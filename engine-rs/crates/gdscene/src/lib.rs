@@ -112,7 +112,9 @@ pub mod visibility_3d;
 // Turning a parsed `.tres` VisualShader into a compilable graph. Lives here
 // because gdresource (parsing) and gdserver2d (the graph type) are siblings —
 // only a crate downstream of both can see the two halves (pat-0q2kx.226).
+pub mod visual_shader_custom;
 pub mod visual_shader_load;
+pub mod xr_modifiers;
 
 // Re-export the most-used types at the crate root.
 pub use autoload::{boot_autoloads_from_dir, instantiate_autoloads, AutoloadResult};

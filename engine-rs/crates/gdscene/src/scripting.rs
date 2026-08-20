@@ -4398,6 +4398,30 @@ impl SceneAccess for SceneTreeAccessor {
             "get_body_size_limit" if is_http_request(self.tree(), nid) => Some(Variant::Int(
                 http_delivery(self.tree(), nid).body_size_limit,
             )),
+            // pat-s3rrv.237. Godot: `set_tls_options(client_options)`, void.
+            //
+            // Stored rather than acted on, and that is the correct behaviour
+            // here rather than a stub: on web the browser owns the TLS
+            // handshake through fetch, so these are configuration a script sets
+            // and reads back, not something this layer applies. Accepting it is
+            // the whole point — `TLSOptions` is a real class as of this bead,
+            // and a script passing one to an HTTPRequest must not error.
+            //
+            // The argument arrives as a `Variant::ObjectId` (TLSOptions is a
+            // handle-table object in gdscript-interop), so it is stored
+            // verbatim; unwrapping it here would just lose the identity.
+            "set_tls_options" if is_http_request(self.tree(), nid) => {
+                let opts = args.first().cloned().unwrap_or(Variant::Nil);
+                if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                    n.set_property("tls_options", opts);
+                }
+                Some(Variant::Nil)
+            }
+            // ⚠️ No `get_tls_options` arm on purpose. Godot's HTTPRequest has
+            // `set_tls_options` and no getter — no method, no `tls_options`
+            // member — so adding one would invent API in a parity port. The
+            // stored property is engine-side state a test can read, not a script
+            // surface.
             "set_download_file" if is_http_request(self.tree(), nid) => {
                 let Some(Variant::String(path)) = args.first() else {
                     return Some(Variant::Nil);
@@ -5622,7 +5646,17 @@ impl SceneAccess for SceneTreeAccessor {
     fn multiplayer_set_peer(&mut self, handle: u64) -> bool {
         let id = ObjectId::from_raw(handle);
         if !gdplatform::multiplayer_peer_handles::is_multiplayer_peer_handle(id) {
-            return false;
+            // pat-s3rrv.230: not a built-in transport handle — it may be a node
+            // whose script `extends MultiplayerPeerExtension`, which is how Godot
+            // lets a project supply its own transport. This used to `return false`
+            // unconditionally, so `multiplayer.multiplayer_peer = self` was
+            // silently dropped and the script's `_poll` was never called.
+            //
+            // The identity is the node because a bare `ClassInstance` has no
+            // Variant form: `self` is the only script identity the interpreter can
+            // hand across this boundary.
+            let node = crate::node::NodeId::from_object_id(id);
+            return self.tree_mut().set_script_multiplayer_peer(node);
         }
         let Some(peer) = gdplatform::multiplayer_peer_handles::take_multiplayer_peer(id) else {
             return false;
@@ -5983,6 +6017,17 @@ impl SceneAccess for SceneTreeAccessor {
     /// inbound packets with, so a call lands on the matching node on the peer.
     fn node_rpc(&mut self, node: u64, method: &str, args: &[Variant]) -> Result<(), String> {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // pat-s3rrv.230: a script `extends MultiplayerAPIExtension` REPLACES the
+        // built-in stack, so it is consulted before the engine's own RPC registry
+        // — Godot hands the call to `_rpc(peer, object, method, args)` and the
+        // extension owns delivery from there. Returning early is the point: the
+        // built-in path must not also run, or the call would go out twice.
+        //
+        // `0` is Godot's broadcast peer, which is what a plain `rpc()` means; the
+        // addressed form is `node_rpc_id` below.
+        if self.tree_mut().rpc_through_script_api(0, nid, method, args) {
+            return Ok(());
+        }
         let Some(hash) = self.rpc_hash_for(nid) else {
             return Err(format!("rpc(): node {node} is not in the tree"));
         };
@@ -6519,6 +6564,17 @@ impl SceneAccess for SceneTreeAccessor {
 
     fn set_tree_paused(&mut self, paused: bool) {
         self.tree_mut().set_paused(paused);
+    }
+
+    /// `get_tree().set_multiplayer(api)` from a script (pat-s3rrv.230).
+    ///
+    /// The capability already existed and only Rust could reach it, so this is
+    /// the spelling rather than the mechanism.
+    fn set_script_multiplayer_api(&mut self, node: u64) -> bool {
+        // Same identity story as `multiplayer_set_peer` above: the script's
+        // identity is the node it is attached to.
+        let node = crate::node::NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().set_script_multiplayer_api(node)
     }
 
     fn is_tree_paused(&self) -> bool {
@@ -7108,6 +7164,108 @@ impl SceneAccess for SceneTreeAccessor {
     // because `gdscript-interop` cannot name a `gdscene` type (this crate
     // depends on it, not the reverse), so the trait is the inversion seam.
 
+    fn polygon_path_finder_new(&mut self) -> Option<u64> {
+        POLYGON_PATH_FINDER_REGISTRY.with(|r| {
+            let mut reg = r.borrow_mut();
+            let seq = reg.next_seq;
+            reg.next_seq += 1;
+            let raw = gdscript_interop::bindings::POLYGON_PATH_FINDER_HANDLE_TAG | seq;
+            reg.finders
+                .insert(raw, crate::polygon_path_finder::PolygonPathFinder::new());
+            Some(raw)
+        })
+    }
+
+    fn polygon_path_finder_call(
+        &mut self,
+        handle: u64,
+        method: &str,
+        args: &[Variant],
+    ) -> Option<Variant> {
+        let vec2 = |i: usize| match args.get(i) {
+            Some(Variant::Vector2(v)) => *v,
+            _ => gdcore::math::Vector2::ZERO,
+        };
+        POLYGON_PATH_FINDER_REGISTRY.with(|r| {
+            let mut reg = r.borrow_mut();
+            let f = reg.finders.get_mut(&handle)?;
+            Some(match method {
+                // Godot: `setup(points: PackedVector2Array, connections:
+                // PackedInt32Array)`. The connections are a **flat** list of
+                // index pairs, while the module takes tuples — adapting that is
+                // the whole reason this lives on the scene side.
+                //
+                // An odd trailing index is dropped rather than paired with
+                // nothing: `chunks_exact(2)` ignores the remainder, which
+                // matches Godot treating the array as pairs.
+                "setup" => {
+                    let points = match args.first() {
+                        Some(Variant::PackedVector2Array(p)) => p.clone(),
+                        _ => Vec::new(),
+                    };
+                    let flat = match args.get(1) {
+                        Some(Variant::PackedInt32Array(c)) => c.clone(),
+                        _ => Vec::new(),
+                    };
+                    let pairs: Vec<(usize, usize)> = flat
+                        .chunks_exact(2)
+                        .filter(|c| c[0] >= 0 && c[1] >= 0)
+                        .map(|c| (c[0] as usize, c[1] as usize))
+                        .collect();
+                    f.setup(points, &pairs);
+                    Variant::Nil
+                }
+                "find_path" => Variant::PackedVector2Array(f.find_path(vec2(0), vec2(1))),
+                "get_intersections" => {
+                    Variant::PackedVector2Array(f.get_intersections(vec2(0), vec2(1)))
+                }
+                "is_point_inside" => Variant::Bool(f.is_point_inside(vec2(0))),
+                // Godot returns a zero Vector2 when there are no points at all,
+                // rather than failing — a script asking an empty finder gets a
+                // usable value.
+                "get_closest_point" => Variant::Vector2(
+                    f.get_closest_point(vec2(0))
+                        .unwrap_or(gdcore::math::Vector2::ZERO),
+                ),
+                // Godot's `get_bounds` is a `Rect2`; the module reports the
+                // min/max extent, so this converts rather than reshaping the
+                // module. An empty finder yields a zero rect, matching Godot's
+                // default-constructed `bounds`.
+                "get_bounds" => {
+                    let (pos, size) = match f.bounds() {
+                        Some((min, max)) => (min, max - min),
+                        None => (gdcore::math::Vector2::ZERO, gdcore::math::Vector2::ZERO),
+                    };
+                    Variant::Rect2(gdcore::math::Rect2 {
+                        position: pos,
+                        size,
+                    })
+                }
+                "set_point_penalty" => {
+                    let idx = match args.first() {
+                        Some(Variant::Int(i)) if *i >= 0 => *i as usize,
+                        _ => return None,
+                    };
+                    let penalty = match args.get(1) {
+                        Some(Variant::Float(v)) => *v as f32,
+                        Some(Variant::Int(v)) => *v as f32,
+                        _ => 0.0,
+                    };
+                    f.set_point_penalty(idx, penalty);
+                    Variant::Nil
+                }
+                "get_point_penalty" => {
+                    let idx = match args.first() {
+                        Some(Variant::Int(i)) if *i >= 0 => *i as usize,
+                        _ => return None,
+                    };
+                    Variant::Float(f64::from(f.get_point_penalty(idx)))
+                }
+                _ => return None,
+            })
+        })
+    }
+
     fn astar_new(&mut self, class_name: &str) -> Option<u64> {
         ASTAR_REGISTRY.with(|r| {
             let mut reg = r.borrow_mut();
@@ -7231,6 +7389,25 @@ struct AStarRegistry {
     astar3d: std::collections::HashMap<u64, crate::astar::AStar3D>,
     grid: std::collections::HashMap<u64, crate::astar::AStarGrid2D>,
     next_seq: u64,
+}
+
+/// Live `PolygonPathFinder` instances behind their handles (pat-s3rrv.240).
+///
+/// Owned here rather than in the interpreter for the reason AStar records: the
+/// type lives in `gdscene`, and `gdscene` depends on `gdscript-interop`, not the
+/// reverse.
+#[derive(Default)]
+struct PolygonPathFinderRegistry {
+    finders: std::collections::HashMap<u64, crate::polygon_path_finder::PolygonPathFinder>,
+    next_seq: u64,
+}
+
+thread_local! {
+    static POLYGON_PATH_FINDER_REGISTRY: std::cell::RefCell<PolygonPathFinderRegistry> =
+        std::cell::RefCell::new(PolygonPathFinderRegistry {
+            next_seq: 1,
+            ..Default::default()
+        });
 }
 
 thread_local! {

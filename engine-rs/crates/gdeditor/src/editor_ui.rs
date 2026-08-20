@@ -7567,6 +7567,35 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       }
     });
 
+    // pat-s3rrv.234: Safari is the one engine with real gesture events, and it
+    // does NOT set ctrlKey on a pinch, so the wheel branch below never sees one
+    // there. `scale` is CUMULATIVE since gesturestart, while Godot's `factor` is
+    // a per-frame delta — hence the running divisor rather than passing `scale`
+    // straight through, which would grow without bound for as long as the
+    // fingers stay down.
+    var safariGestureScale = 1;
+    container.addEventListener('gesturestart', function(e) {
+      if (typeof runtimeRunning === 'undefined' || !runtimeRunning) return;
+      e.preventDefault();
+      safariGestureScale = e.scale || 1;
+    });
+    container.addEventListener('gesturechange', function(e) {
+      if (typeof runtimeRunning === 'undefined' || !runtimeRunning) return;
+      e.preventDefault();
+      var scale = e.scale || 1;
+      // Guard the divisor: a reported scale of 0 would make the factor
+      // infinite, and Infinity through JSON is `null`.
+      var factor = safariGestureScale > 0 ? (scale / safariGestureScale) : 1;
+      safariGestureScale = scale;
+      var sRect = container.getBoundingClientRect();
+      api('POST', '/api/runtime/input/gesture', {
+        kind: 'magnify',
+        x: e.clientX - sRect.left,
+        y: e.clientY - sRect.top,
+        factor: factor
+      });
+    });
+
     // Zoom with mouse wheel
     container.addEventListener('wheel', function(e) {
       e.preventDefault();
@@ -7580,6 +7609,40 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       // MOUSE_BUTTON_WHEEL_UP/DOWN, so the DOM's "positive deltaY is scrolling
       // down" convention is decided in exactly one place.
       if (typeof runtimeRunning !== 'undefined' && runtimeRunning) {
+        // pat-s3rrv.234: browsers report a trackpad PINCH as a `wheel` event
+        // with ctrlKey set — there is no separate pinch event outside Safari.
+        // A pinch is not a scroll, so it posts a magnify gesture INSTEAD of the
+        // wheel; forwarding both would zoom and scroll on the same fingers.
+        var gRect = container.getBoundingClientRect();
+        if (e.ctrlKey) {
+          // Godot's factor is a per-frame scale delta around 1.0. The /100
+          // divisor is the browser's own pinch scale: one notch of trackpad
+          // pinch reports deltaY near 10, so this lands a few percent per frame
+          // rather than a jump.
+          api('POST', '/api/runtime/input/gesture', {
+            kind: 'magnify',
+            x: e.clientX - gRect.left,
+            y: e.clientY - gRect.top,
+            factor: 1 - (e.deltaY || 0) / 100
+          });
+          return;
+        }
+        // A two-finger trackpad scroll carries a horizontal component; a mouse
+        // wheel has none. That is the only signal the DOM gives to tell them
+        // apart, so it is what decides whether a pan is also reported.
+        //
+        // The wheel post below is left UNCHANGED and still fires: scripts and
+        // Controls already rely on it, so the pan is additional information
+        // rather than a replacement, and nothing that works today stops.
+        if ((e.deltaX || 0) !== 0) {
+          api('POST', '/api/runtime/input/gesture', {
+            kind: 'pan',
+            x: e.clientX - gRect.left,
+            y: e.clientY - gRect.top,
+            dx: e.deltaX || 0,
+            dy: e.deltaY || 0
+          });
+        }
         api('POST', '/api/runtime/input/mouse_wheel', { delta_y: e.deltaY || 0, delta_x: e.deltaX || 0 });
         return;
       }
@@ -12647,6 +12710,119 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     if (bp && ps.bottom) bp.style.height = ps.bottom + 'px';
   }
 
+  // ---- Editor layout: slots + splits, persisted server-side (pat-s3rrv.228) ----
+  // restoreLayout above only ever restored SIZES, and only from
+  // display_settings.panel_sizes, which the server keeps in memory — so an
+  // arrangement never survived a server restart. These persist the whole
+  // arrangement (which dock sits in which column, plus the split sizes) to
+  // /api/editor/layout, which writes it under the project.
+  //
+  // #inspector-panel is the right column's anchor and is not itself movable; a
+  // panel assigned to 'right' is inserted after it in the main row.
+  var MOVABLE_DOCKS = ['scene-panel', 'filesystem-panel'];
+
+  function dockSlotContainer(slot) {
+    return document.getElementById(slot === 'right' ? 'inspector-panel' : 'left-panel');
+  }
+
+  function currentEditorLayout() {
+    var layout = { splits: {}, docks: { left: [], right: [] } };
+    var lp = document.getElementById('left-panel');
+    if (lp) layout.splits.left = lp.offsetWidth;
+    var ip = document.getElementById('inspector-panel');
+    if (ip) layout.splits.right = ip.offsetWidth;
+    var bp = document.getElementById('bottom-panel');
+    if (bp) layout.splits.bottom = bp.offsetHeight;
+    MOVABLE_DOCKS.forEach(function(id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      // A panel counts as 'right' once it no longer lives in the left column.
+      var slot = (lp && lp.contains(el)) ? 'left' : 'right';
+      layout.docks[slot].push(id);
+    });
+    if (ip) layout.docks.right.push('inspector-panel');
+    return layout;
+  }
+
+  function applyEditorLayout(layout) {
+    if (!layout) return;
+    var sp = layout.splits || {};
+    var lp = document.getElementById('left-panel');
+    if (lp && sp.left) lp.style.width = sp.left + 'px';
+    var ip = document.getElementById('inspector-panel');
+    if (ip && sp.right) ip.style.width = sp.right + 'px';
+    var bp = document.getElementById('bottom-panel');
+    if (bp && sp.bottom) bp.style.height = sp.bottom + 'px';
+
+    var docks = layout.docks || {};
+    ['left', 'right'].forEach(function(slot) {
+      (docks[slot] || []).forEach(function(id) {
+        // The anchor stays put; moving it would reparent the column itself.
+        if (id === 'inspector-panel') return;
+        var el = document.getElementById(id);
+        if (!el) return;
+        if (slot === 'right') {
+          if (ip && ip.parentNode) ip.parentNode.insertBefore(el, ip.nextSibling);
+        } else if (lp) {
+          lp.appendChild(el);
+        }
+      });
+    });
+  }
+
+  async function saveEditorLayout() {
+    var resp = await api('POST', '/api/editor/layout', { layout: currentEditorLayout() });
+    if (resp && resp.ok) logMessage('info', 'Editor layout saved');
+    else logMessage('error', 'Could not save the editor layout');
+  }
+
+  async function resetEditorLayout() {
+    var resp = await api('POST', '/api/editor/layout', { reset: true });
+    if (resp && resp.layout) {
+      applyEditorLayout(resp.layout);
+      logMessage('info', 'Editor layout reset to default');
+    } else {
+      logMessage('error', 'Could not reset the editor layout');
+    }
+  }
+
+  // The wiring requirement: the arrangement comes from the SERVER on load, not
+  // from client-only state, so it survives on another browser too.
+  async function loadEditorLayout() {
+    var data = await api('GET', '/api/editor/layout');
+    if (data && data.layout) applyEditorLayout(data.layout);
+  }
+
+  // Drag a dock by its header to move it between the left and right columns.
+  function setupDockDragging() {
+    MOVABLE_DOCKS.forEach(function(id) {
+      var panel = document.getElementById(id);
+      if (!panel) return;
+      var header = panel.querySelector('.panel-header');
+      if (!header) return;
+      header.setAttribute('draggable', 'true');
+      header.classList.add('draggable-dock');
+      header.addEventListener('dragstart', function(ev) {
+        if (ev.dataTransfer) ev.dataTransfer.setData('text/plain', id);
+      });
+    });
+    ['left', 'right'].forEach(function(slot) {
+      var target = dockSlotContainer(slot);
+      if (!target) return;
+      target.addEventListener('dragover', function(ev) { ev.preventDefault(); });
+      target.addEventListener('drop', function(ev) {
+        ev.preventDefault();
+        var id = ev.dataTransfer && ev.dataTransfer.getData('text/plain');
+        if (!id || MOVABLE_DOCKS.indexOf(id) < 0) return;
+        var layout = currentEditorLayout();
+        layout.docks.left = layout.docks.left.filter(function(d) { return d !== id; });
+        layout.docks.right = layout.docks.right.filter(function(d) { return d !== id; });
+        layout.docks[slot].push(id);
+        applyEditorLayout(layout);
+      });
+    });
+  }
+
 
   // ---- Quick Open (fuzzy) + Batch Rename (pat-nzgdu.105) ----
   // Quick Open filters project files by a fuzzy subsequence query and opens the
@@ -12850,6 +13026,9 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     fetchSettings();
     // Distraction-free toggle + restore any persisted dock layout (pat-nzgdu.172).
     restoreLayout();
+    // pat-s3rrv.228: the full arrangement (slots + splits) comes from the server.
+    loadEditorLayout();
+    setupDockDragging();
     var dfBtn = document.getElementById('distraction-free-toggle');
     if (dfBtn) dfBtn.addEventListener('click', toggleDistractionFree);
   }
@@ -16005,10 +16184,10 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         if (esd) esd.style.display = 'flex';
         break;
       case 'editor-layout-save':
-        logMessage('info', 'Editor layout saved');
+        saveEditorLayout();
         break;
       case 'editor-layout-default':
-        logMessage('info', 'Editor layout reset to default');
+        resetEditorLayout();
         break;
       case 'editor-toggle-fullscreen':
         if (document.fullscreenElement) { document.exitFullscreen(); }
@@ -16936,7 +17115,36 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       el.addEventListener(ev, function() { assetLibPage = 0; renderAssetLib(); });
     });
     var imp = document.getElementById('assetlib-import');
-    if (imp) imp.addEventListener('click', function() { logMessage('info', 'Import asset (.zip) — not yet implemented'); });
+    // pat-s3rrv.227: pick a .zip and install it into the project. The archive is
+    // base64'd because the server reads request bodies as UTF-8 strings, so raw
+    // zip bytes would be mangled in transit.
+    if (imp) imp.addEventListener('click', function() {
+      var picker = document.createElement('input');
+      picker.type = 'file';
+      picker.accept = '.zip,application/zip';
+      picker.addEventListener('change', async function() {
+        var file = picker.files && picker.files[0];
+        if (!file) return;
+        var buf = new Uint8Array(await file.arrayBuffer());
+        var bin = '';
+        // Chunked so a large asset does not blow the argument limit of
+        // String.fromCharCode with a single spread.
+        for (var i = 0; i < buf.length; i += 0x8000) {
+          bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+        }
+        var resp = await api('POST', '/api/assetlib/install', { zip_base64: btoa(bin) });
+        if (!resp || !resp.ok) {
+          logMessage('error', 'Asset install failed');
+          return;
+        }
+        logMessage('info', 'Installed ' + (resp.installed || []).length + ' file(s) from ' + file.name);
+        // Refresh the FileSystem dock and the plugin list so the newly unpacked
+        // addon is visible without a reload.
+        if (typeof refreshFsTree === 'function') refreshFsTree();
+        if (typeof loadPlugins === 'function') loadPlugins();
+      });
+      picker.click();
+    });
     var plug = document.getElementById('assetlib-plugins');
     if (plug) plug.addEventListener('click', function() { logMessage('info', 'Plugins view — not yet implemented'); });
   }
@@ -16974,6 +17182,27 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       auth.textContent = (a.author || '') + (a.license ? '    ' + a.license : '');
       body.appendChild(auth);
       row.appendChild(body);
+      // pat-s3rrv.227: a configured catalog supplies download_url, and the
+      // fetch happens server-side — the browser cannot read a cross-origin
+      // zip, and the unpack has to touch the project on disk.
+      if (a.download_url) {
+        var dl = document.createElement('button');
+        dl.className = 'asset-row-download';
+        dl.textContent = 'Download';
+        dl.addEventListener('click', async function() {
+          dl.disabled = true;
+          var resp = await api('POST', '/api/assetlib/download', { url: a.download_url });
+          dl.disabled = false;
+          if (!resp || !resp.ok) {
+            logMessage('error', 'Download failed for ' + (a.title || 'asset'));
+            return;
+          }
+          logMessage('info', 'Installed ' + (resp.installed || []).length + ' file(s) from ' + (a.title || 'asset'));
+          if (typeof refreshFsTree === 'function') refreshFsTree();
+          if (typeof loadPlugins === 'function') loadPlugins();
+        });
+        row.appendChild(dl);
+      }
       grid.appendChild(row);
     });
     renderAssetPagination(pageCount);

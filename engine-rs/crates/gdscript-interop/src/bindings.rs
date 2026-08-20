@@ -355,6 +355,28 @@ pub fn is_astar_handle(raw: u64) -> bool {
     raw & 0xFF00_0000_0000_0000 == ASTAR_HANDLE_TAG
 }
 
+/// Tag bits marking an `ObjectId` minted by
+/// [`SceneAccess::polygon_path_finder_new`] (pat-s3rrv.240).
+///
+/// `gdscene::polygon_path_finder` is a complete visibility-graph pathfinder that
+/// nothing could reach: it was not in ClassDB, not constructible from a script,
+/// and its only reference anywhere was the `pub mod` line. Same shape as AStar
+/// and the mesh builders — the type lives in `gdscene`, which this crate cannot
+/// name, so the scene layer owns the instance and hands back a tagged handle.
+///
+/// ⚠️ `0x74` was checked against every tag-shaped constant in the workspace in
+/// **both** spellings, `0xNN_00_…` and `0xNN00_…`. That matters: the two do not
+/// both turn up in one grep, and a sweep of mine earlier today reported `0x71`
+/// free when it is `KINEMATIC_COLLISION_TAG`, written `0x71_00_`. In use at the
+/// time of writing: 10 11 12 1A 1B 33 48 4D 53 57 5B-5F 60 61 62 6D 6E 6F 70 71
+/// 72 73 77 78 A1-A7 B9 C1-C4 CA CF DA E0-EF FA, plus FF as the mask.
+pub const POLYGON_PATH_FINDER_HANDLE_TAG: u64 = 0x7400_0000_0000_0000;
+
+/// Returns `true` when `raw` is a `PolygonPathFinder` handle.
+pub fn is_polygon_path_finder_handle(raw: u64) -> bool {
+    raw & 0xFF00_0000_0000_0000 == POLYGON_PATH_FINDER_HANDLE_TAG
+}
+
 /// Trait providing scene-tree operations to a running script.
 ///
 /// The engine crate (`gdscene`) implements this trait on an accessor that wraps
@@ -894,6 +916,32 @@ pub trait SceneAccess {
         None
     }
 
+    /// Constructs a `PolygonPathFinder` and returns its handle, tagged with
+    /// [`POLYGON_PATH_FINDER_HANDLE_TAG`] (pat-s3rrv.240).
+    ///
+    /// `None` when the scene layer provides no pathfinder, so the interpreter
+    /// falls through to its usual unknown-class error rather than handing back
+    /// a handle that answers nothing.
+    fn polygon_path_finder_new(&mut self) -> Option<u64> {
+        None
+    }
+
+    /// Calls `method` on the `PolygonPathFinder` behind `handle`.
+    ///
+    /// The scene layer adapts Godot's signatures here rather than in the
+    /// interpreter: `setup` takes a **flat** `PackedInt32Array` of index pairs
+    /// while the Rust module takes tuples, and `get_bounds` returns a `Rect2`
+    /// while the module returns a min/max pair. Those conversions need the
+    /// module's own types, which only this side can name.
+    fn polygon_path_finder_call(
+        &mut self,
+        _handle: u64,
+        _method: &str,
+        _args: &[Variant],
+    ) -> Option<Variant> {
+        None
+    }
+
     /// Creates an `ImmediateMesh` or `SurfaceTool` and returns its tagged
     /// handle (pat-s3rrv.197), or `None` for any other class name.
     fn mesh_builder_new(&mut self, _class_name: &str) -> Option<u64> {
@@ -950,6 +998,22 @@ pub trait SceneAccess {
 
     /// `SceneTree.set_pause` — the `paused` property's setter.
     fn set_tree_paused(&mut self, _paused: bool) {}
+
+    /// `SceneTree.set_multiplayer(multiplayer)` — install a script
+    /// `MultiplayerAPIExtension` in place of the built-in stack
+    /// (pat-s3rrv.230).
+    ///
+    /// `node` is the node the script is attached to, because that is the only
+    /// script identity available: `self` evaluates to a node's `ObjectId`,
+    /// while a bare `ClassInstance` has no Variant form. `false` means the
+    /// object cannot serve as an API, which the caller reports as Godot's
+    /// `ERR_INVALID_PARAMETER` rather than swallowing.
+    ///
+    /// A `SceneTree` method rather than a node one, so it belongs here beside
+    /// `quit` and `set_tree_paused` rather than behind `call_node_method`.
+    fn set_script_multiplayer_api(&mut self, _node: u64) -> bool {
+        false
+    }
 
     /// `SceneTree.is_paused`.
     fn is_tree_paused(&self) -> bool {

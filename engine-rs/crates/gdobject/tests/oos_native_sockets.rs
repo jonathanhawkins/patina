@@ -27,6 +27,10 @@ const SURFACES: &[(&str, &str)] = &[
     ("PacketPeerDTLS", "PacketPeer"),
     ("StreamPeerSocket", "StreamPeer"),
     ("StreamPeerUDS", "StreamPeerSocket"),
+    // pat-s3rrv.238 — the family's last omission. `SocketServer` had a
+    // registered subclass and a registered peer type with no server to hand it
+    // out.
+    ("UDSServer", "SocketServer"),
 ];
 
 #[test]
@@ -76,7 +80,13 @@ fn every_surface_reaches_object_through_its_chain() {
 fn surfaces_declare_no_transport_methods() {
     register_networking_classes();
 
-    for class in ["TCPServer", "UDPServer", "DTLSServer", "StreamPeerUDS"] {
+    for class in [
+        "TCPServer",
+        "UDPServer",
+        "DTLSServer",
+        "StreamPeerUDS",
+        "UDSServer",
+    ] {
         let info = get_class_info(class).unwrap_or_else(|| panic!("{class} registered"));
         assert!(
             info.methods.is_empty(),

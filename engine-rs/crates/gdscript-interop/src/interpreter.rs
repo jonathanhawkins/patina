@@ -782,6 +782,44 @@ pub struct ClassInstance {
     pub properties: HashMap<String, Variant>,
 }
 
+/// Which engine list a script extension was registered into (pat-s3rrv.229).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScriptExtensionKind {
+    /// `TranslationServer.add_translation()` — a script `extends Translation`.
+    Translation,
+    /// `OS.add_logger()` — a script `extends Logger`.
+    Logger,
+}
+
+thread_local! {
+    /// Nodes whose script `extends Translation`, registered through
+    /// `TranslationServer.add_translation()` (pat-s3rrv.229).
+    ///
+    /// Godot passes the Translation **object**; the object here is the node the
+    /// script is attached to, because that is the only script identity the
+    /// interpreter has — `self` evaluates to a node's `ObjectId`, while a bare
+    /// `ClassInstance` has no Variant form at all. An autoload is exactly the
+    /// shape the bead describes, and an autoload is a node.
+    ///
+    /// ⚠️ **Process-wide, not per-interpreter, and that is load-bearing.**
+    /// Every scripted node owns its own `Interpreter`
+    /// (`gdscene::GDScriptNodeInstance`), so a registry stored on the struct
+    /// would only ever be visible to the one script that registered — and the
+    /// whole point is that ANOTHER script's `tr()` picks it up. These are the
+    /// same thread-local tables the Thread/Mutex handles already use.
+    static SCRIPT_TRANSLATIONS: std::cell::RefCell<Vec<u64>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// Nodes whose script `extends Logger`, registered through
+    /// `OS.add_logger()`. Same identity and same scope as above.
+    static SCRIPT_LOGGERS: std::cell::RefCell<Vec<u64>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// Guards against a `_log_message` body that itself calls `print()`.
+    ///
+    /// Without it the fan-out is unbounded recursion, and the natural thing to
+    /// write inside a logger — print the line somewhere — is what triggers it.
+    static IN_LOGGER_DISPATCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 impl Interpreter {
     /// Drains everything `print()` has emitted since the last call.
     ///
@@ -1925,6 +1963,19 @@ impl Interpreter {
                         rng_set_property(*oid, member, &final_val);
                         return Ok(());
                     }
+                    // `pose.transform = x` (pat-s3rrv.220). Same reason as the
+                    // RNG arm above: the scene path would resolve the handle as
+                    // a node and drop the write.
+                    if is_xr_pose_handle(*oid) {
+                        let cur = xr_pose_get_property(*oid, member).unwrap_or(Variant::Nil);
+                        let final_val = if matches!(op, AssignOp::Assign) {
+                            rhs
+                        } else {
+                            self.apply_assign_op(op, &cur, &rhs)?
+                        };
+                        xr_pose_set_property(*oid, member, &final_val);
+                        return Ok(());
+                    }
                     // `state.linear_velocity = v` inside `_integrate_forces`.
                     // Same reason as the RNG arm above: the scene path would
                     // resolve the handle as a node and drop the write, which is
@@ -2256,6 +2307,29 @@ impl Interpreter {
         args: &[Variant],
     ) -> Result<Variant, RuntimeError> {
         match method {
+            // pat-s3rrv.220 — `XRPose.get_adjusted_transform` had nothing to
+            // read: XRServer carried no world scale at all. `gdscene`'s
+            // `world_scale_for` read one off the XROrigin3D node and its own
+            // comment said Godot keeps it here; this is the thing it proxied.
+            "get_world_scale" => Ok(Variant::Float(XR_WORLD_SCALE.with(|s| s.get()) as f64)),
+            // Godot CLAMPS rather than rejecting, to [0.01, 1000.0].
+            "set_world_scale" => {
+                let requested = match args.first() {
+                    Some(Variant::Float(f)) => *f as f32,
+                    Some(Variant::Int(i)) => *i as f32,
+                    _ => 1.0,
+                };
+                XR_WORLD_SCALE.with(|s| s.set(requested.clamp(0.01, 1000.0)));
+                Ok(Variant::Nil)
+            }
+            "get_reference_frame" => Ok(Variant::Transform3D(
+                XR_REFERENCE_FRAME.with(|f| *f.borrow()),
+            )),
+            "clear_reference_frame" => {
+                XR_REFERENCE_FRAME
+                    .with(|f| *f.borrow_mut() = gdcore::math3d::Transform3D::IDENTITY);
+                Ok(Variant::Nil)
+            }
             // Godot returns the HMD's pose as a Transform3D. The platform
             // XrServer models the head as position + yaw, so the basis is a
             // yaw rotation rather than a full orientation — enough for the
@@ -2541,6 +2615,57 @@ impl Interpreter {
         })
     }
 
+    /// `XRTracker` handle methods, plus delivery of the signals they emit
+    /// (pat-s3rrv.220).
+    ///
+    /// Inherent rather than free-standing for exactly the reason
+    /// `call_xr_interface_instance` below is: emission invokes script
+    /// Callables, which needs the interpreter. The data work stays in the free
+    /// function `call_xr_tracker_instance`, which hands back a queue.
+    fn call_xr_tracker_handle(
+        &mut self,
+        oid: gdcore::id::ObjectId,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        let raw = oid.raw();
+
+        // `connect` is handled here rather than by the generic paths: a handle
+        // is not a scene node, so neither of those can bind to it. Same
+        // contract, and the same registry, as the interface path below.
+        if method == "connect" {
+            let signal = args.first().map(arg_str).unwrap_or_default();
+            let Some(Variant::Callable(cb)) = args.get(1) else {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "XRTracker.connect() needs a signal name and a Callable".into(),
+                )));
+            };
+            let callable = (**cb).clone();
+            XR_SIGNAL_CALLBACKS.with(|m| {
+                m.borrow_mut()
+                    .entry((raw, signal))
+                    .or_default()
+                    .push(callable);
+            });
+            return Ok(Variant::Int(0));
+        }
+
+        // Mutate the tracker, then deliver whatever it queued — synchronously,
+        // so a `set_input` is observable in the same frame the script made it.
+        let (result, emitted) = call_xr_tracker_instance(oid, method, args)?;
+        for (signal, sig_args) in emitted {
+            // Taken out of the table before invoking: a callback may itself
+            // call back into the tracker, and holding the `RefCell` borrow
+            // across script execution would panic.
+            let callbacks = XR_SIGNAL_CALLBACKS
+                .with(|m| m.borrow().get(&(raw, signal)).cloned().unwrap_or_default());
+            for cb in callbacks {
+                self.invoke_callable(&cb, &sig_args)?;
+            }
+        }
+        Ok(result)
+    }
+
     /// Dispatches `WebXRInterface` handle methods (pat-0q2kx.236).
     ///
     /// Inherent rather than a free function because the signal drain invokes
@@ -2671,6 +2796,88 @@ impl Interpreter {
     /// Taken out of the table before invoking: a callback may itself call back
     /// into the interface, and holding the `RefCell` borrow across script
     /// execution would panic.
+    /// `FileSystemDock` instance methods (pat-s3rrv.226).
+    ///
+    /// Every call also drains whatever the editor server has queued — the same
+    /// contract `call_xr_interface_instance` uses. A handle is not a scene node,
+    /// so there is no frame hook to hang delivery on, and draining on the next
+    /// interaction is what makes a connected callback fire at all.
+    fn call_filesystem_dock_instance(
+        &mut self,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        let result = match method {
+            // Godot scrolls the dock to `path`. There is no dock viewport here,
+            // so this records the request; a script calls it for effect.
+            "navigate_to_path" => {
+                let path = match args.first() {
+                    Some(Variant::String(p)) => p.clone(),
+                    _ => String::new(),
+                };
+                FS_DOCK_NAVIGATED.with(|n| *n.borrow_mut() = path);
+                Variant::Nil
+            }
+            // Tooltip plugins have no renderer here; accepting and ignoring them
+            // keeps an addon's `_enter_tree` from raising.
+            "add_resource_tooltip_plugin" | "remove_resource_tooltip_plugin" => Variant::Nil,
+            "connect" => {
+                let signal = match args.first() {
+                    Some(Variant::String(s)) => s.clone(),
+                    Some(Variant::StringName(s)) => s.as_str().to_string(),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "FileSystemDock.connect() takes a signal name".into(),
+                        )))
+                    }
+                };
+                match args.get(1) {
+                    Some(Variant::Callable(c)) => {
+                        FS_DOCK_SIGNAL_CALLBACKS.with(|m| {
+                            m.borrow_mut()
+                                .entry(signal)
+                                .or_default()
+                                .push((**c).clone());
+                        });
+                        Variant::Int(0)
+                    }
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "FileSystemDock.connect() takes a Callable".into(),
+                        )))
+                    }
+                }
+            }
+            // Not a Godot method: the only way a caller can observe that
+            // `navigate_to_path` did anything, since the dock has no state to
+            // read back here.
+            "_navigated_path" => Variant::String(FS_DOCK_NAVIGATED.with(|n| n.borrow().clone())),
+            other => {
+                return Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                    format!("FileSystemDock.{other}"),
+                )))
+            }
+        };
+        self.drain_filesystem_dock_signals()?;
+        Ok(result)
+    }
+
+    /// Hands every queued dock signal to the callbacks connected to it.
+    ///
+    /// ⚠️ Callbacks are cloned out of the registry before running: a callback
+    /// may connect another signal, and holding the `RefCell` borrow across
+    /// script execution would panic.
+    fn drain_filesystem_dock_signals(&mut self) -> Result<(), RuntimeError> {
+        for (signal, args) in take_filesystem_dock_signals() {
+            let callbacks = FS_DOCK_SIGNAL_CALLBACKS
+                .with(|m| m.borrow().get(&signal).cloned().unwrap_or_default());
+            for cb in callbacks {
+                self.invoke_callable(&cb, &args)?;
+            }
+        }
+        Ok(())
+    }
+
     fn drain_xr_signals(&mut self, raw: u64) -> Result<(), RuntimeError> {
         let signals = XR_INTERFACES.with(|m| {
             m.borrow_mut()
@@ -2793,10 +3000,120 @@ impl Interpreter {
             // Godot types the thread id as a String.
             "get_id" => Ok(Variant::String(raw.to_string())),
             "is_main_thread" => Ok(Variant::Bool(true)),
+            // Static in Godot, but a static may be called through an instance,
+            // so both spellings must land on the same flag (pat-s3rrv.217).
+            "set_thread_safety_checks_enabled" => {
+                let enabled = match args.first() {
+                    Some(Variant::Bool(b)) => *b,
+                    Some(Variant::Int(i)) => *i != 0,
+                    _ => true,
+                };
+                gdplatform::thread::set_thread_safety_checks_enabled(enabled);
+                Ok(Variant::Nil)
+            }
             other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "Thread has no method '{other}'"
             )))),
         }
+    }
+
+    /// Adds or removes a script extension object from one of the engine's
+    /// lists (pat-s3rrv.229).
+    ///
+    /// Godot takes the Translation/Logger object itself. The object here is the
+    /// node the script is attached to — see the field docs for why that is the
+    /// only script identity available — so anything that is not an `ObjectId`
+    /// is ignored rather than raised, matching Godot's tolerance of a null.
+    fn register_script_extension(
+        &mut self,
+        kind: ScriptExtensionKind,
+        add: bool,
+        args: &[Variant],
+    ) -> Variant {
+        let node = match args.first() {
+            Some(Variant::ObjectId(id)) => id.raw(),
+            _ => return Variant::Nil,
+        };
+        let update = |list: &mut Vec<u64>| {
+            if add {
+                // Godot's lists hold each object once, so adding twice is not
+                // a way to be translated or logged twice.
+                if !list.contains(&node) {
+                    list.push(node);
+                }
+            } else {
+                list.retain(|n| *n != node);
+            }
+        };
+        match kind {
+            ScriptExtensionKind::Translation => {
+                SCRIPT_TRANSLATIONS.with(|l| update(&mut l.borrow_mut()))
+            }
+            ScriptExtensionKind::Logger => SCRIPT_LOGGERS.with(|l| update(&mut l.borrow_mut())),
+        }
+        Variant::Nil
+    }
+
+    /// Asks each registered script `Translation` for `key`, in registration
+    /// order (pat-s3rrv.229).
+    ///
+    /// `None` means no script answered, and the caller falls through to the
+    /// loaded catalog — which is what keeps an unmapped key unchanged.
+    fn script_translation_lookup(&mut self, key: &str, context: &str) -> Option<String> {
+        let registered: Vec<u64> = SCRIPT_TRANSLATIONS.with(|l| l.borrow().clone());
+        if registered.is_empty() {
+            return None;
+        }
+        let args = [
+            Variant::String(key.to_string()),
+            Variant::String(context.to_string()),
+        ];
+        // Read out of the thread-local up front: the calls below re-enter the
+        // interpreter, and a script is free to register another Translation
+        // while it runs — which would panic on a borrow still held here.
+        for node in registered {
+            // No locale gate here on purpose. A Translation speaks one
+            // locale, but the script's own `var locale` is a SCRIPT var, and
+            // script vars and node properties are separate stores — reading it
+            // through the node would answer Nil and silently gate nothing.
+            // Returning "" is already the script's way of saying "not mine",
+            // so a script that cares compares against
+            // `TranslationServer.get_locale()` itself and the fallback below
+            // does the rest.
+            let answered = match self.scene_access.as_mut() {
+                Some(access) => access.call_script_method(node, "_get_message", &args),
+                None => None,
+            };
+            // Godot reads an empty return as "no translation here", so it must
+            // NOT shadow the catalog.
+            if let Some(Variant::String(text)) = answered {
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+        }
+        None
+    }
+
+    /// Hands one printed line to every registered script `Logger`
+    /// (pat-s3rrv.229).
+    ///
+    /// Godot's signature is `_log_message(message, error)`; this is the
+    /// `error == false` stream. `_log_error` carries eight arguments of
+    /// diagnostic context and belongs with `push_error`, not here.
+    fn fan_out_to_script_loggers(&mut self, message: &str) {
+        let registered: Vec<u64> = SCRIPT_LOGGERS.with(|l| l.borrow().clone());
+        if registered.is_empty() || IN_LOGGER_DISPATCH.with(|g| g.get()) {
+            return;
+        }
+        IN_LOGGER_DISPATCH.with(|g| g.set(true));
+        let args = [Variant::String(message.to_string()), Variant::Bool(false)];
+        for node in registered {
+            if let Some(access) = self.scene_access.as_mut() {
+                access.call_script_method(node, "_log_message", &args);
+            }
+        }
+        IN_LOGGER_DISPATCH.with(|g| g.set(false));
     }
 
     /// Dispatches the `WorkerThreadPool` singleton (pat-0q2kx.209).
@@ -3324,6 +3641,16 @@ impl Interpreter {
                         }
                         // Godot singletons: OS / Engine / Time / JSON.
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "OS") {
+                            // `add_logger`/`remove_logger` take a live OBJECT,
+                            // so they need `self` and are intercepted ahead of
+                            // the free dispatcher (pat-s3rrv.229).
+                            if member == "add_logger" || member == "remove_logger" {
+                                return Ok(self.register_script_extension(
+                                    ScriptExtensionKind::Logger,
+                                    member == "add_logger",
+                                    &evaluated_args,
+                                ));
+                            }
                             return call_os_static(member, &evaluated_args);
                         }
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "Engine") {
@@ -3351,6 +3678,48 @@ impl Interpreter {
                         // because its tasks invoke Callables.
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "WorkerThreadPool") {
                             return self.call_worker_thread_pool_static(member, &evaluated_args);
+                        }
+                        // Thread's STATIC methods (pat-s3rrv.217). Thread.xml
+                        // marks `set_thread_safety_checks_enabled` and
+                        // `is_main_thread` `qualifiers="static"`, so a script
+                        // spells them on the bare class name with no instance;
+                        // only the instance table existed, so the class-name
+                        // spelling never reached a dispatch arm. Unrecognised
+                        // members deliberately fall through, because
+                        // `Thread.new()` is spelled on this same identifier.
+                        // `TLSOptions` has no constructor in Godot — the
+                        // three statics ARE the API (pat-s3rrv.237). Falls
+                        // through on any other member so `TLSOptions.new()`
+                        // still reaches the constructor path, which refuses it.
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "TLSOptions") {
+                            if let Some(v) =
+                                call_tls_options_static(member.as_str(), &evaluated_args)
+                            {
+                                return Ok(v);
+                            }
+                        }
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "Thread") {
+                            // `member` is a `&String` here, so the literal arms
+                            // need `as_str()` — the neighbouring blocks compare
+                            // with `==`, which needs no such thing.
+                            match member.as_str() {
+                                "set_thread_safety_checks_enabled" => {
+                                    // Godot: void, one bool. The flag is
+                                    // THREAD-LOCAL, and a script body runs on
+                                    // the calling thread here, so this applies
+                                    // to that thread — matching Godot's "on the
+                                    // current thread" wording.
+                                    let enabled = match evaluated_args.first() {
+                                        Some(Variant::Bool(b)) => *b,
+                                        Some(Variant::Int(i)) => *i != 0,
+                                        _ => true,
+                                    };
+                                    gdplatform::thread::set_thread_safety_checks_enabled(enabled);
+                                    return Ok(Variant::Nil);
+                                }
+                                "is_main_thread" => return Ok(Variant::Bool(true)),
+                                _ => {}
+                            }
                         }
                         // ClassDB reflection singleton (pat-u3l8c.21).
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "ClassDB") {
@@ -3433,6 +3802,23 @@ impl Interpreter {
                         }
                         // TranslationServer singleton (pat-nzgdu.92).
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "TranslationServer") {
+                            // `add_translation` takes a live OBJECT, so it needs
+                            // `self` and is intercepted ahead of the free
+                            // dispatcher (pat-s3rrv.229). `remove_translation`
+                            // is only ours when the argument is an object —
+                            // the existing arm takes a locale STRING, and that
+                            // spelling must keep working.
+                            let is_object =
+                                matches!(evaluated_args.first(), Some(Variant::ObjectId(_)));
+                            if member == "add_translation"
+                                || (member == "remove_translation" && is_object)
+                            {
+                                return Ok(self.register_script_extension(
+                                    ScriptExtensionKind::Translation,
+                                    member == "add_translation",
+                                    &evaluated_args,
+                                ));
+                            }
                             return call_translationserver_static(member, &evaluated_args);
                         }
                         // CameraServer singleton (pat-nzgdu.179) — reports 0 feeds
@@ -3530,6 +3916,15 @@ impl Interpreter {
                                 // (pat-0q2kx.263). WebXR hand tracking
                                 // populates these and registers them on
                                 // XRServer.
+                                // `XRPose.new()` (pat-s3rrv.220). Godot's
+                                // XRPose is an instantiable RefCounted value; a
+                                // script builds one to hand to a custom tracker
+                                // implementation.
+                                if class_name == "XRPose" {
+                                    return Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(
+                                        new_xr_pose_handle(""),
+                                    )));
+                                }
                                 if matches!(
                                     class_name.as_str(),
                                     "XRTracker"
@@ -3791,6 +4186,15 @@ impl Interpreter {
                                 if class_name == "Thread" {
                                     return Ok(Variant::ObjectId(new_thread_handle()));
                                 }
+                                // pat-s3rrv.237: StreamPeerTLS IS constructible
+                                // (Godot's `StreamPeerTLS.new()`); its
+                                // transport is what a browser lacks, not the
+                                // object. TLSOptions deliberately has no arm —
+                                // Godot's class is not instantiable, so it must
+                                // keep reaching the refusal below.
+                                if class_name == "StreamPeerTLS" {
+                                    return Ok(Variant::ObjectId(new_stream_peer_tls_handle()));
+                                }
                                 if class_name == "Mutex" {
                                     return Ok(Variant::ObjectId(new_mutex_handle()));
                                 }
@@ -4002,6 +4406,16 @@ impl Interpreter {
                     // would answer Nil (pat-0q2kx.164).
                     if is_rng_handle(*oid) {
                         if let Some(v) = rng_get_property(*oid, member) {
+                            return Ok(v);
+                        }
+                    }
+                    // `pose.transform`, `pose.has_tracking_data`
+                    // (pat-s3rrv.220). Before the scene lookup for the same
+                    // reason as the RNG arm above: a pose handle names no node,
+                    // so the scene route would answer Nil and every script
+                    // written from Godot's docs would read nothing.
+                    if is_xr_pose_handle(*oid) {
+                        if let Some(v) = xr_pose_get_property(*oid, member) {
                             return Ok(v);
                         }
                     }
@@ -4937,6 +5351,43 @@ impl Interpreter {
                 };
                 Variant::Int(if ok { OK } else { ERR_CANT_OPEN })
             }
+            // `get_tree().set_multiplayer(api)` — the script spelling for
+            // installing a `MultiplayerAPIExtension` (pat-s3rrv.230). The
+            // capability existed and only Rust could reach it.
+            //
+            // Godot's second parameter is a `root_path` selecting which
+            // subtree the API serves; there is one tree-wide API here, so a
+            // second argument is accepted and ignored rather than raising —
+            // the one-argument form is what scripts write.
+            "set_multiplayer" => {
+                Self::require_args("set_multiplayer", args, 1)?;
+                let node = match args.first() {
+                    Some(Variant::ObjectId(id)) => id.raw(),
+                    // Godot types the parameter `MultiplayerAPI`; anything else
+                    // is a bad argument, not a silent no-op.
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "set_multiplayer() expects a MultiplayerAPI object".into(),
+                        )))
+                    }
+                };
+                let ok = match self.scene_access {
+                    Some(ref mut access) => access.set_script_multiplayer_api(node),
+                    None => false,
+                };
+                if !ok {
+                    // Godot's `set_multiplayer` returns void, so there is no
+                    // code to hand back — but a refusal that leaves no trace is
+                    // the worst of both worlds, since the built-in stack keeps
+                    // working and the script looks installed. Godot prints an
+                    // error here too.
+                    self.errors.push(
+                        "set_multiplayer(): the object cannot serve as a MultiplayerAPI"
+                            .to_string(),
+                    );
+                }
+                Variant::Nil
+            }
             "quit" => {
                 let code = Self::scene_tree_arg_int("quit", args, 0, 0)?;
                 if let Some(ref mut access) = self.scene_access {
@@ -5067,7 +5518,12 @@ impl Interpreter {
                     .iter()
                     .map(|a| self.display_variant(a))
                     .collect::<Vec<_>>();
-                self.output.push(line.join(" "));
+                let text = line.join(" ");
+                self.output.push(text.clone());
+                // Every printed line goes through the engine's loggers in Godot
+                // (`core/io/logger.h`), so a script `extends Logger` registered
+                // with OS.add_logger() sees this one (pat-s3rrv.229).
+                self.fan_out_to_script_loggers(&text);
                 Ok(Some(Variant::Nil))
             }
             // Awaitable factories (pat-p0s82.7 / pat-z35r2.3).
@@ -5218,6 +5674,13 @@ impl Interpreter {
                     Some(Variant::StringName(sn)) => sn.as_str().to_string(),
                     _ => String::new(),
                 };
+                // A script `extends Translation` registered through
+                // TranslationServer.add_translation() answers first. An empty
+                // return means "not mine", so an unmapped key still falls
+                // through to the loaded catalog unchanged (pat-s3rrv.229).
+                if let Some(text) = self.script_translation_lookup(&key, &context) {
+                    return Ok(Some(Variant::String(text)));
+                }
                 Ok(Some(Variant::String(
                     gdcore::translation::translate_with_context(&key, &context),
                 )))
@@ -7075,7 +7538,11 @@ impl Interpreter {
             // -- Print / error family (pat-u3l8c.20) --------------------------
             "prints" => {
                 let line: Vec<String> = args.iter().map(|a| format!("{a}")).collect();
-                self.output.push(line.join(" "));
+                let text = line.join(" ");
+                self.output.push(text.clone());
+                // Same stream as `print`, so a Logger that saw one and not the
+                // other would be a hole rather than a design (pat-s3rrv.229).
+                self.fan_out_to_script_loggers(&text);
                 Ok(Some(Variant::Nil))
             }
             "printt" => {
@@ -10008,6 +10475,9 @@ impl Interpreter {
             if is_editor_fs_dir_handle(*oid) {
                 return call_editor_fs_dir_instance(*oid, method, args);
             }
+            if is_filesystem_dock_handle(*oid) {
+                return self.call_filesystem_dock_instance(method, args);
+            }
             if is_image_handle(*oid) {
                 return call_image_instance(*oid, method, args);
             }
@@ -10159,9 +10629,20 @@ impl Interpreter {
                 return call_undo_redo_instance(*oid, method, args, access);
             }
             if is_xr_tracker_handle(*oid) {
-                // Free-standing: a tracker is a plain data object, so none of
-                // its accessors needs the interpreter or the scene.
-                return call_xr_tracker_instance(*oid, method, args);
+                // ⚠️ NOT free-standing any more. This used to read "a tracker
+                // is a plain data object, so none of its accessors needs the
+                // interpreter or the scene" — true until pat-s3rrv.220 added
+                // the seven pose/input signals, whose delivery runs script
+                // Callables through `invoke_callable`. The data half is still
+                // a free function; the wrapper below only binds `connect` and
+                // drains what that function queued.
+                return self.call_xr_tracker_handle(*oid, method, args);
+            }
+            if is_xr_pose_handle(*oid) {
+                // Free-standing: a pose IS a plain value object, and the
+                // XRServer state `get_adjusted_transform` reads is a
+                // thread-local beside the pose table (pat-s3rrv.220).
+                return call_xr_pose_instance(*oid, method, args);
             }
             if is_json_handle(*oid) {
                 return call_json_instance(*oid, method, args);
@@ -10193,6 +10674,14 @@ impl Interpreter {
             }
             if is_regex_handle(*oid) {
                 return call_regex_instance(*oid, method, args);
+            }
+            // pat-s3rrv.237. Placed with the other handle arms; both classes
+            // are RefCounted in Godot, so a handle is the right shape.
+            if is_tls_options_handle(*oid) {
+                return call_tls_options_instance(*oid, method, args);
+            }
+            if is_stream_peer_tls_handle(*oid) {
+                return call_stream_peer_tls_instance(*oid, method, args);
             }
             if is_hashing_context_handle(*oid) {
                 return call_hashing_context_instance(*oid, method, args);
@@ -22512,7 +23001,20 @@ pub(crate) struct ScriptXrTracker {
     joint_radius: HashMap<i64, f32>,
     blend_shapes: HashMap<i64, f32>,
     /// Named poses (Godot `XRPositionalTracker.set_pose`), pat-s3rrv.219.
-    poses: HashMap<String, XrTrackerPose>,
+    ///
+    /// ⚠️ Stores the pose HANDLE, not the pose data (pat-s3rrv.220). Godot
+    /// keeps one `XRPose` object per pose name for the tracker's lifetime and
+    /// mutates it in place, so a script holding the object it received from
+    /// `pose_changed` keeps seeing updates. A map of values would hand out a
+    /// fresh snapshot per `get_pose` and break that silently.
+    poses: HashMap<String, u64>,
+    /// Godot `XRTracker.description`.
+    ///
+    /// ⚠️ The accessors are `get_tracker_desc` / `set_tracker_desc` —
+    /// abbreviated, and not derivable from the member name.
+    description: String,
+    /// Godot `XRPositionalTracker.profile`.
+    profile: String,
     /// Named inputs — buttons, triggers, thumbsticks — as raw Variants, which
     /// is how Godot's `set_input(name, value)` carries them.
     inputs: HashMap<String, Variant>,
@@ -22531,6 +23033,15 @@ pub(crate) struct ScriptXrTracker {
 // `set_pose` always supplies every field.
 #[derive(Debug, Clone, PartialEq)]
 pub struct XrTrackerPose {
+    /// The pose's own name — `set_pose` assigns it from the action name, as
+    /// Godot's `new_pose->set_name(p_action_name)` does.
+    pub name: String,
+    /// Godot `XRPose.has_tracking_data`.
+    ///
+    /// ⚠️ `invalidate_pose` clears this and KEEPS the entry, so a pose can
+    /// exist while not tracking. [`xr_tracker_pose`] folds that back into
+    /// `None`, which is the "not tracking" answer its callers already expect.
+    pub has_tracking_data: bool,
     /// The pose's transform in tracking space.
     pub transform: gdcore::math3d::Transform3D,
     /// Linear velocity, if the runtime reports one.
@@ -22556,6 +23067,190 @@ thread_local! {
     static NEXT_XR_TRACKER: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
 }
 
+/// pat-s3rrv.220 — the `XRPose` objects a tracker hands back, and that a script
+/// can build directly with `XRPose.new()`.
+///
+/// 0xE0 because it is the last free byte in this block: E1 encoded object, E2
+/// RegEx, E3 RegExMatch, E4 Expression, E5 Thread, E6 Mutex, E7 Semaphore, E8
+/// XRInterface, E9 ScriptBacktrace, EA XRTracker, EB JSON, EC RefCounted, ED
+/// UndoRedo, EE/EF the editor filesystem. Two families sharing a tag would make
+/// both `is_*_handle` predicates claim the same handles and misroute every
+/// method call, silently.
+///
+/// ⚠️ Tag constants in this file are written in TWO spellings —
+/// `0xE5_00_0000_0000_0000` and `0xE500_0000_0000_0000` — so a single-spelling
+/// grep under-reports what is taken. The sweep behind this choice matched both.
+const XR_POSE_HANDLE_TAG: u64 = 0xE0_00_0000_0000_0000;
+
+thread_local! {
+    /// Live `XRPose` handles.
+    static XR_POSES: std::cell::RefCell<HashMap<u64, XrTrackerPose>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_XR_POSE: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    /// `XRServer.world_scale` (pat-s3rrv.220).
+    ///
+    /// ⚠️ Defaults to **1.0**, not 0.0. `XRPose.get_adjusted_transform`
+    /// multiplies the pose origin by it, so a zero default would collapse every
+    /// pose onto the origin point — and a "reflects world_scale" test written
+    /// against a fresh server would then pass for entirely the wrong reason.
+    ///
+    /// `gdscene::xr_nodes::world_scale_for` already read a world scale off the
+    /// `XROrigin3D` node and its own comment noted that Godot keeps it on
+    /// `XRServer`; this is the thing that proxy was proxying.
+    static XR_WORLD_SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+    /// `XRServer.reference_frame` — identity until `clear_reference_frame`.
+    static XR_REFERENCE_FRAME: std::cell::RefCell<gdcore::math3d::Transform3D> =
+        std::cell::RefCell::new(gdcore::math3d::Transform3D::IDENTITY);
+}
+
+fn is_xr_pose_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == XR_POSE_HANDLE_TAG
+}
+
+/// Mints a fresh `XRPose` — for `XRPose.new()`, and for the first `set_pose`
+/// under a given action name.
+fn new_xr_pose_handle(name: &str) -> u64 {
+    let raw = NEXT_XR_POSE.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    }) | XR_POSE_HANDLE_TAG;
+    XR_POSES.with(|m| {
+        m.borrow_mut().insert(
+            raw,
+            XrTrackerPose {
+                name: name.to_string(),
+                // `xr_pose.h` starts a fresh pose untracked with a zero
+                // confidence; only `set_pose` marks it tracking.
+                has_tracking_data: false,
+                transform: gdcore::math3d::Transform3D::IDENTITY,
+                linear_velocity: gdcore::math::Vector3::new(0.0, 0.0, 0.0),
+                angular_velocity: gdcore::math::Vector3::new(0.0, 0.0, 0.0),
+                tracking_confidence: 0,
+            },
+        )
+    });
+    raw
+}
+
+/// `XRPose` instance methods (pat-s3rrv.220).
+///
+/// Free-standing: a pose is a plain value object. `get_adjusted_transform`
+/// reads XRServer state, but that state is a thread-local beside this table,
+/// not the interpreter.
+fn call_xr_pose_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    let raw = id.raw();
+    XR_POSES.with(|m| {
+        let mut map = m.borrow_mut();
+        let Some(p) = map.get_mut(&raw) else {
+            return Ok(Variant::Nil);
+        };
+        Ok(match method {
+            "get_name" => Variant::String(p.name.clone()),
+            "set_name" => {
+                p.name = args.first().map(arg_str).unwrap_or_default();
+                Variant::Nil
+            }
+            // ⚠️ `get_has_tracking_data`, NOT `is_has_tracking_data`. Godot
+            // uses the `is_` prefix for a great many bool getters and not this
+            // one, so deriving the name from the convention yields a plausible,
+            // wrong string.
+            "get_has_tracking_data" => Variant::Bool(p.has_tracking_data),
+            "set_has_tracking_data" => {
+                p.has_tracking_data = matches!(args.first(), Some(Variant::Bool(true)));
+                Variant::Nil
+            }
+            "get_transform" => Variant::Transform3D(p.transform),
+            "set_transform" => {
+                if let Some(Variant::Transform3D(x)) = args.first() {
+                    p.transform = *x;
+                }
+                Variant::Nil
+            }
+            "get_linear_velocity" => Variant::Vector3(p.linear_velocity),
+            "set_linear_velocity" => {
+                if let Some(Variant::Vector3(v)) = args.first() {
+                    p.linear_velocity = *v;
+                }
+                Variant::Nil
+            }
+            "get_angular_velocity" => Variant::Vector3(p.angular_velocity),
+            "set_angular_velocity" => {
+                if let Some(Variant::Vector3(v)) = args.first() {
+                    p.angular_velocity = *v;
+                }
+                Variant::Nil
+            }
+            "get_tracking_confidence" => Variant::Int(p.tracking_confidence),
+            "set_tracking_confidence" => {
+                p.tracking_confidence = match args.first() {
+                    Some(Variant::Int(v)) => *v,
+                    _ => 0,
+                };
+                Variant::Nil
+            }
+            // `xr_pose.cpp`: origin *= world_scale, THEN reference_frame is
+            // LEFT-multiplied.
+            //
+            // ⚠️ The scale multiplies the ORIGIN only. Multiplying the whole
+            // transform would scale the basis too, growing the controller
+            // instead of moving it further from the player — and at
+            // world_scale 1.0 the two are indistinguishable, which is why the
+            // test fixture uses 2.0 with a non-identity basis.
+            "get_adjusted_transform" => {
+                let mut adjusted = p.transform;
+                adjusted.origin = adjusted.origin * XR_WORLD_SCALE.with(|s| s.get());
+                let frame = XR_REFERENCE_FRAME.with(|f| *f.borrow());
+                Variant::Transform3D(frame * adjusted)
+            }
+            "get_class" => Variant::String("XRPose".to_string()),
+            other => {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "XRPose has no method '{other}'"
+                ))))
+            }
+        })
+    })
+}
+
+/// Reads `XRPose`'s members, which Godot exposes as PROPERTIES as well as
+/// getters (`ADD_PROPERTY` throughout `xr_pose.cpp`).
+///
+/// A script written from the Godot docs spells `pose.transform`, not
+/// `pose.get_transform()`. Routed through the dispatcher above so the two
+/// spellings can never drift apart.
+fn xr_pose_get_property(id: gdcore::id::ObjectId, name: &str) -> Option<Variant> {
+    let getter = match name {
+        "name" => "get_name",
+        "has_tracking_data" => "get_has_tracking_data",
+        "transform" => "get_transform",
+        "linear_velocity" => "get_linear_velocity",
+        "angular_velocity" => "get_angular_velocity",
+        "tracking_confidence" => "get_tracking_confidence",
+        _ => return None,
+    };
+    call_xr_pose_instance(id, getter, &[]).ok()
+}
+
+/// Writes the same members. `pose.transform = x` is how a script fills in an
+/// `XRPose` it built itself.
+fn xr_pose_set_property(id: gdcore::id::ObjectId, name: &str, value: &Variant) -> bool {
+    let setter = match name {
+        "name" => "set_name",
+        "has_tracking_data" => "set_has_tracking_data",
+        "transform" => "set_transform",
+        "linear_velocity" => "set_linear_velocity",
+        "angular_velocity" => "set_angular_velocity",
+        "tracking_confidence" => "set_tracking_confidence",
+        _ => return false,
+    };
+    call_xr_pose_instance(id, setter, std::slice::from_ref(value)).is_ok()
+}
+
 /// Looks up a named pose on a named tracker (pat-s3rrv.219).
 ///
 /// `gdscene` drives XR nodes from the frame tick but cannot reach these
@@ -22564,10 +23259,22 @@ thread_local! {
 /// what `XRNode3D.get_has_tracking_data()` reports.
 pub fn xr_tracker_pose(tracker_name: &str, pose_name: &str) -> Option<XrTrackerPose> {
     let raw = XR_TRACKER_REGISTRY.with(|r| r.borrow().get(tracker_name).copied())?;
-    XR_TRACKERS.with(|m| {
+    let pose_raw = XR_TRACKERS.with(|m| {
         m.borrow()
             .get(&raw)
-            .and_then(|t| t.poses.get(pose_name).cloned())
+            .and_then(|t| t.poses.get(pose_name).copied())
+    })?;
+    XR_POSES.with(|pm| {
+        pm.borrow()
+            .get(&pose_raw)
+            // ⚠️ An invalidated pose still EXISTS — Godot keeps its transform
+            // "so controllers don't suddenly jump to origin" — but it is not
+            // tracking. This seam's contract is tracking-or-not: both callers
+            // in `gdscene::xr_nodes` test it with `.is_some()`, so a cleared
+            // flag has to read as `None` here or an XRNode3D would keep
+            // reporting tracking data after the runtime dropped the pose.
+            .filter(|p| p.has_tracking_data)
+            .cloned()
     })
 }
 
@@ -22602,6 +23309,26 @@ fn new_xr_tracker_handle(class_name: &str) -> Variant {
             raw,
             ScriptXrTracker {
                 class_name: class_name.to_string(),
+                // Godot sets the type in each concrete tracker's constructor.
+                // `..Default::default()` left it 0, which is not a legal
+                // `TrackerType` at all, so `XRServer.get_trackers(TRACKER_HAND)`
+                // could never match a script-created hand tracker.
+                tracker_type: match class_name {
+                    "XRControllerTracker" => 2, // TRACKER_CONTROLLER
+                    "XRHandTracker" => 16,      // TRACKER_HAND   (0x10)
+                    "XRBodyTracker" => 32,      // TRACKER_BODY   (0x20)
+                    "XRFaceTracker" => 64,      // TRACKER_FACE   (0x40)
+                    // `XRTracker` and `XRPositionalTracker` declare no
+                    // constructor of their own, so both keep the header's
+                    // TRACKER_UNKNOWN (0x80).
+                    _ => 128,
+                },
+                // `xr_tracker.h:46` starts the name at "Unknown".
+                //
+                // ⚠️ Not cosmetic: `XRServer.add_tracker` keys its registry BY
+                // NAME, so with the old "" default two trackers registered
+                // before `set_tracker_name` silently overwrote each other.
+                tracker_name: "Unknown".to_string(),
                 ..Default::default()
             },
         )
@@ -22609,14 +23336,24 @@ fn new_xr_tracker_handle(class_name: &str) -> Variant {
     Variant::ObjectId(gdcore::id::ObjectId::from_raw(raw))
 }
 
+/// One signal a tracker method asked to emit: name plus already-built args.
+type XrEmit = (String, Vec<Variant>);
+
 /// `XRTracker` / `XRPositionalTracker` / `XRHandTracker` / `XRBodyTracker` /
 /// `XRFaceTracker` instance methods.
+///
+/// Returns the value **plus the signals the call wants emitted**, rather than
+/// emitting them itself (pat-s3rrv.220). Emission runs script Callables through
+/// `invoke_callable`, which needs `&mut Interpreter`; keeping that out of here
+/// leaves the data half free-standing and testable, and mirrors the WebXR
+/// idiom next door — "mutate the interface, then drain whatever it queued".
 fn call_xr_tracker_instance(
     id: gdcore::id::ObjectId,
     method: &str,
     args: &[Variant],
-) -> Result<Variant, RuntimeError> {
+) -> Result<(Variant, Vec<XrEmit>), RuntimeError> {
     let raw = id.raw();
+    let mut emitted: Vec<XrEmit> = Vec::new();
     let int_arg = |i: usize| -> i64 {
         match args.get(i) {
             Some(Variant::Int(v)) => *v,
@@ -22630,7 +23367,7 @@ fn call_xr_tracker_instance(
             _ => 0.0,
         }
     };
-    XR_TRACKERS.with(|m| {
+    let result = XR_TRACKERS.with(|m| {
         let mut map = m.borrow_mut();
         let Some(t) = map.get_mut(&raw) else {
             return Ok(Variant::Nil);
@@ -22663,58 +23400,129 @@ fn call_xr_tracker_instance(
                     Some(Variant::Vector3(v)) => *v,
                     _ => gdcore::math::Vector3::new(0.0, 0.0, 0.0),
                 };
-                t.poses.insert(
-                    name,
-                    XrTrackerPose {
-                        transform,
-                        linear_velocity: vec_at(2),
-                        angular_velocity: vec_at(3),
-                        tracking_confidence: int_arg(4),
-                    },
-                );
+                // Godot REUSES the `XRPose` already stored under this name and
+                // mutates it in place, minting one only on first sight. That is
+                // what lets a script keep the object it got from `pose_changed`
+                // and go on seeing updates through it.
+                let pose_raw = match t.poses.get(&name) {
+                    Some(existing) => *existing,
+                    None => {
+                        let fresh = new_xr_pose_handle(&name);
+                        t.poses.insert(name.clone(), fresh);
+                        fresh
+                    }
+                };
+                XR_POSES.with(|pm| {
+                    if let Some(p) = pm.borrow_mut().get_mut(&pose_raw) {
+                        p.has_tracking_data = true;
+                        p.transform = transform;
+                        p.linear_velocity = vec_at(2);
+                        p.angular_velocity = vec_at(3);
+                        p.tracking_confidence = int_arg(4);
+                    }
+                });
+                // ⚠️ Unconditional, unlike the input signals below: Godot emits
+                // at the end of EVERY `set_pose`, because a pose arriving with
+                // an unchanged value is still a fresh sample from the runtime.
+                emitted.push((
+                    "pose_changed".to_string(),
+                    vec![Variant::ObjectId(gdcore::id::ObjectId::from_raw(pose_raw))],
+                ));
                 Variant::Nil
             }
             "has_pose" => Variant::Bool(
                 t.poses
                     .contains_key(&args.first().map(arg_str).unwrap_or_default()),
             ),
-            // Godot hands back an `XRPose` object; Patina has no such class, so
-            // the fields travel as a Dictionary. `Nil` for an unset pose is the
-            // load-bearing part — it is how "not tracking yet" is expressed.
+            // Godot hands back the `XRPose` OBJECT. `Nil` for a name the tracker
+            // has never seen is the load-bearing part — it is Godot's empty
+            // `Ref<XRPose>`, and it is how "no such pose" is spelled.
             "get_pose" => match t.poses.get(&args.first().map(arg_str).unwrap_or_default()) {
-                Some(pose) => {
-                    let mut d = gdvariant::Dictionary::new();
-                    d.insert(
-                        Variant::String("transform".into()),
-                        Variant::Transform3D(pose.transform),
-                    );
-                    d.insert(
-                        Variant::String("linear_velocity".into()),
-                        Variant::Vector3(pose.linear_velocity),
-                    );
-                    d.insert(
-                        Variant::String("angular_velocity".into()),
-                        Variant::Vector3(pose.angular_velocity),
-                    );
-                    d.insert(
-                        Variant::String("tracking_confidence".into()),
-                        Variant::Int(pose.tracking_confidence),
-                    );
-                    Variant::Dictionary(d)
-                }
+                Some(pose_raw) => Variant::ObjectId(gdcore::id::ObjectId::from_raw(*pose_raw)),
                 None => Variant::Nil,
             },
+            // ⚠️ Does NOT remove the pose. Godot clears the tracking flag and
+            // leaves the transform and velocities alone, with the comment "we
+            // leave our current transform and velocity data as is so
+            // controllers don't suddenly jump to origin". So `has_pose` stays
+            // true afterwards and `get_pose` keeps answering with the object —
+            // which is exactly what the acceptance's
+            // `get_pose(...).has_tracking_data == false` clause needs.
             "invalidate_pose" => {
-                t.poses
-                    .remove(&args.first().map(arg_str).unwrap_or_default());
+                let name = args.first().map(arg_str).unwrap_or_default();
+                if let Some(pose_raw) = t.poses.get(&name).copied() {
+                    XR_POSES.with(|pm| {
+                        if let Some(p) = pm.borrow_mut().get_mut(&pose_raw) {
+                            p.has_tracking_data = false;
+                        }
+                    });
+                    // Emitted only when the tracker actually had this pose, as
+                    // Godot's `if (poses.has(...))` guard does.
+                    emitted.push((
+                        "pose_lost_tracking".to_string(),
+                        vec![Variant::ObjectId(gdcore::id::ObjectId::from_raw(pose_raw))],
+                    ));
+                }
                 Variant::Nil
             }
+            // ⚠️ Edge-triggered on a CHANGED value, and the signal is chosen by
+            // the value's TYPE: bool -> button_pressed/button_released, float ->
+            // input_float_changed, Vector2 -> input_vector2_changed. Anything
+            // else emits nothing, matching the `default:` arm of Godot's switch.
+            //
+            // A level-triggered emit would fire on every call and still satisfy
+            // a `>= 1` assertion, which is why the test counts exactly.
             "set_input" => {
                 let name = args.first().map(arg_str).unwrap_or_default();
-                t.inputs
-                    .insert(name, args.get(1).cloned().unwrap_or(Variant::Nil));
+                let value = args.get(1).cloned().unwrap_or(Variant::Nil);
+                if t.inputs.get(&name) != Some(&value) {
+                    t.inputs.insert(name.clone(), value.clone());
+                    let emit = match &value {
+                        Variant::Bool(pressed) => Some((
+                            if *pressed {
+                                "button_pressed"
+                            } else {
+                                "button_released"
+                            },
+                            vec![Variant::String(name)],
+                        )),
+                        Variant::Float(_) => Some((
+                            "input_float_changed",
+                            vec![Variant::String(name), value.clone()],
+                        )),
+                        // ⚠️ Godot names this parameter `vector`, while its
+                        // float sibling names it `value`.
+                        Variant::Vector2(_) => Some((
+                            "input_vector2_changed",
+                            vec![Variant::String(name), value.clone()],
+                        )),
+                        _ => None,
+                    };
+                    if let Some((signal, sig_args)) = emit {
+                        emitted.push((signal.to_string(), sig_args));
+                    }
+                }
                 Variant::Nil
             }
+            "set_tracker_desc" => {
+                t.description = args.first().map(arg_str).unwrap_or_default();
+                Variant::Nil
+            }
+            "get_tracker_desc" => Variant::String(t.description.clone()),
+            // ⚠️ Edge-triggered like the inputs, and the signal's parameter is
+            // named `role` — not `profile`, the way the member is.
+            "set_tracker_profile" => {
+                let profile = args.first().map(arg_str).unwrap_or_default();
+                if t.profile != profile {
+                    t.profile = profile.clone();
+                    emitted.push((
+                        "profile_changed".to_string(),
+                        vec![Variant::String(profile)],
+                    ));
+                }
+                Variant::Nil
+            }
+            "get_tracker_profile" => Variant::String(t.profile.clone()),
             "get_input" => t
                 .inputs
                 .get(&args.first().map(arg_str).unwrap_or_default())
@@ -22763,7 +23571,8 @@ fn call_xr_tracker_instance(
                 ))))
             }
         })
-    })
+    })?;
+    Ok((result, emitted))
 }
 
 const XR_INTERFACE_HANDLE_TAG: u64 = 0xE8_00_0000_0000_0000;
@@ -23157,6 +23966,212 @@ thread_local! {
 }
 
 /// Returns `true` when `id` was issued by [`new_regex_handle`].
+// ===========================================================================
+// TLSOptions / StreamPeerTLS (pat-s3rrv.237)
+// ===========================================================================
+//
+// Two classes with opposite web stories, which is why they are implemented
+// differently rather than both being stubs:
+//
+// * `TLSOptions` is **pure configuration** — it is what
+//   `HTTPClient.connect_to_host`, `HTTPRequest.set_tls_options` and
+//   `WebSocketPeer.connect_to_url` accept. A browser does the handshake itself
+//   through fetch/WebSocket, so a script building one must genuinely work. It
+//   carries real values.
+// * `StreamPeerTLS` wraps a **raw TCP socket**, which a browser does not have.
+//   Godot's own web build stubs every NetSocket operation to `ERR_UNAVAILABLE`
+//   (`platform/web/net_socket_web.h`), so parity here is a registered class
+//   that returns that error — not an absent class that raises "unknown class",
+//   and not a fake success.
+
+/// Godot's `Error::ERR_UNAVAILABLE`, transcribed from `global_constants.rs`.
+const ERR_UNAVAILABLE: i64 = 2;
+/// `StreamPeerTLS.Status.STATUS_ERROR`, from `StreamPeerTLS.xml`.
+const STREAM_PEER_TLS_STATUS_ERROR: i64 = 3;
+
+const TLS_OPTIONS_HANDLE_TAG: u64 = 0x7200_0000_0000_0000;
+const STREAM_PEER_TLS_HANDLE_TAG: u64 = 0x7300_0000_0000_0000;
+
+/// One `TLSOptions` value (pat-s3rrv.237).
+///
+/// Godot has no public constructor — the three statics are the only way to
+/// build one, and which of them was used is itself observable through
+/// `is_server()` / `is_unsafe_client()`. That is why the kind is stored rather
+/// than inferred from which fields happen to be set.
+#[derive(Clone, Default)]
+struct TlsOptionsState {
+    server: bool,
+    unsafe_client: bool,
+    common_name_override: String,
+    trusted_ca_chain: Variant,
+    private_key: Variant,
+    own_certificate: Variant,
+}
+
+thread_local! {
+    static TLS_OPTIONS: std::cell::RefCell<HashMap<u64, TlsOptionsState>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_TLS_OPTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    /// `StreamPeerTLS` handles. The value is the last status, which stays
+    /// `STATUS_DISCONNECTED` until an operation fails it to `STATUS_ERROR`.
+    static STREAM_PEER_TLS: std::cell::RefCell<HashMap<u64, i64>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_STREAM_PEER_TLS: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+fn is_tls_options_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == TLS_OPTIONS_HANDLE_TAG
+}
+
+fn is_stream_peer_tls_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == STREAM_PEER_TLS_HANDLE_TAG
+}
+
+fn new_tls_options_handle(state: TlsOptionsState) -> gdcore::id::ObjectId {
+    let seq = NEXT_TLS_OPTIONS.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = TLS_OPTIONS_HANDLE_TAG | seq;
+    TLS_OPTIONS.with(|m| m.borrow_mut().insert(raw, state));
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+fn new_stream_peer_tls_handle() -> gdcore::id::ObjectId {
+    let seq = NEXT_STREAM_PEER_TLS.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = STREAM_PEER_TLS_HANDLE_TAG | seq;
+    // Godot starts a fresh StreamPeerTLS disconnected, not errored — the error
+    // is the RESULT of trying, so a script can tell "never used" from "failed".
+    STREAM_PEER_TLS.with(|m| m.borrow_mut().insert(raw, 0));
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+/// `TLSOptions`'s three static constructors (pat-s3rrv.237).
+///
+/// Returns `None` for any other member so the caller falls through — the class
+/// name is also where `TLSOptions.new()` would be spelled, and Godot refuses
+/// that (the class is not instantiable), which the constructor path reports.
+fn call_tls_options_static(method: &str, args: &[Variant]) -> Option<Variant> {
+    let arg = |i: usize| args.get(i).cloned().unwrap_or(Variant::Nil);
+    let string_arg = |i: usize| match args.get(i) {
+        Some(Variant::String(s)) => s.clone(),
+        Some(Variant::StringName(s)) => s.as_str().to_string(),
+        _ => String::new(),
+    };
+    match method {
+        // client(trusted_chain = null, common_name_override = "")
+        "client" => Some(Variant::ObjectId(new_tls_options_handle(TlsOptionsState {
+            trusted_ca_chain: arg(0),
+            common_name_override: string_arg(1),
+            ..TlsOptionsState::default()
+        }))),
+        // client_unsafe(trusted_chain = null)
+        "client_unsafe" => Some(Variant::ObjectId(new_tls_options_handle(TlsOptionsState {
+            unsafe_client: true,
+            trusted_ca_chain: arg(0),
+            ..TlsOptionsState::default()
+        }))),
+        // server(key, certificate) — both required in Godot.
+        "server" => Some(Variant::ObjectId(new_tls_options_handle(TlsOptionsState {
+            server: true,
+            private_key: arg(0),
+            own_certificate: arg(1),
+            ..TlsOptionsState::default()
+        }))),
+        _ => None,
+    }
+}
+
+/// `TLSOptions` instance methods — all const getters in Godot.
+fn call_tls_options_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    let state = TLS_OPTIONS.with(|m| m.borrow().get(&id.raw()).cloned().unwrap_or_default());
+    match method {
+        "is_server" => Ok(Variant::Bool(state.server)),
+        "is_unsafe_client" => Ok(Variant::Bool(state.unsafe_client)),
+        "get_common_name_override" => Ok(Variant::String(state.common_name_override)),
+        "get_trusted_ca_chain" => Ok(state.trusted_ca_chain),
+        "get_private_key" => Ok(state.private_key),
+        "get_own_certificate" => Ok(state.own_certificate),
+        "get_class" => Ok(Variant::String("TLSOptions".into())),
+        // TLSOptions extends RefCounted extends Object, and `is_class` answers
+        // for the whole chain rather than just the leaf.
+        "is_class" => match args.first() {
+            Some(Variant::String(name)) => Ok(Variant::Bool(
+                name == "TLSOptions" || name == "RefCounted" || name == "Object",
+            )),
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                "TLSOptions.is_class() takes a string".into(),
+            ))),
+        },
+        "get_instance_id" => Ok(Variant::Int(id.raw() as i64)),
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("TLSOptions.{other}"),
+        ))),
+    }
+}
+
+/// `StreamPeerTLS` instance methods — the web-unavailable surface.
+///
+/// Every transport call answers `ERR_UNAVAILABLE` and leaves the peer in
+/// `STATUS_ERROR`, which is what Godot's web build does. The class existing at
+/// all is the point: without it a script gets "unknown class" and cannot even
+/// branch on the error.
+fn call_stream_peer_tls_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    let fail = || {
+        STREAM_PEER_TLS.with(|m| {
+            m.borrow_mut()
+                .insert(id.raw(), STREAM_PEER_TLS_STATUS_ERROR);
+        });
+        Ok(Variant::Int(ERR_UNAVAILABLE))
+    };
+    match method {
+        "connect_to_stream" | "accept_stream" => fail(),
+        "poll" => fail(),
+        "get_status" => Ok(Variant::Int(
+            STREAM_PEER_TLS.with(|m| m.borrow().get(&id.raw()).copied().unwrap_or(0)),
+        )),
+        // Godot returns the wrapped peer; there was never one to wrap.
+        "get_stream" => Ok(Variant::Nil),
+        "disconnect_from_stream" => {
+            // Disconnecting is the one operation that cannot fail: it returns
+            // void and puts the peer back to DISCONNECTED.
+            STREAM_PEER_TLS.with(|m| {
+                m.borrow_mut().insert(id.raw(), 0);
+            });
+            Ok(Variant::Nil)
+        }
+        "get_class" => Ok(Variant::String("StreamPeerTLS".into())),
+        "is_class" => match args.first() {
+            Some(Variant::String(name)) => Ok(Variant::Bool(
+                name == "StreamPeerTLS"
+                    || name == "StreamPeer"
+                    || name == "RefCounted"
+                    || name == "Object",
+            )),
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                "StreamPeerTLS.is_class() takes a string".into(),
+            ))),
+        },
+        "get_instance_id" => Ok(Variant::Int(id.raw() as i64)),
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("StreamPeerTLS.{other}"),
+        ))),
+    }
+}
+
 fn is_regex_handle(id: gdcore::id::ObjectId) -> bool {
     id.raw() & 0xFF00_0000_0000_0000 == REGEX_HANDLE_TAG
 }
@@ -24840,6 +25855,54 @@ const EDITOR_PATHS_HANDLE_TAG: u64 = 0x1000_0000_0000_0000;
 /// `EditorInterface.get_command_palette()` hands back.
 const EDITOR_PALETTE_HANDLE_TAG: u64 = 0x1100_0000_0000_0000;
 
+/// `FileSystemDock`'s handle tag (pat-s3rrv.226).
+const FS_DOCK_HANDLE_TAG: u64 = 0x1200_0000_0000_0000;
+
+fn is_filesystem_dock_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == FS_DOCK_HANDLE_TAG
+}
+
+thread_local! {
+    /// Script callbacks connected to the dock's signals, keyed by signal name.
+    ///
+    /// Same shape as `XR_SIGNAL_CALLBACKS` / `WEBRTC_SIGNAL_CALLBACKS`: a dock
+    /// handle is not a scene node, so neither `connect` path can bind it.
+    static FS_DOCK_SIGNAL_CALLBACKS: std::cell::RefCell<HashMap<String, Vec<CallableRef>>> =
+        std::cell::RefCell::new(HashMap::new());
+    /// The path `navigate_to_path` last requested.
+    static FS_DOCK_NAVIGATED: std::cell::RefCell<String> =
+        const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Signals the editor server has raised but no script has been handed yet.
+///
+/// ⚠️ **A `Mutex`, not a `thread_local`.** The editor server answers requests on
+/// spawned threads (`editor_server.rs` uses `thread::spawn`), so the emitter and
+/// the script that receives it are on *different* threads. A thread-local queue
+/// — which is what the XR and WebRTC registries use — would silently collect the
+/// signal on the server thread and deliver it to nobody.
+static FS_DOCK_PENDING: std::sync::Mutex<Vec<(String, Vec<Variant>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Records a `FileSystemDock` signal for delivery to connected scripts.
+///
+/// Called by gdeditor's filesystem routes when a file is moved, removed or the
+/// display mode changes. Safe to call from any thread and from a build with no
+/// script running — the queue simply grows until something drains it.
+pub fn emit_filesystem_dock_signal(signal: &str, args: Vec<Variant>) {
+    if let Ok(mut q) = FS_DOCK_PENDING.lock() {
+        q.push((signal.to_string(), args));
+    }
+}
+
+/// Takes everything queued, leaving the queue empty.
+fn take_filesystem_dock_signals() -> Vec<(String, Vec<Variant>)> {
+    FS_DOCK_PENDING
+        .lock()
+        .map(|mut q| std::mem::take(&mut *q))
+        .unwrap_or_default()
+}
+
 fn is_editor_paths_handle(id: gdcore::id::ObjectId) -> bool {
     id.raw() & 0xFF00_0000_0000_0000 == EDITOR_PATHS_HANDLE_TAG
 }
@@ -24921,6 +25984,11 @@ fn call_editor_interface_static(member: &str, _args: &[Variant]) -> Result<Varia
         ))),
         "get_command_palette" => Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(
             EDITOR_PALETTE_HANDLE_TAG | 1,
+        ))),
+        // `EditorInterface.get_file_system_dock()` — the handle an addon
+        // connects `files_moved`/`file_removed` on (pat-s3rrv.226).
+        "get_file_system_dock" => Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(
+            FS_DOCK_HANDLE_TAG | 1,
         ))),
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("EditorInterface.{other}"),
@@ -26684,6 +27752,29 @@ fn call_navigationmeshgenerator_static(
                 Variant::PackedVector3Array(vertices),
             );
             out.insert(Variant::String("polygons".into()), Variant::Array(polygons));
+            Ok(Variant::Dictionary(out))
+        }
+        // Godot `clear(navigation_mesh)` empties the mesh and returns void.
+        //
+        // ⚠️ Patina's navmesh travels as a Dictionary **value**, not a resource
+        // handle, so there is nothing to empty in place — the cleared mesh is
+        // returned and the caller rebinds (`nav = NavigationMeshGenerator
+        // .clear(nav)`). Returning Nil to match Godot's void would leave the
+        // caller holding the un-cleared original with no way to notice.
+        //
+        // The keys match what the bake arms emit, so a cleared mesh stays
+        // shape-compatible with a baked one rather than becoming an empty
+        // dictionary that later reads answer Nil for.
+        "clear" => {
+            let mut out = gdvariant::Dictionary::new();
+            out.insert(
+                Variant::String("vertices".into()),
+                Variant::PackedVector3Array(Vec::new()),
+            );
+            out.insert(
+                Variant::String("polygons".into()),
+                Variant::Array(Vec::new()),
+            );
             Ok(Variant::Dictionary(out))
         }
         // Baking is synchronous here, so nothing is ever in flight.

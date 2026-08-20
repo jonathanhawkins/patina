@@ -913,6 +913,12 @@ pub fn control_at_point(tree: &SceneTree, point: Vector2) -> Option<NodeId> {
 /// matched here is a class ClassDB does not know, and hit-testing it works by
 /// accident.
 pub const CONTROL_HIT_CLASSES: &[&str] = &[
+    // pat-s3rrv.233: GraphEdit must take clicks so port drags, node moves and box
+    // select reach `gui_input_stage`. Its GraphNode children are hit-tested by the
+    // GraphEdit branch there against the same `position_offset` rect they are
+    // drawn at, so they are not listed separately — a node listed here would be
+    // hit at its anchor rect while being drawn somewhere else entirely.
+    "GraphEdit",
     // pat-s3rrv.72: a MenuBar's title strip has to be hit-testable or the press
     // never resolves to the bar and no menu can open — the strip would draw and
     // ignore every click.

@@ -35,7 +35,9 @@
 use gdcore::math::Color;
 use gdvariant::Variant;
 
-use crate::class_db::{class_exists, register_class, ClassRegistration, MethodInfo, PropertyInfo};
+use crate::class_db::{
+    class_exists, register_class, ClassRegistration, MethodInfo, PropertyInfo, SignalInfo,
+};
 
 /// Registers the `@tool` editor-plugin scripting classes.
 ///
@@ -149,6 +151,54 @@ pub fn register_editor_plugin_classes() {
                     Variant::Color(Color::new(0.0, 0.0, 0.0, 0.0)),
                 ))
                 .property(PropertyInfo::new("transient", Variant::Bool(false))),
+        );
+    }
+
+    // FileSystemDock (pat-s3rrv.226). Its parent chain became available when
+    // `EditorDock` landed above; the note in class_db.rs saying both bases were
+    // missing was stale and is corrected there.
+    //
+    // ⓘ Its value to an addon is the SIGNALS, not the three methods — a plugin
+    // connects `files_moved`/`file_removed` to react to project-tree edits.
+    if !class_exists("FileSystemDock") {
+        register_class(
+            ClassRegistration::new("FileSystemDock")
+                .parent("EditorDock")
+                .method(MethodInfo::new("navigate_to_path", 1))
+                .method(MethodInfo::new("add_resource_tooltip_plugin", 1))
+                .method(MethodInfo::new("remove_resource_tooltip_plugin", 1))
+                .signal(SignalInfo::new("inherit").arg("file"))
+                .signal(SignalInfo::new("instantiate").arg("files"))
+                .signal(SignalInfo::new("resource_removed").arg("resource"))
+                .signal(SignalInfo::new("file_removed").arg("file"))
+                .signal(SignalInfo::new("folder_removed").arg("folder"))
+                .signal(
+                    SignalInfo::new("files_moved")
+                        .arg("old_file")
+                        .arg("new_file"),
+                )
+                .signal(
+                    SignalInfo::new("folder_moved")
+                        .arg("old_folder")
+                        .arg("new_folder"),
+                )
+                .signal(SignalInfo::new("folder_color_changed"))
+                .signal(SignalInfo::new("display_mode_changed")),
+        );
+    }
+    // EditorFileSystemImportFormatSupportQuery — an addon offers to install
+    // support for an import format the editor cannot handle. All three members
+    // are virtuals the script overrides, hence the leading underscores.
+    if !class_exists("EditorFileSystemImportFormatSupportQuery") {
+        register_class(
+            ClassRegistration::new("EditorFileSystemImportFormatSupportQuery")
+                .parent("RefCounted")
+                .method(MethodInfo::new("_is_active", 0).returns(Variant::Bool(false)))
+                .method(
+                    MethodInfo::new("_get_file_extensions", 0)
+                        .returns(Variant::PackedStringArray(Vec::new())),
+                )
+                .method(MethodInfo::new("_query", 0).returns(Variant::Bool(false))),
         );
     }
 }

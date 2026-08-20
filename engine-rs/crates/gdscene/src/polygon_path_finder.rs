@@ -151,6 +151,22 @@ impl PolygonPathFinder {
     /// Returns the poly-line of waypoints (including `from` and `to`) or an
     /// empty vector if no unobstructed route exists. If `from` can see `to`
     /// directly, the result is `[from, to]`.
+    /// Every point where the segment `from`→`to` crosses a boundary edge
+    /// (Godot `get_intersections`).
+    ///
+    /// Edge order, not sorted along the segment — Godot returns them in edge
+    /// iteration order and callers that need them ordered sort themselves.
+    pub fn get_intersections(&self, from: Vector2, to: Vector2) -> Vec<Vector2> {
+        self.edges
+            .iter()
+            .filter_map(|&(i, j)| {
+                let a = *self.points.get(i)?;
+                let b = *self.points.get(j)?;
+                segment_intersection(a, b, from, to)
+            })
+            .collect()
+    }
+
     pub fn find_path(&self, from: Vector2, to: Vector2) -> Vec<Vector2> {
         // Node list: [points…, from, to].
         let mut nodes = self.points.clone();
@@ -271,6 +287,52 @@ fn segments_properly_cross(p1: Vector2, p2: Vector2, p3: Vector2, p4: Vector2) -
     let d4 = orient(p1, p2, p4);
     ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
         && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
+}
+
+/// Godot's `CMP_EPSILON` (`core/math/math_defs.h`), used by the intersection
+/// test below at the same tolerance the engine uses.
+const CMP_EPSILON: f32 = 0.00001;
+
+/// Intersection point of segments `(a1,a2)` and `(b1,b2)`, or `None`.
+///
+/// A direct port of `Geometry2D::segment_intersects_segment`
+/// (`core/math/geometry_2d.h:188`), including its rejection of parallel and
+/// collinear pairs, because `get_intersections` must agree with Godot point for
+/// point.
+///
+/// ⚠️ **Deliberately not [`segments_properly_cross`].** That predicate is
+/// exclusive — endpoint touches and collinear overlaps are `false` — because a
+/// path is allowed to travel along an obstacle edge or through a shared vertex.
+/// Godot's intersection test is inclusive at the endpoints instead, so reusing
+/// the visibility predicate here would silently drop every intersection that
+/// lands exactly on a vertex, which for a closed polygon is every corner.
+fn segment_intersection(a1: Vector2, a2: Vector2, b1: Vector2, b2: Vector2) -> Option<Vector2> {
+    let b = a2 - a1;
+    let mut c = b1 - a1;
+    let mut d = b2 - a1;
+
+    let ab_len = b.dot(b);
+    if ab_len <= 0.0 {
+        return None;
+    }
+    let bn = b / ab_len;
+    c = Vector2::new(c.x * bn.x + c.y * bn.y, c.y * bn.x - c.x * bn.y);
+    d = Vector2::new(d.x * bn.x + d.y * bn.y, d.y * bn.x - d.x * bn.y);
+
+    // Same sign on both sides of the line means no crossing.
+    if (c.y < -CMP_EPSILON && d.y < -CMP_EPSILON) || (c.y > CMP_EPSILON && d.y > CMP_EPSILON) {
+        return None;
+    }
+    // Parallel or collinear.
+    if (c.y - d.y).abs() < CMP_EPSILON {
+        return None;
+    }
+
+    let ab_pos = d.x + (c.x - d.x) * d.y / (d.y - c.y);
+    if !(0.0..=1.0).contains(&ab_pos) {
+        return None;
+    }
+    Some(a1 + b * ab_pos)
 }
 
 /// A Dijkstra frontier entry ordered as a min-heap by `cost`.

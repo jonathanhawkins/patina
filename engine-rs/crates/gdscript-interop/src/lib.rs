@@ -35,7 +35,7 @@ pub use interpreter::{
     engine_max_fps, engine_max_physics_steps_per_frame, engine_physics_frames,
     engine_physics_jitter_fix, engine_physics_ticks_per_second,
     engine_physics_ticks_per_second_generation, engine_process_frames, engine_time_scale,
-    poll_xr_interfaces, xr_tracker_exists, xr_tracker_input, xr_tracker_pose, XrTrackerPose, publish_engine_physics_ticks_per_second, reset_engine_singleton_state,
+    emit_filesystem_dock_signal, poll_xr_interfaces, xr_tracker_exists, xr_tracker_input, xr_tracker_pose, XrTrackerPose, publish_engine_physics_ticks_per_second, reset_engine_singleton_state,
     set_engine_editor_hint, set_engine_frame_counters, set_engine_frames_per_second,
     set_engine_in_physics_frame, set_engine_max_fps, set_engine_max_physics_steps_per_frame,
     set_engine_physics_jitter_fix, set_engine_physics_ticks_per_second, set_engine_time_scale,

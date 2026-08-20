@@ -6738,6 +6738,9 @@ pub fn register_3d_classes() {
                 .method(MethodInfo::new("is_alive", 0).const_method())
                 .method(MethodInfo::new("wait_to_finish", 0))
                 .method(MethodInfo::new("is_main_thread", 0).static_method())
+                // pat-s3rrv.217 — `set_thread_safety_checks_enabled(enabled)`,
+                // static per Thread.xml. Dispatched in gdscript-interop.
+                .method(MethodInfo::new("set_thread_safety_checks_enabled", 1).static_method())
                 .enumeration(
                     EnumInfo::new("Priority")
                         .constant("PRIORITY_LOW", 0)
@@ -8390,10 +8393,31 @@ pub fn register_3d_classes() {
     //
     // Members and accessors are transcribed from
     // `upstream/godot/doc/classes/{Translation,TranslationServer,TranslationDomain}.xml`.
+    // pat-s3rrv.229 — Logger.xml. A script `extends Logger` intercepts
+    // engine output; the class was absent from ClassDB entirely, so no
+    // script could extend it and no `_log_message` could ever be found.
+    if !class_exists("Logger") {
+        register_class(
+            ClassRegistration::new("Logger")
+                .parent("RefCounted")
+                .method(MethodInfo::new("_log_error", 8).virtual_method())
+                .method(MethodInfo::new("_log_message", 2).virtual_method()),
+        );
+    }
     if !class_exists("Translation") {
         register_class(
             ClassRegistration::new("Translation")
                 .parent("Resource")
+                .method(
+                    MethodInfo::new("_get_message", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_plural_message", 4)
+                        .virtual_method()
+                        .const_method(),
+                )
                 .property(
                     PropertyInfo::new("locale", Variant::String("en".to_string()))
                         .with_accessors("get_locale", "set_locale"),
@@ -8806,6 +8830,7 @@ pub fn register_3d_classes() {
         register_class(
             ClassRegistration::new("CompositorEffect")
                 .parent("Resource")
+                .method(MethodInfo::new("_render_callback", 2).virtual_method())
                 .property(
                     PropertyInfo::new("access_resolved_color", Variant::Bool(false))
                         .with_accessors("get_access_resolved_color", "set_access_resolved_color"),
@@ -11024,7 +11049,94 @@ pub fn register_3d_classes() {
                     .with_accessors("get_vrs_strength", "set_vrs_strength"),
             ),
     );
-    register_class(ClassRegistration::new("XRInterfaceExtension").parent("XRInterface"));
+    register_class(
+        ClassRegistration::new("XRInterfaceExtension")
+            .parent("XRInterface")
+            .method(MethodInfo::new("_end_frame", 0).virtual_method())
+            .method(
+                MethodInfo::new("_get_anchor_detection_is_enabled", 0)
+                    .virtual_method()
+                    .const_method(),
+            )
+            .method(
+                MethodInfo::new("_get_camera_feed_id", 0)
+                    .virtual_method()
+                    .const_method(),
+            )
+            .method(MethodInfo::new("_get_camera_transform", 0).virtual_method())
+            .method(
+                MethodInfo::new("_get_capabilities", 0)
+                    .virtual_method()
+                    .const_method(),
+            )
+            .method(MethodInfo::new("_get_color_texture", 0).virtual_method())
+            .method(MethodInfo::new("_get_depth_texture", 0).virtual_method())
+            .method(
+                MethodInfo::new("_get_name", 0)
+                    .virtual_method()
+                    .const_method(),
+            )
+            .method(
+                MethodInfo::new("_get_play_area", 0)
+                    .virtual_method()
+                    .const_method(),
+            )
+            .method(
+                MethodInfo::new("_get_play_area_mode", 0)
+                    .virtual_method()
+                    .const_method(),
+            )
+            .method(MethodInfo::new("_get_projection_for_view", 4).virtual_method())
+            .method(MethodInfo::new("_get_render_target_size", 0).virtual_method())
+            .method(
+                MethodInfo::new("_get_suggested_pose_names", 1)
+                    .virtual_method()
+                    .const_method(),
+            )
+            .method(
+                MethodInfo::new("_get_suggested_tracker_names", 0)
+                    .virtual_method()
+                    .const_method(),
+            )
+            .method(
+                MethodInfo::new("_get_system_info", 0)
+                    .virtual_method()
+                    .const_method(),
+            )
+            .method(
+                MethodInfo::new("_get_tracking_status", 0)
+                    .virtual_method()
+                    .const_method(),
+            )
+            .method(MethodInfo::new("_get_transform_for_view", 2).virtual_method())
+            .method(MethodInfo::new("_get_velocity_texture", 0).virtual_method())
+            .method(MethodInfo::new("_get_view_count", 0).virtual_method())
+            .method(MethodInfo::new("_get_vrs_texture", 0).virtual_method())
+            .method(MethodInfo::new("_get_vrs_texture_format", 0).virtual_method())
+            .method(MethodInfo::new("_initialize", 0).virtual_method())
+            .method(
+                MethodInfo::new("_is_initialized", 0)
+                    .virtual_method()
+                    .const_method(),
+            )
+            .method(MethodInfo::new("_post_draw_viewport", 2).virtual_method())
+            .method(MethodInfo::new("_pre_draw_viewport", 1).virtual_method())
+            .method(MethodInfo::new("_pre_render", 0).virtual_method())
+            .method(MethodInfo::new("_process", 0).virtual_method())
+            .method(MethodInfo::new("_set_anchor_detection_is_enabled", 1).virtual_method())
+            .method(
+                MethodInfo::new("_set_play_area_mode", 1)
+                    .virtual_method()
+                    .const_method(),
+            )
+            .method(
+                MethodInfo::new("_supports_play_area_mode", 1)
+                    .virtual_method()
+                    .const_method(),
+            )
+            .method(MethodInfo::new("_trigger_haptic_pulse", 6).virtual_method())
+            .method(MethodInfo::new("_uninitialize", 0).virtual_method()),
+    );
     register_class(
         ClassRegistration::new("MobileVRInterface")
             .parent("XRInterface")
@@ -15625,10 +15737,58 @@ pub fn register_2d_classes() {
     // Registered before the player below so a `stream` property that reflects
     // its resource's class resolves it rather than finding nothing.
     if !class_exists("VideoStream") {
-        register_class(ClassRegistration::new("VideoStream").parent("Resource"));
+        register_class(
+            ClassRegistration::new("VideoStream")
+                .parent("Resource")
+                .method(MethodInfo::new("_instantiate_playback", 0).virtual_method()),
+        );
     }
     if !class_exists("VideoStreamPlayback") {
-        register_class(ClassRegistration::new("VideoStreamPlayback").parent("Resource"));
+        register_class(
+            ClassRegistration::new("VideoStreamPlayback")
+                .parent("Resource")
+                .method(
+                    MethodInfo::new("_get_channels", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_length", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_mix_rate", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_playback_position", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_texture", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_is_paused", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_is_playing", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_play", 0).virtual_method())
+                .method(MethodInfo::new("_seek", 1).virtual_method())
+                .method(MethodInfo::new("_set_audio_track", 1).virtual_method())
+                .method(MethodInfo::new("_set_paused", 1).virtual_method())
+                .method(MethodInfo::new("_stop", 0).virtual_method())
+                .method(MethodInfo::new("_update", 1).virtual_method()),
+        );
     }
     if !class_exists("VideoStreamPlayer") {
         register_class(
@@ -22629,6 +22789,8 @@ fn register_camera_server_classes() {
         register_class(
             ClassRegistration::new("CameraFeed")
                 .parent("RefCounted")
+                .method(MethodInfo::new("_activate_feed", 0).virtual_method())
+                .method(MethodInfo::new("_deactivate_feed", 0).virtual_method())
                 // Godot exposes id/name/position as methods, not properties —
                 // only these three are the property surface.
                 .property(
@@ -25364,7 +25526,33 @@ fn register_gltf_classes() {
             .method(MethodInfo::new("unregister_gltf_document_extension", 1))
             .method(MethodInfo::new("get_supported_gltf_extensions", 0)),
     );
-    register_class(ClassRegistration::new("GLTFDocumentExtension").parent("Resource"));
+    register_class(
+        ClassRegistration::new("GLTFDocumentExtension")
+            .parent("Resource")
+            .method(MethodInfo::new("_convert_scene_node", 3).virtual_method())
+            .method(MethodInfo::new("_export_node", 4).virtual_method())
+            .method(MethodInfo::new("_export_object_model_property", 6).virtual_method())
+            .method(MethodInfo::new("_export_post", 1).virtual_method())
+            .method(MethodInfo::new("_export_post_convert", 2).virtual_method())
+            .method(MethodInfo::new("_export_preflight", 2).virtual_method())
+            .method(MethodInfo::new("_export_preserialize", 1).virtual_method())
+            .method(MethodInfo::new("_generate_scene_node", 3).virtual_method())
+            .method(MethodInfo::new("_get_image_file_extension", 0).virtual_method())
+            .method(MethodInfo::new("_get_saveable_image_formats", 0).virtual_method())
+            .method(MethodInfo::new("_get_supported_extensions", 0).virtual_method())
+            .method(MethodInfo::new("_import_node", 4).virtual_method())
+            .method(MethodInfo::new("_import_object_model_property", 3).virtual_method())
+            .method(MethodInfo::new("_import_post", 2).virtual_method())
+            .method(MethodInfo::new("_import_post_parse", 1).virtual_method())
+            .method(MethodInfo::new("_import_pre_generate", 1).virtual_method())
+            .method(MethodInfo::new("_import_preflight", 2).virtual_method())
+            .method(MethodInfo::new("_parse_image_data", 4).virtual_method())
+            .method(MethodInfo::new("_parse_node_extensions", 3).virtual_method())
+            .method(MethodInfo::new("_parse_texture_json", 3).virtual_method())
+            .method(MethodInfo::new("_save_image_at_path", 5).virtual_method())
+            .method(MethodInfo::new("_serialize_image_to_bytes", 5).virtual_method())
+            .method(MethodInfo::new("_serialize_texture_json", 4).virtual_method()),
+    );
     register_class(
         ClassRegistration::new("GLTFDocumentExtensionConvertImporterMesh")
             .parent("GLTFDocumentExtension"),
@@ -25750,12 +25938,14 @@ pub fn register_networking_classes() {
     // support is absent would be a lie; registering one that is abstract BY
     // DESIGN is simply the port.
     //
-    // ⚠️ `WebRTCPeerConnectionExtension` and `WebRTCDataChannelExtension` are
-    // deliberately NOT here. They inherit from `WebRTCPeerConnection` /
-    // `WebRTCDataChannel`, which are unregistered — and an unregistered base
-    // silently severs the chain, so they would answer `class_exists` while
-    // `inheritance_chain` stopped short of Object. They belong in the same
-    // change that lands their parents.
+    // ⚠️ `WebRTCPeerConnectionExtension` and `WebRTCDataChannelExtension` are not
+    // here, and still must not be: they inherit from `WebRTCPeerConnection` /
+    // `WebRTCDataChannel`, which are registered ~250 lines BELOW this point.
+    // `register_class` resolves the parent at call time, so registering them here
+    // would run before their bases existed and silently sever the chain — they
+    // would answer `class_exists` while `inheritance_chain` stopped short of
+    // Object. Their parents landed in pat-s3rrv.80, so as of pat-s3rrv.230 both
+    // ARE registered — immediately after those parents, not here.
     if !class_exists("StreamPeerExtension") {
         register_class(
             ClassRegistration::new("StreamPeerExtension")
@@ -26031,6 +26221,127 @@ pub fn register_networking_classes() {
                 .method(MethodInfo::new("get_max_retransmits", 0))
                 .method(MethodInfo::new("get_protocol", 0))
                 .method(MethodInfo::new("was_string_packet", 0)),
+        );
+    }
+
+    // WebRTCPeerConnectionExtension / WebRTCDataChannelExtension (pat-s3rrv.230).
+    //
+    // ⚠️ REGISTERED HERE, NOT BESIDE THEIR SIBLINGS. The other `*Extension`
+    // classes sit ~400 lines above, but these two inherit from
+    // `WebRTCPeerConnection` / `WebRTCDataChannel`, which are registered JUST
+    // above this point. `register_class` resolves the parent at call time, so
+    // registering them next to `StreamPeerExtension` would run before their bases
+    // existed and silently sever the chain — `class_exists` would answer true
+    // while `inheritance_chain` stopped short of Object. That is exactly the
+    // failure the earlier comment predicted, and it is why this waited for the
+    // change that landed the parents.
+    //
+    // Names, arities and const-ness transcribed from
+    // modules/webrtc/doc_classes/*.xml (module classes keep their docs there, not
+    // in doc/classes/), not derived from the parent's non-virtual surface.
+    if !class_exists("WebRTCPeerConnectionExtension") {
+        register_class(
+            ClassRegistration::new("WebRTCPeerConnectionExtension")
+                .parent("WebRTCPeerConnection")
+                .method(MethodInfo::new("_add_ice_candidate", 3).virtual_method())
+                .method(MethodInfo::new("_close", 0).virtual_method())
+                .method(MethodInfo::new("_create_data_channel", 2).virtual_method())
+                .method(MethodInfo::new("_create_offer", 0).virtual_method())
+                .method(
+                    MethodInfo::new("_get_connection_state", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_gathering_state", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_signaling_state", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_initialize", 1).virtual_method())
+                .method(MethodInfo::new("_poll", 0).virtual_method())
+                .method(MethodInfo::new("_set_local_description", 2).virtual_method())
+                .method(MethodInfo::new("_set_remote_description", 2).virtual_method()),
+        );
+    }
+    if !class_exists("WebRTCDataChannelExtension") {
+        register_class(
+            ClassRegistration::new("WebRTCDataChannelExtension")
+                .parent("WebRTCDataChannel")
+                .method(MethodInfo::new("_close", 0).virtual_method())
+                .method(
+                    MethodInfo::new("_get_available_packet_count", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_buffered_amount", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_id", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_label", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_max_packet_life_time", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_max_packet_size", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_max_retransmits", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_get_packet", 2).virtual_method())
+                .method(
+                    MethodInfo::new("_get_protocol", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_ready_state", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_write_mode", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_is_negotiated", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_is_ordered", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_poll", 0).virtual_method())
+                .method(MethodInfo::new("_put_packet", 2).virtual_method())
+                .method(MethodInfo::new("_set_write_mode", 1).virtual_method())
+                .method(
+                    MethodInfo::new("_was_string_packet", 0)
+                        .virtual_method()
+                        .const_method(),
+                ),
         );
     }
     if !class_exists("WebRTCMultiplayerPeer") {
@@ -26526,6 +26837,59 @@ pub fn register_networking_classes() {
                 .method(MethodInfo::new("get_available_bytes", 0).const_method()),
         );
     }
+    // pat-s3rrv.237 — the TLS pair, with opposite web stories.
+    //
+    // `StreamPeerTLS` wraps a raw TCP socket, which a browser does not have:
+    // Godot's own web build stubs every NetSocket operation to `ERR_UNAVAILABLE`
+    // (`platform/web/net_socket_web.h`). Registering it is still the right
+    // move — parity is a class that EXISTS and returns that error, because an
+    // absent class raises "unknown class" and a script cannot branch on that.
+    // The dispatch lives in `gdscript-interop`'s handle table.
+    if !class_exists("StreamPeerTLS") {
+        register_class(
+            ClassRegistration::new("StreamPeerTLS")
+                .parent("StreamPeer")
+                .method(MethodInfo::new("accept_stream", 2))
+                .method(MethodInfo::new("connect_to_stream", 3))
+                .method(MethodInfo::new("disconnect_from_stream", 0))
+                .method(MethodInfo::new("get_status", 0).const_method())
+                .method(MethodInfo::new("get_stream", 0).const_method())
+                .method(MethodInfo::new("poll", 0))
+                .enumeration(
+                    EnumInfo::new("Status")
+                        .constant("STATUS_DISCONNECTED", 0)
+                        .constant("STATUS_HANDSHAKING", 1)
+                        .constant("STATUS_CONNECTED", 2)
+                        .constant("STATUS_ERROR", 3)
+                        .constant("STATUS_ERROR_HOSTNAME_MISMATCH", 4),
+                ),
+        );
+    }
+    // `TLSOptions` is the opposite case: pure configuration, accepted by
+    // `HTTPClient.connect_to_host`, `HTTPRequest.set_tls_options` and
+    // `WebSocketPeer.connect_to_url`. A browser performs the handshake itself
+    // through fetch/WebSocket, so this one genuinely works.
+    //
+    // ⚠️ Marked abstract because Godot's TLSOptions is **not instantiable** —
+    // the three statics are the only way to build one, and `TLSOptions.new()`
+    // is an error. Leaving it instantiable would invite a script to construct
+    // an empty one that no static ever configured.
+    if !class_exists("TLSOptions") {
+        register_class(
+            ClassRegistration::new("TLSOptions")
+                .parent("RefCounted")
+                .abstract_class()
+                .method(MethodInfo::new("client", 2).static_method())
+                .method(MethodInfo::new("client_unsafe", 1).static_method())
+                .method(MethodInfo::new("server", 2).static_method())
+                .method(MethodInfo::new("get_common_name_override", 0).const_method())
+                .method(MethodInfo::new("get_own_certificate", 0).const_method())
+                .method(MethodInfo::new("get_private_key", 0).const_method())
+                .method(MethodInfo::new("get_trusted_ca_chain", 0).const_method())
+                .method(MethodInfo::new("is_server", 0).const_method())
+                .method(MethodInfo::new("is_unsafe_client", 0).const_method()),
+        );
+    }
     if !class_exists("StreamPeerTCP") {
         register_class(
             ClassRegistration::new("StreamPeerTCP")
@@ -26569,6 +26933,23 @@ pub fn register_networking_classes() {
     }
     if !class_exists("TCPServer") {
         register_class(ClassRegistration::new("TCPServer").parent("SocketServer"));
+    }
+    // UDSServer completes the SocketServer family (pat-s3rrv.238): its parent
+    // `SocketServer`, its sibling `TCPServer` and its return type
+    // `StreamPeerUDS` were all registered while it alone was missing, so
+    // `get_inheriters_from_class("SocketServer")` diverged from Godot.
+    //
+    // ⚠️ Parent only, NO methods — deliberately, and NOT what the bead's prose
+    // asks for. `oos_native_sockets.rs::surfaces_declare_no_transport_methods`
+    // asserts `methods.is_empty()` across this whole family, because the
+    // transport cannot exist on the web target ("the transport is out of scope
+    // on web, the class is not", pat-0q2kx.184). Advertising `listen` /
+    // `take_connection` here would fail that test and make UDSServer the one
+    // member of the family claiming transport it cannot perform. There is also
+    // no UDS transport anywhere in the workspace for such a method to call —
+    // `StreamPeerUDS` is itself registration-only.
+    if !class_exists("UDSServer") {
+        register_class(ClassRegistration::new("UDSServer").parent("SocketServer"));
     }
     if !class_exists("UDPServer") {
         register_class(
@@ -27236,6 +27617,34 @@ fn register_navigation_resource_classes() {
                 )),
         );
     }
+    // NavigationMeshGenerator (pat-s3rrv.239). The singleton was already
+    // reachable from script (`interpreter.rs` dispatches it) but ClassDB knew
+    // nothing about it, so `ClassDB.class_exists("NavigationMeshGenerator")`
+    // answered false for a name scripts can actually call — the same
+    // editor-vs-ClassDB disagreement pat-0q2kx.184 fixed for the socket family.
+    //
+    // ⚠️ Parent is `Object`, not `RefCounted`: it is a singleton, and
+    // `doc/classes/NavigationMeshGenerator.xml` carries `deprecated=""` at the
+    // CLASS level. Godot keeps it so older projects still load, and its `bake()`
+    // note redirects callers to `NavigationServer3D.parse_source_geometry_data`
+    // + `bake_from_source_geometry_data`.
+    if !class_exists("NavigationMeshGenerator") {
+        register_class(
+            ClassRegistration::new("NavigationMeshGenerator")
+                .parent("Object")
+                // ⚠️ Only the methods the interpreter actually DISPATCHES are
+                // registered. Godot also documents `bake(navigation_mesh,
+                // root_node)`, but it walks a scene tree, which lives in
+                // `gdscene` — a crate that depends on the interpreter, so the
+                // dispatcher cannot reach it. Registering `bake` here would
+                // make `has_method("bake")` answer true while the call fell
+                // through and did nothing observable, which is worse than the
+                // method being absent.
+                .method(MethodInfo::new("parse_source_geometry_data", 4))
+                .method(MethodInfo::new("bake_from_source_geometry_data", 3))
+                .method(MethodInfo::new("clear", 1)),
+        );
+    }
 }
 
 /// Populates the whole ClassDB — every `register_*_classes` table — the way
@@ -27741,6 +28150,9 @@ pub fn register_all_classes() {
     // with `event is InputEventKey`, which cannot resolve unless the chain is
     // in ClassDB.
     register_input_event_classes();
+    // The server `*Extension` seams (pat-s3rrv.231): registration surface
+    // only, so `extends PhysicsServer2DExtension` resolves its base.
+    register_server_extension_classes();
     // Registers the editor-only classes on top; its own fan-out to the six
     // tables above is a no-op by the time it runs.
     register_editor_classes();
@@ -28240,6 +28652,29 @@ pub fn register_editor_classes() {
         register_class(
             ClassRegistration::new("EditorVCSInterface")
                 .parent("Object")
+                .method(MethodInfo::new("_checkout_branch", 1).virtual_method())
+                .method(MethodInfo::new("_commit", 1).virtual_method())
+                .method(MethodInfo::new("_create_branch", 1).virtual_method())
+                .method(MethodInfo::new("_create_remote", 2).virtual_method())
+                .method(MethodInfo::new("_discard_file", 1).virtual_method())
+                .method(MethodInfo::new("_fetch", 1).virtual_method())
+                .method(MethodInfo::new("_get_branch_list", 0).virtual_method())
+                .method(MethodInfo::new("_get_current_branch_name", 0).virtual_method())
+                .method(MethodInfo::new("_get_diff", 2).virtual_method())
+                .method(MethodInfo::new("_get_line_diff", 2).virtual_method())
+                .method(MethodInfo::new("_get_modified_files_data", 0).virtual_method())
+                .method(MethodInfo::new("_get_previous_commits", 1).virtual_method())
+                .method(MethodInfo::new("_get_remotes", 0).virtual_method())
+                .method(MethodInfo::new("_get_vcs_name", 0).virtual_method())
+                .method(MethodInfo::new("_initialize", 1).virtual_method())
+                .method(MethodInfo::new("_pull", 1).virtual_method())
+                .method(MethodInfo::new("_push", 2).virtual_method())
+                .method(MethodInfo::new("_remove_branch", 1).virtual_method())
+                .method(MethodInfo::new("_remove_remote", 1).virtual_method())
+                .method(MethodInfo::new("_set_credentials", 5).virtual_method())
+                .method(MethodInfo::new("_shut_down", 0).virtual_method())
+                .method(MethodInfo::new("_stage_file", 1).virtual_method())
+                .method(MethodInfo::new("_unstage_file", 1).virtual_method())
                 // Its surface is almost entirely virtuals a VCS plugin
                 // overrides; these few are the helpers Godot calls back into.
                 .method(MethodInfo::new("create_diff_line", 4))
@@ -28671,6 +29106,15 @@ pub fn register_editor_classes() {
 
     register_editor_filesystem_classes();
     register_resource_importer_classes();
+    // The editor plugin/dock family lives in `editor_plugin_classes.rs` and was
+    // reachable only through `EditorState::new()` — so a `register_all_classes()`
+    // caller (every test, and any headless consumer) never saw `EditorDock`,
+    // `FileSystemDock` or their siblings (pat-s3rrv.226).
+    //
+    // That file's own module doc asks for exactly this line and records why it
+    // was left undone: `class_db.rs` was under an exclusive lease at the time.
+    // The lease is mine now, so the follow-up is paid off here.
+    crate::editor_plugin_classes::register_editor_plugin_classes();
 }
 
 /// Registers Godot's editor filesystem service classes (pat-0q2kx.167).
@@ -28691,8 +29135,13 @@ pub fn register_editor_classes() {
 /// `Node` (the bead says Object), and `FileSystemDock` inherits `EditorDock`
 /// (the bead says VBoxContainer). Registering against a base that is not itself
 /// registered silently truncates the inheritance chain, so `FileSystemDock`
-/// (needs `EditorDock`) and `EditorFileDialog` (needs `FileDialog`) are
-/// deliberately NOT registered here — both bases are still missing.
+/// `EditorFileDialog` (needs `FileDialog`) is deliberately NOT registered here
+/// — its base is still missing.
+///
+/// ⚠️ **Corrected pat-s3rrv.226:** this note used to say the same of
+/// `FileSystemDock`, on the grounds that `EditorDock` was missing too.
+/// `EditorDock` has since landed in `editor_plugin_classes.rs`, so that reason
+/// expired; `FileSystemDock` is now registered there beside its parent.
 fn register_editor_filesystem_classes() {
     // -- EditorFileSystem — the scanning service itself (inherits Node) --
     if !class_exists("EditorFileSystem") {
@@ -28984,6 +29433,1726 @@ pub fn clear_for_testing() {
     db.classes.clear();
     db.by_id.clear();
     db.next_id = 1;
+}
+
+/// Registers the server `*Extension` seams (pat-s3rrv.231).
+///
+/// Godot's `*Extension` classes are how a GDExtension replaces a whole
+/// server, and their virtuals are the entire API — a class registered
+/// without them exists in name only. Same pure-virtual-surface precedent as
+/// the `MultiplayerPeerExtension` block above: without a provider an instance
+/// is inert, which is Godot's behaviour too, but the surface still exists.
+///
+/// Arities are transcribed from each class's doc XML. The bead asks for
+/// `extension_api.json` via jq; that file is not vendored here.
+pub fn register_server_extension_classes() {
+    // These two bases were themselves missing. A child registered against an
+    // unregistered base leaves an inheritance chain that stops there, so the
+    // Extension classes below would resolve their parent NAME and nothing else.
+    if !class_exists("TextServer") {
+        register_class(
+            ClassRegistration::new("TextServer")
+                .parent("RefCounted")
+                .abstract_class(),
+        );
+    }
+    if !class_exists("PhysicsServer3D") {
+        register_class(
+            ClassRegistration::new("PhysicsServer3D")
+                .parent("Object")
+                .abstract_class(),
+        );
+    }
+    if !class_exists("TextServerExtension") {
+        register_class(
+            ClassRegistration::new("TextServerExtension")
+                .parent("TextServer")
+                .method(MethodInfo::new("_cleanup", 0).virtual_method())
+                .method(MethodInfo::new("_create_font", 0).virtual_method())
+                .method(MethodInfo::new("_create_font_linked_variation", 1).virtual_method())
+                .method(MethodInfo::new("_create_shaped_text", 2).virtual_method())
+                .method(
+                    MethodInfo::new("_draw_hex_code_box", 5)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_font_clear_glyphs", 2).virtual_method())
+                .method(MethodInfo::new("_font_clear_kerning_map", 2).virtual_method())
+                .method(MethodInfo::new("_font_clear_size_cache", 1).virtual_method())
+                .method(MethodInfo::new("_font_clear_system_fallback_cache", 0).virtual_method())
+                .method(MethodInfo::new("_font_clear_textures", 2).virtual_method())
+                .method(
+                    MethodInfo::new("_font_draw_glyph", 7)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_draw_glyph_outline", 8)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_antialiasing", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_ascent", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_baseline_offset", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_char_from_glyph_index", 3)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_descent", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_disable_embedded_bitmaps", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_embolden", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_face_count", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_face_index", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_fixed_size", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_fixed_size_scale_mode", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_generate_mipmaps", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_global_oversampling", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_glyph_advance", 3)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_glyph_contours", 3)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_glyph_index", 4)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_glyph_list", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_glyph_offset", 3)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_glyph_size", 3)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_glyph_texture_idx", 3)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_glyph_texture_rid", 3)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_glyph_texture_size", 3)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_glyph_uv_rect", 3)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_hinting", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_keep_rounding_remainders", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_kerning", 3)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_kerning_list", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_font_get_language_support_override", 2).virtual_method())
+                .method(MethodInfo::new("_font_get_language_support_overrides", 1).virtual_method())
+                .method(
+                    MethodInfo::new("_font_get_msdf_pixel_range", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_msdf_size", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_name", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_opentype_feature_overrides", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_ot_name_strings", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_oversampling", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_scale", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_font_get_script_support_override", 2).virtual_method())
+                .method(MethodInfo::new("_font_get_script_support_overrides", 1).virtual_method())
+                .method(
+                    MethodInfo::new("_font_get_size_cache_info", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_size_cache_list", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_spacing", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_stretch", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_style", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_style_name", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_subpixel_positioning", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_supported_chars", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_supported_glyphs", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_texture_count", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_texture_image", 3)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_texture_offsets", 3)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_transform", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_underline_position", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_underline_thickness", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_variation_coordinates", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_get_weight", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_has_char", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_is_allow_system_fallback", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_is_force_autohinter", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_is_language_supported", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_is_modulate_color_glyphs", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_is_multichannel_signed_distance_field", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_is_script_supported", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_font_remove_glyph", 3).virtual_method())
+                .method(MethodInfo::new("_font_remove_kerning", 3).virtual_method())
+                .method(
+                    MethodInfo::new("_font_remove_language_support_override", 2).virtual_method(),
+                )
+                .method(MethodInfo::new("_font_remove_script_support_override", 2).virtual_method())
+                .method(MethodInfo::new("_font_remove_size_cache", 2).virtual_method())
+                .method(MethodInfo::new("_font_remove_texture", 3).virtual_method())
+                .method(MethodInfo::new("_font_render_glyph", 3).virtual_method())
+                .method(MethodInfo::new("_font_render_range", 4).virtual_method())
+                .method(MethodInfo::new("_font_set_allow_system_fallback", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_antialiasing", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_ascent", 3).virtual_method())
+                .method(MethodInfo::new("_font_set_baseline_offset", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_data", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_data_ptr", 3).virtual_method())
+                .method(MethodInfo::new("_font_set_descent", 3).virtual_method())
+                .method(MethodInfo::new("_font_set_disable_embedded_bitmaps", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_embolden", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_face_index", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_fixed_size", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_fixed_size_scale_mode", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_force_autohinter", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_generate_mipmaps", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_global_oversampling", 1).virtual_method())
+                .method(MethodInfo::new("_font_set_glyph_advance", 4).virtual_method())
+                .method(MethodInfo::new("_font_set_glyph_offset", 4).virtual_method())
+                .method(MethodInfo::new("_font_set_glyph_size", 4).virtual_method())
+                .method(MethodInfo::new("_font_set_glyph_texture_idx", 4).virtual_method())
+                .method(MethodInfo::new("_font_set_glyph_uv_rect", 4).virtual_method())
+                .method(MethodInfo::new("_font_set_hinting", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_keep_rounding_remainders", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_kerning", 4).virtual_method())
+                .method(MethodInfo::new("_font_set_language_support_override", 3).virtual_method())
+                .method(MethodInfo::new("_font_set_modulate_color_glyphs", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_msdf_pixel_range", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_msdf_size", 2).virtual_method())
+                .method(
+                    MethodInfo::new("_font_set_multichannel_signed_distance_field", 2)
+                        .virtual_method(),
+                )
+                .method(MethodInfo::new("_font_set_name", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_opentype_feature_overrides", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_oversampling", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_scale", 3).virtual_method())
+                .method(MethodInfo::new("_font_set_script_support_override", 3).virtual_method())
+                .method(MethodInfo::new("_font_set_spacing", 3).virtual_method())
+                .method(MethodInfo::new("_font_set_stretch", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_style", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_style_name", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_subpixel_positioning", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_texture_image", 4).virtual_method())
+                .method(MethodInfo::new("_font_set_texture_offsets", 4).virtual_method())
+                .method(MethodInfo::new("_font_set_transform", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_underline_position", 3).virtual_method())
+                .method(MethodInfo::new("_font_set_underline_thickness", 3).virtual_method())
+                .method(MethodInfo::new("_font_set_variation_coordinates", 2).virtual_method())
+                .method(MethodInfo::new("_font_set_weight", 2).virtual_method())
+                .method(
+                    MethodInfo::new("_font_supported_feature_list", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_font_supported_variation_list", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_format_number", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_free_rid", 1).virtual_method())
+                .method(
+                    MethodInfo::new("_get_features", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_hex_code_box_size", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_name", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_support_data", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_support_data_filename", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_support_data_info", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_has", 1).virtual_method())
+                .method(
+                    MethodInfo::new("_has_feature", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_is_confusable", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_is_locale_right_to_left", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_is_locale_using_support_data", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_is_valid_identifier", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_is_valid_letter", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_load_support_data", 1).virtual_method())
+                .method(
+                    MethodInfo::new("_name_to_tag", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_parse_number", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_parse_structured_text", 3)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_percent_sign", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_reference_oversampling_level", 1).virtual_method())
+                .method(
+                    MethodInfo::new("_save_support_data", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_get_run_count", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_get_run_direction", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_get_run_font_rid", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_get_run_font_size", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_get_run_language", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_get_run_object", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_get_run_range", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_get_run_text", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_get_span_count", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_get_span_embedded_object", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_get_span_meta", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_get_span_object", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_get_span_text", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_get_text", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_shaped_set_span_update_font", 5).virtual_method())
+                .method(MethodInfo::new("_shaped_text_add_object", 6).virtual_method())
+                .method(MethodInfo::new("_shaped_text_add_string", 7).virtual_method())
+                .method(MethodInfo::new("_shaped_text_clear", 1).virtual_method())
+                .method(
+                    MethodInfo::new("_shaped_text_closest_character_pos", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_draw", 7)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_draw_outline", 8)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_shaped_text_duplicate", 1).virtual_method())
+                .method(MethodInfo::new("_shaped_text_fit_to_width", 3).virtual_method())
+                .method(
+                    MethodInfo::new("_shaped_text_get_ascent", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_carets", 3)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_character_breaks", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_custom_ellipsis", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_custom_punctuation", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_descent", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_direction", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_dominant_direction_in_range", 3)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_ellipsis_glyph_count", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_ellipsis_glyphs", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_ellipsis_pos", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_glyph_count", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_glyphs", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_grapheme_bounds", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_inferred_direction", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_line_breaks", 4)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_line_breaks_adv", 5)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_object_glyph", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_object_range", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_object_rect", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_objects", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_orientation", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_parent", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_preserve_control", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_preserve_invalid", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_range", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_selection", 3)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_size", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_spacing", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_trim_pos", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_underline_position", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_underline_thickness", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_width", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_get_word_breaks", 3)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_has_object", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_hit_test_grapheme", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_hit_test_position", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_is_ready", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_next_character_pos", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_next_grapheme_pos", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_shaped_text_overrun_trim_to_width", 3).virtual_method())
+                .method(
+                    MethodInfo::new("_shaped_text_prev_character_pos", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shaped_text_prev_grapheme_pos", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_shaped_text_resize_object", 5).virtual_method())
+                .method(MethodInfo::new("_shaped_text_set_bidi_override", 2).virtual_method())
+                .method(MethodInfo::new("_shaped_text_set_custom_ellipsis", 2).virtual_method())
+                .method(MethodInfo::new("_shaped_text_set_custom_punctuation", 2).virtual_method())
+                .method(MethodInfo::new("_shaped_text_set_direction", 2).virtual_method())
+                .method(MethodInfo::new("_shaped_text_set_orientation", 2).virtual_method())
+                .method(MethodInfo::new("_shaped_text_set_preserve_control", 2).virtual_method())
+                .method(MethodInfo::new("_shaped_text_set_preserve_invalid", 2).virtual_method())
+                .method(MethodInfo::new("_shaped_text_set_spacing", 3).virtual_method())
+                .method(MethodInfo::new("_shaped_text_shape", 1).virtual_method())
+                .method(MethodInfo::new("_shaped_text_sort_logical", 1).virtual_method())
+                .method(
+                    MethodInfo::new("_shaped_text_substr", 3)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_shaped_text_tab_align", 2).virtual_method())
+                .method(MethodInfo::new("_shaped_text_update_breaks", 1).virtual_method())
+                .method(
+                    MethodInfo::new("_shaped_text_update_justification_ops", 1).virtual_method(),
+                )
+                .method(
+                    MethodInfo::new("_spoof_check", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_string_get_character_breaks", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_string_get_word_breaks", 3)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_string_to_lower", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_string_to_title", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_string_to_upper", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_strip_diacritics", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_tag_to_name", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_unreference_oversampling_level", 1).virtual_method()),
+        );
+    }
+    if !class_exists("PhysicsServer2DExtension") {
+        register_class(
+            ClassRegistration::new("PhysicsServer2DExtension")
+                .parent("PhysicsServer2D")
+                .method(MethodInfo::new("_area_add_shape", 4).virtual_method())
+                .method(MethodInfo::new("_area_attach_canvas_instance_id", 2).virtual_method())
+                .method(MethodInfo::new("_area_attach_object_instance_id", 2).virtual_method())
+                .method(MethodInfo::new("_area_clear_shapes", 1).virtual_method())
+                .method(MethodInfo::new("_area_create", 0).virtual_method())
+                .method(
+                    MethodInfo::new("_area_get_canvas_instance_id", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_area_get_collision_layer", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_area_get_collision_mask", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_area_get_object_instance_id", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_area_get_param", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_area_get_shape", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_area_get_shape_count", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_area_get_shape_transform", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_area_get_space", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_area_get_transform", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_area_remove_shape", 2).virtual_method())
+                .method(MethodInfo::new("_area_set_area_monitor_callback", 2).virtual_method())
+                .method(MethodInfo::new("_area_set_collision_layer", 2).virtual_method())
+                .method(MethodInfo::new("_area_set_collision_mask", 2).virtual_method())
+                .method(MethodInfo::new("_area_set_monitor_callback", 2).virtual_method())
+                .method(MethodInfo::new("_area_set_monitorable", 2).virtual_method())
+                .method(MethodInfo::new("_area_set_param", 3).virtual_method())
+                .method(MethodInfo::new("_area_set_pickable", 2).virtual_method())
+                .method(MethodInfo::new("_area_set_shape", 3).virtual_method())
+                .method(MethodInfo::new("_area_set_shape_disabled", 3).virtual_method())
+                .method(MethodInfo::new("_area_set_shape_transform", 3).virtual_method())
+                .method(MethodInfo::new("_area_set_space", 2).virtual_method())
+                .method(MethodInfo::new("_area_set_transform", 2).virtual_method())
+                .method(MethodInfo::new("_body_add_collision_exception", 2).virtual_method())
+                .method(MethodInfo::new("_body_add_constant_central_force", 2).virtual_method())
+                .method(MethodInfo::new("_body_add_constant_force", 3).virtual_method())
+                .method(MethodInfo::new("_body_add_constant_torque", 2).virtual_method())
+                .method(MethodInfo::new("_body_add_shape", 4).virtual_method())
+                .method(MethodInfo::new("_body_apply_central_force", 2).virtual_method())
+                .method(MethodInfo::new("_body_apply_central_impulse", 2).virtual_method())
+                .method(MethodInfo::new("_body_apply_force", 3).virtual_method())
+                .method(MethodInfo::new("_body_apply_impulse", 3).virtual_method())
+                .method(MethodInfo::new("_body_apply_torque", 2).virtual_method())
+                .method(MethodInfo::new("_body_apply_torque_impulse", 2).virtual_method())
+                .method(MethodInfo::new("_body_attach_canvas_instance_id", 2).virtual_method())
+                .method(MethodInfo::new("_body_attach_object_instance_id", 2).virtual_method())
+                .method(MethodInfo::new("_body_clear_shapes", 1).virtual_method())
+                .method(MethodInfo::new("_body_collide_shape", 8).virtual_method())
+                .method(MethodInfo::new("_body_create", 0).virtual_method())
+                .method(
+                    MethodInfo::new("_body_get_canvas_instance_id", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_collision_exceptions", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_collision_layer", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_collision_mask", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_collision_priority", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_constant_force", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_constant_torque", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_contacts_reported_depth_threshold", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_continuous_collision_detection_mode", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_body_get_direct_state", 1).virtual_method())
+                .method(
+                    MethodInfo::new("_body_get_max_contacts_reported", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_mode", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_object_instance_id", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_param", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_shape", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_shape_count", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_shape_transform", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_space", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_state", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_is_omitting_force_integration", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_body_remove_collision_exception", 2).virtual_method())
+                .method(MethodInfo::new("_body_remove_shape", 2).virtual_method())
+                .method(MethodInfo::new("_body_reset_mass_properties", 1).virtual_method())
+                .method(MethodInfo::new("_body_set_axis_velocity", 2).virtual_method())
+                .method(MethodInfo::new("_body_set_collision_layer", 2).virtual_method())
+                .method(MethodInfo::new("_body_set_collision_mask", 2).virtual_method())
+                .method(MethodInfo::new("_body_set_collision_priority", 2).virtual_method())
+                .method(MethodInfo::new("_body_set_constant_force", 2).virtual_method())
+                .method(MethodInfo::new("_body_set_constant_torque", 2).virtual_method())
+                .method(
+                    MethodInfo::new("_body_set_contacts_reported_depth_threshold", 2)
+                        .virtual_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_set_continuous_collision_detection_mode", 2)
+                        .virtual_method(),
+                )
+                .method(MethodInfo::new("_body_set_force_integration_callback", 3).virtual_method())
+                .method(MethodInfo::new("_body_set_max_contacts_reported", 2).virtual_method())
+                .method(MethodInfo::new("_body_set_mode", 2).virtual_method())
+                .method(MethodInfo::new("_body_set_omit_force_integration", 2).virtual_method())
+                .method(MethodInfo::new("_body_set_param", 3).virtual_method())
+                .method(MethodInfo::new("_body_set_pickable", 2).virtual_method())
+                .method(MethodInfo::new("_body_set_shape", 3).virtual_method())
+                .method(MethodInfo::new("_body_set_shape_as_one_way_collision", 4).virtual_method())
+                .method(MethodInfo::new("_body_set_shape_disabled", 3).virtual_method())
+                .method(MethodInfo::new("_body_set_shape_transform", 3).virtual_method())
+                .method(MethodInfo::new("_body_set_space", 2).virtual_method())
+                .method(MethodInfo::new("_body_set_state", 3).virtual_method())
+                .method(MethodInfo::new("_body_set_state_sync_callback", 2).virtual_method())
+                .method(
+                    MethodInfo::new("_body_test_motion", 7)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_capsule_shape_create", 0).virtual_method())
+                .method(MethodInfo::new("_circle_shape_create", 0).virtual_method())
+                .method(MethodInfo::new("_concave_polygon_shape_create", 0).virtual_method())
+                .method(MethodInfo::new("_convex_polygon_shape_create", 0).virtual_method())
+                .method(
+                    MethodInfo::new("_damped_spring_joint_get_param", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_damped_spring_joint_set_param", 3).virtual_method())
+                .method(MethodInfo::new("_end_sync", 0).virtual_method())
+                .method(MethodInfo::new("_finish", 0).virtual_method())
+                .method(MethodInfo::new("_flush_queries", 0).virtual_method())
+                .method(MethodInfo::new("_free_rid", 1).virtual_method())
+                .method(MethodInfo::new("_get_process_info", 1).virtual_method())
+                .method(MethodInfo::new("_init", 0).virtual_method())
+                .method(
+                    MethodInfo::new("_is_flushing_queries", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_joint_clear", 1).virtual_method())
+                .method(MethodInfo::new("_joint_create", 0).virtual_method())
+                .method(
+                    MethodInfo::new("_joint_disable_collisions_between_bodies", 2).virtual_method(),
+                )
+                .method(
+                    MethodInfo::new("_joint_get_param", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_joint_get_type", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_joint_is_disabled_collisions_between_bodies", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_joint_make_damped_spring", 5).virtual_method())
+                .method(MethodInfo::new("_joint_make_groove", 6).virtual_method())
+                .method(MethodInfo::new("_joint_make_pin", 4).virtual_method())
+                .method(MethodInfo::new("_joint_set_param", 3).virtual_method())
+                .method(
+                    MethodInfo::new("_pin_joint_get_flag", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_pin_joint_get_param", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_pin_joint_set_flag", 3).virtual_method())
+                .method(MethodInfo::new("_pin_joint_set_param", 3).virtual_method())
+                .method(MethodInfo::new("_rectangle_shape_create", 0).virtual_method())
+                .method(MethodInfo::new("_segment_shape_create", 0).virtual_method())
+                .method(MethodInfo::new("_separation_ray_shape_create", 0).virtual_method())
+                .method(MethodInfo::new("_set_active", 1).virtual_method())
+                .method(MethodInfo::new("_shape_collide", 9).virtual_method())
+                .method(
+                    MethodInfo::new("_shape_get_custom_solver_bias", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shape_get_data", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shape_get_type", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_shape_set_custom_solver_bias", 2).virtual_method())
+                .method(MethodInfo::new("_shape_set_data", 2).virtual_method())
+                .method(MethodInfo::new("_space_create", 0).virtual_method())
+                .method(
+                    MethodInfo::new("_space_get_contact_count", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_space_get_contacts", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_space_get_direct_state", 1).virtual_method())
+                .method(
+                    MethodInfo::new("_space_get_param", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_space_is_active", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_space_set_active", 2).virtual_method())
+                .method(MethodInfo::new("_space_set_debug_contacts", 2).virtual_method())
+                .method(MethodInfo::new("_space_set_param", 3).virtual_method())
+                .method(MethodInfo::new("_step", 1).virtual_method())
+                .method(MethodInfo::new("_sync", 0).virtual_method())
+                .method(MethodInfo::new("_world_boundary_shape_create", 0).virtual_method()),
+        );
+    }
+    if !class_exists("PhysicsServer3DExtension") {
+        register_class(
+            ClassRegistration::new("PhysicsServer3DExtension")
+                .parent("PhysicsServer3D")
+                .method(MethodInfo::new("_area_add_shape", 4).virtual_method())
+                .method(MethodInfo::new("_area_attach_object_instance_id", 2).virtual_method())
+                .method(MethodInfo::new("_area_clear_shapes", 1).virtual_method())
+                .method(MethodInfo::new("_area_create", 0).virtual_method())
+                .method(
+                    MethodInfo::new("_area_get_collision_layer", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_area_get_collision_mask", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_area_get_object_instance_id", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_area_get_param", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_area_get_shape", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_area_get_shape_count", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_area_get_shape_transform", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_area_get_space", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_area_get_transform", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_area_remove_shape", 2).virtual_method())
+                .method(MethodInfo::new("_area_set_area_monitor_callback", 2).virtual_method())
+                .method(MethodInfo::new("_area_set_collision_layer", 2).virtual_method())
+                .method(MethodInfo::new("_area_set_collision_mask", 2).virtual_method())
+                .method(MethodInfo::new("_area_set_monitor_callback", 2).virtual_method())
+                .method(MethodInfo::new("_area_set_monitorable", 2).virtual_method())
+                .method(MethodInfo::new("_area_set_param", 3).virtual_method())
+                .method(MethodInfo::new("_area_set_ray_pickable", 2).virtual_method())
+                .method(MethodInfo::new("_area_set_shape", 3).virtual_method())
+                .method(MethodInfo::new("_area_set_shape_disabled", 3).virtual_method())
+                .method(MethodInfo::new("_area_set_shape_transform", 3).virtual_method())
+                .method(MethodInfo::new("_area_set_space", 2).virtual_method())
+                .method(MethodInfo::new("_area_set_transform", 2).virtual_method())
+                .method(MethodInfo::new("_body_add_collision_exception", 2).virtual_method())
+                .method(MethodInfo::new("_body_add_constant_central_force", 2).virtual_method())
+                .method(MethodInfo::new("_body_add_constant_force", 3).virtual_method())
+                .method(MethodInfo::new("_body_add_constant_torque", 2).virtual_method())
+                .method(MethodInfo::new("_body_add_shape", 4).virtual_method())
+                .method(MethodInfo::new("_body_apply_central_force", 2).virtual_method())
+                .method(MethodInfo::new("_body_apply_central_impulse", 2).virtual_method())
+                .method(MethodInfo::new("_body_apply_force", 3).virtual_method())
+                .method(MethodInfo::new("_body_apply_impulse", 3).virtual_method())
+                .method(MethodInfo::new("_body_apply_torque", 2).virtual_method())
+                .method(MethodInfo::new("_body_apply_torque_impulse", 2).virtual_method())
+                .method(MethodInfo::new("_body_attach_object_instance_id", 2).virtual_method())
+                .method(MethodInfo::new("_body_clear_shapes", 1).virtual_method())
+                .method(MethodInfo::new("_body_create", 0).virtual_method())
+                .method(
+                    MethodInfo::new("_body_get_collision_exceptions", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_collision_layer", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_collision_mask", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_collision_priority", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_constant_force", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_constant_torque", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_contacts_reported_depth_threshold", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_body_get_direct_state", 1).virtual_method())
+                .method(
+                    MethodInfo::new("_body_get_max_contacts_reported", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_mode", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_object_instance_id", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_param", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_shape", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_shape_count", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_shape_transform", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_space", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_state", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_get_user_flags", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_is_axis_locked", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_is_continuous_collision_detection_enabled", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_is_omitting_force_integration", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_body_remove_collision_exception", 2).virtual_method())
+                .method(MethodInfo::new("_body_remove_shape", 2).virtual_method())
+                .method(MethodInfo::new("_body_reset_mass_properties", 1).virtual_method())
+                .method(MethodInfo::new("_body_set_axis_lock", 3).virtual_method())
+                .method(MethodInfo::new("_body_set_axis_velocity", 2).virtual_method())
+                .method(MethodInfo::new("_body_set_collision_layer", 2).virtual_method())
+                .method(MethodInfo::new("_body_set_collision_mask", 2).virtual_method())
+                .method(MethodInfo::new("_body_set_collision_priority", 2).virtual_method())
+                .method(MethodInfo::new("_body_set_constant_force", 2).virtual_method())
+                .method(MethodInfo::new("_body_set_constant_torque", 2).virtual_method())
+                .method(
+                    MethodInfo::new("_body_set_contacts_reported_depth_threshold", 2)
+                        .virtual_method(),
+                )
+                .method(
+                    MethodInfo::new("_body_set_enable_continuous_collision_detection", 2)
+                        .virtual_method(),
+                )
+                .method(MethodInfo::new("_body_set_force_integration_callback", 3).virtual_method())
+                .method(MethodInfo::new("_body_set_max_contacts_reported", 2).virtual_method())
+                .method(MethodInfo::new("_body_set_mode", 2).virtual_method())
+                .method(MethodInfo::new("_body_set_omit_force_integration", 2).virtual_method())
+                .method(MethodInfo::new("_body_set_param", 3).virtual_method())
+                .method(MethodInfo::new("_body_set_ray_pickable", 2).virtual_method())
+                .method(MethodInfo::new("_body_set_shape", 3).virtual_method())
+                .method(MethodInfo::new("_body_set_shape_disabled", 3).virtual_method())
+                .method(MethodInfo::new("_body_set_shape_transform", 3).virtual_method())
+                .method(MethodInfo::new("_body_set_space", 2).virtual_method())
+                .method(MethodInfo::new("_body_set_state", 3).virtual_method())
+                .method(MethodInfo::new("_body_set_state_sync_callback", 2).virtual_method())
+                .method(MethodInfo::new("_body_set_user_flags", 2).virtual_method())
+                .method(
+                    MethodInfo::new("_body_test_motion", 8)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_box_shape_create", 0).virtual_method())
+                .method(MethodInfo::new("_capsule_shape_create", 0).virtual_method())
+                .method(MethodInfo::new("_concave_polygon_shape_create", 0).virtual_method())
+                .method(
+                    MethodInfo::new("_cone_twist_joint_get_param", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_cone_twist_joint_set_param", 3).virtual_method())
+                .method(MethodInfo::new("_convex_polygon_shape_create", 0).virtual_method())
+                .method(MethodInfo::new("_custom_shape_create", 0).virtual_method())
+                .method(MethodInfo::new("_cylinder_shape_create", 0).virtual_method())
+                .method(MethodInfo::new("_end_sync", 0).virtual_method())
+                .method(MethodInfo::new("_finish", 0).virtual_method())
+                .method(MethodInfo::new("_flush_queries", 0).virtual_method())
+                .method(MethodInfo::new("_free_rid", 1).virtual_method())
+                .method(
+                    MethodInfo::new("_generic_6dof_joint_get_flag", 3)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_generic_6dof_joint_get_param", 3)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_generic_6dof_joint_set_flag", 4).virtual_method())
+                .method(MethodInfo::new("_generic_6dof_joint_set_param", 4).virtual_method())
+                .method(MethodInfo::new("_get_process_info", 1).virtual_method())
+                .method(MethodInfo::new("_heightmap_shape_create", 0).virtual_method())
+                .method(
+                    MethodInfo::new("_hinge_joint_get_flag", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_hinge_joint_get_param", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_hinge_joint_set_flag", 3).virtual_method())
+                .method(MethodInfo::new("_hinge_joint_set_param", 3).virtual_method())
+                .method(MethodInfo::new("_init", 0).virtual_method())
+                .method(
+                    MethodInfo::new("_is_flushing_queries", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_joint_clear", 1).virtual_method())
+                .method(MethodInfo::new("_joint_create", 0).virtual_method())
+                .method(
+                    MethodInfo::new("_joint_disable_collisions_between_bodies", 2).virtual_method(),
+                )
+                .method(
+                    MethodInfo::new("_joint_get_solver_priority", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_joint_get_type", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_joint_is_disabled_collisions_between_bodies", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_joint_make_cone_twist", 5).virtual_method())
+                .method(MethodInfo::new("_joint_make_generic_6dof", 5).virtual_method())
+                .method(MethodInfo::new("_joint_make_hinge", 5).virtual_method())
+                .method(MethodInfo::new("_joint_make_hinge_simple", 7).virtual_method())
+                .method(MethodInfo::new("_joint_make_pin", 5).virtual_method())
+                .method(MethodInfo::new("_joint_make_slider", 5).virtual_method())
+                .method(MethodInfo::new("_joint_set_solver_priority", 2).virtual_method())
+                .method(
+                    MethodInfo::new("_pin_joint_get_local_a", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_pin_joint_get_local_b", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_pin_joint_get_param", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_pin_joint_set_local_a", 2).virtual_method())
+                .method(MethodInfo::new("_pin_joint_set_local_b", 2).virtual_method())
+                .method(MethodInfo::new("_pin_joint_set_param", 3).virtual_method())
+                .method(MethodInfo::new("_separation_ray_shape_create", 0).virtual_method())
+                .method(MethodInfo::new("_set_active", 1).virtual_method())
+                .method(
+                    MethodInfo::new("_shape_get_custom_solver_bias", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shape_get_data", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shape_get_margin", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_shape_get_type", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_shape_set_custom_solver_bias", 2).virtual_method())
+                .method(MethodInfo::new("_shape_set_data", 2).virtual_method())
+                .method(MethodInfo::new("_shape_set_margin", 2).virtual_method())
+                .method(
+                    MethodInfo::new("_slider_joint_get_param", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_slider_joint_set_param", 3).virtual_method())
+                .method(MethodInfo::new("_soft_body_add_collision_exception", 2).virtual_method())
+                .method(MethodInfo::new("_soft_body_apply_central_force", 2).virtual_method())
+                .method(MethodInfo::new("_soft_body_apply_central_impulse", 2).virtual_method())
+                .method(MethodInfo::new("_soft_body_apply_point_force", 3).virtual_method())
+                .method(MethodInfo::new("_soft_body_apply_point_impulse", 3).virtual_method())
+                .method(MethodInfo::new("_soft_body_create", 0).virtual_method())
+                .method(
+                    MethodInfo::new("_soft_body_get_bounds", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_soft_body_get_collision_exceptions", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_soft_body_get_collision_layer", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_soft_body_get_collision_mask", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_soft_body_get_damping_coefficient", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_soft_body_get_drag_coefficient", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_soft_body_get_linear_stiffness", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_soft_body_get_point_global_position", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_soft_body_get_pressure_coefficient", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_soft_body_get_shrinking_factor", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_soft_body_get_simulation_precision", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_soft_body_get_space", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_soft_body_get_state", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_soft_body_get_total_mass", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_soft_body_is_point_pinned", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_soft_body_move_point", 3).virtual_method())
+                .method(MethodInfo::new("_soft_body_pin_point", 3).virtual_method())
+                .method(MethodInfo::new("_soft_body_remove_all_pinned_points", 1).virtual_method())
+                .method(
+                    MethodInfo::new("_soft_body_remove_collision_exception", 2).virtual_method(),
+                )
+                .method(MethodInfo::new("_soft_body_set_collision_layer", 2).virtual_method())
+                .method(MethodInfo::new("_soft_body_set_collision_mask", 2).virtual_method())
+                .method(MethodInfo::new("_soft_body_set_damping_coefficient", 2).virtual_method())
+                .method(MethodInfo::new("_soft_body_set_drag_coefficient", 2).virtual_method())
+                .method(MethodInfo::new("_soft_body_set_linear_stiffness", 2).virtual_method())
+                .method(MethodInfo::new("_soft_body_set_mesh", 2).virtual_method())
+                .method(MethodInfo::new("_soft_body_set_pressure_coefficient", 2).virtual_method())
+                .method(MethodInfo::new("_soft_body_set_ray_pickable", 2).virtual_method())
+                .method(MethodInfo::new("_soft_body_set_shrinking_factor", 2).virtual_method())
+                .method(MethodInfo::new("_soft_body_set_simulation_precision", 2).virtual_method())
+                .method(MethodInfo::new("_soft_body_set_space", 2).virtual_method())
+                .method(MethodInfo::new("_soft_body_set_state", 3).virtual_method())
+                .method(MethodInfo::new("_soft_body_set_total_mass", 2).virtual_method())
+                .method(MethodInfo::new("_soft_body_set_transform", 2).virtual_method())
+                .method(MethodInfo::new("_soft_body_update_rendering_server", 2).virtual_method())
+                .method(MethodInfo::new("_space_create", 0).virtual_method())
+                .method(
+                    MethodInfo::new("_space_get_contact_count", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_space_get_contacts", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_space_get_direct_state", 1).virtual_method())
+                .method(
+                    MethodInfo::new("_space_get_param", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_space_is_active", 1)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_space_set_active", 2).virtual_method())
+                .method(MethodInfo::new("_space_set_debug_contacts", 2).virtual_method())
+                .method(MethodInfo::new("_space_set_param", 3).virtual_method())
+                .method(MethodInfo::new("_sphere_shape_create", 0).virtual_method())
+                .method(MethodInfo::new("_step", 1).virtual_method())
+                .method(MethodInfo::new("_sync", 0).virtual_method())
+                .method(MethodInfo::new("_world_boundary_shape_create", 0).virtual_method()),
+        );
+    }
+    if !class_exists("PhysicsDirectSpaceState2DExtension") {
+        register_class(
+            ClassRegistration::new("PhysicsDirectSpaceState2DExtension")
+                .parent("PhysicsDirectSpaceState2D")
+                .method(MethodInfo::new("_cast_motion", 9).virtual_method())
+                .method(MethodInfo::new("_collide_shape", 10).virtual_method())
+                .method(MethodInfo::new("_intersect_point", 7).virtual_method())
+                .method(MethodInfo::new("_intersect_ray", 7).virtual_method())
+                .method(MethodInfo::new("_intersect_shape", 9).virtual_method())
+                .method(MethodInfo::new("_rest_info", 8).virtual_method()),
+        );
+    }
+    if !class_exists("PhysicsDirectSpaceState3DExtension") {
+        register_class(
+            ClassRegistration::new("PhysicsDirectSpaceState3DExtension")
+                .parent("PhysicsDirectSpaceState3D")
+                .method(MethodInfo::new("_cast_motion", 10).virtual_method())
+                .method(MethodInfo::new("_collide_shape", 10).virtual_method())
+                .method(
+                    MethodInfo::new("_get_closest_point_to_object_volume", 2)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(MethodInfo::new("_intersect_point", 6).virtual_method())
+                .method(MethodInfo::new("_intersect_ray", 9).virtual_method())
+                .method(MethodInfo::new("_intersect_shape", 9).virtual_method())
+                .method(MethodInfo::new("_rest_info", 8).virtual_method()),
+        );
+    }
+    if !class_exists("PhysicsServer3DRenderingServerHandler") {
+        register_class(
+            ClassRegistration::new("PhysicsServer3DRenderingServerHandler")
+                .parent("Object")
+                .method(MethodInfo::new("_set_aabb", 1).virtual_method())
+                .method(MethodInfo::new("_set_normal", 2).virtual_method())
+                .method(MethodInfo::new("_set_vertex", 2).virtual_method()),
+        );
+    }
 }
 
 #[cfg(test)]

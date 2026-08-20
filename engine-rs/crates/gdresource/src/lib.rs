@@ -47,6 +47,7 @@ pub mod saver;
 pub mod shader_ast;
 pub mod shader_preprocessor;
 pub mod shader_tokenizer;
+pub mod stream_peer_gzip;
 pub mod uid;
 pub mod unified;
 pub mod woff;

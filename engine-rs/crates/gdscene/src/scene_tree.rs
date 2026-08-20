@@ -465,6 +465,18 @@ pub struct SceneTree {
     /// pointer keeps moving, the offset does not, and the divider then lags by
     /// however far the user overshot on the way back.
     gui_split_drag: Option<(NodeId, f32, f32)>,
+    /// A GraphEdit port drag in flight (pat-s3rrv.233):
+    /// `(graph_edit, from node name, port index, from_is_output)`.
+    ///
+    /// The endpoint is stored by node NAME rather than `NodeId` because that is
+    /// how `GraphConnection` addresses its ends, so the release path can emit
+    /// `connection_request` without a second lookup.
+    gui_graph_port_drag: Option<(NodeId, String, u32, bool)>,
+    /// A GraphNode titlebar drag: `(graph_edit, node, grab offset inside the node)`.
+    ///
+    /// The grab offset is kept so the node does not jump its own top-left corner to
+    /// the cursor on the first motion event.
+    gui_graph_node_drag: Option<(NodeId, NodeId, gdcore::math::Vector2)>,
     /// The `[url=…]` run the pointer is currently inside: its label, the run's
     /// index and the payload.
     ///
@@ -604,6 +616,24 @@ pub struct SceneTree {
     /// per frame via [`poll_multiplayer`](Self::poll_multiplayer); inbound RPCs
     /// are dispatched to their target node's script.
     multiplayer: MultiplayerAPI,
+    /// A node whose script `extends MultiplayerPeerExtension`, installed as the
+    /// transport by `multiplayer.multiplayer_peer = self` (pat-s3rrv.230).
+    ///
+    /// The identity is the NODE, not the script object: a bare `ClassInstance` has
+    /// no Variant form, so `self` (a node `ObjectId`) is the only script identity
+    /// the interpreter can hand over — the same reasoning `SCRIPT_TRANSLATIONS`
+    /// records for `extends Translation`.
+    script_multiplayer_peer: Option<NodeId>,
+    /// The engine-side half of a loopback pair bridging that script to
+    /// [`Self::multiplayer`].
+    ///
+    /// ⚠️ A script peer cannot implement `NetworkPeer` directly: that trait is
+    /// `Send` and `ScriptInstance` is not. So the API owns a perfectly ordinary
+    /// peer, and each frame this tree pumps bytes between it and the script.
+    script_peer_bridge: Option<Box<dyn gdplatform::network::NetworkPeer>>,
+    /// A node whose script `extends MultiplayerAPIExtension`, installed by
+    /// `set_multiplayer` — when present its `_rpc` replaces the built-in path.
+    script_multiplayer_api: Option<NodeId>,
     /// Scene-replication state for the `MultiplayerSpawner` /
     /// `MultiplayerSynchronizer` nodes in this tree (pat-s3rrv.17).
     ///
@@ -700,6 +730,8 @@ impl SceneTree {
             http_requests: HashMap::new(),
             gui_scrollbar_drag: None,
             gui_split_drag: None,
+            gui_graph_port_drag: None,
+            gui_graph_node_drag: None,
             hovered_meta: None,
             focus_owner: None,
             tweens: HashMap::new(),
@@ -730,6 +762,9 @@ impl SceneTree {
             last_modifiers: (false, false, false),
             paused: false,
             multiplayer: MultiplayerAPI::new(),
+            script_multiplayer_peer: None,
+            script_peer_bridge: None,
+            script_multiplayer_api: None,
             replication: ReplicationState::default(),
             rpc_call_local: std::collections::HashSet::new(),
             pending_scene: None,
@@ -897,6 +932,183 @@ impl SceneTree {
     /// RPCs, set authority, initiate `rpc()` calls).
     pub fn get_multiplayer_mut(&mut self) -> &mut MultiplayerAPI {
         &mut self.multiplayer
+    }
+
+    /// Installs a node whose script `extends MultiplayerPeerExtension` as the
+    /// multiplayer transport (pat-s3rrv.230).
+    ///
+    /// Godot lets a project supply its own transport by extending
+    /// `MultiplayerPeerExtension` and assigning it to `multiplayer.multiplayer_peer`;
+    /// the engine then calls `_poll` every frame and moves bytes with
+    /// `_put_packet` / `_get_packet`. Patina dropped such an assignment on the
+    /// floor: `multiplayer_set_peer` returned `false` for anything that was not a
+    /// built-in peer handle.
+    ///
+    /// Returns whether the node actually looks like a peer extension. A node with
+    /// no `_poll` is refused rather than installed as a transport that can never
+    /// carry anything.
+    pub fn set_script_multiplayer_peer(&mut self, node: NodeId) -> bool {
+        // ⚠️ ABSENCE OF A SCRIPT IS NOT ABSENCE OF A PEER. `call_script_method`
+        // does `scripts.remove(&node_id)` for the duration of a call, so while
+        // `_ready` runs the calling node's script is CHECKED OUT of the arena and
+        // `get_script` answers `None` for exactly the node doing the assigning —
+        // which is the normal case for `multiplayer.multiplayer_peer = self`.
+        // Treating that `None` as "not a transport" refused every real script peer
+        // while still accepting the Rust-side path, which is precisely the shape of
+        // bug that passes three tests and fails the one that matters.
+        //
+        // So: refuse only when a script is VISIBLE and demonstrably lacks the
+        // transport virtuals. What cannot be seen cannot be judged.
+        if let Some(script) = self.get_script(node) {
+            if !(script.has_method("_poll") && script.has_method("_get_available_packet_count")) {
+                return false;
+            }
+        }
+        // A loopback pair: the API drives one end as an ordinary transport, and
+        // `pump_script_multiplayer_peer` moves bytes between the other end and the
+        // script. Reusing the existing pair avoids inventing a second queue.
+        // ⚠️ `create_pair(client_id)` returns `(server @ PeerId::SERVER, client @
+        // client_id)`. Passing `PeerId::SERVER` here would give BOTH halves id 1,
+        // so every packet the script delivered would claim to come from the local
+        // peer itself. The engine keeps the server half (the local identity, id 1,
+        // matching what a script's `_get_unique_id` reports) and the bridge takes a
+        // distinct id so inbound traffic reads as coming from a real remote.
+        let (engine_side, bridge) =
+            gdplatform::network::MockNetwork::create_pair(gdplatform::network::PeerId(2));
+        self.multiplayer.set_multiplayer_peer(Box::new(engine_side));
+        self.script_peer_bridge = Some(Box::new(bridge));
+        self.script_multiplayer_peer = Some(node);
+        true
+    }
+
+    /// The node currently acting as the script transport, if any.
+    pub fn script_multiplayer_peer(&self) -> Option<NodeId> {
+        self.script_multiplayer_peer
+    }
+
+    /// Installs a node whose script `extends MultiplayerAPIExtension`, replacing
+    /// the built-in RPC path with the script's `_rpc` (pat-s3rrv.230).
+    pub fn set_script_multiplayer_api(&mut self, node: NodeId) -> bool {
+        // Same checked-out-script rule as `set_script_multiplayer_peer` above: a
+        // script installing itself from its own `_ready` is invisible to the arena
+        // at that moment, so only a VISIBLE script without `_rpc` is refused.
+        if let Some(script) = self.get_script(node) {
+            if !script.has_method("_rpc") {
+                return false;
+            }
+        }
+        self.script_multiplayer_api = Some(node);
+        true
+    }
+
+    /// The node currently acting as the script MultiplayerAPI, if any.
+    pub fn script_multiplayer_api(&self) -> Option<NodeId> {
+        self.script_multiplayer_api
+    }
+
+    /// Routes one `rpc()` through a script `MultiplayerAPIExtension._rpc`.
+    ///
+    /// Godot's signature is `_rpc(peer: int, object: Object, method: StringName,
+    /// args: Array)`. Returns whether a script API handled the call — `false`
+    /// means the built-in path should run, which is what keeps every existing
+    /// non-scripted tree on its current behaviour.
+    pub fn rpc_through_script_api(
+        &mut self,
+        peer: i64,
+        from: NodeId,
+        method: &str,
+        args: &[Variant],
+    ) -> bool {
+        let Some(api) = self.script_multiplayer_api else {
+            return false;
+        };
+        let object = Variant::ObjectId(from.object_id());
+        let call_args = [
+            Variant::Int(peer),
+            object,
+            Variant::String(method.to_string()),
+            Variant::Array(args.to_vec()),
+        ];
+        let Some(script) = self.get_script_mut(api) else {
+            return false;
+        };
+        script.call_method("_rpc", &call_args).is_ok()
+    }
+
+    /// Drives a script `MultiplayerPeerExtension` for one frame (pat-s3rrv.230).
+    ///
+    /// Runs before the API's own drain so a packet the script produced this frame
+    /// is visible to the very same `poll_multiplayer` call, rather than one frame
+    /// late.
+    fn pump_script_multiplayer_peer(&mut self) {
+        use gdplatform::network::{Packet, PeerId, TransferMode};
+
+        let Some(node) = self.script_multiplayer_peer else {
+            return;
+        };
+        // ⚠️ The bridge is TAKEN OUT for the duration. Every script call below
+        // needs `&mut self` for `get_script_mut`, and holding a borrow of the
+        // field across those calls would be a second mutable borrow of `self`.
+        let Some(mut bridge) = self.script_peer_bridge.take() else {
+            return;
+        };
+
+        // 1. `_poll()` — once per frame per tree, exactly as Godot drives a custom
+        //    transport.
+        if let Some(script) = self.get_script_mut(node) {
+            let _ = script.call_method("_poll", &[]);
+        }
+
+        // 2. Inbound: drain the script through Godot's count/get pair.
+        let mut inbound: Vec<Vec<u8>> = Vec::new();
+        if let Some(script) = self.get_script_mut(node) {
+            let available = script
+                .call_method("_get_available_packet_count", &[])
+                .map(|v| v.to_int())
+                .unwrap_or(0);
+            // Bounded by the count the script itself reported, so a script whose
+            // `_get_packet` never empties the queue cannot spin here forever.
+            for _ in 0..available.max(0) {
+                match script.call_method("_get_packet", &[]) {
+                    Ok(Variant::PackedByteArray(bytes)) => inbound.push(bytes),
+                    // Anything else means the script has nothing more to give;
+                    // continuing would append empty packets.
+                    _ => break,
+                }
+            }
+        }
+        let sender = bridge.get_unique_id();
+        for data in inbound {
+            let _ = bridge.send_packet(
+                PeerId::SERVER,
+                Packet {
+                    sender,
+                    channel: 0,
+                    data,
+                    transfer_mode: TransferMode::Reliable,
+                },
+            );
+        }
+
+        // 3. Outbound: whatever the engine queued for the transport goes to the
+        //    script through `_set_target_peer` + `_put_packet`, Godot's send pair.
+        let outbound = bridge.poll();
+        if !outbound.is_empty() {
+            if let Some(script) = self.get_script_mut(node) {
+                for packet in outbound {
+                    // ⚠️ Broadcast (0) rather than a specific id: the loopback pair
+                    // does not carry the address the API sent with, so claiming a
+                    // particular target would be inventing information. 0 is
+                    // Godot's own "all peers", which is the honest reading of a
+                    // packet whose destination was not preserved.
+                    let _ = script.call_method("_set_target_peer", &[Variant::Int(0)]);
+                    let _ =
+                        script.call_method("_put_packet", &[Variant::PackedByteArray(packet.data)]);
+                }
+            }
+        }
+
+        self.script_peer_bridge = Some(bridge);
     }
 
     /// Registers every `MultiplayerSpawner` / `MultiplayerSynchronizer` node in
@@ -1716,6 +1928,10 @@ impl SceneTree {
         // Age the auth timers before polling, so a peer that ran out this frame
         // fails in the same drain rather than one frame late.
         self.multiplayer.poll_auth(delta);
+        // pat-s3rrv.230: drive a script `MultiplayerPeerExtension` before the API
+        // drains, so a packet the script produced this frame is seen by this very
+        // poll rather than one frame late.
+        self.pump_script_multiplayer_peer();
         // Scene replication: SPAWN/SYNC frames (pat-s3rrv.17).
         //
         // These used to be bound to `_other` and dropped on the floor every
@@ -6021,6 +6237,130 @@ impl SceneTree {
         None
     }
 
+    /// The GraphEdit that owns `node`, walking up from a hit (pat-s3rrv.233).
+    ///
+    /// ⚠️ `control_at_point` returns the TOPMOST control, and with ClassDB
+    /// populated a GraphNode **is** one — `GraphNode -> GraphElement -> Container
+    /// -> Control`. So a press on a node's titlebar or port resolves to the CHILD,
+    /// not to the GraphEdit. Testing `hit`'s own class instead of walking up would
+    /// work in a bare unit test, where ClassDB is empty and only the
+    /// `CONTROL_HIT_CLASSES` fallback matches "GraphEdit", and would silently do
+    /// nothing in the real editor: a test passing for the wrong reason.
+    ///
+    /// Same shape as `enclosing_subviewport_container` above.
+    fn enclosing_graph_edit(&self, node: NodeId) -> Option<NodeId> {
+        let mut cur = Some(node);
+        while let Some(id) = cur {
+            let n = self.get_node(id)?;
+            if n.class_name() == "GraphEdit" {
+                return Some(id);
+            }
+            cur = n.parent();
+        }
+        None
+    }
+
+    /// A press inside a GraphEdit: begin a port drag or a titlebar drag
+    /// (pat-s3rrv.233).
+    ///
+    /// Ports are tested before titlebars because a port dot sits ON the node's
+    /// edge and would otherwise be swallowed by the panel behind it.
+    fn graph_edit_press(&mut self, edit: NodeId, position: gdcore::math::Vector2) -> bool {
+        let rect = crate::control::get_global_rect(self, edit);
+        if let Some((name, port, is_output)) =
+            crate::control_render::graph_port_at(self, edit, rect, position)
+        {
+            self.gui_graph_port_drag = Some((edit, name, port, is_output));
+            return true;
+        }
+        if let Some(node) = crate::control_render::graph_titlebar_at(self, edit, rect, position) {
+            let nrect = crate::control_render::graph_node_rect(self, rect, node);
+            // The grab offset is kept so the node does not snap its top-left corner
+            // to the cursor on the first motion event.
+            self.gui_graph_node_drag = Some((
+                edit,
+                node,
+                gdcore::math::Vector2::new(
+                    position.x - nrect.position.x,
+                    position.y - nrect.position.y,
+                ),
+            ));
+            let arg = Variant::ObjectId(node.object_id());
+            self.emit_signal(edit, "node_selected", &[arg]);
+            return true;
+        }
+        false
+    }
+
+    /// Motion while a GraphNode titlebar drag is in flight.
+    fn graph_edit_motion(&mut self, position: gdcore::math::Vector2) -> bool {
+        let Some((edit, node, grab)) = self.gui_graph_node_drag else {
+            return false;
+        };
+        let rect = crate::control::get_global_rect(self, edit);
+        // `position_offset` is graph-space, so the GraphEdit origin comes off as
+        // well as the grab offset — otherwise the node drifts by the editor's own
+        // position every time it is dragged.
+        let off = gdcore::math::Vector2::new(
+            position.x - rect.position.x - grab.x,
+            position.y - rect.position.y - grab.y,
+        );
+        self.set_node_property_notifying(node, "position_offset", Variant::Vector2(off));
+        true
+    }
+
+    /// Release: a port drag that ended on another port becomes a
+    /// `connection_request`, and one that ended on the canvas a
+    /// `connection_to_empty`.
+    ///
+    /// ⚠️ Emits a REQUEST, it does not connect. Godot leaves the decision to the
+    /// game: the handler validates the pair and calls `connect_node` itself, which
+    /// is what makes rejecting a connection possible at all.
+    fn graph_edit_release(&mut self, position: gdcore::math::Vector2) -> bool {
+        let was_moving = self.gui_graph_node_drag.take().is_some();
+        let Some((edit, from_name, from_port, from_is_output)) = self.gui_graph_port_drag.take()
+        else {
+            return was_moving;
+        };
+        let rect = crate::control::get_global_rect(self, edit);
+        let Some((to_name, to_port, to_is_output)) =
+            crate::control_render::graph_port_at(self, edit, rect, position)
+        else {
+            self.emit_signal(
+                edit,
+                "connection_to_empty",
+                &[
+                    Variant::String(from_name),
+                    Variant::Int(from_port as i64),
+                    Variant::Vector2(position),
+                ],
+            );
+            return true;
+        };
+        // An edge runs output -> input. A drag started from an input is the same
+        // edge discovered backwards, so it is normalised rather than refused —
+        // Godot lets you draw a connection in either direction.
+        if from_is_output == to_is_output {
+            return true;
+        }
+        let (out_node, out_port, in_node, in_port) = if from_is_output {
+            (from_name, from_port, to_name, to_port)
+        } else {
+            (to_name, to_port, from_name, from_port)
+        };
+        self.emit_signal(
+            edit,
+            "connection_request",
+            &[
+                Variant::String(out_node),
+                Variant::Int(out_port as i64),
+                Variant::String(in_node),
+                Variant::Int(in_port as i64),
+            ],
+        );
+        true
+    }
+
     fn gui_input_stage(&mut self, event: &gdplatform::input::InputEvent, payload: &Variant) {
         use gdplatform::input::InputEvent as Ev;
         let position = match event {
@@ -6291,6 +6631,50 @@ impl SceneTree {
         // divider sits in the gap between two panes, so nothing else wants that
         // press, and a drag in flight must keep winning motion even when the
         // pointer wanders over a child (pat-s3rrv.173).
+        // pat-s3rrv.233: GraphEdit port drags, node moves and connection requests.
+        // Checked before the divider/range blocks because a port dot and a titlebar
+        // sit inside the GraphEdit's own rect, so nothing below competes for the
+        // press.
+        // ⚠️ `hit` is a bare `NodeId` here, not an `Option` — it was unwrapped by
+        // the `let Some(hit) = hit else { ... }` ~200 lines above.
+        //
+        // Resolved by walking UP rather than by testing `hit`'s own class: a
+        // GraphNode is itself a Control once ClassDB is populated, so the hit is
+        // usually the child. See `enclosing_graph_edit`.
+        let graph_edit_hit = self.enclosing_graph_edit(hit);
+        match event {
+            Ev::MouseButton {
+                pressed: true,
+                button: gdplatform::input::MouseButton::Left,
+                ..
+            } => {
+                if let Some(edit) = graph_edit_hit {
+                    if self.graph_edit_press(edit, position) {
+                        self.input_handled = true;
+                        return;
+                    }
+                }
+            }
+            // Keyed on the drag being in flight rather than on `hit`, so the node
+            // keeps following the cursor once it has been dragged out from under
+            // the pointer's original target.
+            Ev::MouseMotion { .. } if self.gui_graph_node_drag.is_some() => {
+                if self.graph_edit_motion(position) {
+                    self.input_handled = true;
+                    return;
+                }
+            }
+            Ev::MouseButton { pressed: false, .. }
+                if self.gui_graph_port_drag.is_some() || self.gui_graph_node_drag.is_some() =>
+            {
+                if self.graph_edit_release(position) {
+                    self.input_handled = true;
+                    return;
+                }
+            }
+            _ => {}
+        }
+
         let split_press = match event {
             Ev::MouseButton {
                 pressed: true,

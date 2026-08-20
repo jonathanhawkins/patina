@@ -2495,7 +2495,9 @@ fn handle_connection(
         ("POST", "/api/project/open") => api_open_project(state, &req.body, &mut stream),
         ("GET", "/api/preview/file") => api_get_file_preview(&req.query, &mut stream),
         ("GET", "/api/script") => api_get_script(&req.query, &mut stream),
-        ("GET", "/api/assetlib/list") => api_get_assetlib_list(&mut stream),
+        ("GET", "/api/assetlib/list") => api_get_assetlib_list(state, &mut stream),
+        ("POST", "/api/assetlib/install") => api_assetlib_install(state, &req.body, &mut stream),
+        ("POST", "/api/assetlib/download") => api_assetlib_download(state, &req.body, &mut stream),
         // pat-yxe4s: SCRIPT main-screen view for the selected node.
         ("GET", "/api/script/main_view") => api_script_main_view(state, &req.query, &mut stream),
         ("GET", "/api/script/templates") => api_script_templates(state, &req.query, &mut stream),
@@ -2511,6 +2513,8 @@ fn handle_connection(
         ("POST", "/api/node/cut") => api_cut_nodes(state, &req.body, &mut stream),
         ("GET", "/api/settings") => api_get_settings(state, &mut stream),
         ("POST", "/api/settings") => api_set_settings(state, &req.body, &mut stream),
+        ("GET", "/api/editor/layout") => api_get_editor_layout(state, &mut stream),
+        ("POST", "/api/editor/layout") => api_set_editor_layout(state, &req.body, &mut stream),
         ("GET", "/api/plugins") => api_get_plugins(state, &mut stream),
         ("POST", "/api/plugins/toggle") => api_toggle_plugin(state, &req.body, &mut stream),
         ("POST", "/api/plugins/main_screen") => {
@@ -2653,6 +2657,10 @@ fn handle_connection(
         ("POST", "/api/runtime/input/touch") => api_input_touch(state, &req.body, &mut stream),
         ("POST", "/api/runtime/input/gamepad") => api_input_gamepad(state, &req.body, &mut stream),
         ("POST", "/api/runtime/input/midi") => api_input_midi(state, &req.body, &mut stream),
+        // Pinch and two-finger pan (pat-s3rrv.234). Same shape as the touch
+        // route above: the events and the script-facing objects existed with
+        // no producer to originate them.
+        ("POST", "/api/runtime/input/gesture") => api_input_gesture(state, &req.body, &mut stream),
         ("POST", "/api/runtime/input/clear_frame") => api_input_clear_frame(state, &mut stream),
         ("POST", "/api/runtime/input/mouse_mode") => {
             api_input_mouse_mode(state, &req.body, &mut stream)
@@ -3234,6 +3242,43 @@ fn base64_encode(data: &[u8]) -> String {
         }
     }
     out
+}
+
+/// Standard base64 decoder (RFC 4648), the inverse of [`base64_encode`].
+///
+/// Hand-rolled for the same reason the encoder above is: this file already
+/// avoids taking a `base64` dependency for one use. Returns `None` on any
+/// character outside the alphabet, so a truncated or corrupted upload is
+/// refused rather than silently decoding to garbage that then fails as "not a
+/// zip" (pat-s3rrv.227).
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(input.len() / 4 * 3);
+    let mut acc: u32 = 0;
+    let mut bits = 0u32;
+    for ch in input.bytes() {
+        // Whitespace is tolerated: a browser may wrap a long data URI.
+        if ch.is_ascii_whitespace() {
+            continue;
+        }
+        if ch == b'=' {
+            break;
+        }
+        let v = match ch {
+            b'A'..=b'Z' => ch - b'A',
+            b'a'..=b'z' => ch - b'a' + 26,
+            b'0'..=b'9' => ch - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        } as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 /// Computes the `Sec-WebSocket-Accept` value for a given `Sec-WebSocket-Key`
@@ -11032,6 +11077,8 @@ const CAPABILITIES: &[(&str, &str, &str, &str, &str)] = &[
     ("GET", "/api/preview/file", "[\"path\"]", "null", "{\"type\":\"object_or_binary\"}"),
     ("GET", "/api/script", "[\"path\"]", "null", "{\"type\":\"object\"}"),
     ("GET", "/api/assetlib/list", "[]", "null", "{\"type\":\"object\"}"),
+    ("POST", "/api/assetlib/install", "[]", "{\"zip_base64\":\"string\",\"skip\":\"array?\"}", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\",\"installed\":\"array\",\"skipped\":\"array\",\"plugins\":\"array\"}}"),
+    ("POST", "/api/assetlib/download", "[]", "{\"url\":\"string\",\"skip\":\"array?\"}", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\",\"installed\":\"array\",\"skipped\":\"array\",\"plugins\":\"array\"}}"),
     ("GET", "/api/commands", "[]", "null", "{\"type\":\"object\"}"),
     ("GET", "/api/animations", "[]", "null", "{\"type\":\"object\"}"),
     ("GET", "/api/animation", "[\"name\"]", "null", "{\"type\":\"object\"}"),
@@ -11051,6 +11098,8 @@ const CAPABILITIES: &[(&str, &str, &str, &str, &str)] = &[
     ("GET", "/api/runtime/status", "[]", "null", "{\"type\":\"object\"}"),
     ("GET", "/api/runtime/input/state", "[]", "null", "{\"type\":\"object\"}"),
     ("GET", "/api/settings", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/editor/layout", "[]", "null", "{\"type\":\"object\",\"properties\":{\"layout\":\"object\",\"saved\":\"boolean\"}}"),
+    ("POST", "/api/editor/layout", "[]", "{\"layout\":\"object?\",\"reset\":\"boolean?\"}", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\",\"saved\":\"boolean\"}}"),
     ("GET", "/api/plugins", "[]", "null", "{\"type\":\"object\"}"),
     ("POST", "/api/plugins/main_screen", "[]", "{\"folder\":\"string\"}", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\",\"main_screen\":\"string\"}}"),
     ("GET", "/api/keybindings", "[]", "null", "{\"type\":\"object\"}"),
@@ -12531,32 +12580,348 @@ fn url_decode(s: &str) -> String {
 }
 
 /// `GET /api/script?path=<path>` -- reads a .gd file and returns its content.
-/// `GET /api/assetlib/list` -- the Asset Library catalog (pat-0q2kx.240).
+/// `GET /api/assetlib/list` -- the Asset Library catalog (pat-0q2kx.240,
+/// pat-s3rrv.227).
 ///
-/// Returns an HONEST EMPTY STATE. This endpoint previously served twelve
-/// hardcoded entries ("Pixel Platformer Kit", "Dialogue System", …) that looked
-/// like a real catalog and were not: none of them existed, none could be
-/// installed, and clicking any of them did nothing because no install path
-/// exists anywhere in the server. Fabricated listings are worse than an empty
-/// browser — they invite a user to try to install something that cannot be
-/// installed, and they make the feature look finished to anyone auditing it.
+/// Serves whatever catalog the project configures via
+/// [`ASSETLIB_INDEX_URL_SETTING`], and an HONEST EMPTY STATE when it configures
+/// none. This endpoint previously served twelve hardcoded entries ("Pixel
+/// Platformer Kit", "Dialogue System", …) that looked like a real catalog and
+/// were not: none of them existed and none could be installed. Fabricated
+/// listings are worse than an empty browser — they invite a user to try to
+/// install something that cannot be installed, and they make the feature look
+/// finished to anyone auditing it. So the unconfigured answer stays
+/// `configured: false`, which lets the frontend render an empty state with an
+/// install-from-file affordance rather than a broken grid.
 ///
-/// Godot browses godotengine.org over HTTPS and installs the downloaded zip
-/// into the project. Until that exists here, the truthful answer is "no catalog
-/// configured", and `configured: false` lets the frontend render an empty state
-/// with an install-from-file/URL affordance rather than a broken grid.
-fn api_get_assetlib_list(stream: &mut TcpStream) {
-    let body = serde_json::json!({
-        "assets": [],
-        // Distinguishes "no catalog source configured" from "the catalog is
-        // configured and happens to return nothing", which the frontend must
-        // present differently.
-        "configured": false,
-        "reason": "no asset catalog configured",
-        // Named so the eventual editor setting and the UI agree on one key.
-        "setting": "editor/assetlib/index_url",
+/// Godot browses godotengine.org over HTTPS. Patina has no baked-in host, and
+/// ⚠️ cannot reach an HTTPS one yet regardless — `HttpClient::perform` refuses
+/// TLS before it connects. A configured catalog must be plaintext `http://`
+/// until a TLS backend lands; `fetch_catalog` says so explicitly rather than
+/// surfacing a bare connection failure.
+fn api_get_assetlib_list(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let Some(url) = assetlib_index_url(state) else {
+        let body = serde_json::json!({
+            "assets": [],
+            // Distinguishes "no catalog source configured" from "the catalog is
+            // configured and happens to return nothing", which the frontend must
+            // present differently.
+            "configured": false,
+            "reason": "no asset catalog configured",
+            // Named so the eventual editor setting and the UI agree on one key.
+            "setting": ASSETLIB_INDEX_URL_SETTING,
+        });
+        send_json(stream, &body.to_string());
+        return;
+    };
+
+    match fetch_catalog(&url) {
+        Ok(assets) => {
+            let body = serde_json::json!({
+                "assets": assets,
+                "configured": true,
+                "source": url,
+            });
+            send_json(stream, &body.to_string());
+        }
+        Err(reason) => {
+            // A configured-but-unreachable catalog is NOT the same as an
+            // unconfigured one, and flattening the two would send the user
+            // hunting for a setting they have already set. `configured` stays
+            // true and the reason says what actually failed.
+            let body = serde_json::json!({
+                "assets": [],
+                "configured": true,
+                "source": url,
+                "reason": reason,
+            });
+            send_json(stream, &body.to_string());
+        }
+    }
+}
+
+/// The project setting naming the asset catalog to query.
+///
+/// Godot browses `godotengine.org`; Patina has no baked-in host, so the catalog
+/// is opt-in per project.
+const ASSETLIB_INDEX_URL_SETTING: &str = "editor/assetlib/index_url";
+
+/// Reads [`ASSETLIB_INDEX_URL_SETTING`] out of `project.godot`.
+///
+/// Returns `None` when unset or blank, which is the honest-empty-state path.
+fn assetlib_index_url(state: &Arc<Mutex<EditorState>>) -> Option<String> {
+    let root = {
+        let s = state.lock().expect("editor state");
+        s.project_root.clone()?
+    };
+    let text = std::fs::read_to_string(std::path::Path::new(&root).join("project.godot")).ok()?;
+    let pf = GodotProjectFile::parse(&text).ok()?;
+    // The key is stored as `[editor] assetlib/index_url`, matching how Godot
+    // splits a slashed setting path into section + remainder.
+    let (section, key) = ASSETLIB_INDEX_URL_SETTING.split_once('/')?;
+    let raw = pf.get(section, key)?.trim().trim_matches('"').to_string();
+    if raw.is_empty() {
+        None
+    } else {
+        Some(raw)
+    }
+}
+
+/// GETs `url` and maps the catalog it returns into the asset shape the AssetLib
+/// grid already renders.
+///
+/// ⚠️ `https://` CANNOT work yet: `HttpClient::perform` refuses TLS before it
+/// connects, because no TLS backend is wired. A catalog URL therefore has to be
+/// plaintext `http://` today — the error text says so rather than reporting a
+/// bare connection failure.
+fn fetch_catalog(url: &str) -> Result<Vec<serde_json::Value>, String> {
+    if url.starts_with("https://") {
+        return Err(
+            "https catalogs are not supported yet (no TLS backend); use an http:// URL".to_string(),
+        );
+    }
+    let config = gdplatform::HttpRequestConfig {
+        url: url.to_string(),
+        method: gdplatform::HttpMethod::Get,
+        timeout_seconds: 10.0,
+        ..Default::default()
+    };
+    let resp = gdplatform::HttpClient::perform(&config);
+    if resp.status_code != 200 {
+        return Err(format!("catalog returned HTTP {}", resp.status_code));
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(&resp.body)
+        .map_err(|e| format!("catalog is not valid JSON: {e}"))?;
+    Ok(map_catalog_assets(&parsed))
+}
+
+/// Normalises a catalog payload into the grid's asset shape.
+///
+/// Accepts Godot's own `{"result": [...]}` envelope, a `{"assets": [...]}` one,
+/// or a bare array, so a hand-written catalog does not have to imitate the
+/// upstream service exactly.
+fn map_catalog_assets(parsed: &serde_json::Value) -> Vec<serde_json::Value> {
+    let rows = parsed
+        .get("result")
+        .or_else(|| parsed.get("assets"))
+        .and_then(|v| v.as_array())
+        .or_else(|| parsed.as_array());
+    let Some(rows) = rows else {
+        return Vec::new();
+    };
+    rows.iter()
+        .map(|a| {
+            let text = |keys: &[&str]| -> String {
+                keys.iter()
+                    .find_map(|k| a.get(*k).and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .to_string()
+            };
+            serde_json::json!({
+                "title": text(&["title", "name"]),
+                "author": text(&["author"]),
+                "category": text(&["category"]),
+                // Upstream calls the licence "cost"; the grid calls it "license".
+                "license": text(&["cost", "license"]),
+                "version": text(&["version_string", "version"]),
+                "download_url": text(&["download_url"]),
+                "icon": "\u{1f4e6}",
+            })
+        })
+        .collect()
+}
+
+/// `POST /api/assetlib/download` — fetches an asset's zip and installs it.
+///
+/// Body: `{"url": "http://.../asset.zip"}`. The fetch happens server-side, which
+/// is what makes the per-asset Download button work at all: the browser cannot
+/// read a cross-origin zip, and the unpack has to touch the project on disk.
+fn api_assetlib_download(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let Some(p) = parse_json_body(body) else {
+        send_error(stream, 400, "invalid JSON body");
+        return;
+    };
+    let Some(url) = p.get("url").and_then(|v| v.as_str()) else {
+        send_error(stream, 400, "url is required");
+        return;
+    };
+    if url.starts_with("https://") {
+        send_error(
+            stream,
+            400,
+            "https downloads are not supported yet (no TLS backend); use an http:// URL",
+        );
+        return;
+    }
+    let config = gdplatform::HttpRequestConfig {
+        url: url.to_string(),
+        method: gdplatform::HttpMethod::Get,
+        timeout_seconds: 30.0,
+        ..Default::default()
+    };
+    let resp = gdplatform::HttpClient::perform(&config);
+    if resp.status_code != 200 {
+        send_error(
+            stream,
+            502,
+            &format!("download returned HTTP {}", resp.status_code),
+        );
+        return;
+    }
+    let skip: Vec<String> = p
+        .get("skip")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    match install_zip_bytes(state, resp.body, &skip) {
+        Ok(outcome) => send_install_outcome(stream, outcome),
+        Err((status, message)) => send_error(stream, status, &message),
+    }
+}
+
+/// `POST /api/assetlib/install` — unpacks an uploaded `.zip` into the project
+/// (pat-s3rrv.227).
+///
+/// Body: `{"zip_base64": "...", "skip": ["addons/demo/README.md"]}`. The zip
+/// arrives base64-encoded because `HttpRequest.body` is a `String` and raw zip
+/// bytes are not valid UTF-8 — they would be mangled before this ever ran.
+///
+/// `skip` is Godot's per-entry opt-out from `EditorAssetInstaller`: the dialog
+/// previews the file list and lets the user untick entries before installing.
+///
+/// ⚠️ Every entry goes through `sandbox_path`, so a zip containing `../../etc`
+/// cannot escape the project. A malicious archive is exactly the threat model
+/// here — the file list comes from an untrusted download.
+/// What an archive install produced, shared by the upload and download routes.
+struct InstallOutcome {
+    installed: Vec<String>,
+    skipped: Vec<String>,
+    plugins: Vec<String>,
+}
+
+/// Unpacks `bytes` into the project (pat-s3rrv.227).
+///
+/// `Err` carries an HTTP status and a message ready for [`send_error`], so both
+/// callers refuse a bad archive identically instead of each inventing wording.
+///
+/// ⚠️ Every entry goes through `sandbox_path`, and destinations are ALL resolved
+/// before anything is written — a hostile entry halfway through an archive must
+/// not leave the first half unpacked. The file list comes from an untrusted
+/// download, which is exactly the threat model here.
+fn install_zip_bytes(
+    state: &Arc<Mutex<EditorState>>,
+    bytes: Vec<u8>,
+    skip: &[String],
+) -> Result<InstallOutcome, (u16, String)> {
+    let mut zip = gdresource::zip::ZipReader::new();
+    if zip.open_from_bytes(bytes).is_err() {
+        return Err((400, "not a readable zip archive".to_string()));
+    }
+
+    let mut planned: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    for entry in zip.get_files() {
+        // A directory entry carries no bytes; the parent dirs are created for
+        // each file below, so these are simply not interesting.
+        if entry.ends_with('/') {
+            continue;
+        }
+        if skip.iter().any(|s| s == &entry) {
+            skipped.push(entry);
+            continue;
+        }
+        let Ok(dest) = sandbox_path(&entry) else {
+            // A traversal attempt is reported, not silently dropped: the user
+            // asked to install this archive and deserves to know it was hostile.
+            return Err((400, format!("unsafe path in archive: {entry}")));
+        };
+        planned.push((entry, dest));
+    }
+
+    let mut installed: Vec<String> = Vec::new();
+    for (entry, dest) in planned {
+        let Ok(data) = zip.read_file(&entry, true) else {
+            return Err((400, format!("could not read {entry} from archive")));
+        };
+        if let Some(parent) = dest.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return Err((500, format!("mkdir failed: {e}")));
+            }
+        }
+        if let Err(e) = std::fs::write(&dest, &data) {
+            return Err((500, format!("write failed: {e}")));
+        }
+        installed.push(entry);
+    }
+
+    // Rescan so a freshly installed `addons/<name>/plugin.cfg` appears in
+    // `/api/plugins` immediately — without this the plugin exists on disk and
+    // the editor cannot see it until a restart.
+    let plugins: Vec<String> = {
+        let mut s = state.lock().expect("editor state");
+        sync_plugins_from_project(&mut s);
+        s.plugins.iter().map(|pl| pl.folder.clone()).collect()
+    };
+
+    Ok(InstallOutcome {
+        installed,
+        skipped,
+        plugins,
+    })
+}
+
+/// Serialises an [`InstallOutcome`] the one way both install routes report it.
+fn send_install_outcome(stream: &mut TcpStream, outcome: InstallOutcome) {
+    let payload = serde_json::json!({
+        "ok": true,
+        "installed": outcome.installed,
+        "skipped": outcome.skipped,
+        "plugins": outcome.plugins,
     });
-    send_json(stream, &body.to_string());
+    send_json(stream, &payload.to_string());
+}
+
+/// `POST /api/assetlib/install` — unpacks an uploaded `.zip` into the project
+/// (pat-s3rrv.227).
+///
+/// Body: `{"zip_base64": "...", "skip": ["addons/demo/README.md"]}`. The zip
+/// arrives base64-encoded because `HttpRequest.body` is a `String` and raw zip
+/// bytes are not valid UTF-8 — they would be mangled before this ever ran.
+///
+/// `skip` is Godot's per-entry opt-out from `EditorAssetInstaller`: the dialog
+/// previews the file list and lets the user untick entries before installing.
+fn api_assetlib_install(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let Some(p) = parse_json_body(body) else {
+        send_error(stream, 400, "invalid JSON body");
+        return;
+    };
+    let Some(b64) = p.get("zip_base64").and_then(|v| v.as_str()) else {
+        send_error(stream, 400, "zip_base64 is required");
+        return;
+    };
+    let Some(bytes) = base64_decode(b64) else {
+        send_error(stream, 400, "zip_base64 is not valid base64");
+        return;
+    };
+    let skip: Vec<String> = p
+        .get("skip")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    match install_zip_bytes(state, bytes, &skip) {
+        Ok(outcome) => send_install_outcome(stream, outcome),
+        Err((status, message)) => send_error(stream, status, &message),
+    }
 }
 
 /// The directory `res://` resolves against for template lookup.
@@ -13589,6 +13954,108 @@ fn api_get_settings(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
         serde_json::to_string(&s.display_settings).unwrap_or_else(|_| "{}".to_string())
     };
     send_json(stream, &j);
+}
+
+/// Where a project's editor layout is persisted (pat-s3rrv.228).
+///
+/// `<project_root>/.patina/editor/` is the established per-project editor state
+/// dir — `create_dialog` already keeps favorites/recent there. Godot writes its
+/// own `editor_layout.cfg` into the editor data dir, but a served editor is
+/// per-project, so the arrangement belongs with the project.
+fn editor_layout_path(state: &Arc<Mutex<EditorState>>) -> Option<std::path::PathBuf> {
+    let root = {
+        let s = state.lock().expect("editor state");
+        s.project_root.clone()?
+    };
+    Some(
+        std::path::PathBuf::from(root)
+            .join(".patina")
+            .join("editor")
+            .join("editor_layout.json"),
+    )
+}
+
+/// The shipped arrangement, restored by Editor > Reset to Default Layout.
+///
+/// Mirrors the DOM the editor ships with: Scene and FileSystem stacked in the
+/// left column, the Inspector on the right.
+fn default_editor_layout() -> serde_json::Value {
+    serde_json::json!({
+        "splits": { "left": 280, "right": 320, "bottom": 200 },
+        "docks": {
+            "left": ["scene-panel", "filesystem-panel"],
+            "right": ["inspector-panel"]
+        }
+    })
+}
+
+/// `GET /api/editor/layout` — the saved arrangement, or the shipped default.
+///
+/// ⚠️ Reads from DISK rather than from `EditorState`, which is what makes the
+/// arrangement survive a server restart. `display_settings.panel_sizes` already
+/// round-tripped sizes through `/api/settings`, but it lives in memory only, so
+/// it was lost the moment the process ended.
+fn api_get_editor_layout(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let saved = editor_layout_path(state)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    let body = serde_json::json!({
+        "layout": saved.clone().unwrap_or_else(default_editor_layout),
+        // Lets the client tell "never saved" from "saved, and happens to equal
+        // the default" — Reset should be a no-op in the second case only.
+        "saved": saved.is_some(),
+    });
+    send_json(stream, &body.to_string());
+}
+
+/// `POST /api/editor/layout` — saves the arrangement, or resets it.
+///
+/// Body is either `{"reset": true}` (delete the saved layout and answer with the
+/// shipped default) or `{"layout": {...}}`.
+fn api_set_editor_layout(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let Some(p) = parse_json_body(body) else {
+        send_error(stream, 400, "invalid JSON body");
+        return;
+    };
+    let Some(path) = editor_layout_path(state) else {
+        send_error(stream, 400, "no project is open");
+        return;
+    };
+
+    if p.get("reset").and_then(|v| v.as_bool()) == Some(true) {
+        // A missing file is already "default", so only a real removal failure is
+        // an error worth reporting.
+        if path.exists() {
+            if let Err(e) = std::fs::remove_file(&path) {
+                send_error(stream, 500, &format!("could not reset layout: {e}"));
+                return;
+            }
+        }
+        let body = serde_json::json!({
+            "ok": true,
+            "layout": default_editor_layout(),
+            "saved": false,
+        });
+        send_json(stream, &body.to_string());
+        return;
+    }
+
+    let Some(layout) = p.get("layout") else {
+        send_error(stream, 400, "layout is required");
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            send_error(stream, 500, &format!("mkdir failed: {e}"));
+            return;
+        }
+    }
+    if let Err(e) = std::fs::write(&path, layout.to_string()) {
+        send_error(stream, 500, &format!("could not save layout: {e}"));
+        return;
+    }
+    let body = serde_json::json!({ "ok": true, "saved": true });
+    send_json(stream, &body.to_string());
 }
 
 fn api_set_settings(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
@@ -17150,6 +17617,65 @@ fn api_input_touch(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
     }
 
     send_json(stream, &format!(r#"{{"ok":true,"events":{pushed}}}"#));
+}
+
+/// `POST /api/runtime/input/gesture` — one pinch or pan gesture frame
+/// (pat-s3rrv.234).
+///
+/// Body: `{"kind":"magnify","x":…,"y":…,"factor":…}` or
+/// `{"kind":"pan","x":…,"y":…,"dx":…,"dy":…}`.
+///
+/// The `InputEvent` variants and the script-facing objects both already
+/// existed; what was missing was any way for a browser to reach them, so a
+/// pinch on the game view produced nothing at all. This is that producer.
+fn api_input_gesture(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let mut state = state.lock().unwrap();
+    if !state.is_running {
+        send_error(stream, 400, "not running");
+        return;
+    }
+    let v: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => {
+            send_error(stream, 400, "invalid json");
+            return;
+        }
+    };
+    let kind = v["kind"].as_str().unwrap_or("").to_string();
+    if !matches!(kind.as_str(), "magnify" | "pan") {
+        send_error(stream, 400, "kind must be magnify|pan");
+        return;
+    }
+    let position = gdcore::math::Vector2::new(
+        v["x"].as_f64().unwrap_or(0.0) as f32,
+        v["y"].as_f64().unwrap_or(0.0) as f32,
+    );
+
+    let Some(main_loop) = state.run_main_loop.as_mut() else {
+        send_error(stream, 400, "not running");
+        return;
+    };
+
+    let event = if kind == "magnify" {
+        gdplatform::InputEvent::MagnifyGesture {
+            position,
+            // Godot's `factor` defaults to 1.0 — the identity scale. Defaulting
+            // to 0.0 would read as "shrink to nothing" on a malformed frame,
+            // which is a silent scene-destroying value rather than a no-op.
+            factor: v["factor"].as_f64().unwrap_or(1.0) as f32,
+        }
+    } else {
+        gdplatform::InputEvent::PanGesture {
+            position,
+            delta: gdcore::math::Vector2::new(
+                v["dx"].as_f64().unwrap_or(0.0) as f32,
+                v["dy"].as_f64().unwrap_or(0.0) as f32,
+            ),
+        }
+    };
+    main_loop.push_event(event);
+
+    send_json(stream, r#"{"ok":true,"events":1}"#);
 }
 
 fn api_input_clear_frame(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
@@ -22585,6 +23111,19 @@ fn api_filesystem_rename(state: &Arc<Mutex<EditorState>>, body: &str, stream: &m
         send_error(stream, 500, &format!("rename failed: {e}"));
         return;
     }
+
+    // FileSystemDock.files_moved (pat-s3rrv.226) — an addon connects this to
+    // follow renames. Emitted only after the rename actually succeeded, and
+    // with the paths a script speaks: the ORIGINAL request path and the new
+    // name, not the sandbox-resolved absolute paths, which mean nothing to a
+    // script and would leak the host layout.
+    gdscript_interop::emit_filesystem_dock_signal(
+        "files_moved",
+        vec![
+            gdvariant::Variant::String(old_path.clone()),
+            gdvariant::Variant::String(new_name.clone()),
+        ],
+    );
 
     // Godot rewrites every dependent scene/resource as part of the move, so a
     // rename never breaks the scenes that reference the file (pat-0q2kx.70).

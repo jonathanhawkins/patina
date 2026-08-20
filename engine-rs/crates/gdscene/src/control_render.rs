@@ -40,6 +40,15 @@ pub(crate) const SCROLLBAR_THICKNESS: f32 = 8.0;
 /// Control classes handled by the render pass. Used as a fallback membership
 /// test in case the ClassDB inheritance chain is unavailable for `is_class`.
 const CONTROL_CLASSES: &[&str] = &[
+    // pat-s3rrv.233: without membership here the draw walk never reaches the
+    // `"GraphEdit"` arm, so the grid, the nodes and every connection stay
+    // invisible — the same failure MenuBar (.72), LinkButton (.166) and the
+    // pickers (.172) each hit.
+    //
+    // ⚠️ `GraphNode` is deliberately absent: its panel is painted by the
+    // GraphEdit arm at `position_offset`, and adding it here would paint a second
+    // panel at the anchor-derived rect instead.
+    "GraphEdit",
     // pat-s3rrv.72: without membership here the draw walk skips the node
     // entirely and the `"MenuBar"` arm below is unreachable — the strip would
     // be laid out, clickable and invisible.
@@ -504,6 +513,308 @@ fn children_of(tree: &SceneTree, node_id: NodeId) -> Vec<NodeId> {
     tree.get_node(node_id)
         .map(|n| n.children().to_vec())
         .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// GraphEdit / GraphNode drawing (pat-s3rrv.233)
+// ---------------------------------------------------------------------------
+//
+// The connection model already existed in `graph_edit.rs` and was reachable from
+// GDScript for `connect_node` / `disconnect_node` / `get_connection_list` — but
+// nothing drew any of it, so a graph could be built and never seen.
+//
+// ⚠️ The WHOLE graph is drawn from the `GraphEdit` arm, including its child
+// GraphNodes. Godot positions a GraphNode by `position_offset` rather than by
+// anchors, so the layout walk's rect is not where the node belongs; drawing the
+// children here means the panels, the port dots and the connection lines all
+// derive from ONE rect function and cannot disagree. That is also why `GraphNode`
+// is deliberately NOT added to `CONTROL_CLASSES` — a second, anchor-positioned
+// panel would be painted underneath every node.
+
+/// Height of a GraphNode's titlebar strip.
+const GRAPH_TITLEBAR_H: f32 = 20.0;
+/// Vertical distance between successive port dots.
+const GRAPH_PORT_PITCH: f32 = 18.0;
+/// Radius of a port dot.
+const GRAPH_PORT_RADIUS: f32 = 4.0;
+/// Spacing of the background grid.
+const GRAPH_GRID_STEP: f32 = 32.0;
+/// Default size for a GraphNode that declares none.
+const GRAPH_NODE_DEFAULT_SIZE: (f32, f32) = (120.0, 60.0);
+
+/// Reads a `Vector2` property, mirroring `float_prop` / `color_prop`.
+fn vec2_prop(tree: &SceneTree, node_id: NodeId, key: &str) -> Option<Vector2> {
+    match tree.get_node(node_id)?.get_property(key) {
+        Variant::Vector2(v) => Some(v),
+        _ => None,
+    }
+}
+
+/// The rect a GraphNode occupies inside its GraphEdit.
+///
+/// Godot's `GraphElement.position_offset` is the graph-space position; the node's
+/// `size` is its own. Component arithmetic rather than `Vector2 + Vector2` so this
+/// does not depend on which operator impls exist.
+pub(crate) fn graph_node_rect(tree: &SceneTree, edit_rect: Rect2, node_id: NodeId) -> Rect2 {
+    let off = vec2_prop(tree, node_id, "position_offset").unwrap_or(Vector2::new(0.0, 0.0));
+    let size = vec2_prop(tree, node_id, "size")
+        .or_else(|| vec2_prop(tree, node_id, "custom_minimum_size"))
+        .unwrap_or(Vector2::new(
+            GRAPH_NODE_DEFAULT_SIZE.0,
+            GRAPH_NODE_DEFAULT_SIZE.1,
+        ));
+    Rect2::new(
+        Vector2::new(edit_rect.position.x + off.x, edit_rect.position.y + off.y),
+        size,
+    )
+}
+
+/// Where a GraphNode's port dot sits, in the same space as its rect.
+///
+/// ⚠️ SHARED BY THE DOTS AND THE LINES ON PURPOSE. If the connection line ever
+/// derived its endpoint separately from the dot, a line could point at empty
+/// space and the frame would still look entirely plausible — the two are one
+/// quantity and must come from one function. The acceptance test asserts the line
+/// endpoint equals the dot centre for exactly this reason.
+pub(crate) fn graph_port_position(node_rect: Rect2, port: u32, is_output: bool) -> Vector2 {
+    let y = node_rect.position.y + GRAPH_TITLEBAR_H + GRAPH_PORT_PITCH * (port as f32 + 0.5);
+    let x = if is_output {
+        node_rect.position.x + node_rect.size.x
+    } else {
+        node_rect.position.x
+    };
+    Vector2::new(x, y)
+}
+
+/// Samples Godot's connection curve between two ports.
+///
+/// Godot draws a cubic bezier whose control points are pushed horizontally out of
+/// each port, so the line leaves an output rightwards and enters an input
+/// leftwards regardless of their relative positions. Emitted as a polyline
+/// because that is the primitive this renderer has.
+fn graph_connection_points(from: Vector2, to: Vector2) -> Vec<Vector2> {
+    // The horizontal pull scales with the gap, matching Godot's look when nodes
+    // are close together as well as far apart.
+    let pull = ((to.x - from.x).abs() * 0.5).max(24.0);
+    let c1 = Vector2::new(from.x + pull, from.y);
+    let c2 = Vector2::new(to.x - pull, to.y);
+    const STEPS: usize = 12;
+    let mut pts = Vec::with_capacity(STEPS + 1);
+    for i in 0..=STEPS {
+        let t = i as f32 / STEPS as f32;
+        let u = 1.0 - t;
+        // Cubic bezier, written out rather than looped: four terms is clearer
+        // than a de Casteljau loop and cannot get the weights wrong.
+        let w0 = u * u * u;
+        let w1 = 3.0 * u * u * t;
+        let w2 = 3.0 * u * t * t;
+        let w3 = t * t * t;
+        pts.push(Vector2::new(
+            w0 * from.x + w1 * c1.x + w2 * c2.x + w3 * to.x,
+            w0 * from.y + w1 * c1.y + w2 * c2.y + w3 * to.y,
+        ));
+    }
+    pts
+}
+
+/// Draws the grid, every child GraphNode, and every connection between them.
+fn draw_graph_edit(tree: &SceneTree, node_id: NodeId, rect: Rect2, out: &mut Vec<DrawCommand>) {
+    let bg =
+        color_prop(tree, node_id, "background_color").unwrap_or(Color::new(0.13, 0.13, 0.16, 1.0));
+    out.push(DrawCommand::DrawRect {
+        rect,
+        color: bg,
+        filled: true,
+    });
+
+    // Grid background. Godot offers lines or dots; lines is the default pattern.
+    if bool_prop(tree, node_id, "show_grid").unwrap_or(true) {
+        let grid = Color::new(1.0, 1.0, 1.0, 0.06);
+        let mut x = rect.position.x;
+        while x <= rect.position.x + rect.size.x {
+            out.push(DrawCommand::DrawLine {
+                from: Vector2::new(x, rect.position.y),
+                to: Vector2::new(x, rect.position.y + rect.size.y),
+                color: grid,
+                width: 1.0,
+            });
+            x += GRAPH_GRID_STEP;
+        }
+        let mut y = rect.position.y;
+        while y <= rect.position.y + rect.size.y {
+            out.push(DrawCommand::DrawLine {
+                from: Vector2::new(rect.position.x, y),
+                to: Vector2::new(rect.position.x + rect.size.x, y),
+                color: grid,
+                width: 1.0,
+            });
+            y += GRAPH_GRID_STEP;
+        }
+    }
+
+    // The model is keyed by node NAME, which is also how `GraphConnection`
+    // addresses its endpoints, so the child lookup is by name throughout.
+    let model = tree.get_graph_edit(node_id);
+
+    for child in children_of(tree, node_id) {
+        let Some(node) = tree.get_node(child) else {
+            continue;
+        };
+        if node.class_name() != "GraphNode" {
+            continue;
+        }
+        let name = node.name().to_string();
+        let node_rect = graph_node_rect(tree, rect, child);
+
+        // Panel, then titlebar on top of it.
+        out.push(DrawCommand::DrawRect {
+            rect: node_rect,
+            color: Color::new(0.22, 0.23, 0.28, 1.0),
+            filled: true,
+        });
+        out.push(DrawCommand::DrawRect {
+            rect: Rect2::new(
+                node_rect.position,
+                Vector2::new(node_rect.size.x, GRAPH_TITLEBAR_H),
+            ),
+            color: Color::new(0.30, 0.31, 0.38, 1.0),
+            filled: true,
+        });
+
+        // The title comes from the node property, falling back to the model and
+        // then the node name — Godot shows the node name when no title is set.
+        let title = string_prop(tree, child, "title")
+            .or_else(|| {
+                model
+                    .and_then(|m| m.get_node(&name))
+                    .map(|n| n.title.clone())
+            })
+            .unwrap_or_else(|| name.clone());
+        out.push(DrawCommand::DrawString {
+            text: title,
+            position: Vector2::new(node_rect.position.x + 4.0, node_rect.position.y + 4.0),
+            color: Color::WHITE,
+            font_size: 12,
+        });
+
+        // Port dots, from the slot model this node declared.
+        if let Some(gn) = model.and_then(|m| m.get_node(&name)) {
+            for port in 0..gn.get_input_port_count() {
+                out.push(DrawCommand::DrawCircle {
+                    center: graph_port_position(node_rect, port as u32, false),
+                    radius: GRAPH_PORT_RADIUS,
+                    color: Color::new(0.4, 0.8, 1.0, 1.0),
+                });
+            }
+            for port in 0..gn.get_output_port_count() {
+                out.push(DrawCommand::DrawCircle {
+                    center: graph_port_position(node_rect, port as u32, true),
+                    radius: GRAPH_PORT_RADIUS,
+                    color: Color::new(1.0, 0.8, 0.4, 1.0),
+                });
+            }
+        }
+    }
+
+    // Connections last so they paint over the panels, as Godot's do.
+    let Some(model) = model else {
+        return;
+    };
+    for conn in model.get_connection_list() {
+        let (Some(from_id), Some(to_id)) = (
+            graph_child_by_name(tree, node_id, &conn.from_node),
+            graph_child_by_name(tree, node_id, &conn.to_node),
+        ) else {
+            continue;
+        };
+        let from = graph_port_position(graph_node_rect(tree, rect, from_id), conn.from_port, true);
+        let to = graph_port_position(graph_node_rect(tree, rect, to_id), conn.to_port, false);
+        out.push(DrawCommand::DrawPolyline {
+            points: graph_connection_points(from, to),
+            color: Color::new(0.8, 0.8, 0.9, 1.0),
+            width: 2.0,
+            closed: false,
+        });
+    }
+}
+
+/// The port under `point`, as `(node name, port index, is_output)`.
+///
+/// ⚠️ Lives beside the drawing on purpose and reuses `graph_port_position`, so a
+/// port can never be hit somewhere other than where its dot was painted. Splitting
+/// hit-testing into `scene_tree.rs` would let the two drift apart silently — the
+/// dot would render in one place and accept clicks in another, which looks like
+/// "the drag sometimes doesn't take" rather than like a geometry bug.
+pub(crate) fn graph_port_at(
+    tree: &SceneTree,
+    edit: NodeId,
+    edit_rect: Rect2,
+    point: Vector2,
+) -> Option<(String, u32, bool)> {
+    // A little larger than the dot: Godot's ports are forgiving to click, and an
+    // exact-radius test makes a 4px target practically unhittable.
+    let slop = GRAPH_PORT_RADIUS + 4.0;
+    let model = tree.get_graph_edit(edit)?;
+    for child in children_of(tree, edit) {
+        let Some(node) = tree.get_node(child) else {
+            continue;
+        };
+        if node.class_name() != "GraphNode" {
+            continue;
+        }
+        let name = node.name().to_string();
+        let Some(gn) = model.get_node(&name) else {
+            continue;
+        };
+        let rect = graph_node_rect(tree, edit_rect, child);
+        for (count, is_output) in [
+            (gn.get_input_port_count(), false),
+            (gn.get_output_port_count(), true),
+        ] {
+            for port in 0..count {
+                let c = graph_port_position(rect, port as u32, is_output);
+                let dx = c.x - point.x;
+                let dy = c.y - point.y;
+                if dx * dx + dy * dy <= slop * slop {
+                    return Some((name, port as u32, is_output));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The GraphNode whose titlebar is under `point`, if any.
+pub(crate) fn graph_titlebar_at(
+    tree: &SceneTree,
+    edit: NodeId,
+    edit_rect: Rect2,
+    point: Vector2,
+) -> Option<NodeId> {
+    for child in children_of(tree, edit) {
+        let Some(node) = tree.get_node(child) else {
+            continue;
+        };
+        if node.class_name() != "GraphNode" {
+            continue;
+        }
+        let r = graph_node_rect(tree, edit_rect, child);
+        if point.x >= r.position.x
+            && point.x <= r.position.x + r.size.x
+            && point.y >= r.position.y
+            && point.y <= r.position.y + GRAPH_TITLEBAR_H
+        {
+            return Some(child);
+        }
+    }
+    None
+}
+
+/// Finds a GraphEdit's direct child by node name.
+pub(crate) fn graph_child_by_name(tree: &SceneTree, edit: NodeId, name: &str) -> Option<NodeId> {
+    children_of(tree, edit)
+        .into_iter()
+        .find(|c| tree.get_node(*c).map(|n| n.name() == name).unwrap_or(false))
 }
 
 fn render_node(
@@ -2061,6 +2372,10 @@ fn draw_control(
     out: &mut Vec<DrawCommand>,
 ) {
     match class_of(tree, node_id).as_str() {
+        // pat-s3rrv.233: the GraphEdit arm draws the grid, every child GraphNode
+        // and every connection — see `draw_graph_edit` for why the children are
+        // drawn from here rather than by an arm of their own.
+        "GraphEdit" => draw_graph_edit(tree, node_id, rect, out),
         "ColorRect" => {
             let color = color_prop(tree, node_id, "color").unwrap_or(Color::WHITE);
             out.push(DrawCommand::DrawRect {
