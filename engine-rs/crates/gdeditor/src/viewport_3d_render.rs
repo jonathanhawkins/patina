@@ -2291,10 +2291,38 @@ fn setup_editor_lighting_3d(
 /// [`editor_render_environment`].
 fn editor_render_viewport(viewport: &Viewport3D, width: u32, height: u32) -> RenderViewport3D {
     let mut rv = RenderViewport3D::new(width, height);
-    rv.camera_transform = viewport.camera.transform();
-    rv.fov = viewport.camera.fov_radians();
-    rv.near = 0.05;
-    rv.far = 2000.0;
+
+    // pat-s3rrv.186: `h_offset`/`v_offset` shift the VIEW, not the node.
+    // Godot's `Camera3D::_get_adjusted_camera_transform`
+    // (camera_3d.cpp:253-258) orthonormalizes, then adds
+    // `basis.column(1) * v_offset` and `basis.column(0) * h_offset` to the
+    // origin — so the shift is along the camera's own right/up axes, not the
+    // world's, and a rotated camera offsets diagonally in world space.
+    // NOTE: `orthonormalized` belongs to `Basis`, not `Transform3D`.
+    let mut tr = viewport.camera.transform();
+    tr.basis = tr.basis.orthonormalized();
+    tr.origin =
+        tr.origin + tr.basis.y * viewport.camera.v_offset + tr.basis.x * viewport.camera.h_offset;
+    rv.camera_transform = tr;
+
+    // `fov` is VERTICAL here. Under KEEP_WIDTH the authored angle is
+    // horizontal, so it is re-derived for the viewport's aspect exactly as
+    // `projection.cpp:253-255` does via `get_fovy(fov, 1.0 / aspect)`.
+    let aspect = (width.max(1) as f32) / (height.max(1) as f32);
+    rv.fov = match viewport.camera.keep_aspect {
+        gdscene::camera3d::KeepAspect::KeepHeight => viewport.camera.fov_radians(),
+        gdscene::camera3d::KeepAspect::KeepWidth => {
+            let half = (viewport.camera.fov_radians() * 0.5).tan();
+            ((half / aspect.max(f32::EPSILON)).atan()) * 2.0
+        }
+    };
+
+    // ⚠️ These were HARDCODED to 0.05 / 2000.0, so a scene camera's authored
+    // near/far never clipped anything — and 2000 is not even Godot's default
+    // far of 4000, so distant geometry vanished for a reason no property
+    // explained.
+    rv.near = viewport.camera.near;
+    rv.far = viewport.camera.far;
     rv
 }
 
@@ -2431,6 +2459,18 @@ pub fn viewport_for_scene_camera(
             viewport.camera.ortho_size = size as f32;
         }
     }
+    // pat-s3rrv.186: everything below was authored, correct and unread — the
+    // accessors are unit-tested in `gdscene::camera3d`, and nothing on the
+    // wired Play path called them. Read through the accessors rather than
+    // matching `Variant::Float` as the two above do: a `.tscn` writing
+    // `near = 2` stores an Int, which a Float-only match silently skips,
+    // leaving the Godot default in place.
+    viewport.camera.near = gdscene::node3d::get_near(tree, camera_node) as f32;
+    viewport.camera.far = gdscene::node3d::get_far(tree, camera_node) as f32;
+    viewport.camera.keep_aspect = gdscene::camera3d::get_keep_aspect(tree, camera_node);
+    viewport.camera.h_offset = gdscene::camera3d::get_h_offset(tree, camera_node) as f32;
+    viewport.camera.v_offset = gdscene::camera3d::get_v_offset(tree, camera_node) as f32;
+    viewport.camera.frustum_offset = gdscene::camera3d::get_frustum_offset(tree, camera_node);
     viewport
 }
 

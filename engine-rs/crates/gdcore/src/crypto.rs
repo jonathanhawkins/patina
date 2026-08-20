@@ -258,59 +258,89 @@ impl AesContext {
         Ok(())
     }
 
-    /// Encrypt or decrypt a full buffer (PKCS7 padded on encrypt).
+    /// Encrypt or decrypt whole blocks, matching Godot's `AESContext.update()`
+    /// (pat-s3rrv.195).
     ///
-    /// ⚠️ **Divergence from Godot, deliberately preserved.** Godot's
-    /// `AESContext.update()` does *no* padding: it requires the input to be a
-    /// multiple of 16 and returns the raw blocks. This pads with PKCS7 on
-    /// encrypt and strips it on decrypt. Changing it would alter every file
-    /// `gdresource::config_file` has already encrypted, so the padding stays and
-    /// the divergence is documented rather than papered over. A round-trip
-    /// through this API is self-consistent either way.
-    pub fn update(&self, data: &[u8]) -> Result<Vec<u8>, &'static str> {
+    /// 🔑 GODOT ADDS NO PADDING. `update()` requires a multiple of 16 bytes and
+    /// returns the raw blocks (`core/crypto/aes_context.cpp`). This used to pad
+    /// with PKCS7 on encrypt and strip it on decrypt, which meant ciphertext
+    /// produced by a Godot project would not decrypt here and vice versa — the
+    /// round trip was self-consistent, so nothing inside the engine noticed.
+    ///
+    /// The PKCS7 that `gdresource::config_file` relies on now lives in
+    /// `config_file` itself, so the bytes it writes are UNCHANGED: same padding,
+    /// same AES-CBC, applied one layer up. Files already encrypted still load.
+    ///
+    /// ⚠️ CBC STATE CHAINS ACROSS CALLS, which is why this takes `&mut self`.
+    /// Godot carries the IV forward so a message split over several `update()`
+    /// calls encrypts identically to the same message passed at once. The old
+    /// code rebuilt the cipher from the ORIGINAL `iv` every call, so the second
+    /// chunk of any multi-call stream was silently wrong.
+    pub fn update(&mut self, data: &[u8]) -> Result<Vec<u8>, &'static str> {
         if !self.started {
             return Err("AES context not started");
         }
-        let key = self.key.as_ref().ok_or("AES key missing")?;
+        if data.len() % 16 != 0 {
+            return Err("AES update() requires a multiple of 16 bytes");
+        }
+        // Cloned so the `&mut self` chaining below does not fight the borrow.
+        let key = self.key.clone().ok_or("AES key missing")?;
         match self.cipher {
-            AesCipher::Cbc => self.update_cbc(key, data),
-            AesCipher::Ecb => self.update_ecb(key, data),
+            AesCipher::Cbc => self.update_cbc(&key, data),
+            AesCipher::Ecb => self.update_ecb(&key, data),
         }
     }
 
-    fn update_cbc(&self, key: &[u8], data: &[u8]) -> Result<Vec<u8>, &'static str> {
-        use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+    /// The current chained IV (Godot `AESContext.get_iv_state()`).
+    ///
+    /// Godot returns the IV as it stands after the last `update()`, which is
+    /// what lets a caller checkpoint and resume a CBC stream. The script binding
+    /// used to return an empty array, so a ported script that saved and restored
+    /// the IV state got nothing back.
+    pub fn get_iv_state(&self) -> Vec<u8> {
+        self.iv.map(|iv| iv.to_vec()).unwrap_or_default()
+    }
 
-        let iv = self.iv.as_ref().ok_or("AES IV missing")?;
-        match self.mode {
-            AesMode::Encrypt => {
-                // Buffer must have room for PKCS7 padding (up to +16).
-                let mut buf = vec![0u8; data.len() + 16];
-                buf[..data.len()].copy_from_slice(data);
-                let out = match key.len() {
-                    16 => cbc::Encryptor::<aes::Aes128>::new(key.into(), iv.into())
-                        .encrypt_padded_mut::<Pkcs7>(&mut buf, data.len()),
-                    _ => cbc::Encryptor::<aes::Aes256>::new(key.into(), iv.into())
-                        .encrypt_padded_mut::<Pkcs7>(&mut buf, data.len()),
-                }
-                .map_err(|_| "AES encrypt failed")?;
-                Ok(out.to_vec())
-            }
-            AesMode::Decrypt => {
-                if data.is_empty() || data.len() % 16 != 0 {
-                    return Err("AES ciphertext length must be multiple of 16");
-                }
-                let mut buf = data.to_vec();
-                let out = match key.len() {
-                    16 => cbc::Decryptor::<aes::Aes128>::new(key.into(), iv.into())
-                        .decrypt_padded_mut::<Pkcs7>(&mut buf),
-                    _ => cbc::Decryptor::<aes::Aes256>::new(key.into(), iv.into())
-                        .decrypt_padded_mut::<Pkcs7>(&mut buf),
-                }
-                .map_err(|_| "AES decrypt failed")?;
-                Ok(out.to_vec())
-            }
+    fn update_cbc(&mut self, key: &[u8], data: &[u8]) -> Result<Vec<u8>, &'static str> {
+        use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+
+        let iv = self.iv.ok_or("AES IV missing")?;
+        if data.is_empty() {
+            return Ok(Vec::new());
         }
+        let mut buf = data.to_vec();
+        let out = match self.mode {
+            AesMode::Encrypt => match key.len() {
+                16 => cbc::Encryptor::<aes::Aes128>::new(key.into(), (&iv).into())
+                    .encrypt_padded_mut::<NoPadding>(&mut buf, data.len()),
+                _ => cbc::Encryptor::<aes::Aes256>::new(key.into(), (&iv).into())
+                    .encrypt_padded_mut::<NoPadding>(&mut buf, data.len()),
+            }
+            .map_err(|_| "AES encrypt failed")?
+            .to_vec(),
+            AesMode::Decrypt => match key.len() {
+                16 => cbc::Decryptor::<aes::Aes128>::new(key.into(), (&iv).into())
+                    .decrypt_padded_mut::<NoPadding>(&mut buf),
+                _ => cbc::Decryptor::<aes::Aes256>::new(key.into(), (&iv).into())
+                    .decrypt_padded_mut::<NoPadding>(&mut buf),
+            }
+            .map_err(|_| "AES decrypt failed")?
+            .to_vec(),
+        };
+
+        // 🔑 Chain the IV forward. In CBC the next block's IV is the previous
+        // CIPHERTEXT block — which is the OUTPUT when encrypting and the INPUT
+        // when decrypting. Using the output in both directions is the natural
+        // mistake and silently corrupts every decrypt after the first call.
+        let chain_from: &[u8] = match self.mode {
+            AesMode::Encrypt => &out,
+            AesMode::Decrypt => data,
+        };
+        let mut next = [0u8; 16];
+        next.copy_from_slice(&chain_from[chain_from.len() - 16..]);
+        self.iv = Some(next);
+
+        Ok(out)
     }
 
     /// ECB, block by block. The `ecb` crate is not a dependency and adding one
@@ -322,7 +352,9 @@ impl AesContext {
 
         match self.mode {
             AesMode::Encrypt => {
-                let mut buf = pkcs7_pad(data);
+                // No padding: `update` has already required block alignment,
+                // and Godot's ECB returns exactly the blocks it was given.
+                let mut buf = data.to_vec();
                 match key.len() {
                     16 => {
                         let c = aes::Aes128::new(GenericArray::from_slice(key));
@@ -358,7 +390,7 @@ impl AesContext {
                         }
                     }
                 }
-                pkcs7_unpad(&buf)
+                Ok(buf)
             }
         }
     }
@@ -381,7 +413,7 @@ impl Default for AesContext {
 /// PKCS7 pad to the 16-byte block size. A length that is already a multiple of
 /// 16 gains a **whole** extra block — that is the standard, and it is what makes
 /// unpadding unambiguous.
-fn pkcs7_pad(data: &[u8]) -> Vec<u8> {
+pub fn pkcs7_pad(data: &[u8]) -> Vec<u8> {
     let pad = 16 - (data.len() % 16);
     let mut out = Vec::with_capacity(data.len() + pad);
     out.extend_from_slice(data);
@@ -391,7 +423,7 @@ fn pkcs7_pad(data: &[u8]) -> Vec<u8> {
 
 /// Strips PKCS7 padding, rejecting anything malformed rather than returning a
 /// truncated buffer.
-fn pkcs7_unpad(data: &[u8]) -> Result<Vec<u8>, &'static str> {
+pub fn pkcs7_unpad(data: &[u8]) -> Result<Vec<u8>, &'static str> {
     let pad = *data.last().ok_or("AES decrypt failed")? as usize;
     if pad == 0 || pad > 16 || pad > data.len() {
         return Err("AES decrypt failed");
@@ -402,21 +434,30 @@ fn pkcs7_unpad(data: &[u8]) -> Result<Vec<u8>, &'static str> {
     Ok(data[..data.len() - pad].to_vec())
 }
 
-/// Fills `out` with pseudo-random bytes (Godot `Crypto.generate_random_bytes`).
+/// Fills `out` with cryptographically secure random bytes
+/// (Godot `Crypto.generate_random_bytes`).
 ///
-/// ⚠️ **NOT cryptographically secure.** This draws from
-/// [`crate::rng`], a SystemTime-seeded xorshift — the same stream `randi()`
-/// serves — because `getrandom` is not a dependency of this crate and a worker
-/// adding one unilaterally is not appropriate. It is fine for nonces, IVs in
-/// tests, and session ids; it must not be used to generate keys. Replacing the
-/// body with `getrandom` is the whole fix and needs no call-site changes.
+/// Backed by the operating system's CSPRNG through `getrandom`, matching
+/// Godot, which draws this from mbedTLS's CTR_DRBG
+/// (`core/crypto/crypto_core.cpp`).
+///
+/// 🔑 THIS USED TO RETURN PREDICTABLE BYTES. The previous body pulled from
+/// [`crate::rng`] — a SystemTime-seeded xorshift, the same stream `randi()`
+/// serves — so every key, nonce and session id a ported project generated was
+/// recoverable by anyone who could guess the process start time to within a
+/// tick. The doc comment admitted it, but a caller reaching for a function
+/// named `generate_random_bytes` in a `crypto` module does not read the doc
+/// comment first.
+///
+/// ⚠️ ON FAILURE THIS PANICS, DELIBERATELY. `getrandom` fails only when the OS
+/// entropy source is unavailable, and the tempting fallback — "use the xorshift
+/// if the CSPRNG is down" — silently reinstates exactly the vulnerability this
+/// replaces, at the one moment nobody is watching. A caller that gets
+/// predictable key material and no error is worse off than one that crashes.
 pub fn generate_random_bytes(len: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(len);
-    while out.len() < len {
-        let word = crate::rng::randi().to_le_bytes();
-        let take = (len - out.len()).min(4);
-        out.extend_from_slice(&word[..take]);
-    }
+    let mut out = vec![0u8; len];
+    getrandom::fill(&mut out)
+        .expect("OS entropy source unavailable; refusing to return predictable bytes");
     out
 }
 
@@ -744,7 +785,149 @@ impl HmacContext {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
+    // ---- pat-s3rrv.195: AESContext matches Godot's block semantics ---------
+
+    const K256: &[u8] = b"0123456789abcdef0123456789abcdef";
+    const IV0: &[u8] = b"iviviviviviviviv";
+
+    /// **The chaining bug, stated as a test.** A message split across two
+    /// `update()` calls must encrypt identically to the same message passed in
+    /// one call.
+    ///
+    /// The old code rebuilt the cipher from the ORIGINAL iv every call, so the
+    /// second chunk was encrypted as though it were the first — this assertion
+    /// failed on the second 16 bytes while the first 16 matched, which is
+    /// exactly why the bug survived a round-trip test.
+    #[test]
+    fn cbc_update_chains_the_iv_across_calls() {
+        let msg = b"sixteen byte msgsixteen byte two";
+
+        let mut one_shot = AesContext::new();
+        one_shot.start(AesMode::Encrypt, K256, IV0).unwrap();
+        let whole = one_shot.update(msg).unwrap();
+
+        let mut split = AesContext::new();
+        split.start(AesMode::Encrypt, K256, IV0).unwrap();
+        let mut chunked = split.update(&msg[..16]).unwrap();
+        chunked.extend_from_slice(&split.update(&msg[16..]).unwrap());
+
+        assert_eq!(
+            whole, chunked,
+            "splitting a message across update() calls must not change the ciphertext"
+        );
+    }
+
+    /// Decrypt chains from the INPUT block, not the output. Getting this
+    /// backwards corrupts every block after the first while leaving the first
+    /// one correct — a failure that looks like a padding bug.
+    #[test]
+    fn cbc_round_trips_across_chained_updates() {
+        let msg = b"sixteen byte msgsixteen byte two";
+
+        let mut enc = AesContext::new();
+        enc.start(AesMode::Encrypt, K256, IV0).unwrap();
+        let ct = enc.update(msg).unwrap();
+
+        let mut dec = AesContext::new();
+        dec.start(AesMode::Decrypt, K256, IV0).unwrap();
+        let mut out = dec.update(&ct[..16]).unwrap();
+        out.extend_from_slice(&dec.update(&ct[16..]).unwrap());
+
+        assert_eq!(out, msg, "chunked decrypt must reproduce the plaintext");
+    }
+
+    /// Godot's `update()` adds NO padding: 16 bytes in, 16 bytes out.
+    #[test]
+    fn update_adds_no_padding() {
+        let mut ctx = AesContext::new();
+        ctx.start(AesMode::Encrypt, K256, IV0).unwrap();
+        let out = ctx.update(b"sixteen byte msg").unwrap();
+        assert_eq!(
+            out.len(),
+            16,
+            "PKCS7 would have produced 32 bytes; Godot returns the raw block"
+        );
+    }
+
+    /// And it refuses a partial block rather than padding it silently.
+    #[test]
+    fn update_rejects_a_partial_block() {
+        let mut ctx = AesContext::new();
+        ctx.start(AesMode::Encrypt, K256, IV0).unwrap();
+        assert!(
+            ctx.update(b"not sixteen").is_err(),
+            "a non-multiple-of-16 input must error, not be padded"
+        );
+    }
+
+    /// `get_iv_state` reports the chained IV, not the one `start` was given.
+    #[test]
+    fn get_iv_state_advances_with_the_stream() {
+        let mut ctx = AesContext::new();
+        ctx.start(AesMode::Encrypt, K256, IV0).unwrap();
+        assert_eq!(ctx.get_iv_state(), IV0, "before any block, the starting IV");
+
+        let ct = ctx.update(b"sixteen byte msg").unwrap();
+        assert_eq!(
+            ctx.get_iv_state(),
+            ct,
+            "after one block the IV is that ciphertext block"
+        );
+        assert_ne!(
+            ctx.get_iv_state(),
+            IV0,
+            "an unchanged IV would mean the stream never advanced"
+        );
+    }
+
+    // ---- pat-s3rrv.195: generate_random_bytes is a CSPRNG ------------------
+
+    /// **The vulnerability this replaces, stated as a test.**
+    ///
+    /// The old body drew from `crate::rng`, a SystemTime-seeded xorshift. Two
+    /// runs that reached the same seed produced the SAME "random" bytes — so a
+    /// key, nonce or session id was recoverable by anyone who could guess the
+    /// process start time closely enough.
+    ///
+    /// Reseeding the xorshift identically and asking twice therefore returns
+    /// identical output under the old implementation and differing output
+    /// under a real CSPRNG. A plain "two calls differ" assertion would NOT
+    /// catch the regression: the xorshift advances, so consecutive draws
+    /// differ there too.
+    #[test]
+    fn generate_random_bytes_does_not_come_from_the_seeded_xorshift() {
+        crate::rng::seed(0xDEAD_BEEF);
+        let first = generate_random_bytes(32);
+        crate::rng::seed(0xDEAD_BEEF);
+        let second = generate_random_bytes(32);
+
+        assert_ne!(
+            first, second,
+            "resetting the xorshift seed must not reproduce the byte stream — \
+             if it does, key material is predictable from the process start time"
+        );
+    }
+
+    #[test]
+    fn generate_random_bytes_respects_the_requested_length() {
+        for len in [0usize, 1, 16, 32, 129] {
+            assert_eq!(generate_random_bytes(len).len(), len);
+        }
+    }
+
+    /// Not a randomness-quality test — just a smoke check that the source is
+    /// not returning a constant buffer.
+    #[test]
+    fn generate_random_bytes_is_not_all_zeroes() {
+        let bytes = generate_random_bytes(64);
+        assert!(
+            bytes.iter().any(|&b| b != 0),
+            "64 zero bytes from the CSPRNG would mean the fill never happened"
+        );
+    }
 
     #[test]
     fn sha256_empty_string() {

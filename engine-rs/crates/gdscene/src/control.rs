@@ -1038,6 +1038,119 @@ fn link_button_pressed(tree: &mut SceneTree, node_id: NodeId) {
     }
 }
 
+/// Opens (or closes) the `ColorPicker` that a `ColorPickerButton` hosts.
+///
+/// Port of `ColorPickerButton::pressed()` + `::_update_picker()`
+/// (`upstream/godot/scene/gui/color_picker.cpp`), pat-s3rrv.172.
+///
+/// 🔑 **The picker does not exist until the first press.** Upstream `memnew`s
+/// the popup and the ColorPicker inside `_update_picker()`, copies `color` and
+/// `edit_alpha` onto it, adds it as an INTERNAL child and emits
+/// `picker_created` — once, ever. So a `.tscn` never contains the picker, and
+/// looking for one authored in the scene finds nothing. The lazy creation is
+/// the behaviour, not an optimisation.
+///
+/// ⚠️ **Not routed through the popup layer**, which the bead for this work
+/// suggested. That layer is item-menu only: `OpenPopup` carries a
+/// `crate::popup::PopupMenu` and `SceneTree::open_popup_for` returns early when
+/// `item_count() == 0`. A picker has no items, so it would open nothing —
+/// silently. Upstream does not use a menu either; it adds a real child.
+///
+/// ⚠️ **Toggle, rather than upstream's `popup_was_open` dance.** Godot's popup
+/// is modal and a click outside it closes it, so by the time `pressed()` runs
+/// for a second time the popup is already hidden and `popup_was_open` exists
+/// only to stop that same click reopening it. Patina has no modal dismissal for
+/// a non-menu popup, so pressing again closes it directly. The observable
+/// behaviour — press opens, press again closes, `popup_closed` on the way out —
+/// is the same; the bookkeeping upstream needs is an artefact of the modality.
+fn color_picker_button_pressed(tree: &mut SceneTree, node_id: NodeId) {
+    let is_picker_button = tree
+        .get_node(node_id)
+        .map(|n| n.class_name() == "ColorPickerButton")
+        .unwrap_or(false);
+    if !is_picker_button {
+        return;
+    }
+
+    let existing = tree
+        .get_node(node_id)
+        .map(|n| n.children().to_vec())
+        .unwrap_or_default()
+        .into_iter()
+        .find(|&c| {
+            tree.get_node(c)
+                .map(|n| n.class_name() == "ColorPicker")
+                .unwrap_or(false)
+        });
+
+    let picker = match existing {
+        Some(p) => p,
+        None => {
+            let color = match tree.get_node(node_id).map(|n| n.get_property("color")) {
+                Some(Variant::Color(c)) => c,
+                _ => Color::WHITE,
+            };
+            // `edit_alpha` defaults to true, so only an explicit `false` turns it
+            // off — the same reading the draw arm uses.
+            let edit_alpha = !matches!(
+                tree.get_node(node_id).map(|n| n.get_property("edit_alpha")),
+                Some(Variant::Bool(false))
+            );
+            let mut node = crate::node::Node::new("ColorPicker", "ColorPicker");
+            node.set_property("color", Variant::Color(color));
+            node.set_property("edit_alpha", Variant::Bool(edit_alpha));
+            // 🔑 Created HIDDEN so this press falls into the open branch below
+            // and takes the one code path that positions it. Creating it visible
+            // would make the very first press read as "already open" and close
+            // a picker the user has never seen.
+            node.set_property("visible", Variant::Bool(false));
+            let Ok(created) = tree.add_child(node_id, node) else {
+                return;
+            };
+            tree.emit_signal(node_id, "picker_created", &[]);
+            created
+        }
+    };
+
+    let is_open = !matches!(
+        tree.get_node(picker).map(|n| n.get_property("visible")),
+        Some(Variant::Bool(false))
+    );
+    if is_open {
+        if let Some(n) = tree.get_node_mut(picker) {
+            n.set_property("visible", Variant::Bool(false));
+        }
+        // Upstream emits this from `_modal_closed()`, whatever dismissed the
+        // popup.
+        tree.emit_signal(node_id, "popup_closed", &[]);
+        return;
+    }
+
+    // Horizontally centred below the button, which is where upstream drops it
+    // (`h_offset = (get_size().x - minsize.x) / 2`, `v_offset = get_size().y`).
+    // Upstream also flips it ABOVE when it would fall off the bottom of the
+    // viewport; that needs the viewport rect, which this function is not given,
+    // so it is left out rather than approximated wrongly.
+    let button_size = get_size(tree, node_id);
+    let picker_size = crate::color_picker::DEFAULT_PICKER_SIZE;
+    let h = (button_size.x - picker_size.x) * 0.5;
+    let v = button_size.y;
+    // ⚠️ OFFSETS, not `position`/`size`: the rect is derived, and the first draw
+    // would recompute it from anchors + offsets and overwrite anything written
+    // directly — collapsing the picker to 0x0 and making it unhittable.
+    set_offset_left(tree, picker, h);
+    set_offset_top(tree, picker, v);
+    set_offset_right(tree, picker, h + picker_size.x);
+    set_offset_bottom(tree, picker, v + picker_size.y);
+    if let Some(n) = tree.get_node_mut(picker) {
+        n.set_property("visible", Variant::Bool(true));
+    }
+    // Resolve immediately, against the BUTTON's rect: the hit test reads `size`
+    // as-is, so without this the picker is 0x0 until something draws it and a
+    // click inside the freshly opened popup would miss.
+    resolve_control_layout(tree, picker, button_size);
+}
+
 pub fn click_at_point(tree: &mut SceneTree, point: Vector2) -> Option<NodeId> {
     let hit = control_at_point(tree, point)?;
     if node_is_base_button(tree, hit) {
@@ -1046,6 +1159,7 @@ pub fn click_at_point(tree: &mut SceneTree, point: Vector2) -> Option<NodeId> {
         // the button was activated, so hooking only `fire_button_action` would
         // leave a plain click inert.
         link_button_pressed(tree, hit);
+        color_picker_button_pressed(tree, hit);
     }
     // An item view resolves the click further, onto the row or tab under the
     // point (pat-0q2kx.85).
@@ -3458,6 +3572,7 @@ pub fn fire_button_action(tree: &mut SceneTree, node_id: NodeId) {
     }
     tree.emit_signal(node_id, "pressed", &[]);
     link_button_pressed(tree, node_id);
+    color_picker_button_pressed(tree, node_id);
     tree.call_script_with_access(node_id, "_pressed", &[]);
 }
 

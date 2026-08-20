@@ -580,7 +580,39 @@ impl SoftwareRenderer3D {
     /// instance's transformed AABB centre). It mis-orders two transparent
     /// surfaces that interpenetrate — no per-object sort can fix that case, and
     /// Godot does not either.
-    fn transparency_draw_order<'a>(
+    /// The depth a transparent instance is sorted by — Godot's
+    /// `inst->depth = cam.origin.distance_to(center) - inst->sorting_offset`
+    /// (`render_forward_clustered.cpp:955`, `render_forward_mobile.cpp:2100`).
+    ///
+    /// ⚠️ `sorting_offset` is SUBTRACTED. A larger offset yields a smaller
+    /// depth, and since the transparent pass draws farthest-first that means the
+    /// instance is drawn LATER — on top. Adding it would inverse the property,
+    /// and the documented behaviour ("a higher value will make the
+    /// VisualInstance3D reliably draw on top of other VisualInstance3Ds that are
+    /// otherwise positioned at the same spot") is the check.
+    ///
+    /// ⚠️ `sorting_use_aabb_center` defaults to TRUE, so the centre — not the
+    /// origin — is the normal sort point. For a mesh whose bounds are centred on
+    /// its origin the two agree, which is why every existing centred-mesh
+    /// baseline is unaffected. An instance with no mesh and no `custom_aabb` has
+    /// no AABB to take a centre of, and falls back to the origin.
+    fn sort_depth(inst: &Instance3D, camera: Vector3) -> f32 {
+        let point = if inst.geometry.sorting_use_aabb_center {
+            inst.world_aabb()
+                .map(|aabb| aabb.get_center())
+                .unwrap_or(inst.transform.origin)
+        } else {
+            inst.transform.origin
+        };
+        camera.distance_to(point) - inst.geometry.sorting_offset
+    }
+
+    /// ⚠️ `pub` so the scene-level parity test can assert the order a .tscn
+    /// actually produces (pat-s3rrv.187). `sorting_offset` is a property whose
+    /// entire observable effect IS this ordering, so a test that could not see
+    /// the order could only re-assert that the field was copied — which is what
+    /// let the property sit registered and unread in the first place.
+    pub fn transparency_draw_order<'a>(
         instances: &'a [Instance3D],
         viewport: &Viewport3D,
     ) -> Vec<&'a Instance3D> {
@@ -602,7 +634,7 @@ impl SoftwareRenderer3D {
         let mut transparent: Vec<(f32, &Instance3D)> = Vec::new();
         for inst in instances {
             if is_transparent(inst) {
-                transparent.push((camera.distance_to(inst.transform.origin), inst));
+                transparent.push((Self::sort_depth(inst, camera), inst));
             } else {
                 opaque.push(inst);
             }

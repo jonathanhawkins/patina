@@ -506,6 +506,99 @@ pub struct Generic6DofJoint3D {
     pub linear_limits: [AxisLimit; 3],
     /// Angular limits for the local X/Y/Z axes (radians).
     pub angular_limits: [AxisLimit; 3],
+    /// Per-axis linear motors (pat-s3rrv.192).
+    pub linear_motors: [AxisMotor; 3],
+    /// Per-axis angular motors.
+    pub angular_motors: [AxisMotor; 3],
+    /// Per-axis linear springs.
+    pub linear_springs: [AxisSpring; 3],
+    /// Per-axis angular springs.
+    pub angular_springs: [AxisSpring; 3],
+}
+
+/// A per-axis motor on a `Generic6DOFJoint3D` — Godot's
+/// `linear_motor_*` / `angular_motor_*` (pat-s3rrv.192).
+///
+/// Drives the RELATIVE velocity of the two bodies about/along the axis toward
+/// [`Self::target_velocity`], with the correcting impulse capped by
+/// [`Self::force_limit`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AxisMotor {
+    /// Whether the motor drives this axis at all.
+    pub enabled: bool,
+    /// Relative velocity the motor drives toward (m/s or rad/s).
+    pub target_velocity: f32,
+    /// Maximum force/torque the motor may apply. ⚠️ A motor with a limit of
+    /// `0.0` is enabled and powerless — which is Godot's LINEAR default, so a
+    /// linear motor does nothing until a limit is authored.
+    pub force_limit: f32,
+}
+
+impl AxisMotor {
+    /// Godot's `linear_motor_*` defaults (`doc/classes/Generic6DOFJoint3D.xml`).
+    pub const fn linear_default() -> Self {
+        Self {
+            enabled: false,
+            target_velocity: 0.0,
+            // ⚠️ 0.0, NOT the angular default of 300.0. The two differ, and
+            // sharing one `Default` impl between them would silently give every
+            // linear motor 300 units of force it should not have.
+            force_limit: 0.0,
+        }
+    }
+
+    /// Godot's `angular_motor_*` defaults — note `force_limit = 300.0`.
+    pub const fn angular_default() -> Self {
+        Self {
+            enabled: false,
+            target_velocity: 0.0,
+            force_limit: 300.0,
+        }
+    }
+}
+
+/// A per-axis spring on a `Generic6DOFJoint3D` — Godot's
+/// `linear_spring_*` / `angular_spring_*` (pat-s3rrv.192).
+///
+/// Pulls the axis back toward [`Self::equilibrium_point`] rather than merely
+/// stopping it at a limit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AxisSpring {
+    /// Whether the spring acts on this axis.
+    pub enabled: bool,
+    /// How hard the spring pulls toward equilibrium. `0.0` is inert.
+    pub stiffness: f32,
+    /// How strongly relative motion along the axis is resisted.
+    pub damping: f32,
+    /// The offset/angle the spring pulls toward.
+    pub equilibrium_point: f32,
+}
+
+impl AxisSpring {
+    /// Godot's `linear_spring_*` defaults — `stiffness` and `damping` are
+    /// **0.01**, not 0.
+    pub const fn linear_default() -> Self {
+        Self {
+            enabled: false,
+            stiffness: 0.01,
+            damping: 0.01,
+            equilibrium_point: 0.0,
+        }
+    }
+
+    /// Godot's `angular_spring_*` defaults.
+    ///
+    /// ⚠️ `stiffness` and `damping` are **0.0** here, where the linear spring
+    /// defaults to 0.01. The asymmetry is real and documented, and one shared
+    /// `Default` would be wrong for whichever side it did not match.
+    pub const fn angular_default() -> Self {
+        Self {
+            enabled: false,
+            stiffness: 0.0,
+            damping: 0.0,
+            equilibrium_point: 0.0,
+        }
+    }
 }
 
 impl Generic6DofJoint3D {
@@ -517,6 +610,10 @@ impl Generic6DofJoint3D {
             local_b: Vector3::ZERO,
             linear_limits: [AxisLimit::default(); 3],
             angular_limits: [AxisLimit::default(); 3],
+            linear_motors: [AxisMotor::linear_default(); 3],
+            angular_motors: [AxisMotor::angular_default(); 3],
+            linear_springs: [AxisSpring::linear_default(); 3],
+            angular_springs: [AxisSpring::angular_default(); 3],
         }
     }
 

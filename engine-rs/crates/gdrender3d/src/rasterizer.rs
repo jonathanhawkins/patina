@@ -37,6 +37,25 @@ pub fn clip_to_screen(v: &VertexOutput, width: u32, height: u32) -> Option<Scree
     let ndc_y = v.clip_position[1] * w_recip;
     let depth = v.clip_position[2] * w_recip;
 
+    // Near/far clipping (pat-s3rrv.186). `perspective_projection_matrix` uses
+    // the OpenGL convention — `(far + near) / (near - far)` with `-1` in w —
+    // so a point exactly on the near plane maps to -1 and one on the far plane
+    // to +1. Anything outside that is outside the frustum.
+    //
+    // ⚠️ Before this, only `w <= 0` (behind the camera) rejected anything, so
+    // `near`/`far` changed the depth VALUE and nothing else: a Camera3D with
+    // `far = 10` still drew geometry a hundred units away. The clip planes were
+    // authored, plumbed, and inert.
+    //
+    // This drops the whole triangle when any vertex is outside, matching how
+    // the existing `w <= 0` test already behaves. A GPU would SPLIT the
+    // triangle at the plane instead; that difference shows only on geometry
+    // straddling a clip plane, where this renders nothing rather than a
+    // partial face.
+    if !(-1.0..=1.0).contains(&depth) {
+        return None;
+    }
+
     let x = (ndc_x + 1.0) * 0.5 * width as f32;
     let y = (1.0 - ndc_y) * 0.5 * height as f32;
 
@@ -377,6 +396,42 @@ mod tests {
             uv: [0.0, 0.0],
         };
         assert!(clip_to_screen(&v, 64, 64).is_none());
+    }
+
+    #[test]
+    /// Geometry outside the near/far planes is rejected (pat-s3rrv.186).
+    ///
+    /// Before this, only `w <= 0` rejected anything, so a Camera3D's `near`
+    /// and `far` changed the depth value and never hid a thing.
+    #[test]
+    fn clip_to_screen_rejects_outside_the_clip_range() {
+        // VertexOutput derives only Debug/Clone/Copy — every field is spelled
+        // out, matching the neighbouring test.
+        let at = |depth: f32| VertexOutput {
+            clip_position: [0.0, 0.0, depth, 1.0],
+            world_position: Vector3::ZERO,
+            world_normal: Vector3::UP,
+            uv: [0.0, 0.0],
+        };
+        assert!(
+            clip_to_screen(&at(-1.5), 64, 64).is_none(),
+            "in front of the near plane"
+        );
+        assert!(
+            clip_to_screen(&at(1.5), 64, 64).is_none(),
+            "beyond the far plane"
+        );
+        // The planes themselves are inside the frustum, so a mesh sitting
+        // exactly on `near` must still draw.
+        assert!(
+            clip_to_screen(&at(-1.0), 64, 64).is_some(),
+            "on the near plane"
+        );
+        assert!(
+            clip_to_screen(&at(1.0), 64, 64).is_some(),
+            "on the far plane"
+        );
+        assert!(clip_to_screen(&at(0.0), 64, 64).is_some(), "mid frustum");
     }
 
     #[test]

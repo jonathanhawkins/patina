@@ -39,7 +39,7 @@ fn structured_args() -> Vec<Variant> {
 fn structured_rpc_args_round_trip_as_variants() {
     let args = structured_args();
     let mut cache = RpcPathCache::new();
-    let (_simplify, call) = encode_rpc_call(&mut cache, NODE, "take_damage", &args);
+    let (_simplify, call) = encode_rpc_call(&mut cache, NODE, "take_damage", &args).unwrap();
 
     let (path, method, decoded) = decode_rpc_packet(&call).expect("first call decodes");
     assert_eq!(path, NODE);
@@ -69,7 +69,7 @@ fn a_confirmed_path_id_replaces_the_full_path_on_the_wire() {
     let mut receiver = RpcPathCache::new();
 
     // --- first call: announces the id, still addresses by full path ---------
-    let (simplify, first) = encode_rpc_call(&mut sender, NODE, "ping", &[]);
+    let (simplify, first) = encode_rpc_call(&mut sender, NODE, "ping", &[]).unwrap();
     let simplify = simplify.expect("the first call to a node must announce its id");
     assert_eq!(simplify[0], NetworkCommand::SimplifyPath.to_byte());
     assert_eq!(first[1], RpcAddressing::FullPath.to_byte());
@@ -85,7 +85,7 @@ fn a_confirmed_path_id_replaces_the_full_path_on_the_wire() {
     assert!(sender.is_confirmed(NODE));
 
     // --- second call: short form, and it still dispatches --------------------
-    let (again, second) = encode_rpc_call(&mut sender, NODE, "ping", &[]);
+    let (again, second) = encode_rpc_call(&mut sender, NODE, "ping", &[]).unwrap();
     assert!(again.is_none(), "the id is announced once, not every call");
     assert_eq!(second[1], RpcAddressing::CachedId.to_byte());
     assert!(
@@ -106,10 +106,10 @@ fn a_confirmed_path_id_replaces_the_full_path_on_the_wire() {
 #[test]
 fn an_unknown_path_id_is_dropped_rather_than_guessed() {
     let mut sender = RpcPathCache::new();
-    let (_, _) = encode_rpc_call(&mut sender, NODE, "ping", &[]);
+    let (_, _) = encode_rpc_call(&mut sender, NODE, "ping", &[]).unwrap();
     let id = sender.id_for(NODE).expect("id assigned");
     sender.confirm(id);
-    let (_, call) = encode_rpc_call(&mut sender, NODE, "ping", &[]);
+    let (_, call) = encode_rpc_call(&mut sender, NODE, "ping", &[]).unwrap();
     assert_eq!(call[1], RpcAddressing::CachedId.to_byte());
 
     let empty = RpcPathCache::new();
@@ -133,7 +133,7 @@ fn raw_packets_never_enter_rpc_dispatch() {
     assert_eq!(decode_raw_packet(&raw), Some(b"hello".to_vec()));
 
     let mut cache = RpcPathCache::new();
-    let (_, call) = encode_rpc_call(&mut cache, NODE, "ping", &[]);
+    let (_, call) = encode_rpc_call(&mut cache, NODE, "ping", &[]).unwrap();
     assert!(
         decode_raw_packet(&call).is_none(),
         "an RPC must not be consumed as a raw payload"

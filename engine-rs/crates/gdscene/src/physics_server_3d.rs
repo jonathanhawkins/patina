@@ -15,17 +15,19 @@
 
 use std::collections::{HashMap, HashSet};
 
-use gdcore::math::Vector3;
+use gdcore::math::{Vector2, Vector3};
 use gdcore::math3d::{Quaternion, Transform3D};
 use gdphysics3d::area3d::{
     Area3D, AreaId3D, AreaOverlapEvent3D, OverlapEvent3D, OverlapState3D, SpaceOverride,
 };
 use gdphysics3d::body::{BodyId3D, BodyType3D, FreezeMode, PhysicsBody3D};
 use gdphysics3d::joint::{
-    AxisLimit, ConeTwistJoint3D, Generic6DofJoint3D, HingeJoint3D, Joint3D, JointId3D, PinJoint3D,
-    SliderJoint3D,
+    AxisLimit, AxisMotor, AxisSpring, ConeTwistJoint3D, Generic6DofJoint3D, HingeJoint3D, Joint3D,
+    JointId3D, PinJoint3D, SliderJoint3D,
 };
 use gdphysics3d::shape::Shape3D;
+use gdphysics3d::softbody3d::{SoftBody3D, SoftBodyId3D, DEFAULT_WELD_EPSILON};
+use gdphysics3d::vehicle3d::{VehicleController3D, VehicleWheel3D};
 use gdphysics3d::world::PhysicsWorld3D;
 use gdvariant::Variant;
 
@@ -37,6 +39,11 @@ use crate::scene_tree::SceneTree;
 fn body_type_for_class_3d(class_name: &str) -> Option<BodyType3D> {
     match class_name {
         "RigidBody3D" => Some(BodyType3D::Rigid),
+        // A VehicleBody3D IS a RigidBody3D in Godot (`VehicleBody3D.xml`); the
+        // wheels only add forces on top (pat-s3rrv.194). Registering it here is
+        // what gives the chassis its shape, mass and contact handling for free —
+        // without this arm a `.tscn` vehicle registered as nothing at all.
+        "VehicleBody3D" => Some(BodyType3D::Rigid),
         "StaticBody3D" => Some(BodyType3D::Static),
         "CharacterBody3D" => Some(BodyType3D::Kinematic),
         // A ragdoll bone registers as Kinematic so it follows the animated bone
@@ -201,6 +208,30 @@ fn opt_float_prop_3d(tree: &SceneTree, id: NodeId, key: &str) -> Option<f64> {
     }
 }
 
+/// Authored vertex indices pinned on a `SoftBody3D`.
+///
+/// Godot writes `_pinned_points` as a packed int array; a hand-built node may
+/// use a plain array instead, so both are read. Negative entries are dropped
+/// rather than wrapping into a huge `usize`.
+fn pinned_point_indices_3d(tree: &SceneTree, id: NodeId) -> Vec<usize> {
+    let Some(node) = tree.get_node(id) else {
+        return Vec::new();
+    };
+    match node.get_property("_pinned_points") {
+        Variant::PackedInt32Array(v) => {
+            v.iter().filter(|&&i| i >= 0).map(|&i| i as usize).collect()
+        }
+        Variant::Array(v) => v
+            .iter()
+            .filter_map(|e| match e {
+                Variant::Int(i) if *i >= 0 => Some(*i as usize),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn u32_prop_3d(tree: &SceneTree, id: NodeId, key: &str, default: u32) -> u32 {
     tree.get_node(id)
         .map(|n| match n.get_property(key) {
@@ -298,16 +329,79 @@ fn float_array_prop_3d(node: &crate::node::Node, key: &str) -> Vec<f32> {
     }
 }
 
-/// Extracts a 3D collision shape from a `CollisionShape3D` node's properties.
+/// Builds an extruded prism from a `CollisionPolygon3D`'s inline outline
+/// (pat-s3rrv.189).
+///
+/// The prism geometry — AABB and support mapping — already existed in
+/// `gdphysics2d::shape3d`, fully unit-tested, and nothing in the engine
+/// produced one: `shape_from_node_3d` rejected every class but
+/// `CollisionShape3D`, so a body whose only collider was a polygon registered
+/// NO geometry at all.
+///
+/// 🔑 `depth` extrudes CENTRED on the node's Z: Godot emits each outline point
+/// twice, at `+depth * 0.5` and `-depth * 0.5`
+/// (`collision_polygon_3d.cpp:66-67`). Extruding 0..depth instead would sink
+/// the prism half its thickness below where the author drew it.
+///
+/// ⚠️ TWO DIFFERENT `Shape3D` ENUMS EXIST. `gdphysics2d::shape3d::Shape3D` has
+/// a `CollisionPolygon3D` variant with its own AABB and support mapping — and
+/// it is NOT the enum this server uses. `physics_server_3d` builds
+/// `gdphysics3d::shape::Shape3D`, which has no such variant. The prism is
+/// therefore expressed as a `ConvexPolygonShape` of the extruded corner points,
+/// which is both what Godot itself produces and what the 3D solver already
+/// understands — adding a variant to an enum with ~110 match sites would be a
+/// lane-wide outage for no gain.
+fn polygon_shape_from_node_3d(tree: &SceneTree, node_id: NodeId) -> Option<Shape3D> {
+    let node = tree.get_node(node_id)?;
+    let vertices: Vec<Vector2> = match node.get_property("polygon") {
+        Variant::PackedVector2Array(v) => v,
+        _ => Vec::new(),
+    };
+    // Godot contributes no collision for a degenerate outline, and a default
+    // stand-in prism here would be worse than none — the body would collide
+    // with something the author never drew.
+    if vertices.len() < 3 {
+        return None;
+    }
+    // `depth` defaults to 1.0 (extension_api.json), NOT 0: a missing property
+    // must not collapse the prism to a zero-thickness sheet.
+    let depth = match node.get_property("depth") {
+        Variant::Float(d) => d as f32,
+        Variant::Int(d) => d as f32,
+        _ => 1.0,
+    };
+    // Each outline point becomes two vertices, one per cap.
+    let half_depth = depth * 0.5;
+    let mut points = Vec::with_capacity(vertices.len() * 2);
+    for v in &vertices {
+        points.push(Vector3::new(v.x, v.y, half_depth));
+        points.push(Vector3::new(v.x, v.y, -half_depth));
+    }
+    Some(Shape3D::ConvexPolygonShape { points })
+}
+
+/// Extracts a 3D collision shape from a `CollisionShape3D` or
+/// `CollisionPolygon3D` node's properties.
 pub(crate) fn shape_from_node_3d(tree: &SceneTree, node_id: NodeId) -> Option<Shape3D> {
     let node = tree.get_node(node_id)?;
-    if node.class_name() != "CollisionShape3D" {
+    let is_polygon = node.class_name() == "CollisionPolygon3D";
+    if !is_polygon && node.class_name() != "CollisionShape3D" {
         return None;
     }
 
-    // If the shape is disabled, skip it.
+    // If the shape is disabled, skip it. Checked before the class split so a
+    // disabled polygon is skipped the same way a disabled shape is.
     if let Variant::Bool(true) = node.get_property("disabled") {
         return None;
+    }
+
+    // A CollisionPolygon3D carries its geometry inline as a `polygon`
+    // PackedVector2Array rather than referencing a Shape3D sub-resource, so it
+    // has no path through the sub-resource resolution below — exactly the split
+    // the 2D server already makes for CollisionPolygon2D
+    // (`physics_server::shape_from_node`).
+    if is_polygon {
+        return polygon_shape_from_node_3d(tree, node_id);
     }
 
     // A real `.tscn` writes `shape = SubResource("id")`, which the parser leaves
@@ -471,10 +565,31 @@ pub struct PhysicsServer3D {
     /// authored `Joint3D` classes, which would delete these on the very next
     /// sync and let the ragdoll fall apart.
     ragdoll_joints: HashMap<NodeId, JointId3D>,
+    /// Raycast-vehicle controllers, one per `VehicleBody3D` node
+    /// (pat-s3rrv.194). The chassis itself is an ordinary rigid body in the
+    /// world; the controller only pushes it.
+    vehicles: HashMap<NodeId, VehicleController3D>,
     /// Source of joint ids. `PhysicsWorld3D::add_joint` keeps whatever id the
     /// joint was built with, so the server is what has to hand out unique ones.
     next_joint_id: u64,
+    /// `SoftBody3D` scene nodes simulated in the world (pat-s3rrv.193).
+    ///
+    /// The weld map lives beside the id because it is derived from the node's
+    /// mesh at registration and is needed again to publish solved positions
+    /// back in authored vertex order.
+    soft_bodies: HashMap<NodeId, SoftBodyBinding3D>,
+    /// Source of soft-body ids. `PhysicsWorld3D::add_soft_body` keeps whatever
+    /// id the body was built with, so the server hands out unique ones — the
+    /// same arrangement as `next_joint_id`.
+    next_soft_body_id: u64,
     gravity: Vector3,
+}
+
+/// A `SoftBody3D` node's registration in the physics world.
+struct SoftBodyBinding3D {
+    id: SoftBodyId3D,
+    /// One entry per authored mesh vertex, naming the particle carrying it.
+    visual_to_physics: Vec<usize>,
 }
 
 impl PhysicsServer3D {
@@ -492,7 +607,10 @@ impl PhysicsServer3D {
             last_contact_events: Vec::new(),
             node_to_joint: HashMap::new(),
             ragdoll_joints: HashMap::new(),
+            vehicles: HashMap::new(),
             next_joint_id: 1,
+            soft_bodies: HashMap::new(),
+            next_soft_body_id: 1,
             gravity: Vector3::new(0.0, -9.8, 0.0),
         }
     }
@@ -511,7 +629,10 @@ impl PhysicsServer3D {
             last_contact_events: Vec::new(),
             node_to_joint: HashMap::new(),
             ragdoll_joints: HashMap::new(),
+            vehicles: HashMap::new(),
             next_joint_id: 1,
+            soft_bodies: HashMap::new(),
+            next_soft_body_id: 1,
             gravity,
         }
     }
@@ -574,7 +695,14 @@ impl PhysicsServer3D {
                         let placeholder_id = BodyId3D(0);
 
                         let position = node3d::get_global_transform(tree, nid).origin;
-                        let mass = float_prop_3d(tree, nid, "mass", 1.0) as f32;
+                        // ⚠️ `VehicleBody3D.mass` defaults to **40.0**, not
+                        // RigidBody3D's 1.0 (`VehicleBody3D.xml`). Sharing the
+                        // 1.0 default would make an unauthored car 40x too
+                        // light, so the same `engine_force` would rocket it —
+                        // wrong in a way that looks like the drive model is
+                        // broken rather than like a bad default.
+                        let default_mass = if class == "VehicleBody3D" { 40.0 } else { 1.0 };
+                        let mass = float_prop_3d(tree, nid, "mass", default_mass) as f32;
 
                         // Look for a CollisionShape3D child.
                         let shape = tree
@@ -710,6 +838,8 @@ impl PhysicsServer3D {
         // Joints last: they resolve `node_a`/`node_b` to `BodyId3D`s, so every
         // body has to be in `node_to_body` before this runs (pat-0q2kx.118).
         self.sync_joints(tree, &all_nodes);
+        self.sync_vehicles(tree, &all_nodes);
+        self.sync_soft_bodies(tree, &all_nodes);
     }
 
     /// Builds world joints from `Joint3D` scene nodes, and frees the ones whose
@@ -799,10 +929,86 @@ impl PhysicsServer3D {
 
             let id = JointId3D(self.next_joint_id);
             self.next_joint_id += 1;
-            let joint = Joint3D::Pin(
-                PinJoint3D::new(id, parent_body, body_id)
-                    .with_pivots(frame_parent.pivot, frame_child.pivot),
-            );
+            // Godot's `PhysicalBone3D.joint_type` chooses the constraint that
+            // ties this bone to its parent — it is what makes an elbow bend one
+            // way and a shoulder swing in a cone (pat-s3rrv.192). Every bone
+            // used to receive a pin regardless, so a ragdoll authored with hinge
+            // elbows flailed freely in every direction.
+            //
+            // ⚠️ `joint_constraints/angular_limit_*`, `swing_span` and
+            // `twist_span` are authored in DEGREES and converted with
+            // `deg_to_rad` on the way in (`physical_bone_3d.cpp:253, :259,
+            // :172, :178`). Reading them as radians would be an ~57x error that
+            // silently produces a limit far too wide to constrain anything.
+            let constraint = |key: &str, default: f64| -> f32 {
+                float_prop_3d(
+                    tree,
+                    bone_node,
+                    &format!("joint_constraints/{key}"),
+                    default,
+                ) as f32
+            };
+            // ⚠️ `u32_prop_3d`, not a hand-rolled i32 reader — `joint_type` is a
+            // non-negative enum ordinal and this is the integer helper this file
+            // already has.
+            let joint_type = u32_prop_3d(tree, bone_node, "joint_type", 0);
+            let joint = match joint_type {
+                // JOINT_TYPE_NONE — the bone falls free of its parent.
+                0 => None,
+                // JOINT_TYPE_CONE = 2.
+                2 => {
+                    let mut cone = ConeTwistJoint3D::new(id, parent_body, body_id)
+                        .with_pivots(frame_parent.pivot, frame_child.pivot)
+                        .with_twist_axis(frame_parent.x);
+                    cone.swing_span = constraint("swing_span", 45.0).to_radians();
+                    cone.twist_span = constraint("twist_span", 180.0).to_radians();
+                    cone.bias = constraint("bias", 0.3);
+                    cone.softness = constraint("softness", 0.8);
+                    cone.relaxation = constraint("relaxation", 1.0);
+                    Some(Joint3D::ConeTwist(cone))
+                }
+                // JOINT_TYPE_HINGE = 3.
+                3 => {
+                    let mut hinge =
+                        HingeJoint3D::new(id, parent_body, body_id).with_axis(frame_parent.z);
+                    hinge.anchor_a = frame_parent.pivot;
+                    hinge.anchor_b = frame_child.pivot;
+                    hinge.use_limit = truthy_prop_3d(
+                        tree,
+                        bone_node,
+                        "joint_constraints/angular_limit_enabled",
+                        true,
+                    );
+                    hinge.lower_limit = constraint("angular_limit_lower", -90.0).to_radians();
+                    hinge.upper_limit = constraint("angular_limit_upper", 90.0).to_radians();
+                    Some(Joint3D::Hinge(hinge))
+                }
+                // JOINT_TYPE_SLIDER = 4.
+                4 => {
+                    let mut slider = SliderJoint3D::new(id, parent_body, body_id)
+                        .with_anchors(frame_parent.pivot, frame_child.pivot)
+                        .with_axis(frame_parent.x);
+                    slider.use_linear_limit = true;
+                    slider.linear_limit_lower = constraint("linear_limit_lower", -1.0);
+                    slider.linear_limit_upper = constraint("linear_limit_upper", 1.0);
+                    Some(Joint3D::Slider(slider))
+                }
+                // JOINT_TYPE_6DOF = 5.
+                5 => Some(Joint3D::Generic6Dof(
+                    Generic6DofJoint3D::new(id, parent_body, body_id)
+                        .with_anchors(frame_parent.pivot, frame_child.pivot),
+                )),
+                // JOINT_TYPE_PIN = 1, and anything unrecognised. Pin is the
+                // safest fallback: it holds the bones together, which is what
+                // every ragdoll did before this switch existed.
+                _ => Some(Joint3D::Pin(
+                    PinJoint3D::new(id, parent_body, body_id)
+                        .with_pivots(frame_parent.pivot, frame_child.pivot),
+                )),
+            };
+            let Some(joint) = joint else {
+                continue;
+            };
             self.world.add_joint(joint);
             self.ragdoll_joints.insert(bone_node, id);
         }
@@ -1084,6 +1290,115 @@ impl PhysicsServer3D {
                             0.0,
                         ) as f32,
                     };
+
+                    // -- motors and springs (pat-s3rrv.192) -----------------
+                    //
+                    // ⚠️ The defaults are ASYMMETRIC between linear and angular
+                    // and are transcribed from `Generic6DOFJoint3D.xml`, not
+                    // derived: a linear motor's `force_limit` defaults to 0.0
+                    // while an angular one defaults to 300.0, and a linear
+                    // spring's `stiffness`/`damping` default to 0.01 while the
+                    // angular pair default to 0.0. Passing one shared default
+                    // here would silently give every joint the wrong strength on
+                    // whichever side it did not match — and a `force_limit` of 0
+                    // makes an enabled motor powerless, so the error looks like
+                    // "motors do not work" rather than like a bad default.
+                    let lm = AxisMotor::linear_default();
+                    dof.linear_motors[index] = AxisMotor {
+                        enabled: truthy_prop_3d(
+                            tree,
+                            node_id,
+                            &format!("linear_motor_{axis}/enabled"),
+                            lm.enabled,
+                        ),
+                        target_velocity: float_prop_3d(
+                            tree,
+                            node_id,
+                            &format!("linear_motor_{axis}/target_velocity"),
+                            lm.target_velocity as f64,
+                        ) as f32,
+                        force_limit: float_prop_3d(
+                            tree,
+                            node_id,
+                            &format!("linear_motor_{axis}/force_limit"),
+                            lm.force_limit as f64,
+                        ) as f32,
+                    };
+                    let am = AxisMotor::angular_default();
+                    dof.angular_motors[index] = AxisMotor {
+                        enabled: truthy_prop_3d(
+                            tree,
+                            node_id,
+                            &format!("angular_motor_{axis}/enabled"),
+                            am.enabled,
+                        ),
+                        target_velocity: float_prop_3d(
+                            tree,
+                            node_id,
+                            &format!("angular_motor_{axis}/target_velocity"),
+                            am.target_velocity as f64,
+                        ) as f32,
+                        force_limit: float_prop_3d(
+                            tree,
+                            node_id,
+                            &format!("angular_motor_{axis}/force_limit"),
+                            am.force_limit as f64,
+                        ) as f32,
+                    };
+                    let ls = AxisSpring::linear_default();
+                    dof.linear_springs[index] = AxisSpring {
+                        enabled: truthy_prop_3d(
+                            tree,
+                            node_id,
+                            &format!("linear_spring_{axis}/enabled"),
+                            ls.enabled,
+                        ),
+                        stiffness: float_prop_3d(
+                            tree,
+                            node_id,
+                            &format!("linear_spring_{axis}/stiffness"),
+                            ls.stiffness as f64,
+                        ) as f32,
+                        damping: float_prop_3d(
+                            tree,
+                            node_id,
+                            &format!("linear_spring_{axis}/damping"),
+                            ls.damping as f64,
+                        ) as f32,
+                        equilibrium_point: float_prop_3d(
+                            tree,
+                            node_id,
+                            &format!("linear_spring_{axis}/equilibrium_point"),
+                            ls.equilibrium_point as f64,
+                        ) as f32,
+                    };
+                    let as_ = AxisSpring::angular_default();
+                    dof.angular_springs[index] = AxisSpring {
+                        enabled: truthy_prop_3d(
+                            tree,
+                            node_id,
+                            &format!("angular_spring_{axis}/enabled"),
+                            as_.enabled,
+                        ),
+                        stiffness: float_prop_3d(
+                            tree,
+                            node_id,
+                            &format!("angular_spring_{axis}/stiffness"),
+                            as_.stiffness as f64,
+                        ) as f32,
+                        damping: float_prop_3d(
+                            tree,
+                            node_id,
+                            &format!("angular_spring_{axis}/damping"),
+                            as_.damping as f64,
+                        ) as f32,
+                        equilibrium_point: float_prop_3d(
+                            tree,
+                            node_id,
+                            &format!("angular_spring_{axis}/equilibrium_point"),
+                            as_.equilibrium_point as f64,
+                        ) as f32,
+                    };
                 }
                 Joint3D::Generic6Dof(dof)
             }
@@ -1258,6 +1573,123 @@ impl PhysicsServer3D {
     /// `CollisionShape3D` child, its transform and authored properties are read
     /// back every tick so a moved or retuned area takes effect, and areas whose
     /// nodes left the tree are freed.
+    /// Builds and refreshes a [`VehicleController3D`] for every `VehicleBody3D`
+    /// node, reading its `VehicleWheel3D` children's authored properties
+    /// (pat-s3rrv.194).
+    ///
+    /// ⚠️ Re-read EVERY tick, not just at registration. `engine_force`, `brake`
+    /// and `steering` are exactly the properties a script writes each frame —
+    /// that is the entire interface of a drivable car — so caching them once
+    /// would leave the throttle authorable and inert, which is the same class of
+    /// bug this bead exists to fix.
+    /// Writes each wheel's simulated contact state back onto its
+    /// `VehicleWheel3D` node (pat-s3rrv.194).
+    ///
+    /// ⚠️ Published as node PROPERTIES rather than kept inside the controller,
+    /// because that is the only place a script can reach them: by the time
+    /// GDScript runs, it has the tree and nothing else. `is_in_contact()` reads
+    /// `_wheel_in_contact` straight off the node.
+    fn publish_wheel_state(&self, tree: &mut SceneTree) {
+        if self.vehicles.is_empty() {
+            return;
+        }
+        // Wheel order follows scene order, which is exactly how `sync_vehicles`
+        // collected them — the two walks must stay in step or a wheel would be
+        // handed another wheel's contact.
+        let updates: Vec<(NodeId, bool, f32, Vector3)> = self
+            .vehicles
+            .iter()
+            .filter_map(|(&body_node, controller)| {
+                let node = tree.get_node(body_node)?;
+                let wheel_nodes: Vec<NodeId> = node
+                    .children()
+                    .iter()
+                    .copied()
+                    .filter(|&c| {
+                        tree.get_node(c)
+                            .map(|n| n.class_name() == "VehicleWheel3D")
+                            .unwrap_or(false)
+                    })
+                    .collect();
+                Some(
+                    wheel_nodes
+                        .into_iter()
+                        .zip(controller.wheels.iter())
+                        .map(|(wnode, w)| (wnode, w.in_contact, w.compression, w.contact_point))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .flatten()
+            .collect();
+
+        for (wnode, in_contact, compression, contact_point) in updates {
+            if let Some(node) = tree.get_node_mut(wnode) {
+                node.set_property("_wheel_in_contact", Variant::Bool(in_contact));
+                node.set_property("_wheel_compression", Variant::Float(compression as f64));
+                node.set_property("_wheel_contact_point", Variant::Vector3(contact_point));
+            }
+        }
+    }
+
+    fn sync_vehicles(&mut self, tree: &SceneTree, all_nodes: &[NodeId]) {
+        let mut live: Vec<NodeId> = Vec::new();
+        for &nid in all_nodes {
+            let Some(node) = tree.get_node(nid) else {
+                continue;
+            };
+            if node.class_name() != "VehicleBody3D" {
+                continue;
+            }
+            let Some(&chassis) = self.node_to_body.get(&nid) else {
+                continue;
+            };
+            live.push(nid);
+
+            let wheel_nodes: Vec<NodeId> = node
+                .children()
+                .iter()
+                .copied()
+                .filter(|&c| {
+                    tree.get_node(c)
+                        .map(|n| n.class_name() == "VehicleWheel3D")
+                        .unwrap_or(false)
+                })
+                .collect();
+
+            let controller = self
+                .vehicles
+                .entry(nid)
+                .or_insert_with(|| VehicleController3D::new(chassis));
+            controller.chassis = chassis;
+            controller.engine_force = float_prop_3d(tree, nid, "engine_force", 0.0) as f32;
+            controller.brake = float_prop_3d(tree, nid, "brake", 0.0) as f32;
+            controller.steering = float_prop_3d(tree, nid, "steering", 0.0) as f32;
+
+            controller.wheels.clear();
+            for wnode in wheel_nodes {
+                let mut wheel = VehicleWheel3D::new(node3d::get_position(tree, wnode));
+                wheel.radius = float_prop_3d(tree, wnode, "wheel_radius", 0.5) as f32;
+                wheel.suspension_rest_length =
+                    float_prop_3d(tree, wnode, "wheel_rest_length", 0.15) as f32;
+                wheel.suspension_travel =
+                    float_prop_3d(tree, wnode, "suspension_travel", 0.2) as f32;
+                wheel.suspension_stiffness =
+                    float_prop_3d(tree, wnode, "suspension_stiffness", 5.88) as f32;
+                // ⚠️ `damping_compression` (0.83), not `damping_relaxation`
+                // (0.88). The compression damper resists the spring while the
+                // wheel is being pushed up, which is the phase this
+                // single-damper model stands for.
+                wheel.suspension_damping =
+                    float_prop_3d(tree, wnode, "damping_compression", 0.83) as f32;
+                wheel.friction = float_prop_3d(tree, wnode, "wheel_friction_slip", 10.5) as f32;
+                wheel.driven = truthy_prop_3d(tree, wnode, "use_as_traction", false);
+                wheel.steerable = truthy_prop_3d(tree, wnode, "use_as_steering", false);
+                controller.wheels.push(wheel);
+            }
+        }
+        self.vehicles.retain(|nid, _| live.contains(nid));
+    }
+
     fn sync_areas(&mut self, tree: &SceneTree, all_nodes: &[NodeId]) {
         let mut current_area_nodes: HashMap<NodeId, ()> = HashMap::new();
 
@@ -1386,6 +1818,20 @@ impl PhysicsServer3D {
                     body.linear_velocity = delta / dt;
                 }
             }
+        }
+        // ⚠️ BEFORE `world.step`, so suspension and drive forces are part of the
+        // same integration that resolves contacts. Applied afterwards they would
+        // be a frame late and the chassis would visibly sag into the ground on
+        // the tick it landed.
+        //
+        // Controllers are taken out and put back because `step` needs `&mut
+        // self.world` while `self.vehicles` is also behind `&mut self`.
+        if !self.vehicles.is_empty() {
+            let mut taken: Vec<(NodeId, VehicleController3D)> = self.vehicles.drain().collect();
+            for (_, controller) in &mut taken {
+                controller.step(&mut self.world, dt);
+            }
+            self.vehicles.extend(taken);
         }
         self.world.step(dt);
         self.detect_body_contacts();
@@ -1739,8 +2185,135 @@ impl PhysicsServer3D {
     /// The three steps are public individually, and signal emission drains its
     /// events, so a frame loop that later calls them explicitly stays correct
     /// rather than firing everything twice.
+    /// Registers `SoftBody3D` nodes into the world and keeps their tuning live.
+    ///
+    /// The node's mesh is the source of geometry, so this goes through
+    /// `resolve_mesh` — the same entry point the render collection uses — rather
+    /// than re-deriving `__mesh__*`/SubResource flattening here. A node whose
+    /// mesh has not resolved yet is skipped, not registered empty, so it can be
+    /// picked up on a later tick once the resource loads.
+    fn sync_soft_bodies(&mut self, tree: &SceneTree, all_nodes: &[NodeId]) {
+        for &nid in all_nodes {
+            let Some(node) = tree.get_node(nid) else {
+                continue;
+            };
+            if node.class_name() != "SoftBody3D" {
+                continue;
+            }
+
+            if !self.soft_bodies.contains_key(&nid) {
+                let mesh = crate::render_server_3d::RenderServer3DAdapter::resolve_mesh(tree, nid);
+                if mesh.vertices.is_empty() {
+                    continue;
+                }
+
+                // Simulate in GLOBAL space: gravity is a world vector, so a
+                // rotated or translated node whose cloth was stepped in local
+                // space would sag along the wrong axis. A node at the origin
+                // with an identity basis cannot tell the difference, which is
+                // exactly why this is done rather than assumed.
+                let xf = node3d::get_global_transform(tree, nid);
+                let world_positions: Vec<Vector3> =
+                    mesh.vertices.iter().map(|&v| xf.xform(v)).collect();
+
+                self.next_soft_body_id += 1;
+                let id = SoftBodyId3D(self.next_soft_body_id);
+                let (mut body, visual_to_physics) = SoftBody3D::from_mesh(
+                    id,
+                    &world_positions,
+                    &mesh.indices,
+                    DEFAULT_WELD_EPSILON,
+                );
+
+                // `_pinned_points` holds AUTHORED vertex indices. Welding means
+                // those are not particle indices, so pinning them directly would
+                // pin whichever particles happened to land at those offsets.
+                for visual in pinned_point_indices_3d(tree, nid) {
+                    if let Some(&particle) = visual_to_physics.get(visual) {
+                        body.pin_vertex(particle);
+                    }
+                }
+
+                self.world.add_soft_body(body);
+                self.soft_bodies.insert(
+                    nid,
+                    SoftBodyBinding3D {
+                        id,
+                        visual_to_physics,
+                    },
+                );
+            }
+
+            self.apply_soft_body_tuning(tree, nid);
+        }
+    }
+
+    /// Re-reads the inspector-facing tuning properties every tick, so editing
+    /// one takes effect without rebuilding the cloth and losing its state.
+    fn apply_soft_body_tuning(&mut self, tree: &SceneTree, nid: NodeId) {
+        let Some(binding) = self.soft_bodies.get(&nid) else {
+            return;
+        };
+        let id = binding.id;
+
+        // Read before borrowing the world mutably.
+        let stiffness = float_prop_3d(tree, nid, "linear_stiffness", 0.5) as f32;
+        let damping = float_prop_3d(tree, nid, "damping_coefficient", 0.01) as f32;
+        let pressure = float_prop_3d(tree, nid, "pressure_coefficient", 0.0) as f32;
+        let precision = u32_prop_3d(tree, nid, "simulation_precision", 4);
+
+        if let Some(body) = self
+            .world
+            .soft_bodies_mut()
+            .iter_mut()
+            .find(|sb| sb.id == id)
+        {
+            body.stiffness = stiffness;
+            body.damping = damping;
+            body.pressure = pressure;
+            // Godot allows 0 but a zero-iteration solver silently applies no
+            // constraints at all, which reads as "the cloth has no edges".
+            body.solver_iterations = precision.max(1);
+        }
+    }
+
+    /// Publishes solved vertex positions back onto each soft body's node.
+    ///
+    /// Converted back into the node's LOCAL space, because that is the space the
+    /// mesh the renderer draws is expressed in — the node transform is applied
+    /// on top of it. Publishing world positions would apply the transform twice.
+    fn publish_soft_body_vertices(&mut self, tree: &mut SceneTree) {
+        let bindings: Vec<(NodeId, SoftBodyId3D, Vec<usize>)> = self
+            .soft_bodies
+            .iter()
+            .map(|(&nid, b)| (nid, b.id, b.visual_to_physics.clone()))
+            .collect();
+
+        for (nid, id, visual_to_physics) in bindings {
+            let inverse = node3d::get_global_transform(tree, nid).inverse();
+            let Some(body) = self
+                .world
+                .soft_bodies_mut()
+                .iter_mut()
+                .find(|sb| sb.id == id)
+            else {
+                continue;
+            };
+
+            crate::softbody_sync_3d::publish_vertices_with_transform(
+                tree,
+                nid,
+                body,
+                &visual_to_physics,
+                inverse,
+            );
+        }
+    }
+
     pub fn sync_from_physics(&mut self, tree: &mut SceneTree) {
         self.publish_body_contacts(tree);
+        self.publish_soft_body_vertices(tree);
+        self.publish_wheel_state(tree);
         for (&nid, &body_id) in &self.node_to_body {
             if let Some(body) = self.world.get_body(body_id) {
                 if body.body_type == BodyType3D::Rigid {

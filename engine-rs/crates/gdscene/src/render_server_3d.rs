@@ -12,7 +12,7 @@ use gdcore::math::{Rect2, Vector2, Vector2i, Vector3};
 use gdcore::math3d::Transform3D;
 use gdrender3d::{compare_framebuffers_3d, DiffResult3D, FrameBuffer3D, SoftwareRenderer3D};
 use gdserver3d::instance::{
-    GeometryInstanceSettings, Instance3DId, ShadowCastingSetting, VisibilityRangeFadeMode,
+    GeometryInstanceSettings, GiMode, Instance3DId, ShadowCastingSetting, VisibilityRangeFadeMode,
 };
 use gdserver3d::label3d::Label3D;
 use gdserver3d::light::{Light3D, Light3DId, LightType, OmniShadowMode};
@@ -528,7 +528,14 @@ impl RenderServer3DAdapter {
 
         for &nid in &all_nodes {
             if let Some(node) = tree.get_node(nid) {
-                if node.class_name() == "MeshInstance3D" {
+                // ⚠️ An EXACT class match here skipped every SUBCLASS of
+                // MeshInstance3D, so a `.tscn` SoftBody3D was never collected
+                // and drew nothing at all — deformed or not (pat-s3rrv.193).
+                // `SoftBody3D` is currently the only registered subclass, so
+                // naming it is exactly equivalent to walking the parent chain
+                // and costs no ClassDB lookup per node per frame; a second
+                // subclass should turn this into an `is_parent_class` check.
+                if matches!(node.class_name(), "MeshInstance3D" | "SoftBody3D") {
                     current_mesh_nodes.insert(nid, ());
 
                     let transform = node3d::get_global_transform(tree, nid);
@@ -593,6 +600,25 @@ impl RenderServer3DAdapter {
                             self.skinned_vertices.insert(nid, skinned.vertices.clone());
                             self.renderer.set_mesh(inst_id, skinned);
                         }
+                    }
+
+                    // -- soft bodies (pat-s3rrv.193) --
+                    // A SoftBody3D's vertices are owned by the solver, which
+                    // publishes them onto the node each tick. Applied AFTER
+                    // morph and skin because the solver's output is the final
+                    // word on where those vertices are, not another deformation
+                    // to compose with them.
+                    let solved = {
+                        // Scoped so the borrow of `instance_map` ends before
+                        // `renderer` is borrowed mutably — the same shape the
+                        // morph stage above uses.
+                        let base = self.instance_map.node_to_base_mesh.get(&nid);
+                        base.and_then(|base| {
+                            crate::softbody_sync_3d::softbody_mesh_for_node(tree, nid, base)
+                        })
+                    };
+                    if let Some(solved) = solved {
+                        self.renderer.set_mesh(inst_id, solved);
                     }
 
                     self.renderer.set_transform(inst_id, transform);
@@ -1136,7 +1162,7 @@ impl RenderServer3DAdapter {
     /// - Paths containing "sphere" → UV sphere
     /// - Paths containing "plane" or "quad" → XZ plane
     /// - Everything else (or no path) → default cube
-    fn resolve_mesh(tree: &SceneTree, nid: NodeId) -> Mesh3D {
+    pub fn resolve_mesh(tree: &SceneTree, nid: NodeId) -> Mesh3D {
         if let Some(path) = node3d::get_mesh_path(tree, nid) {
             let lower = path.to_lowercase();
 
@@ -2115,6 +2141,33 @@ fn geometry_instance_settings(
     }
     if let Some(v) = float_property(node, "extra_cull_margin") {
         g.extra_cull_margin = v.max(0.0);
+    }
+
+    // -- VisualInstance3D sorting (pat-s3rrv.187) ---------------------------
+    //
+    // Both properties were registered in ClassDB and present in the inspector
+    // schema, and NOTHING in either render path read them — the usual shape of
+    // a gap here: the value is authorable, round-trips through a `.tscn`, and
+    // changes nothing on screen.
+    if let Some(v) = float_property(node, "sorting_offset") {
+        g.sorting_offset = v;
+    }
+    // ⚠️ Only an explicit `false` turns this off. The default is TRUE, so
+    // treating an absent property as `false` would flip the sort point to the
+    // origin for every mesh in every existing scene.
+    if let Variant::Bool(b) = node.get_property("sorting_use_aabb_center") {
+        g.sorting_use_aabb_center = b;
+    }
+
+    // -- GeometryInstance3D global illumination / occlusion -----------------
+    if let Variant::Int(v) = node.get_property("gi_mode") {
+        g.gi_mode = GiMode::from_godot_int(v);
+    }
+    if let Some(v) = float_property(node, "gi_lightmap_texel_scale") {
+        g.gi_lightmap_texel_scale = v;
+    }
+    if let Variant::Bool(b) = node.get_property("ignore_occlusion_culling") {
+        g.ignore_occlusion_culling = b;
     }
 
     g

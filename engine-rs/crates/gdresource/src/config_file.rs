@@ -126,7 +126,13 @@ impl ConfigFile {
         let mut ctx = gdcore::crypto::AesContext::new();
         ctx.start(gdcore::crypto::AesMode::Encrypt, &key, &iv)
             .map_err(|e| e.to_string())?;
-        let ciphertext = ctx.update(text.as_bytes()).map_err(|e| e.to_string())?;
+        // PKCS7 lives HERE now, not in `AesContext::update` (pat-s3rrv.195).
+        // Godot's `AESContext.update()` pads nothing and requires whole blocks,
+        // so the padding moved up a layer. The bytes written are unchanged —
+        // same PKCS7 over the same AES-CBC — so files encrypted by earlier
+        // builds still load.
+        let padded = gdcore::crypto::pkcs7_pad(text.as_bytes());
+        let ciphertext = ctx.update(&padded).map_err(|e| e.to_string())?;
         std::fs::write(path, &ciphertext).map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -142,7 +148,11 @@ impl ConfigFile {
         let mut ctx = gdcore::crypto::AesContext::new();
         ctx.start(gdcore::crypto::AesMode::Decrypt, &key, &iv)
             .map_err(|e| e.to_string())?;
-        let plaintext = ctx.update(&ciphertext).map_err(|e| e.to_string())?;
+        // A wrong password decrypts to noise whose last byte is rarely a valid
+        // PKCS7 length, so unpadding is also the first place a bad password is
+        // detected — the UTF-8 check below is the second.
+        let padded = ctx.update(&ciphertext).map_err(|e| e.to_string())?;
+        let plaintext = gdcore::crypto::pkcs7_unpad(&padded).map_err(|e| e.to_string())?;
         let text = String::from_utf8(plaintext)
             .map_err(|_| "decrypted data is not valid UTF-8 (wrong password?)".to_string())?;
         ConfigFile::load_from_string(&text)

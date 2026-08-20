@@ -263,6 +263,50 @@ pub fn draw_texture_rect_transformed_shaded(
     uniforms: &HashMap<String, Variant>,
     time: f32,
 ) {
+    draw_texture_rect_transformed_shaded_with_screen(
+        fb,
+        texture,
+        xform,
+        rect,
+        source_rect,
+        modulate,
+        filter,
+        repeat,
+        instructions,
+        uniforms,
+        time,
+        None,
+    )
+}
+
+/// As [`draw_texture_rect_transformed_shaded`], but able to answer
+/// `texture(SCREEN_TEXTURE, …)` from a back-buffer snapshot (pat-s3rrv.183).
+///
+/// Godot's `BackBufferCopy` copies the framebuffer into a back buffer that
+/// canvas_item shaders sample as `SCREEN_TEXTURE`. Without a copy there is no
+/// screen to read, which is why this is an OPTION rather than always-on: Godot
+/// gives an uncopied `SCREEN_TEXTURE` undefined contents, and answering with the
+/// item's own texture — which is what the shared sampler did, since it ignored
+/// the sampler name entirely — silently returns plausible-looking pixels from
+/// the wrong source.
+///
+/// Additive rather than a new parameter on the existing function: that one has
+/// call sites in another crate's tests, and this keeps their signature intact.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_texture_rect_transformed_shaded_with_screen(
+    fb: &mut FrameBuffer,
+    texture: &Texture2D,
+    xform: Transform2D,
+    rect: Rect2,
+    source_rect: Option<Rect2>,
+    modulate: Color,
+    filter: TextureFilter,
+    repeat: TextureRepeat,
+    instructions: &[FragmentInstruction],
+    uniforms: &HashMap<String, Variant>,
+    time: f32,
+    screen: Option<&Texture2D>,
+) {
     if texture.width == 0 || texture.height == 0 {
         return;
     }
@@ -283,8 +327,20 @@ pub fn draw_texture_rect_transformed_shaded(
     let shader_env = ShaderEnv {
         sampler: Some({
             let tex = texture.clone();
-            Sampler::new(move |_name, uv| {
-                let c = canvas_material::sample_texture(&tex, uv[0], uv[1], filter, repeat);
+            // Owned because `Sampler` is `'static`. Only cloned when a
+            // BackBufferCopy actually ran, so an ordinary shaded draw pays
+            // nothing.
+            let screen_tex = screen.cloned();
+            Sampler::new(move |name, uv| {
+                // The NAME is what distinguishes the taps. Ignoring it — as
+                // this closure used to — makes `texture(SCREEN_TEXTURE, UV)`
+                // return the item's own texture, which looks like a working
+                // screen read and is not one.
+                let src = match name {
+                    "SCREEN_TEXTURE" | "screen_texture" => screen_tex.as_ref().unwrap_or(&tex),
+                    _ => &tex,
+                };
+                let c = canvas_material::sample_texture(src, uv[0], uv[1], filter, repeat);
                 [c.r, c.g, c.b, c.a]
             })
         }),

@@ -16,6 +16,7 @@ pub mod export;
 pub mod fetch_state;
 pub mod fetch_web;
 pub mod http_client;
+pub mod http_client_handle;
 pub mod http_request;
 pub mod input;
 /// Real `JavaScriptBridge` backend — browser bindings on wasm32, Godot's dummy
@@ -34,8 +35,10 @@ pub mod signing;
 pub mod stream_peer_buffer;
 pub mod stream_peer_tcp;
 pub mod tcp_multiplayer;
+pub mod tcp_server;
 pub mod thread;
 pub mod time;
+pub mod udp_server;
 pub mod web_request_driver;
 pub mod webrtc_peer;
 pub mod websocket_multiplayer;

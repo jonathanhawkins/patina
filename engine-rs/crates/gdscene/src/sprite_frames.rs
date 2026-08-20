@@ -239,6 +239,22 @@ pub struct AnimatedSpritePlayback {
     pub speed_scale: f32,
 }
 
+/// What one [`AnimatedSpritePlayback::advance`] call did, beyond moving the
+/// playhead.
+///
+/// ⚠️ `looped` and `finished` are mutually exclusive per call and mean opposite
+/// things: a looping clip WRAPS (and keeps playing), a non-looping clip STOPS.
+/// `advance` used to return a bare `bool` meaning "just finished", which had
+/// nowhere to report a wrap — the reason `animation_looped` was declared in
+/// ClassDB and never emitted (pat-s3rrv.182).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AdvanceOutcome {
+    /// A non-looping clip reached its end this call, for the first time.
+    pub finished: bool,
+    /// A looping clip wrapped past an end this call.
+    pub looped: bool,
+}
+
 impl AnimatedSpritePlayback {
     /// Starts playback of `animation` from frame 0.
     pub fn new(animation: &str) -> Self {
@@ -266,36 +282,104 @@ impl AnimatedSpritePlayback {
     /// Returns `true` exactly on the step a non-looping animation reaches its
     /// last frame, so the caller can emit `animation_finished` once. Looping
     /// animations wrap and never report finished.
-    pub fn advance(&mut self, dt: f32, frames: &SpriteFrames) -> bool {
+    pub fn advance(&mut self, dt: f32, frames: &SpriteFrames) -> AdvanceOutcome {
+        let mut out = AdvanceOutcome::default();
         if !self.playing {
-            return false;
+            return out;
         }
         let count = frames.frame_count(&self.animation);
         let fps = frames.speed(&self.animation);
         if count == 0 || fps <= 0.0 {
-            return false;
+            return out;
         }
         let loops = frames.loops(&self.animation);
         let interval = 1.0 / fps;
+        // ⚠️ `fps` is the CLIP's rate and must stay positive — the direction
+        // lives in `speed_scale`, which Godot allows to be negative
+        // (`play_backwards` is literally `play(name, -1, true)`,
+        // `animated_sprite_2d.cpp:520-522`). Folding the sign into `interval`
+        // instead would make the `<= 0.0` guard above reject every reversed
+        // clip as if it had no frame rate.
         self.time += dt * self.speed_scale;
-        let mut just_finished = false;
-        while self.time >= interval {
-            self.time -= interval;
-            if self.frame + 1 < count {
-                self.frame += 1;
-            } else if loops {
-                self.frame = 0;
-            } else {
-                // Rest on the last frame and fire animation_finished once.
-                self.playing = false;
-                if !self.finished {
-                    self.finished = true;
-                    just_finished = true;
+        let backwards = self.speed_scale < 0.0;
+
+        if backwards {
+            // Mirror image of the forward loop: time runs negative, and the
+            // wrap goes 0 -> last rather than last -> 0
+            // (`animated_sprite_2d.cpp:66-72`).
+            while self.time <= -interval {
+                self.time += interval;
+                if self.frame > 0 {
+                    self.frame -= 1;
+                } else if loops {
+                    self.frame = count - 1;
+                    out.looped = true;
+                } else {
+                    // Rest on frame 0, the reverse of resting on the last one.
+                    self.playing = false;
+                    if !self.finished {
+                        self.finished = true;
+                        out.finished = true;
+                    }
+                    break;
                 }
-                break;
+            }
+        } else {
+            while self.time >= interval {
+                self.time -= interval;
+                if self.frame + 1 < count {
+                    self.frame += 1;
+                } else if loops {
+                    self.frame = 0;
+                    out.looped = true;
+                } else {
+                    // Rest on the last frame and fire animation_finished once.
+                    self.playing = false;
+                    if !self.finished {
+                        self.finished = true;
+                        out.finished = true;
+                    }
+                    break;
+                }
             }
         }
-        just_finished
+        out
+    }
+
+    /// Starts playing `animation` in reverse from its last frame — Godot's
+    /// `play_backwards(name)`, which is exactly `play(name, -1, true)`
+    /// (`animated_sprite_2d.cpp:520-522`).
+    ///
+    /// ⚠️ `from_end` is the half that is easy to drop. Reversing the speed alone
+    /// leaves the playhead at frame 0, where a non-looping clip is already at
+    /// its reverse end — it would finish immediately without showing a frame.
+    pub fn play_backwards(&mut self, animation: &str, frames: &SpriteFrames) {
+        self.animation = animation.to_string();
+        self.frame = frames.frame_count(animation).saturating_sub(1);
+        self.time = 0.0;
+        self.speed_scale = -self.speed_scale.abs().max(f32::MIN_POSITIVE);
+        self.playing = true;
+        self.finished = false;
+    }
+
+    /// Godot's `pause()`: freeze where we are.
+    ///
+    /// ⚠️ Distinct from `stop()`, which resets. Godot spells both as
+    /// `_stop_internal(reset)` (`animated_sprite_2d.cpp:524-540`) — the whole
+    /// difference is whether `frame` and progress are cleared, and collapsing
+    /// the two loses the ability to resume mid-clip.
+    pub fn pause(&mut self) {
+        self.playing = false;
+    }
+
+    /// Godot's `get_playing_speed()`: the SIGNED effective speed, or 0 while
+    /// stopped. Negative means the clip is running backwards.
+    pub fn playing_speed(&self) -> f32 {
+        if self.playing {
+            self.speed_scale
+        } else {
+            0.0
+        }
     }
 }
 

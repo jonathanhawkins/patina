@@ -15811,13 +15811,21 @@ fn api_runtime_status(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     send_json(
         stream,
         &format!(
-            r#"{{"running":{running},"paused":{paused},"frame_count":{frame_count},"fps":{fps:.1},"suspended":{},"time_scale":{:.2},"muted":{},"camera_override":{},"hide_selection":{},"input_mode":"{}"}}"#,
+            r#"{{"running":{running},"paused":{paused},"frame_count":{frame_count},"fps":{fps:.1},"suspended":{},"time_scale":{:.2},"muted":{},"camera_override":{},"hide_selection":{},"input_mode":"{}","midi_open":{}}}"#,
             state.runtime_suspended,
             state.runtime_time_scale,
             state.runtime_muted,
             state.runtime_camera_override,
             state.runtime_hide_selection,
-            state.runtime_input_mode
+            state.runtime_input_mode,
+            // Whether the game called `OS.open_midi_inputs()` (pat-s3rrv.176).
+            //
+            // ⚠️ This exists so the CLIENT can gate `navigator.requestMIDIAccess()`
+            // on it. Godot only starts the platform MIDI driver when a game asks
+            // for it, and on the web that call is what raises a browser
+            // permission prompt — requesting unconditionally would prompt every
+            // user who ever pressed Play, for a device almost none of them have.
+            gdscript_interop::midi_ports::is_open()
         ),
     );
 }

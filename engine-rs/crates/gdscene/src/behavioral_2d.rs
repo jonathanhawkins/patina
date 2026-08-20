@@ -77,20 +77,22 @@ fn float_prop(tree: &SceneTree, id: NodeId, key: &str) -> Option<f32> {
 
 /// The product of the local scales along the parent chain.
 ///
-/// `node2d` deliberately has no global-scale extractor: pulling scale back out
-/// of a matrix that also carries rotation is where shear and sign errors creep
-/// in (see the note on `get_global_rotation`). Multiplying the chain has the
-/// same shape as that function and is exact for the translate·rotate·scale
-/// transforms Node2D builds.
+/// 🔑 Delegates to [`node2d::get_global_scale`] rather than repeating the walk
+/// (pat-s3rrv.184). This was a byte-for-byte copy of it, and the copy had
+/// already drifted: `node2d`'s version stops at a `top_level` node and this one
+/// walked past it, so a detached node reported one scale here and another
+/// there. One rule, one place — the whole reason that class of bug is possible
+/// is having two.
+///
+/// ⚠️ The doc this replaced claimed the chain product is "exact for the
+/// translate·rotate·scale transforms Node2D builds". That is no longer true:
+/// Node2D now composes **skew** as well (`node_2d.cpp::_update_transform`), so
+/// this is an approximation that ignores shear — as is `get_global_rotation`.
+/// Godot derives both by decomposing the global transform. Deriving them
+/// properly is a real change with its own blast radius and is NOT part of this
+/// bead; recording it here so the next reader does not trust the old claim.
 fn global_scale(tree: &SceneTree, id: NodeId) -> Vector2 {
-    let mut scale = Vector2::new(1.0, 1.0);
-    let mut current = Some(id);
-    while let Some(n) = current {
-        let s = node2d::get_scale(tree, n);
-        scale = Vector2::new(scale.x * s.x, scale.y * s.y);
-        current = tree.get_node(n).and_then(|node| node.parent());
-    }
-    scale
+    node2d::get_global_scale(tree, id)
 }
 
 // ===========================================================================

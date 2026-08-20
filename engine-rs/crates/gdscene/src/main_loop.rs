@@ -16,7 +16,7 @@
 //!    [`NOTIFICATION_PROCESS`](gdobject::NOTIFICATION_PROCESS) exactly once.
 //! 3. Frame counter and elapsed-time accumulators are updated.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::audio_server_bridge::AudioServerBridge;
 use crate::navigation::{
@@ -522,6 +522,15 @@ pub struct MainLoop {
     physics_server: PhysicsServer,
     /// Physics server bridging scene nodes to gdphysics3d (pat-u3l8c.1).
     physics_server_3d: PhysicsServer3D,
+    /// Players whose voice an `Area2D` audio-bus override is currently holding
+    /// off their own bus (pat-s3rrv.190).
+    ///
+    /// ⚠️ Needed because the redirect is applied to the LIVE VOICE
+    /// (`AudioServer::redirect_stream_bus`), which nothing resets — the
+    /// per-frame `sync_player_node` pass only re-stamps the *player's*
+    /// configured bus, not the voice's. Without remembering who was overridden,
+    /// a player walking out of a reverb zone would keep the reverb bus forever.
+    area2d_bus_overridden: HashSet<NodeId>,
     /// Audio bridge driving AudioStreamPlayer nodes through gdaudio
     /// (pat-u3l8c.2).
     audio_bridge: AudioServerBridge,
@@ -693,6 +702,7 @@ impl MainLoop {
             tree,
             physics_server: PhysicsServer::new(),
             physics_server_3d: PhysicsServer3D::new(),
+            area2d_bus_overridden: HashSet::new(),
             audio_bridge: AudioServerBridge::new(),
             physics_ticks_per_second: 60,
             max_physics_steps_per_frame: 8,
@@ -1846,6 +1856,10 @@ impl MainLoop {
         // (pat-0q2kx.98). The link-aware search already existed on both servers
         // but nothing ever filled these, so `links` was permanently empty and a
         // scene whose regions are joined only by a link could not path at all.
+        // pat-s3rrv.180: obstacles never reached the query. `add_obstacle` had
+        // no runtime caller at all, so the detour logic in
+        // `navigation::NavigationServer2D` was dead code in a shipped engine.
+        let mut obstacles2: Vec<crate::navigation::NavigationObstacle2D> = Vec::new();
         let mut links2: Vec<crate::navigation::NavigationLink2D> = Vec::new();
         let mut links3: Vec<crate::navigation::NavigationLink3D> = Vec::new();
 
@@ -1941,6 +1955,31 @@ impl MainLoop {
                         }
                     }
                 }
+                // 🔑 Gated on `avoidance_enabled`, which defaults to TRUE — not on
+                // `affect_navigation_mesh`, which defaults to false. The two
+                // belong to different Godot subsystems and picking the wrong one
+                // makes every plain obstacle inert: `affect_navigation_mesh`
+                // discards source geometry inside the obstacle's `vertices`
+                // during BAKING, while `radius` is the avoidance shape
+                // (`doc/classes/NavigationObstacle2D.xml`). This detour is
+                // radius-based, so `avoidance_enabled` is its gate.
+                "NavigationObstacle2D" => {
+                    let radius = match node.get_property("radius") {
+                        Variant::Float(f) => f as f32,
+                        Variant::Int(i) => i as f32,
+                        _ => 0.0,
+                    };
+                    let enabled =
+                        !matches!(node.get_property("avoidance_enabled"), Variant::Bool(false));
+                    // A zero radius is Godot's default and blocks nothing; adding
+                    // it would put a degenerate circle on the map that every
+                    // segment test still has to consider.
+                    if enabled && radius > 0.0 {
+                        let origin = crate::node2d::get_global_position(&self.tree, id);
+                        obstacles2
+                            .push(crate::navigation::NavigationObstacle2D::new(origin, radius));
+                    }
+                }
                 // A link is an off-mesh connection between two points on the map
                 // (pat-0q2kx.98). Godot's `get_global_start_position()` is the
                 // node's global transform applied to `start_position`, so the
@@ -2015,6 +2054,12 @@ impl MainLoop {
         let mut server2 = NavigationServer2D::new();
         if !polys2.is_empty() {
             server2.add_region(NavMesh2D::new(polys2, 0.5));
+        }
+        // After the region, because an obstacle is a modifier on the map the
+        // region defines — `NavigationServer2D::find_path` consults them while
+        // walking the polygons it just registered.
+        for obstacle in obstacles2 {
+            server2.add_obstacle(obstacle);
         }
         let mut server3 = NavigationServer3D::new();
         if !polys3.is_empty() {
@@ -2631,6 +2676,58 @@ impl MainLoop {
             let point = crate::node3d::get_global_transform(&self.tree, node_id).origin;
             if let Some(bus) = self.physics_server_3d.audio_bus_at(&self.tree, point) {
                 self.audio_bridge.redirect_node_bus(node_id, &bus);
+            }
+        }
+    }
+
+    /// The 2D twin of [`Self::apply_area3d_audio_bus_overrides`]: reroutes every
+    /// live `AudioStreamPlayer2D` standing inside an `Area2D` whose
+    /// `audio_bus_override` is on to that area's `audio_bus_name`
+    /// (pat-s3rrv.190).
+    ///
+    /// ⚠️ Filters on the node's class, which the 3D sweep does not do.
+    /// `player_nodes()` returns EVERY tracked player — plain, 2D and 3D — and
+    /// asking `node2d::get_global_position` for a 3D player yields a position
+    /// anyway, so an unfiltered sweep would let a 2D area capture a 3D voice
+    /// whose 2D position happens to land inside it.
+    fn apply_area2d_audio_bus_overrides(&mut self) {
+        // Nothing to do before any area is registered AND with nobody currently
+        // overridden — the common case for a scene with no Area2D at all. The
+        // second half matters: if the last area is removed while a player is
+        // still overridden, that player must still be restored.
+        if self.physics_server.area_count() == 0 && self.area2d_bus_overridden.is_empty() {
+            return;
+        }
+        for node_id in self.audio_bridge.player_nodes() {
+            let is_2d = self
+                .tree
+                .get_node(node_id)
+                .map(|n| n.class_name() == "AudioStreamPlayer2D")
+                .unwrap_or(false);
+            if !is_2d {
+                continue;
+            }
+            let point = crate::node2d::get_global_position(&self.tree, node_id);
+            match self.physics_server.audio_bus_at(&self.tree, point) {
+                Some(bus) => {
+                    self.audio_bridge.redirect_node_bus(node_id, &bus);
+                    self.area2d_bus_overridden.insert(node_id);
+                }
+                None => {
+                    // ⚠️ Restore only players THIS sweep moved. Redirecting every
+                    // player outside every area would stamp its own `bus` over a
+                    // voice some other system legitimately routed elsewhere — and
+                    // it is why the restore is gated on the remembered set rather
+                    // than applied unconditionally.
+                    if self.area2d_bus_overridden.remove(&node_id) {
+                        let own = match self.tree.get_node(node_id).map(|n| n.get_property("bus")) {
+                            Some(Variant::String(b)) if !b.is_empty() => b,
+                            // Godot's default bus for a player that names none.
+                            _ => "Master".to_string(),
+                        };
+                        self.audio_bridge.redirect_node_bus(node_id, &own);
+                    }
+                }
             }
         }
     }
@@ -3831,6 +3928,10 @@ impl MainLoop {
             // snaps BoneAttachment3D children to their bone. The render bridge reads
             // the resulting poses to skin bound MeshInstance3D meshes.
             crate::skeleton3d::process_skeletons_with_delta(&mut self.tree, delta_secs);
+            // pat-s3rrv.185: the 2D bone phase, immediately after the 3D one.
+            // Both write poses that the render pass reads later in the same
+            // frame, so a skeleton posed here is skinned before anything draws.
+            crate::skeleton2d::process_skeletons_2d(&mut self.tree);
 
             // -- particle phase (pat-u3l8c.4) --
             // Advance CPU particle simulators for emitting particle nodes so that
@@ -3998,6 +4099,7 @@ impl MainLoop {
         // heard on the old bus for one frame, which is exactly the kind of
         // one-frame lag that makes a reverb zone feel wrong on entry.
         self.apply_area3d_audio_bus_overrides();
+        self.apply_area2d_audio_bus_overrides();
 
         // -- audio phase (pat-u3l8c.2) --
         // After scripts so same-frame `playing` changes are heard immediately.

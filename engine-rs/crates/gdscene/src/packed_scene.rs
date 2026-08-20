@@ -495,6 +495,55 @@ impl PackedScene {
             }
         }
 
+        // Per-surface material overrides BEYOND surface 0 (pat-s3rrv.187).
+        //
+        // The `__material__*` pass below flattens exactly one material — Godot's
+        // mesh-level priority picks `material_override`, then
+        // `surface_material_override/0`, then the mesh's own `material` — so a
+        // two-material mesh lost its second material silently at load, and with
+        // it any chance of writing it back out.
+        //
+        // ⚠️ A DISTINCT prefix, not a suffix inside `__material__`. The surface-0
+        // collector rebuilds its body with `strip_prefix("__material__")`, so a
+        // key spelled `__material__1__albedo_color` would be harvested into
+        // surface 0's sub-resource as a property literally named
+        // `1__albedo_color` — corrupting the material that already worked.
+        //
+        // The `__resref__surface_material_override/N` companion these pair with
+        // is already written by the generic sub-resource pass above, for every N.
+        for tmpl in &mut templates {
+            let indexed: Vec<(usize, String)> = tmpl
+                .properties
+                .iter()
+                .filter_map(|(k, v)| {
+                    let idx: usize = k.strip_prefix("surface_material_override/")?.parse().ok()?;
+                    // Surface 0 is the `__material__*` pass's job; duplicating it
+                    // here would write the same bag under two prefixes.
+                    if idx == 0 {
+                        return None;
+                    }
+                    match v {
+                        Variant::String(sub) => {
+                            Some((idx, sub.strip_prefix("SubResource:")?.to_string()))
+                        }
+                        _ => None,
+                    }
+                })
+                .collect();
+            for (idx, mat_id) in indexed {
+                let Some(props) = sub_resource_props.get(&mat_id) else {
+                    continue;
+                };
+                let flattened: Vec<(String, Variant)> = props
+                    .iter()
+                    .map(|(k, v)| (format!("__surfmat{idx}__{k}"), v.clone()))
+                    .collect();
+                for (k, v) in flattened {
+                    tmpl.properties.insert(k, v);
+                }
+            }
+        }
+
         // Flatten a `MultiplayerSynchronizer`'s `SceneReplicationConfig`
         // sub-resource onto the node under `__replication__*` (pat-s3rrv.17),
         // mirroring the `__material__*` pass below.
@@ -1570,6 +1619,47 @@ impl PackedScene {
                 tmpl.properties
                     .insert("__navmesh_polygons__".into(), polygons.clone());
             }
+            // The BAKE parameters (pat-s3rrv.180). `vertices`/`polygons` above
+            // are the baked *result*; these are the inputs a rebake needs, and
+            // they live on the same resource.
+            //
+            // 🔑 Without this the whole parameter set stops at the resource
+            // boundary. `gdserver3d::bake_navigation_mesh` reads
+            // `agent_max_slope` correctly and always saw the hardcoded default,
+            // so a scene that chose 60 degrees baked as though it had chosen 45
+            // — the reader was wired and the value never arrived.
+            for name in [
+                "cell_size",
+                "cell_height",
+                "agent_height",
+                "agent_radius",
+                "agent_max_climb",
+                "agent_max_slope",
+                "region_min_size",
+                "edge_max_length",
+            ] {
+                if let Some(value) = props.get(name) {
+                    tmpl.properties.insert(
+                        format!("{}{name}__", crate::nav_bake::PARAM_PREFIX),
+                        value.clone(),
+                    );
+                }
+            }
+        }
+
+        // pat-s3rrv.185: a `Skeleton2D`'s modification stack, two sub-resource
+        // levels down. Same reason as the navmesh params above — the data is in
+        // the file and stops at the resource boundary.
+        for tmpl in &mut templates {
+            let Some(Variant::String(reference)) = tmpl.properties.get("modification_stack") else {
+                continue;
+            };
+            let Some(stack_id) = reference.strip_prefix("SubResource:").map(String::from) else {
+                continue;
+            };
+            let mut flat: HashMap<String, Variant> = HashMap::new();
+            flatten_modification_stack(&sub_resources, &sub_resource_props, &stack_id, &mut flat);
+            tmpl.properties.extend(flat);
         }
 
         // Resolve `tile_set = SubResource("id")` on TileMapLayer/TileMap nodes
@@ -2758,6 +2848,72 @@ fn parse_ext_resource_ref(value: &str) -> Option<String> {
 /// which is a real key and would fire the shortcut on the wrong press.
 ///
 /// Modifier mask: 1 = ctrl, 2 = shift, 4 = alt.
+/// Flattens a `Skeleton2D`'s modification stack onto the node (pat-s3rrv.185).
+///
+/// A rig is a TWO-level sub-resource chain — the node's `modification_stack`
+/// names a `SkeletonModificationStack2D`, whose `modifications/<i>` entries each
+/// name a `SkeletonModification2D*` (`skeleton_modification_stack_2d.cpp:37`).
+/// Neither level survived loading: `modification_stack = SubResource("…")` sat
+/// on the node as an inert string and the entries were unreachable, so a rig
+/// with a TwoBoneIK modifier loaded and did nothing.
+///
+/// 🔑 Emitted as individually-keyed properties rather than one packed array.
+/// Modifications are heterogeneous — the fields TwoBoneIK needs are not the
+/// fields LookAt needs — and the `shortcut` flatten beside this one records why
+/// parallel index-read arrays are a trap: they are coupled through their length,
+/// and a filter applied to one silently misaligns the other.
+fn flatten_modification_stack(
+    sub_resources: &HashMap<String, String>,
+    sub_props: &HashMap<String, HashMap<String, Variant>>,
+    stack_id: &str,
+    out: &mut HashMap<String, Variant>,
+) {
+    let Some(stack) = sub_props.get(stack_id) else {
+        return;
+    };
+    if matches!(stack.get("enabled"), Some(Variant::Bool(false))) {
+        return;
+    }
+    let mut count = 0usize;
+    // Godot writes the entries as `modifications/0`, `modifications/1`, … and
+    // stops at the first gap, which is what `modification_count` bounds.
+    for i in 0..64usize {
+        let Some(Variant::String(reference)) = stack.get(&format!("modifications/{i}")) else {
+            break;
+        };
+        let Some(mod_id) = reference.strip_prefix("SubResource:") else {
+            break;
+        };
+        let Some(props) = sub_props.get(mod_id) else {
+            break;
+        };
+        let class = sub_resources.get(mod_id).cloned().unwrap_or_default();
+        out.insert(format!("__skelmod_{i}_class__"), Variant::String(class));
+        // ⚠️ Only the fields a modification actually declares are copied, and
+        // each keeps its own key. A missing key means "not authored", which the
+        // executor distinguishes from an authored zero.
+        for key in [
+            "enabled",
+            "target_nodepath",
+            "flip_bend_direction",
+            "target_minimum_distance",
+            "target_maximum_distance",
+            "joint_one_bone2d_node",
+            "joint_two_bone2d_node",
+            "joint_one_bone_idx",
+            "joint_two_bone_idx",
+        ] {
+            if let Some(v) = props.get(key) {
+                out.insert(format!("__skelmod_{i}_{key}__"), v.clone());
+            }
+        }
+        count = i + 1;
+    }
+    if count > 0 {
+        out.insert("__skelmod_count__".into(), Variant::Int(count as i64));
+    }
+}
+
 fn shortcut_event_pairs(
     sub_props: &HashMap<String, HashMap<String, Variant>>,
     shortcut_id: &str,

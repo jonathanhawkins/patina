@@ -1090,6 +1090,17 @@ pub struct NavigationAgent2D {
     pub path: Vec<Vector2>,
     /// Index of the next waypoint in the path.
     pub path_index: usize,
+    /// Godot's `simplify_path`: run the computed path through a
+    /// Ramer-Douglas-Peucker reduction before following it.
+    ///
+    /// ⚠️ The reduction itself (`nav_simplify::simplify_path_2d` / `_3d`) has
+    /// existed and been unit-tested since pat-u3l8c.66 with **no callers at
+    /// all** — these two fields plus the call in `set_target_position` are what
+    /// let the scene-authored knobs reach it (pat-s3rrv.181).
+    pub simplify_path: bool,
+    /// Godot's `simplify_epsilon`: the RDP tolerance in world units. Zero leaves
+    /// the path untouched even when `simplify_path` is set.
+    pub simplify_epsilon: f32,
     /// Distance at which a waypoint is considered reached.
     pub path_desired_distance: f32,
     /// Distance at which the **target** is considered reached
@@ -1144,6 +1155,9 @@ impl NavigationAgent2D {
             target_position: Vector2::ZERO,
             path: Vec::new(),
             path_index: 0,
+            // Godot defaults: reduction off, zero tolerance.
+            simplify_path: false,
+            simplify_epsilon: 0.0,
             path_desired_distance: 4.0,
             target_desired_distance: 10.0,
             avoidance_enabled: false,
@@ -1194,6 +1208,9 @@ impl NavigationAgent2D {
     ) {
         self.target_position = target;
         self.path = server.find_path(current, target);
+        if self.simplify_path && self.simplify_epsilon > 0.0 {
+            self.path = crate::nav_simplify::simplify_path_2d(&self.path, self.simplify_epsilon);
+        }
         self.path_index = if self.path.len() > 1 { 1 } else { 0 };
         // A fresh target restarts the navigation lifecycle.
         self.finished_emitted = false;
@@ -1389,6 +1406,17 @@ pub struct NavigationAgent3D {
     pub path: Vec<Vector3>,
     /// Index of the next waypoint in the path.
     pub path_index: usize,
+    /// Godot's `simplify_path`: run the computed path through a
+    /// Ramer-Douglas-Peucker reduction before following it.
+    ///
+    /// ⚠️ The reduction itself (`nav_simplify::simplify_path_2d` / `_3d`) has
+    /// existed and been unit-tested since pat-u3l8c.66 with **no callers at
+    /// all** — these two fields plus the call in `set_target_position` are what
+    /// let the scene-authored knobs reach it (pat-s3rrv.181).
+    pub simplify_path: bool,
+    /// Godot's `simplify_epsilon`: the RDP tolerance in world units. Zero leaves
+    /// the path untouched even when `simplify_path` is set.
+    pub simplify_epsilon: f32,
     /// Distance at which a waypoint is considered reached.
     pub path_desired_distance: f32,
     /// Distance at which the **target** is considered reached
@@ -1498,6 +1526,9 @@ impl NavigationAgent3D {
             target_position: Vector3::ZERO,
             path: Vec::new(),
             path_index: 0,
+            // Godot defaults: reduction off, zero tolerance.
+            simplify_path: false,
+            simplify_epsilon: 0.0,
             path_desired_distance: 1.0,
             target_desired_distance: 1.0,
             avoidance_enabled: false,
@@ -1633,6 +1664,9 @@ impl NavigationAgent3D {
         } else {
             server.find_path(current, target)
         };
+        if self.simplify_path && self.simplify_epsilon > 0.0 {
+            self.path = crate::nav_simplify::simplify_path_3d(&self.path, self.simplify_epsilon);
+        }
         self.path_index = if self.path.len() > 1 { 1 } else { 0 };
         self.finished_emitted = false;
     }

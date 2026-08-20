@@ -37,6 +37,7 @@ pub mod obb_sat_3d;
 pub mod query;
 pub mod shape;
 pub mod softbody3d;
+pub mod vehicle3d;
 pub mod world;
 
 pub use area3d::{

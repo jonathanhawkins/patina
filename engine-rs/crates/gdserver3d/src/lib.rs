@@ -14,6 +14,7 @@ pub mod environment;
 pub mod extra_meshes;
 pub mod fog_volume;
 pub mod gi;
+pub mod immediate_mesh;
 pub mod instance;
 pub mod label3d;
 pub mod light;

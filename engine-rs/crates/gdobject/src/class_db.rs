@@ -2925,6 +2925,40 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("debug_fill", Variant::Bool(true))),
     );
 
+    // CollisionPolygon3D (pat-s3rrv.189). The 3D body shape scan matches on
+    // `class_name()` and never consults ClassDB, so the collider works without
+    // this — but reflection (`has_method`, the inspector, `get_property_list`)
+    // reported the class as unknown.
+    //
+    // ⚠️ Accessor names are TRANSCRIBED from doc/classes/CollisionPolygon3D.xml,
+    // not derived: `disabled` reads through `is_disabled`, and `debug_fill`
+    // through `get_enable_debug_fill` / `set_enable_debug_fill` — neither
+    // follows the `get_<name>` pattern a guess would produce.
+    register_class(
+        ClassRegistration::new("CollisionPolygon3D")
+            .parent("Node3D")
+            .property(PropertyInfo::new(
+                "polygon",
+                Variant::PackedVector2Array(Vec::new()),
+            ))
+            // Godot's default is 1.0, not 0: a zero depth would collapse the
+            // extruded prism to a sheet.
+            .property(PropertyInfo::new("depth", Variant::Float(1.0)))
+            .property(
+                PropertyInfo::new("disabled", Variant::Bool(false))
+                    .with_accessors("is_disabled", "set_disabled"),
+            )
+            .property(PropertyInfo::new("margin", Variant::Float(0.04)))
+            .property(PropertyInfo::new(
+                "debug_color",
+                Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 0.0)),
+            ))
+            .property(
+                PropertyInfo::new("debug_fill", Variant::Bool(true))
+                    .with_accessors("get_enable_debug_fill", "set_enable_debug_fill"),
+            ),
+    );
+
     register_joint_3d_classes();
 
     // -- Shape3D resource hierarchy (pat-nzgdu.96) --
@@ -7755,7 +7789,59 @@ pub fn register_3d_classes() {
                 .method(MethodInfo::new("rectangle_shape_create", 0))
                 .method(MethodInfo::new("body_add_shape", 2))
                 .method(MethodInfo::new("body_set_space", 2))
-                .method(MethodInfo::new("shape_set_data", 2)),
+                .method(MethodInfo::new("shape_set_data", 2))
+                // BodyState: TRANSFORM 0, LINEAR_VELOCITY 1, ANGULAR_VELOCITY 2,
+                // SLEEPING 3, CAN_SLEEP 4.
+                .constant("BODY_STATE_TRANSFORM", 0)
+                .constant("BODY_STATE_LINEAR_VELOCITY", 1)
+                .constant("BODY_STATE_ANGULAR_VELOCITY", 2)
+                .constant("BODY_STATE_SLEEPING", 3)
+                .constant("BODY_STATE_CAN_SLEEP", 4)
+                // BodyParameter. INERTIA, and both DAMP_MODE entries, are
+                // registered because Godot has them — the dispatch DECLINES
+                // them, which is a different and honest answer from pretending
+                // the enum does not exist.
+                .constant("BODY_PARAM_BOUNCE", 0)
+                .constant("BODY_PARAM_FRICTION", 1)
+                .constant("BODY_PARAM_MASS", 2)
+                .constant("BODY_PARAM_INERTIA", 3)
+                .constant("BODY_PARAM_CENTER_OF_MASS", 4)
+                .constant("BODY_PARAM_GRAVITY_SCALE", 5)
+                .constant("BODY_PARAM_LINEAR_DAMP_MODE", 6)
+                .constant("BODY_PARAM_ANGULAR_DAMP_MODE", 7)
+                .constant("BODY_PARAM_LINEAR_DAMP", 8)
+                .constant("BODY_PARAM_ANGULAR_DAMP", 9)
+                .constant("BODY_PARAM_MAX", 10)
+                // AreaParameter.
+                .constant("AREA_PARAM_GRAVITY_OVERRIDE_MODE", 0)
+                .constant("AREA_PARAM_GRAVITY", 1)
+                .constant("AREA_PARAM_GRAVITY_VECTOR", 2)
+                .constant("AREA_PARAM_GRAVITY_IS_POINT", 3)
+                .constant("AREA_PARAM_GRAVITY_POINT_UNIT_DISTANCE", 4)
+                .constant("AREA_PARAM_LINEAR_DAMP_OVERRIDE_MODE", 5)
+                .constant("AREA_PARAM_LINEAR_DAMP", 6)
+                .constant("AREA_PARAM_ANGULAR_DAMP_OVERRIDE_MODE", 7)
+                .constant("AREA_PARAM_ANGULAR_DAMP", 8)
+                .constant("AREA_PARAM_PRIORITY", 9)
+                // AreaSpaceOverrideMode — the values `area_set_param(area,
+                // AREA_PARAM_GRAVITY_OVERRIDE_MODE, ...)` takes. Without one of
+                // these an area's gravity is inert, because `Disabled` is the
+                // default on both sides.
+                .constant("AREA_SPACE_OVERRIDE_DISABLED", 0)
+                .constant("AREA_SPACE_OVERRIDE_COMBINE", 1)
+                .constant("AREA_SPACE_OVERRIDE_COMBINE_REPLACE", 2)
+                .constant("AREA_SPACE_OVERRIDE_REPLACE", 3)
+                .constant("AREA_SPACE_OVERRIDE_REPLACE_COMBINE", 4)
+                // ShapeType, for completeness of the constructors we expose.
+                .constant("SHAPE_WORLD_BOUNDARY", 0)
+                .constant("SHAPE_SEPARATION_RAY", 1)
+                .constant("SHAPE_SEGMENT", 2)
+                .constant("SHAPE_CIRCLE", 3)
+                .constant("SHAPE_RECTANGLE", 4)
+                .constant("SHAPE_CAPSULE", 5)
+                .constant("SHAPE_CONVEX_POLYGON", 6)
+                .constant("SHAPE_CONCAVE_POLYGON", 7)
+                .constant("SHAPE_CUSTOM", 8),
         );
     }
     if !class_exists("PhysicsServer2DManager") {
@@ -11777,6 +11863,16 @@ pub fn register_2d_classes() {
                 .property(
                     PropertyInfo::new("scale", Variant::Vector2(Vector2::ONE))
                         .with_accessors("get_scale", "set_scale"),
+                )
+                // pat-s3rrv.184: `skew` shears the Y basis relative to X
+                // (`scene/2d/node_2d.cpp::_update_transform`). It was absent
+                // from ClassDB entirely — the only `skew` in this file was
+                // StyleBoxFlat's, which is a Vector2 — so a script reading
+                // `node.skew` got no declared default and the inspector had
+                // nothing to show.
+                .property(
+                    PropertyInfo::new("skew", Variant::Float(0.0))
+                        .with_accessors("get_skew", "set_skew"),
                 ),
         );
     }
@@ -12872,6 +12968,16 @@ pub fn register_2d_classes() {
                     )
                     .with_accessors("get_skeleton", "set_skeleton"),
                 )
+                // pat-s3rrv.185: `skeleton` was registered and `bones` was not,
+                // so a rig declared which skeleton to follow and never which
+                // vertices follow which bone. Serialized by
+                // `Polygon2D::_get_bones` as a FLAT array alternating
+                // path/PackedFloat32Array, which is why the accessors are the
+                // underscore-prefixed pair rather than get_/set_bones.
+                .property(
+                    PropertyInfo::new("bones", Variant::Array(Vec::new()))
+                        .with_accessors("_get_bones", "_set_bones"),
+                )
                 .property(
                     PropertyInfo::new("texture", Variant::Nil)
                         .with_accessors("get_texture", "set_texture"),
@@ -12906,19 +13012,45 @@ pub fn register_2d_classes() {
         register_class(
             ClassRegistration::new("Skeleton2D")
                 .parent("Node2D")
-                .signal(SignalInfo::new("bone_setup_changed")),
+                .signal(SignalInfo::new("bone_setup_changed"))
+                // pat-s3rrv.135 registered SkeletonModificationStack2D as a
+                // class; nothing on the node pointed at one (pat-s3rrv.185).
+                .property(PropertyInfo::new("modification_stack", Variant::Nil)),
         );
     }
     if !class_exists("Bone2D") {
         // Bone2D: 1 own properties from doc/classes/Bone2D.xml.
         register_class(
-            ClassRegistration::new("Bone2D").parent("Node2D").property(
-                PropertyInfo::new(
-                    "rest",
-                    Variant::Transform2D(gdcore::math::Transform2D::IDENTITY),
+            ClassRegistration::new("Bone2D")
+                .parent("Node2D")
+                // ⚠️ Godot's default is the all-zero, SINGULAR matrix, not the
+                // identity (`doc/classes/Bone2D.xml`: `Transform2D(0, 0, 0, 0,
+                // 0, 0)`). It was registered as IDENTITY here, and that is not a
+                // harmless cosmetic difference: `packed_scene`'s
+                // `node_with_class_defaults` writes every ClassDB default onto
+                // the node, so EVERY loaded Bone2D carried an identity `rest`
+                // that reads as authored. Skinning is `pose * rest⁻¹`, so an
+                // identity rest collapses to `pose` and flings the polygon by the
+                // bone's whole world transform on frame 0. Zero is what makes
+                // "defaulted" and "never authored" the same state — which is
+                // exactly why upstream chose it (pat-s3rrv.185).
+                .property(
+                    PropertyInfo::new(
+                        "rest",
+                        Variant::Transform2D(gdcore::math::Transform2D {
+                            x: gdcore::math::Vector2::ZERO,
+                            y: gdcore::math::Vector2::ZERO,
+                            origin: gdcore::math::Vector2::ZERO,
+                        }),
+                    )
+                    .with_accessors("get_rest", "set_rest"),
                 )
-                .with_accessors("get_rest", "set_rest"),
-            ),
+                // The IK tip is the far end of the last bone, and `length` is the
+                // only record of where that is.
+                .property(
+                    PropertyInfo::new("length", Variant::Float(16.0))
+                        .with_accessors("get_length", "set_length"),
+                ),
         );
     }
 
@@ -25028,7 +25160,37 @@ pub fn register_networking_classes() {
                 .method(MethodInfo::new("property_set_spawn", 2))
                 .method(MethodInfo::new("property_set_sync", 2))
                 .method(MethodInfo::new("property_set_watch", 2))
-                .method(MethodInfo::new("remove_property", 1)),
+                .method(MethodInfo::new("remove_property", 1))
+                // pat-s3rrv.177 — the `ReplicationMode` enum the bead's scope
+                // names alongside the method set.
+                //
+                // ⚠️ Transcribed POSITIONALLY from
+                // `modules/multiplayer/scene_replication_config.h`:
+                // `enum ReplicationMode { REPLICATION_MODE_NEVER,
+                // REPLICATION_MODE_ALWAYS, REPLICATION_MODE_ON_CHANGE }`.
+                // Deriving the order from the more familiar
+                // "never / on change / always" phrasing swaps the last two, and
+                // a script asking for ON_CHANGE would silently get ALWAYS —
+                // every-tick traffic instead of change-gated.
+                //
+                // ⚠️ Absent until now, so `SceneReplicationConfig.REPLICATION_MODE_ON_CHANGE`
+                // did not resolve at all. The tell was in my own earlier test for
+                // this bead: it spells the modes as raw `0/1/2` because the named
+                // constants were unavailable.
+                //
+                // 🔑 `.enumeration(..)`, not three loose `.constant(..)` calls:
+                // its doc says it registers each constant in BOTH places, so the
+                // names resolve via `class_get_integer_constant` AND the enum
+                // itself shows up in `class_get_enum_list` — which is what Godot
+                // reports and what an inspector needs to draw a dropdown. Using
+                // the lower-level primitive would have delivered the constants
+                // while silently omitting the enum.
+                .enumeration(
+                    EnumInfo::new("ReplicationMode")
+                        .constant("REPLICATION_MODE_NEVER", 0)
+                        .constant("REPLICATION_MODE_ALWAYS", 1)
+                        .constant("REPLICATION_MODE_ON_CHANGE", 2),
+                ),
         );
     }
     if !class_exists("MultiplayerSpawner") {
@@ -25070,6 +25232,24 @@ pub fn register_networking_classes() {
                     "replication_interval",
                     Variant::Float(0.0),
                 ))
+                // pat-s3rrv.177 — Godot's central property for this node
+                // (doc_classes/MultiplayerSynchronizer.xml:61): the
+                // SceneReplicationConfig resource naming what replicates.
+                //
+                // ⚠️ It was absent entirely, so a .tscn's
+                // `replication_config = SubResource("...")` had nowhere to
+                // land and reflected as Nil — the synchronizer looked
+                // configured and replicated nothing it was authored to.
+                //
+                // `Variant::Nil` is how every other object-typed property
+                // is registered here (see `mesh`, `skin`, `texture`); the
+                // accessor names are the XML's own.
+                .property(
+                    PropertyInfo::new("replication_config", Variant::Nil)
+                        .with_accessors("get_replication_config", "set_replication_config"),
+                )
+                .method(MethodInfo::new("get_replication_config", 0))
+                .method(MethodInfo::new("set_replication_config", 1))
                 .method(MethodInfo::new("get_root_path", 0))
                 .method(MethodInfo::new("set_root_path", 1))
                 .method(MethodInfo::new("get_replication_interval", 0))
@@ -25368,6 +25548,244 @@ fn register_navigation_resource_classes() {
         register_class(ClassRegistration::new("Resource").parent("RefCounted"));
     }
 
+    if !class_exists("NavigationPathQueryParameters2D") {
+        // The argument object of `NavigationServer2D.query_path()`
+        // (pat-s3rrv.181). A RefCounted data holder — registering it is what
+        // makes `ClassDB.instantiate` hand back one carrying Godot's defaults.
+        register_class(
+            ClassRegistration::new("NavigationPathQueryParameters2D")
+                .parent("RefCounted")
+                .property(
+                    PropertyInfo::new("map", Variant::Rid(gdcore::id::Rid::INVALID))
+                        .with_accessors("get_map", "set_map"),
+                )
+                .property(
+                    PropertyInfo::new(
+                        "start_position",
+                        Variant::Vector2(gdcore::math::Vector2::ZERO),
+                    )
+                    .with_accessors("get_start_position", "set_start_position"),
+                )
+                .property(
+                    PropertyInfo::new(
+                        "target_position",
+                        Variant::Vector2(gdcore::math::Vector2::ZERO),
+                    )
+                    .with_accessors("get_target_position", "set_target_position"),
+                )
+                // Bit 0 of the layer mask, i.e. layer 1 — NOT 0, which would
+                // match no region and make every query return an empty path.
+                .property(
+                    PropertyInfo::new("navigation_layers", Variant::Int(1))
+                        .with_accessors("get_navigation_layers", "set_navigation_layers"),
+                )
+                .property(
+                    PropertyInfo::new("pathfinding_algorithm", Variant::Int(0))
+                        .with_accessors("get_pathfinding_algorithm", "set_pathfinding_algorithm"),
+                )
+                // PATH_POSTPROCESSING_CORRIDORFUNNEL = 0 is the default: a taut
+                // funnelled line, not the polygon-centroid chain.
+                .property(
+                    PropertyInfo::new("path_postprocessing", Variant::Int(0))
+                        .with_accessors("get_path_postprocessing", "set_path_postprocessing"),
+                )
+                // All three metadata bits (TYPES | RIDS | OWNERS) are on by
+                // default, which is why a plain query still fills `path_types`.
+                .property(
+                    PropertyInfo::new("metadata_flags", Variant::Int(7))
+                        .with_accessors("get_metadata_flags", "set_metadata_flags"),
+                )
+                // ⚠️ `get_simplify_path`, not `is_simplify_path`. Godot uses the
+                // `is_` prefix for plenty of bool getters and not for this one.
+                .property(
+                    PropertyInfo::new("simplify_path", Variant::Bool(false))
+                        .with_accessors("get_simplify_path", "set_simplify_path"),
+                )
+                .property(
+                    PropertyInfo::new("simplify_epsilon", Variant::Float(0.0))
+                        .with_accessors("get_simplify_epsilon", "set_simplify_epsilon"),
+                )
+                .property(
+                    PropertyInfo::new("excluded_regions", Variant::Array(Vec::new()))
+                        .with_accessors("get_excluded_regions", "set_excluded_regions"),
+                )
+                .property(
+                    PropertyInfo::new("included_regions", Variant::Array(Vec::new()))
+                        .with_accessors("get_included_regions", "set_included_regions"),
+                )
+                // ⚠️ Zero means "no limit" for all three of these, and 4096 is a
+                // real cap for the polygon budget. Copying 0 into
+                // `path_search_max_polygons` would refuse every search.
+                .property(
+                    PropertyInfo::new("path_return_max_length", Variant::Float(0.0))
+                        .with_accessors("get_path_return_max_length", "set_path_return_max_length"),
+                )
+                .property(
+                    PropertyInfo::new("path_return_max_radius", Variant::Float(0.0))
+                        .with_accessors("get_path_return_max_radius", "set_path_return_max_radius"),
+                )
+                .property(
+                    PropertyInfo::new("path_search_max_polygons", Variant::Int(4096))
+                        .with_accessors(
+                            "get_path_search_max_polygons",
+                            "set_path_search_max_polygons",
+                        ),
+                )
+                .property(
+                    PropertyInfo::new("path_search_max_distance", Variant::Float(0.0))
+                        .with_accessors(
+                            "get_path_search_max_distance",
+                            "set_path_search_max_distance",
+                        ),
+                ),
+        );
+    }
+    if !class_exists("NavigationPathQueryParameters3D") {
+        // The argument object of `NavigationServer3D.query_path()`
+        // (pat-s3rrv.181). A RefCounted data holder — registering it is what
+        // makes `ClassDB.instantiate` hand back one carrying Godot's defaults.
+        register_class(
+            ClassRegistration::new("NavigationPathQueryParameters3D")
+                .parent("RefCounted")
+                .property(
+                    PropertyInfo::new("map", Variant::Rid(gdcore::id::Rid::INVALID))
+                        .with_accessors("get_map", "set_map"),
+                )
+                .property(
+                    PropertyInfo::new(
+                        "start_position",
+                        Variant::Vector3(gdcore::math::Vector3::ZERO),
+                    )
+                    .with_accessors("get_start_position", "set_start_position"),
+                )
+                .property(
+                    PropertyInfo::new(
+                        "target_position",
+                        Variant::Vector3(gdcore::math::Vector3::ZERO),
+                    )
+                    .with_accessors("get_target_position", "set_target_position"),
+                )
+                // Bit 0 of the layer mask, i.e. layer 1 — NOT 0, which would
+                // match no region and make every query return an empty path.
+                .property(
+                    PropertyInfo::new("navigation_layers", Variant::Int(1))
+                        .with_accessors("get_navigation_layers", "set_navigation_layers"),
+                )
+                .property(
+                    PropertyInfo::new("pathfinding_algorithm", Variant::Int(0))
+                        .with_accessors("get_pathfinding_algorithm", "set_pathfinding_algorithm"),
+                )
+                // PATH_POSTPROCESSING_CORRIDORFUNNEL = 0 is the default: a taut
+                // funnelled line, not the polygon-centroid chain.
+                .property(
+                    PropertyInfo::new("path_postprocessing", Variant::Int(0))
+                        .with_accessors("get_path_postprocessing", "set_path_postprocessing"),
+                )
+                // All three metadata bits (TYPES | RIDS | OWNERS) are on by
+                // default, which is why a plain query still fills `path_types`.
+                .property(
+                    PropertyInfo::new("metadata_flags", Variant::Int(7))
+                        .with_accessors("get_metadata_flags", "set_metadata_flags"),
+                )
+                // ⚠️ `get_simplify_path`, not `is_simplify_path`. Godot uses the
+                // `is_` prefix for plenty of bool getters and not for this one.
+                .property(
+                    PropertyInfo::new("simplify_path", Variant::Bool(false))
+                        .with_accessors("get_simplify_path", "set_simplify_path"),
+                )
+                .property(
+                    PropertyInfo::new("simplify_epsilon", Variant::Float(0.0))
+                        .with_accessors("get_simplify_epsilon", "set_simplify_epsilon"),
+                )
+                .property(
+                    PropertyInfo::new("excluded_regions", Variant::Array(Vec::new()))
+                        .with_accessors("get_excluded_regions", "set_excluded_regions"),
+                )
+                .property(
+                    PropertyInfo::new("included_regions", Variant::Array(Vec::new()))
+                        .with_accessors("get_included_regions", "set_included_regions"),
+                )
+                // ⚠️ Zero means "no limit" for all three of these, and 4096 is a
+                // real cap for the polygon budget. Copying 0 into
+                // `path_search_max_polygons` would refuse every search.
+                .property(
+                    PropertyInfo::new("path_return_max_length", Variant::Float(0.0))
+                        .with_accessors("get_path_return_max_length", "set_path_return_max_length"),
+                )
+                .property(
+                    PropertyInfo::new("path_return_max_radius", Variant::Float(0.0))
+                        .with_accessors("get_path_return_max_radius", "set_path_return_max_radius"),
+                )
+                .property(
+                    PropertyInfo::new("path_search_max_polygons", Variant::Int(4096))
+                        .with_accessors(
+                            "get_path_search_max_polygons",
+                            "set_path_search_max_polygons",
+                        ),
+                )
+                .property(
+                    PropertyInfo::new("path_search_max_distance", Variant::Float(0.0))
+                        .with_accessors(
+                            "get_path_search_max_distance",
+                            "set_path_search_max_distance",
+                        ),
+                ),
+        );
+    }
+    if !class_exists("NavigationPathQueryResult2D") {
+        // The out parameter of `NavigationServer2D.query_path()`.
+        register_class(
+            ClassRegistration::new("NavigationPathQueryResult2D")
+                .parent("RefCounted")
+                .property(
+                    PropertyInfo::new("path", Variant::PackedVector2Array(Vec::new()))
+                        .with_accessors("get_path", "set_path"),
+                )
+                .property(
+                    PropertyInfo::new("path_types", Variant::PackedInt32Array(Vec::new()))
+                        .with_accessors("get_path_types", "set_path_types"),
+                )
+                .property(
+                    PropertyInfo::new("path_rids", Variant::Array(Vec::new()))
+                        .with_accessors("get_path_rids", "set_path_rids"),
+                )
+                .property(
+                    PropertyInfo::new("path_owner_ids", Variant::PackedInt64Array(Vec::new()))
+                        .with_accessors("get_path_owner_ids", "set_path_owner_ids"),
+                )
+                .property(
+                    PropertyInfo::new("path_length", Variant::Float(0.0))
+                        .with_accessors("get_path_length", "set_path_length"),
+                ),
+        );
+    }
+    if !class_exists("NavigationPathQueryResult3D") {
+        // The out parameter of `NavigationServer3D.query_path()`.
+        register_class(
+            ClassRegistration::new("NavigationPathQueryResult3D")
+                .parent("RefCounted")
+                .property(
+                    PropertyInfo::new("path", Variant::PackedVector3Array(Vec::new()))
+                        .with_accessors("get_path", "set_path"),
+                )
+                .property(
+                    PropertyInfo::new("path_types", Variant::PackedInt32Array(Vec::new()))
+                        .with_accessors("get_path_types", "set_path_types"),
+                )
+                .property(
+                    PropertyInfo::new("path_rids", Variant::Array(Vec::new()))
+                        .with_accessors("get_path_rids", "set_path_rids"),
+                )
+                .property(
+                    PropertyInfo::new("path_owner_ids", Variant::PackedInt64Array(Vec::new()))
+                        .with_accessors("get_path_owner_ids", "set_path_owner_ids"),
+                )
+                .property(
+                    PropertyInfo::new("path_length", Variant::Float(0.0))
+                        .with_accessors("get_path_length", "set_path_length"),
+                ),
+        );
+    }
     if !class_exists("NavigationPolygon") {
         register_class(
             ClassRegistration::new("NavigationPolygon")
@@ -28925,6 +29343,45 @@ mod tests {
                 "SceneReplicationConfig is missing `{m}`"
             );
         }
+
+        // pat-s3rrv.177 — the ReplicationMode enum the bead's scope names
+        // alongside the method set. Absent until now, so a script writing
+        // `SceneReplicationConfig.REPLICATION_MODE_ON_CHANGE` got nothing.
+        let modes = info
+            .enums
+            .iter()
+            .find(|e| e.name == "ReplicationMode")
+            .expect("ReplicationMode must be registered as an ENUM, not just as loose constants");
+        assert_eq!(
+            modes.constants,
+            vec![
+                ("REPLICATION_MODE_NEVER".to_string(), 0),
+                ("REPLICATION_MODE_ALWAYS".to_string(), 1),
+                ("REPLICATION_MODE_ON_CHANGE".to_string(), 2),
+            ],
+            "⚠️ ORDER IS THE POINT. scene_replication_config.h declares NEVER, \
+             ALWAYS, ON_CHANGE — deriving the order from the more natural-sounding \
+             \"never / on change / always\" swaps the last two, and a script asking \
+             for ON_CHANGE would silently get ALWAYS: every-tick traffic instead of \
+             change-gated"
+        );
+        assert!(
+            !modes.is_bitfield,
+            "ReplicationMode is a plain enum, not a flags bitfield — an inspector \
+             would otherwise draw a multi-select"
+        );
+
+        // …and enum constants must ALSO be plain integer constants of the class,
+        // which is what `enumeration()` guarantees and three loose `.constant()`
+        // calls would only half-deliver.
+        assert_eq!(
+            info.integer_constants
+                .iter()
+                .find(|(n, _)| n == "REPLICATION_MODE_ON_CHANGE")
+                .map(|(_, v)| *v),
+            Some(2),
+            "the enum's constants must be reachable as class constants too"
+        );
 
         // Arity, not just presence: the paired get/set differ by one argument
         // and a wrong count mis-binds at the call site.

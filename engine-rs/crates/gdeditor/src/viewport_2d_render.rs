@@ -281,6 +281,36 @@ pub enum Render2DKind {
         /// One UV per vertex, same order.
         uvs: Vec<Vector2>,
     },
+    /// A `BackBufferCopy`: snapshots the frame so far into the back buffer a
+    /// canvas_item shader samples as `SCREEN_TEXTURE` (pat-s3rrv.183).
+    ///
+    /// Draws nothing itself. It is a draw-list item purely so the snapshot
+    /// happens at its ORDER position — everything below it is in the copy,
+    /// everything above is not, which is the whole point of the node.
+    BackBufferCopy {
+        /// Godot's `copy_mode`: 0 disabled, 1 rect, 2 whole viewport.
+        /// ⚠️ Defaults to 1 (RECT), not 0 — `doc/classes/BackBufferCopy.xml`.
+        copy_mode: i64,
+        /// The region copied in `COPY_MODE_RECT`, in the node's local space.
+        rect: Rect2,
+    },
+    /// A `MultiMeshInstance2D`: one mesh drawn once per instance transform
+    /// (pat-s3rrv.183).
+    ///
+    /// The geometry is shared and the per-instance data travels with it, so the
+    /// whole node is still a single draw-list item rather than N items — which
+    /// is the point of a MultiMesh.
+    MultiMesh {
+        /// Texture resource path, empty when untextured.
+        texture: String,
+        /// Local-space corners of the instanced mesh, in draw order.
+        vertices: Vec<Vector2>,
+        /// One UV per vertex, same order.
+        uvs: Vec<Vector2>,
+        /// Per-instance transform and colour. The colour is white when the
+        /// authored buffer carries no per-instance colours.
+        instances: Vec<(Transform2D, Color)>,
+    },
 }
 
 /// One painted tile cell, resolved from `tile_map_data` plus the layer's
@@ -1393,6 +1423,124 @@ pub fn tilemap_quads(tree: &SceneTree, id: gdscene::NodeId) -> Vec<TileQuad> {
     quads
 }
 
+/// Deforms a `Polygon2D`'s vertices by its skeleton, or `None` when it has none.
+///
+/// pat-s3rrv.185. `gdrender2d::polygon_raster::deform_polygon_vertices` has held
+/// this maths since the port began with no caller outside its own unit tests;
+/// this is the binding that puts it on the frame.
+///
+/// ⚠️ **Spaces.** The skinning transforms are GLOBAL (a bone's rest and pose
+/// both are), while `polygon` is LOCAL to the Polygon2D, and the render list
+/// wants local points back because the item's own transform is applied
+/// separately. So the vertices go out to global, deform, and come back:
+/// `local⁻¹ ∘ skin ∘ local`. Skipping either conversion looks right only when
+/// the polygon sits at the origin with no rotation or scale.
+fn skinned_polygon_points(
+    tree: &SceneTree,
+    id: gdscene::NodeId,
+    points: &[Vector2],
+) -> Option<Vec<Vector2>> {
+    // ⚠️ `Variant::NodePath` wraps a `gdcore::NodePath`, NOT a String — the two
+    // cannot share an or-pattern binding. A `.tscn` writes `skeleton =
+    // NodePath("../Skel")`, but a hand-built node or an older scene may carry a
+    // plain String, so both are accepted and normalised here.
+    let skeleton_path = match tree.get_node(id).map(|n| n.get_property("skeleton")) {
+        Some(Variant::NodePath(p)) if !p.is_empty() => p.get_concatenated_names(),
+        Some(Variant::String(p)) if !p.is_empty() => p,
+        _ => return None,
+    };
+    // `skeleton` is relative to the POLYGON (`polygon_2d.cpp` resolves it with
+    // the polygon's own `get_node`), unlike the bone paths below.
+    let skeleton = resolve_relative(tree, id, &skeleton_path)?;
+    let skin = gdscene::skeleton2d::published_skin_transforms(tree, skeleton);
+    if skin.is_empty() {
+        return None;
+    }
+
+    // 🔑 Weights are placed by the bone's INDEX IN THE SKELETON, not by the
+    // order the polygon happens to list them — `polygon_2d.cpp:268` looks the
+    // bone up and calls `get_index_in_skeleton()`. A polygon listing its bones
+    // in a different order than the skeleton declares them would otherwise skin
+    // every vertex to the wrong bone.
+    let order = gdscene::skeleton2d::gather_bones(tree, skeleton);
+    let mut weights: Vec<Vec<f32>> = vec![Vec::new(); skin.len()];
+
+    let entries = match tree.get_node(id).map(|n| n.get_property("bones")) {
+        Some(Variant::Array(v)) => v,
+        _ => return None,
+    };
+    // Godot serializes `bones` as alternating path/weight pairs
+    // (`Polygon2D::_get_bones`), so an odd-length array is malformed.
+    for pair in entries.chunks(2) {
+        let [path, w] = pair else { continue };
+        // `_get_bones` deliberately pushes the path as a **String** ("to avoid
+        // errors due to invalid node path in editor"), so String is the normal
+        // case here — NodePath is accepted for hand-built nodes.
+        let path = match path {
+            Variant::String(p) => p.clone(),
+            Variant::NodePath(p) => p.get_concatenated_names(),
+            _ => continue,
+        };
+        let w: Vec<f32> = match w {
+            Variant::PackedFloat32Array(f) => f.clone(),
+            Variant::PackedFloat64Array(f) => f.iter().map(|x| *x as f32).collect(),
+            Variant::Array(items) => items
+                .iter()
+                .filter_map(|v| match v {
+                    Variant::Float(f) => Some(*f as f32),
+                    Variant::Int(i) => Some(*i as f32),
+                    _ => None,
+                })
+                .collect(),
+            _ => continue,
+        };
+        // ⚠️ Upstream's guard, ported verbatim in spirit: "different number of
+        // vertices, sorry not using". A short weight array is a mis-authored rig,
+        // and skinning by it would drag the unweighted tail to the origin.
+        if w.len() != points.len() {
+            continue;
+        }
+        // Bone paths are relative to the SKELETON, not the polygon.
+        let Some(bone) = resolve_relative(tree, skeleton, &path) else {
+            continue;
+        };
+        if let Some(idx) = order.iter().position(|&b| b == bone) {
+            if idx < weights.len() {
+                weights[idx] = w;
+            }
+        }
+    }
+    if weights.iter().all(|w| w.is_empty()) {
+        return None;
+    }
+
+    let to_global = gdscene::node2d::get_global_transform(tree, id);
+    let to_local = to_global.affine_inverse();
+    let global_pts: Vec<Vector2> = points.iter().map(|p| to_global.xform(*p)).collect();
+    let deformed =
+        gdrender2d::polygon_raster::deform_polygon_vertices(&global_pts, &skin, &weights);
+    Some(deformed.into_iter().map(|p| to_local.xform(p)).collect())
+}
+
+/// Resolves a `/`-separated node path relative to `from`.
+fn resolve_relative(
+    tree: &SceneTree,
+    from: gdscene::NodeId,
+    path: &str,
+) -> Option<gdscene::NodeId> {
+    let mut current = from;
+    for part in path.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        let children = tree.get_node(current).map(|n| n.children().to_vec())?;
+        current = children
+            .into_iter()
+            .find(|&c| tree.get_node(c).map(|n| n.name() == part).unwrap_or(false))?;
+    }
+    Some(current)
+}
+
 fn render_kind_for(tree: &SceneTree, id: gdscene::NodeId, class: &str) -> Render2DKind {
     match class {
         // An AnimatedSprite2D draws exactly like a Sprite2D — the difference is
@@ -1436,6 +1584,53 @@ fn render_kind_for(tree: &SceneTree, id: gdscene::NodeId, class: &str) -> Render
                 };
             }
         }
+        // BackBufferCopy (pat-s3rrv.183). Registered with no behaviour, so it
+        // fell through to `Marker` — and with nothing copying the frame, a
+        // canvas_item shader sampling SCREEN_TEXTURE had no screen to read.
+        "BackBufferCopy" => {
+            return Render2DKind::BackBufferCopy {
+                copy_mode: read_int(tree, id, "copy_mode").unwrap_or(1),
+                rect: read_rect2(tree, id, "rect").unwrap_or_else(|| {
+                    Rect2::new(Vector2::new(-100.0, -100.0), Vector2::new(200.0, 200.0))
+                }),
+            };
+        }
+        // MultiMeshInstance2D (pat-s3rrv.183). Registered with no draw
+        // semantics, so it fell through to `Marker` and showed a placeholder
+        // glyph instead of its instances.
+        //
+        // `packed_scene` already flattens `multimesh = SubResource(..)` onto the
+        // node as `__multimesh__*`, and that pass is class-agnostic — it copies
+        // every property of any `multimesh` sub-resource, so the 2D node gets
+        // the same companions the 3D one does and needs no new flattening.
+        //
+        // Geometry: the PRIMITIVE case only, matching the MeshInstance2D arm
+        // above. The multimesh's own `mesh` is a nested SubResource reference
+        // whose body is not copied onto the node, so there is nothing to read
+        // real geometry from; Godot's QuadMesh default of 1x1 centred on the
+        // origin is what a 2D multimesh almost always instances.
+        "MultiMeshInstance2D" => {
+            let instances = multimesh_2d_instances(tree, id);
+            if !instances.is_empty() {
+                let h = 0.5;
+                return Render2DKind::MultiMesh {
+                    texture: node2d::get_texture_path(tree, id).unwrap_or_default(),
+                    vertices: vec![
+                        Vector2::new(-h, -h),
+                        Vector2::new(h, -h),
+                        Vector2::new(h, h),
+                        Vector2::new(-h, h),
+                    ],
+                    uvs: vec![
+                        Vector2::new(0.0, 0.0),
+                        Vector2::new(1.0, 0.0),
+                        Vector2::new(1.0, 1.0),
+                        Vector2::new(0.0, 1.0),
+                    ],
+                    instances,
+                };
+            }
+        }
         "Sprite2D" | "AnimatedSprite2D" => {
             if let Some(texture) = node2d::get_texture_path(tree, id) {
                 return Render2DKind::Sprite {
@@ -1448,7 +1643,12 @@ fn render_kind_for(tree: &SceneTree, id: gdscene::NodeId, class: &str) -> Render
             }
         }
         "Polygon2D" => {
-            let points = read_points(tree, id, "polygon");
+            let rest_points = read_points(tree, id, "polygon");
+            // pat-s3rrv.185: a polygon bound to a Skeleton2D draws at its bones'
+            // current pose. Falls back to the rest vertices when there is no
+            // skeleton, no published pose, or no usable weights.
+            let points = skinned_polygon_points(tree, id, &rest_points)
+                .unwrap_or_else(|| rest_points.clone());
             // Godot leaves `uv` empty until the polygon is unwrapped and then
             // textures it by its own VERTEX POSITIONS — `polygon_2d.cpp:237`
             // uses `points[i]` when the uv array is the wrong length, so an
@@ -1628,6 +1828,22 @@ fn read_vector2(tree: &SceneTree, id: gdscene::NodeId, key: &str) -> Vector2 {
 }
 
 /// Reads a `bool` property, defaulting to `false` when absent.
+/// Reads an int property, or `None` when absent or another type.
+fn read_int(tree: &SceneTree, id: gdscene::NodeId, key: &str) -> Option<i64> {
+    match tree.get_node(id)?.get_property(key) {
+        Variant::Int(v) => Some(v),
+        _ => None,
+    }
+}
+
+/// Reads a `Rect2` property, or `None` when absent or another type.
+fn read_rect2(tree: &SceneTree, id: gdscene::NodeId, key: &str) -> Option<Rect2> {
+    match tree.get_node(id)?.get_property(key) {
+        Variant::Rect2(r) => Some(r),
+        _ => None,
+    }
+}
+
 fn read_bool(tree: &SceneTree, id: gdscene::NodeId, key: &str) -> bool {
     matches!(
         tree.get_node(id).map(|n| n.get_property(key)),
@@ -2668,6 +2884,12 @@ pub fn rasterize_render_list_with_quality(
 
     let mut fb = FrameBuffer::new(width.max(1), height.max(1), clear);
     let font = BitmapFont::builtin();
+    // The back buffer a canvas_item shader samples as `SCREEN_TEXTURE`
+    // (pat-s3rrv.183). `None` until a BackBufferCopy item runs, because Godot
+    // gives an uncopied SCREEN_TEXTURE undefined contents — serving the item's
+    // own texture instead, which is what the shared sampler did, hides the
+    // missing copy behind plausible pixels.
+    let mut screen_texture: Option<gdrender2d::texture::Texture2D> = None;
     for item in items {
         let xform = item.global_transform;
         // `clip_children` (pat-0q2kx.39): the software rasterizer has no scissor to
@@ -2787,7 +3009,7 @@ pub fn rasterize_render_list_with_quality(
                             // filter/repeat instead of hardcoded nearest-clamp.
                             match &shader_program {
                                 Some((instructions, uniforms)) => {
-                                    draw::draw_texture_rect_transformed_shaded(
+                                    draw::draw_texture_rect_transformed_shaded_with_screen(
                                         &mut fb,
                                         tex,
                                         xform * flip,
@@ -2806,6 +3028,9 @@ pub fn rasterize_render_list_with_quality(
                                         // parameter on the public signature and
                                         // is left to its own bead.
                                         0.0,
+                                        // `None` unless a BackBufferCopy ran
+                                        // earlier in this frame's draw order.
+                                        screen_texture.as_ref(),
                                     );
                                 }
                                 None => {
@@ -3060,6 +3285,56 @@ pub fn rasterize_render_list_with_quality(
                     }
                 }
             }
+            Render2DKind::MultiMesh {
+                texture,
+                vertices,
+                uvs,
+                instances,
+            } => {
+                if vertices.len() >= 3 {
+                    for (instance, color) in instances {
+                        // `a * b` applies `b` first, so this puts the instance
+                        // in the node's space and then into canvas space.
+                        let composed = xform * *instance;
+                        let pts: Vec<Vector2> =
+                            vertices.iter().map(|v| composed.xform(*v)).collect();
+                        let tinted = modulate(*color, item.modulate);
+                        let drawn = texture_cache
+                            .as_deref_mut()
+                            .and_then(|cache| cache.get(texture))
+                            .map(|tex| {
+                                gdrender2d::polygon_raster::fill_polygon_textured(
+                                    &mut fb, &pts, uvs, tex,
+                                )
+                            })
+                            .is_some();
+                        // Untextured instances still have to appear — a
+                        // MultiMesh of flat-coloured quads is a normal scene,
+                        // and silently drawing nothing would look identical to
+                        // the Marker fallthrough this arm exists to replace.
+                        if !drawn {
+                            fill_polygon(&mut fb, Transform2D::IDENTITY, &pts, tinted);
+                        }
+                    }
+                }
+            }
+            Render2DKind::BackBufferCopy { copy_mode, .. } => {
+                // COPY_MODE_DISABLED (0) is a real authored state and must not
+                // refresh the buffer.
+                if *copy_mode != 0 {
+                    // The whole frame is captured even in COPY_MODE_RECT.
+                    // SCREEN_TEXTURE is addressed in full-screen SCREEN_UV, so a
+                    // partial buffer would need the sampler to know the copied
+                    // region to remap; Godot leaves reads outside the copied
+                    // rect undefined, so a superset is permissive rather than
+                    // wrong. Honouring `rect` exactly is a follow-up.
+                    screen_texture = Some(gdrender2d::texture::Texture2D {
+                        width: fb.width,
+                        height: fb.height,
+                        pixels: fb.pixels.clone(),
+                    });
+                }
+            }
             Render2DKind::Marker { .. } => {}
         }
         if let (Some(rect), Some(before)) = (item.clip_rect, clip_snapshot) {
@@ -3253,12 +3528,300 @@ pub fn render_runtime_canvas(
     texture_cache: Option<&mut TextureCache>,
 ) -> FrameBuffer {
     let items = build_runtime_render_list(tree);
-    let mut fb = rasterize_render_list(&items, width, height, clear, texture_cache);
+    // CanvasGroup subtrees composite as one layer (pat-s3rrv.183). With no
+    // CanvasGroup in the scene this is byte-for-byte the old path — the
+    // groups-aware entry delegates straight back to `rasterize_render_list`.
+    let groups = collect_canvas_groups(tree);
+    let mut fb =
+        rasterize_render_list_with_groups(&items, &groups, width, height, clear, texture_cache);
     shade_runtime_canvas(tree, &mut fb);
     fb
 }
 
+/// A `CanvasGroup` and the draw-list items that belong to its subtree
+/// (pat-s3rrv.183).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CanvasGroup2D {
+    /// The CanvasGroup node's own raw id.
+    pub node_id: u64,
+    /// The tint applied ONCE to the flattened subtree: the group's
+    /// `inherited_modulate` times its own `self_modulate`.
+    pub modulate: Color,
+    /// What the group's children have ALREADY baked into their own item
+    /// modulate — the group's `inherited_modulate`, which is `modulate` up the
+    /// chain and excludes `self_modulate`.
+    ///
+    /// ⚠️ These two differ exactly when the group sets `self_modulate`, which
+    /// children do NOT inherit. Stripping children by the full tint would then
+    /// remove a factor they never had.
+    pub inherited: Color,
+    /// Raw ids of every descendant that produces a draw-list item.
+    pub members: Vec<u64>,
+}
+
+/// Finds every `CanvasGroup` in the tree and the descendants it flattens.
+///
+/// Godot renders a CanvasGroup's whole subtree into an offscreen buffer and
+/// composites that buffer once, so `modulate` applies to the GROUP rather than
+/// to each child. The observable difference is at overlaps: two opaque children
+/// under a half-transparent group show one uniform half-alpha, where per-child
+/// blending shows a darker seam (1 - 0.5² = 0.75) exactly where they cross.
+pub fn collect_canvas_groups(tree: &SceneTree) -> Vec<CanvasGroup2D> {
+    let mut groups = Vec::new();
+    for id in tree.all_nodes_in_tree_order() {
+        let is_group = tree
+            .get_node(id)
+            .map(|n| n.class_name() == "CanvasGroup")
+            .unwrap_or(false);
+        if !is_group {
+            continue;
+        }
+        let members: Vec<u64> = tree
+            .all_nodes_in_tree_order()
+            .into_iter()
+            .filter(|&other| other != id && is_descendant_of(tree, other, id))
+            .map(|n| n.raw())
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        groups.push(CanvasGroup2D {
+            node_id: id.raw(),
+            modulate: canvas_order::effective_modulate(tree, id),
+            inherited: canvas_order::inherited_modulate(tree, id),
+            members,
+        });
+    }
+    groups
+}
+
+/// Whether `node` sits anywhere under `ancestor`.
+fn is_descendant_of(tree: &SceneTree, node: NodeId, ancestor: NodeId) -> bool {
+    let mut cur = tree.get_node(node).and_then(|n| n.parent());
+    while let Some(p) = cur {
+        if p == ancestor {
+            return true;
+        }
+        cur = tree.get_node(p).and_then(|n| n.parent());
+    }
+    false
+}
+
+/// Removes `group`'s contribution from a child's already-composed modulate.
+///
+/// ⚠️ `canvas_order::effective_modulate` multiplies the WHOLE ancestor chain,
+/// so a CanvasGroup's modulate is already baked into every child item. Leaving
+/// it there and also tinting at composite time applies it TWICE — a group at
+/// alpha 0.5 would render its children at 0.25. Since the chain is a pure
+/// product, dividing the group's factor back out is exact.
+///
+/// A zero component means the group hides the subtree entirely, so the child
+/// contributes nothing and 0 is the right answer rather than a division by zero.
+fn strip_group_modulate(child: Color, group: Color) -> Color {
+    let undo = |c: f32, g: f32| {
+        if g > 0.0 {
+            (c / g).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+    Color::new(
+        undo(child.r, group.r),
+        undo(child.g, group.g),
+        undo(child.b, group.b),
+        undo(child.a, group.a),
+    )
+}
+
+/// Blends `scratch` over `fb` once, tinted by `tint`.
+///
+/// This single pass is what makes a CanvasGroup a group: the subtree has
+/// already been flattened into `scratch`, so overlapping children have resolved
+/// against each other at full opacity and the tint applies to the result.
+fn composite_group_buffer(fb: &mut FrameBuffer, scratch: &FrameBuffer, tint: Color) {
+    let w = fb.width.min(scratch.width);
+    let h = fb.height.min(scratch.height);
+    for y in 0..h {
+        for x in 0..w {
+            let src = scratch.pixels[(y * scratch.width + x) as usize];
+            if src.a <= 0.0 {
+                continue;
+            }
+            fb.blend_pixel(
+                x,
+                y,
+                Color::new(
+                    src.r * tint.r,
+                    src.g * tint.g,
+                    src.b * tint.b,
+                    src.a * tint.a,
+                ),
+            );
+        }
+    }
+}
+
+/// Rasterizes `items`, compositing each `CanvasGroup` subtree as one layer
+/// (pat-s3rrv.183).
+///
+/// Additive on purpose: [`rasterize_render_list`] keeps its signature and its
+/// behaviour, and this is the entry point that knows about groups. Adding a
+/// group field to [`Render2DItem`] instead would have broken all fifteen of its
+/// construction sites, thirteen of them in other agents' test files.
+///
+/// A group composites at the position of its FIRST member in the sorted list,
+/// which is where the group's own z-order puts it.
+pub fn rasterize_render_list_with_groups(
+    items: &[Render2DItem],
+    groups: &[CanvasGroup2D],
+    width: u32,
+    height: u32,
+    clear: Color,
+    mut texture_cache: Option<&mut TextureCache>,
+) -> FrameBuffer {
+    if groups.is_empty() {
+        return rasterize_render_list(items, width, height, clear, texture_cache);
+    }
+
+    // Split the draw list into ordered layers: runs of ungrouped items, and one
+    // layer per group at the position of its first member.
+    enum Layer {
+        Plain(Vec<Render2DItem>),
+        Group(usize, Vec<Render2DItem>),
+    }
+    let group_of = |node_id: u64| groups.iter().position(|g| g.members.contains(&node_id));
+
+    let mut layers: Vec<Layer> = Vec::new();
+    let mut emitted: Vec<usize> = Vec::new();
+    for item in items {
+        match group_of(item.node_id) {
+            Some(gi) => {
+                if !emitted.contains(&gi) {
+                    emitted.push(gi);
+                    layers.push(Layer::Group(gi, Vec::new()));
+                }
+                if let Some(Layer::Group(_, bucket)) = layers
+                    .iter_mut()
+                    .find(|l| matches!(l, Layer::Group(g, _) if *g == gi))
+                {
+                    let mut stripped = item.clone();
+                    // Strip what the child actually inherited, not the full
+                    // composite tint.
+                    stripped.modulate = strip_group_modulate(item.modulate, groups[gi].inherited);
+                    bucket.push(stripped);
+                }
+            }
+            None => match layers.last_mut() {
+                Some(Layer::Plain(bucket)) => bucket.push(item.clone()),
+                _ => layers.push(Layer::Plain(vec![item.clone()])),
+            },
+        }
+    }
+
+    let transparent = Color::new(0.0, 0.0, 0.0, 0.0);
+    let mut fb = FrameBuffer::new(width.max(1), height.max(1), clear);
+    for layer in &layers {
+        let (batch, tint) = match layer {
+            Layer::Plain(batch) => (batch, Color::WHITE),
+            Layer::Group(gi, batch) => (batch, groups[*gi].modulate),
+        };
+        if batch.is_empty() {
+            continue;
+        }
+        // Every layer goes through the SAME rasterizer, so a grouped item draws
+        // exactly as it would ungrouped — only the compositing differs.
+        let scratch = rasterize_render_list(
+            batch,
+            width.max(1),
+            height.max(1),
+            transparent,
+            texture_cache.as_deref_mut(),
+        );
+        composite_group_buffer(&mut fb, &scratch, tint);
+    }
+    fb
+}
+
 /// Component-wise multiply of a base color by a `modulate` tint.
+/// Floats per instance in a `MULTIMESH_TRANSFORM_2D` buffer: a row-major 2x4
+/// matrix (pat-s3rrv.183).
+const MULTIMESH_XFORM_2D_FLOATS: usize = 8;
+/// The per-instance colour block that follows the transform when `use_colors`.
+const MULTIMESH_COLOR_FLOATS: usize = 4;
+
+/// Decodes a `MultiMeshInstance2D`'s per-instance transforms and colours out of
+/// the `__multimesh__*` companions `packed_scene` flattens onto the node.
+///
+/// 🔑 THE BUFFER IS ROW-MAJOR AND OUR `Transform2D` IS COLUMN-MAJOR.
+/// `mesh_storage.cpp:1927-1934` writes `columns[0][0], columns[1][0], 0,
+/// columns[2][0]` then `columns[0][1], columns[1][1], 0, columns[2][1]` — so a
+/// basis column is STRIDED out of the buffer, not read contiguously. Reading
+/// `f[0..2]` into `x` is the natural-looking version and it is the transpose:
+/// invisible for a pure translation, wrong for any rotation or non-uniform
+/// scale. The 3D decoder in `gdscene::node3d` documents the same trap.
+fn multimesh_2d_instances(tree: &SceneTree, id: NodeId) -> Vec<(Transform2D, Color)> {
+    let Some(node) = tree.get_node(id) else {
+        return Vec::new();
+    };
+    // ⚠️ Godot's `transform_format` DEFAULTS TO 2D (`MultiMesh.xml` gives
+    // `default="0"`), so a 2D buffer is the unmarked case. A 3D buffer strides
+    // by 12 and would be mis-read at every instance after the first.
+    if matches!(
+        node.get_property("__multimesh__transform_format"),
+        Variant::Int(1)
+    ) {
+        return Vec::new();
+    }
+    let buffer = match node.get_property("__multimesh__buffer") {
+        Variant::PackedFloat32Array(v) if !v.is_empty() => v,
+        _ => return Vec::new(),
+    };
+    let use_colors = matches!(
+        node.get_property("__multimesh__use_colors"),
+        Variant::Bool(true)
+    );
+    let stride = MULTIMESH_XFORM_2D_FLOATS
+        + if use_colors {
+            MULTIMESH_COLOR_FLOATS
+        } else {
+            0
+        };
+
+    // The authored instance count wins, but is clamped to what the buffer can
+    // actually supply: a count larger than the data would otherwise read zeroed
+    // transforms and stack degenerate quads at the origin.
+    let available = buffer.len() / stride;
+    let declared = match node.get_property("__multimesh__instance_count") {
+        Variant::Int(v) if v >= 0 => v as usize,
+        _ => match node.get_property("instance_count") {
+            Variant::Int(v) if v >= 0 => v as usize,
+            _ => available,
+        },
+    };
+    let count = declared.min(available);
+
+    (0..count)
+        .filter_map(|i| {
+            let base = i.checked_mul(stride)?;
+            let f = buffer.get(base..base.checked_add(MULTIMESH_XFORM_2D_FLOATS)?)?;
+            let transform = Transform2D {
+                x: Vector2::new(f[0], f[4]),
+                y: Vector2::new(f[1], f[5]),
+                origin: Vector2::new(f[3], f[7]),
+            };
+            let color = if use_colors {
+                buffer
+                    .get(base + MULTIMESH_XFORM_2D_FLOATS..base + stride)
+                    .map(|c| Color::new(c[0], c[1], c[2], c[3]))
+                    .unwrap_or(Color::WHITE)
+            } else {
+                Color::WHITE
+            };
+            Some((transform, color))
+        })
+        .collect()
+}
+
 fn modulate(base: Color, tint: Color) -> Color {
     Color::new(
         base.r * tint.r,

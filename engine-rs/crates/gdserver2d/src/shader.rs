@@ -598,6 +598,23 @@ fn extract_function_body<'a>(source: &'a str, func_name: &str) -> Option<&'a str
     None
 }
 
+/// Whether an expression samples a texture.
+///
+/// `ColorExpr` has no way to represent a sampler tap, so `parse_color_expr`
+/// falls all the way through to `ColorExpr::BuiltinColor` — the INCOMING colour
+/// — and `COLOR = texture(SCREEN_TEXTURE, UV)` silently renders as an unshaded
+/// passthrough rather than as an error (pat-s3rrv.183).
+///
+/// Declining the statement instead leaves the instruction list empty, which is
+/// exactly the condition that hands the shader to the AST evaluator in
+/// `parse_fragment_body` — and that path DOES sample, through the renderer's
+/// `Sampler`. So this turns a wrong answer into a right one; it cannot make a
+/// shader that renders correctly today render differently, because a shader
+/// reaching this branch was being ignored.
+fn samples_a_texture(expr: &str) -> bool {
+    expr.contains("texture(") || expr.contains("textureLod(")
+}
+
 /// Parses a single fragment statement.
 fn parse_fragment_statement(s: &str) -> Option<FragmentInstruction> {
     // COLOR.a = <expr>
@@ -605,6 +622,9 @@ fn parse_fragment_statement(s: &str) -> Option<FragmentInstruction> {
         let rest = rest.trim();
         if let Some(val) = rest.strip_prefix('=') {
             let val = val.trim();
+            if samples_a_texture(val) {
+                return None;
+            }
             return Some(FragmentInstruction::SetColorAlpha(parse_float_expr(val)));
         }
     }
@@ -618,6 +638,9 @@ fn parse_fragment_statement(s: &str) -> Option<FragmentInstruction> {
         }
         if let Some(val) = rest.strip_prefix('=') {
             let val = val.trim();
+            if samples_a_texture(val) {
+                return None;
+            }
             return Some(FragmentInstruction::SetColorRgb(parse_color_expr(val)));
         }
     }
@@ -631,6 +654,9 @@ fn parse_fragment_statement(s: &str) -> Option<FragmentInstruction> {
         }
         if let Some(val) = rest.strip_prefix('=') {
             let val = val.trim();
+            if samples_a_texture(val) {
+                return None;
+            }
             return Some(FragmentInstruction::SetColor(parse_color_expr(val)));
         }
     }

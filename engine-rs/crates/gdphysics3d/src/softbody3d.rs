@@ -11,6 +11,7 @@
 //! - The simulation pressure parameter inflates the soft body
 
 use gdcore::math::Vector3;
+use std::collections::{HashMap, HashSet};
 
 /// Unique identifier for a soft body in the physics world.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -278,6 +279,150 @@ impl SoftBody3D {
         }
         (min, max)
     }
+
+    /// Builds a soft body from a triangle mesh.
+    ///
+    /// `positions` is the mesh's vertex buffer and `indices` its triangle list
+    /// (three entries per triangle). An empty `indices` is treated as a
+    /// non-indexed mesh, where each consecutive run of three vertices forms one
+    /// triangle — Godot meshes may arrive either way.
+    ///
+    /// Vertices coincident within `weld_epsilon` collapse into a single
+    /// simulated particle. This is not an optimisation: an unwelded mesh whose
+    /// faces do not share vertices produces no constraints between faces, and
+    /// the "cloth" falls apart into free particles.
+    ///
+    /// Returns the body together with a map from each input (visual) vertex to
+    /// the simulated vertex carrying it, so solved positions can be written
+    /// back onto the original vertex buffer.
+    pub fn from_mesh(
+        id: SoftBodyId3D,
+        positions: &[Vector3],
+        indices: &[u32],
+        weld_epsilon: f32,
+    ) -> (Self, Vec<usize>) {
+        let (welded, visual_to_physics) = weld_positions(positions, weld_epsilon);
+        let edges = edges_from_triangles(indices, &visual_to_physics);
+        (Self::new(id, &welded, &edges), visual_to_physics)
+    }
+}
+
+/// Default tolerance for merging coincident mesh vertices, in world units.
+pub const DEFAULT_WELD_EPSILON: f32 = 1e-5;
+
+/// Merges vertices that coincide within `epsilon`.
+///
+/// Returns the deduplicated positions and, for each input vertex, the index of
+/// the merged vertex representing it. A non-positive `epsilon` disables
+/// welding and every input vertex stays independent.
+pub fn weld_positions(positions: &[Vector3], epsilon: f32) -> (Vec<Vector3>, Vec<usize>) {
+    if epsilon <= 0.0 {
+        return (positions.to_vec(), (0..positions.len()).collect());
+    }
+
+    let mut unique: Vec<Vector3> = Vec::new();
+    let mut map: Vec<usize> = Vec::with_capacity(positions.len());
+    let mut buckets: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
+    let inv = 1.0 / epsilon;
+
+    for &p in positions {
+        let cell = (
+            (p.x * inv).floor() as i64,
+            (p.y * inv).floor() as i64,
+            (p.z * inv).floor() as i64,
+        );
+
+        // Two points within epsilon can land in adjacent cells, so scan the
+        // 3x3x3 neighbourhood. Checking only the point's own cell would leave
+        // pairs that straddle a cell boundary unwelded.
+        let mut found = None;
+        'search: for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let probe = (cell.0 + dx, cell.1 + dy, cell.2 + dz);
+                    if let Some(candidates) = buckets.get(&probe) {
+                        for &c in candidates {
+                            if (unique[c] - p).length() <= epsilon {
+                                found = Some(c);
+                                break 'search;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let index = match found {
+            Some(c) => c,
+            None => {
+                unique.push(p);
+                let fresh = unique.len() - 1;
+                buckets.entry(cell).or_default().push(fresh);
+                fresh
+            }
+        };
+        map.push(index);
+    }
+
+    (unique, map)
+}
+
+/// Derives the unique undirected edges of a triangle mesh, mapped through
+/// `visual_to_physics` onto welded vertex indices.
+///
+/// Each edge appears once however many triangles share it; emitting an
+/// interior edge twice would silently double its constraint's stiffness.
+/// An empty `indices` is treated as a non-indexed mesh.
+pub fn edges_from_triangles(indices: &[u32], visual_to_physics: &[usize]) -> Vec<(usize, usize)> {
+    let sequential: Vec<u32>;
+    let indices = if indices.is_empty() {
+        sequential = (0..visual_to_physics.len() as u32).collect();
+        &sequential[..]
+    } else {
+        indices
+    };
+
+    let mut seen: HashSet<(usize, usize)> = HashSet::new();
+    let mut edges = Vec::new();
+
+    // chunks_exact drops a trailing partial triangle rather than panicking on
+    // an index count that is not a multiple of three.
+    for tri in indices.chunks_exact(3) {
+        let mut mapped = [0usize; 3];
+        let mut ok = true;
+        for (slot, &raw) in mapped.iter_mut().zip(tri) {
+            match visual_to_physics.get(raw as usize) {
+                Some(&v) => *slot = v,
+                // An out-of-range index is malformed mesh data; skip the
+                // triangle instead of panicking on untrusted scene content.
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+
+        for (a, b) in [
+            (mapped[0], mapped[1]),
+            (mapped[1], mapped[2]),
+            (mapped[2], mapped[0]),
+        ] {
+            // Welding can collapse a sliver triangle's corners together; a
+            // self-edge would be a zero-rest-length constraint on one vertex.
+            if a == b {
+                continue;
+            }
+            let key = if a < b { (a, b) } else { (b, a) };
+            if seen.insert(key) {
+                edges.push(key);
+            }
+        }
+    }
+
+    edges
 }
 
 #[cfg(test)]

@@ -150,6 +150,59 @@ pub struct GeometryInstanceSettings {
     pub layers: u32,
     /// Overrides the mesh-derived bounds used for culling.
     pub custom_aabb: Option<Aabb>,
+    /// Depth bias applied when sorting transparent instances, in world units —
+    /// Godot's `VisualInstance3D.sorting_offset`.
+    ///
+    /// ⚠️ Godot SUBTRACTS this from the sort depth
+    /// (`render_forward_clustered.cpp:955`: `depth = distance_to(center) -
+    /// sorting_offset`), so a LARGER offset means a SMALLER depth and the
+    /// instance draws later — on top. Adding it instead would invert the whole
+    /// property, and the doc's own wording ("a higher value will make the
+    /// VisualInstance3D reliably draw on top") is the check.
+    pub sorting_offset: f32,
+    /// Sort transparent instances by their AABB centre rather than their
+    /// origin — Godot's `VisualInstance3D.sorting_use_aabb_center`.
+    ///
+    /// ⚠️ Defaults to **true** (`visual_instance_3d.h:44`). The doc XML lists
+    /// no `default=` for this member at all, so the value cannot be read off
+    /// the documentation the way every other default here was — it comes from
+    /// the header.
+    pub sorting_use_aabb_center: bool,
+    /// Global illumination mode for the whole geometry.
+    pub gi_mode: GiMode,
+    /// Lightmap texel density multiplier for `LightmapGI` (Godot default `1.0`).
+    ///
+    /// ⚠️ Carried but not yet consumed: Patina has no lightmap bake to scale.
+    /// Stored so the authored value survives a sync round-trip.
+    pub gi_lightmap_texel_scale: f32,
+    /// Draw this instance even when occlusion culling would hide it.
+    pub ignore_occlusion_culling: bool,
+}
+
+/// `GeometryInstance3D.GIMode` — how an instance participates in global
+/// illumination (`doc/classes/GeometryInstance3D.xml`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GiMode {
+    /// Takes no part in GI.
+    Disabled,
+    /// Baked into static GI. ⚠️ Godot's DEFAULT (`gi_mode` default="1"), not
+    /// `Disabled` — deriving the default from "0 is usually off" gives the
+    /// wrong one and silently drops every mesh out of a bake.
+    #[default]
+    Static,
+    /// Updated dynamically at runtime.
+    Dynamic,
+}
+
+impl GiMode {
+    /// Maps Godot's `GIMode` ordinal; anything unknown keeps the default.
+    pub fn from_godot_int(v: i64) -> Self {
+        match v {
+            0 => GiMode::Disabled,
+            2 => GiMode::Dynamic,
+            _ => GiMode::Static,
+        }
+    }
 }
 
 impl Default for GeometryInstanceSettings {
@@ -170,6 +223,14 @@ impl Default for GeometryInstanceSettings {
             // covers it.
             layers: 1,
             custom_aabb: None,
+            sorting_offset: 0.0,
+            // `true`, from `visual_instance_3d.h:44` — the doc XML omits this
+            // member's default entirely.
+            sorting_use_aabb_center: true,
+            // GI_MODE_STATIC, Godot's documented `default="1"`.
+            gi_mode: GiMode::Static,
+            gi_lightmap_texel_scale: 1.0,
+            ignore_occlusion_culling: false,
         }
     }
 }

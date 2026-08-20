@@ -1447,11 +1447,25 @@ struct ResourceTables {
 /// under a namespaced prefix so the runtime can reach it after the `PackedScene`
 /// is gone (`packed_scene.rs`). That cache is also the only surviving record of
 /// the sub-resource's contents at save time.
-fn companion_prefix_for(property: &str) -> Option<&'static str> {
+fn companion_prefix_for(property: &str) -> Option<String> {
+    // Per-surface overrides beyond surface 0 get an INDEXED prefix, so each
+    // surface's material rebuilds into its own `[sub_resource]` body
+    // (pat-s3rrv.187). Surface 0 deliberately stays on `__material__`: it is
+    // the one the mesh-level priority already flattens there, and moving it
+    // would orphan every scene saved before this.
+    if let Some(rest) = property.strip_prefix("surface_material_override/") {
+        if let Ok(idx) = rest.parse::<usize>() {
+            if idx > 0 {
+                return Some(format!("__surfmat{idx}__"));
+            }
+        }
+    }
     match property {
-        "shape" => Some("__shape__"),
-        "curve" => Some("__curve__"),
-        "material" | "material_override" | "surface_material_override/0" => Some("__material__"),
+        "shape" => Some("__shape__".to_string()),
+        "curve" => Some("__curve__".to_string()),
+        "material" | "material_override" | "surface_material_override/0" => {
+            Some("__material__".to_string())
+        }
         _ => None,
     }
 }
@@ -1488,7 +1502,7 @@ fn collect_sub_resource_bodies(
             let mut props: Vec<(String, Variant)> = node
                 .properties()
                 .filter_map(|(ck, cv)| {
-                    let key = ck.strip_prefix(prefix)?;
+                    let key = ck.strip_prefix(prefix.as_str())?;
                     if key == "class" {
                         return None;
                     }
@@ -1612,6 +1626,12 @@ fn is_internal_prop(key: &str) -> bool {
         // write a 101-entry baked table in place of the four authored points.
         || key.starts_with("__gradient_")
         || key.starts_with("__width_curve_")
+        // `__surfmat<N>__*` caches a per-surface material override's body so it
+        // can be rebuilt into a `[sub_resource]` on save (pat-s3rrv.187). The
+        // node's own `surface_material_override/N` still carries the reference
+        // that round-trips; emitting the cache too would invent properties Godot
+        // has never heard of, exactly as for `__shape__*` above.
+        || key.starts_with("__surfmat")
 }
 
 /// The `type=` an external resource is declared as in a `[ext_resource]` header,

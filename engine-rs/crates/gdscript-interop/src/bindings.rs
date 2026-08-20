@@ -615,6 +615,48 @@ pub trait SceneAccess {
 
     /// Play `name` backwards from its end (Godot `play_backwards`). Returns
     /// `false` if `node` has no player.
+    /// `AnimatedSprite2D.play_backwards(name)` (pat-s3rrv.182).
+    /// `AnimatedSprite2D.play(name, custom_speed, from_end)`. False when the
+    /// node is not an AnimatedSprite2D.
+    fn animated_sprite_play(
+        &mut self,
+        _node: u64,
+        _name: &str,
+        _custom_speed: f64,
+        _from_end: bool,
+    ) -> bool {
+        false
+    }
+
+    fn animated_sprite_play_backwards(&mut self, _node: u64, _name: &str) -> bool {
+        false
+    }
+
+    /// `AnimatedSprite2D.pause()` — freeze without resetting.
+    fn animated_sprite_pause(&mut self, _node: u64) -> bool {
+        false
+    }
+
+    /// `AnimatedSprite2D.stop()` — freeze and reset to the clip start.
+    fn animated_sprite_stop(&mut self, _node: u64) -> bool {
+        false
+    }
+
+    /// `AnimatedSprite2D.set_frame_and_progress(frame, progress)`.
+    fn animated_sprite_set_frame_and_progress(
+        &mut self,
+        _node: u64,
+        _frame: i64,
+        _progress: f64,
+    ) -> bool {
+        false
+    }
+
+    /// `AnimatedSprite2D.get_playing_speed()` — signed, 0 while stopped.
+    fn animated_sprite_playing_speed(&self, _node: u64) -> f64 {
+        0.0
+    }
+
     fn animation_player_play_backwards(&mut self, _node: u64, _name: &str) -> bool {
         false
     }
@@ -1035,6 +1077,159 @@ pub trait SceneAccess {
     /// The body's current position, or `None` when the RID is not in a space.
     fn physics2d_body_get_position(&self, _body: u64) -> Option<(f32, f32)> {
         None
+    }
+
+    /// `PhysicsServer2D.capsule_shape_create()` — a new capsule shape RID.
+    ///
+    /// ⓘ One of the six constructors the 9-arm surface was missing
+    /// (capsule/segment/world_boundary/separation_ray/convex/concave). Only the
+    /// capsule is needed by this bead's acceptance; the rest are the same shape
+    /// and deliberately left for whoever takes tier 1 further, rather than
+    /// stubbed here where they would read as supported.
+    fn physics2d_capsule_shape_create(&mut self) -> u64 {
+        0
+    }
+
+    /// `shape_set_data(shape, Vector2(radius, height))` for a capsule.
+    ///
+    /// ⚠️ Godot overloads `shape_set_data` by shape type — a circle takes a
+    /// float radius, a rectangle a Vector2 of half-extents, a capsule a Vector2
+    /// of `(radius, height)`. The existing arms already split by argument shape
+    /// (`..._radius` / `..._extents`), so this follows that split rather than
+    /// widening one method to guess from the value it receives.
+    fn physics2d_shape_set_data_capsule(
+        &mut self,
+        _shape: u64,
+        _radius: f32,
+        _height: f32,
+    ) -> bool {
+        false
+    }
+
+    /// `PhysicsServer2D.body_set_param(body, param, value)`.
+    ///
+    /// `param` is Godot's `BodyParameter` enum: BOUNCE 0, FRICTION 1, MASS 2,
+    /// INERTIA 3, CENTER_OF_MASS 4, GRAVITY_SCALE 5, LINEAR_DAMP_MODE 6,
+    /// ANGULAR_DAMP_MODE 7, LINEAR_DAMP 8, ANGULAR_DAMP 9
+    /// (`servers/physics_server_2d.h`). Returns whether the RID resolved.
+    fn physics2d_body_set_param(&mut self, _body: u64, _param: i64, _value: f32) -> bool {
+        false
+    }
+
+    /// `PhysicsServer2D.body_get_param(body, param)`.
+    fn physics2d_body_get_param(&self, _body: u64, _param: i64) -> Option<f32> {
+        None
+    }
+
+    /// `PhysicsServer2D.body_set_collision_layer/mask(body, layers)`.
+    ///
+    /// `mask` selects which of the two the call writes, so one binding serves
+    /// both arms — they differ only in destination field.
+    fn physics2d_body_set_collision_layers(
+        &mut self,
+        _body: u64,
+        _layers: u32,
+        _is_mask: bool,
+    ) -> bool {
+        false
+    }
+
+    /// `body_apply_central_impulse` / `body_apply_impulse` (server form).
+    ///
+    /// ⚠️ An impulse is an instantaneous velocity change and a force is
+    /// accumulated over the step — Godot keeps them separate methods for that
+    /// reason, and the underlying `PhysicsBody2D` already has both
+    /// (`body.rs:213` / `:203`). Collapsing them here would make
+    /// `apply_impulse` behave like a one-frame force, which is wrong by the mass
+    /// factor and invisible in any test that only checks "it moved".
+    fn physics2d_body_apply_impulse(
+        &mut self,
+        _body: u64,
+        _impulse: (f32, f32),
+        _at_point: Option<(f32, f32)>,
+    ) -> bool {
+        false
+    }
+
+    /// `body_apply_central_force` / `body_apply_force` (server form).
+    fn physics2d_body_apply_force(
+        &mut self,
+        _body: u64,
+        _force: (f32, f32),
+        _at_point: Option<(f32, f32)>,
+    ) -> bool {
+        false
+    }
+
+    /// `body_apply_torque_impulse` (server form).
+    fn physics2d_body_apply_torque_impulse(&mut self, _body: u64, _torque: f32) -> bool {
+        false
+    }
+
+    /// The body's linear velocity, or `None` when the RID is not in a space.
+    ///
+    /// 🔑 `body_get_state` answered Nil for every state except TRANSFORM, which
+    /// is why the acceptance names LINEAR_VELOCITY specifically: a script could
+    /// apply an impulse and had no way to observe that anything happened.
+    fn physics2d_body_get_linear_velocity(&self, _body: u64) -> Option<(f32, f32)> {
+        None
+    }
+
+    /// The body's angular velocity, or `None` when the RID is not in a space.
+    fn physics2d_body_get_angular_velocity(&self, _body: u64) -> Option<f32> {
+        None
+    }
+
+    /// Whether the body is sleeping / may sleep (BODY_STATE_SLEEPING, CAN_SLEEP).
+    fn physics2d_body_get_sleep_state(&self, _body: u64, _can_sleep: bool) -> Option<bool> {
+        None
+    }
+
+    /// `PhysicsServer2D.area_create()` — a new area RID.
+    fn physics2d_area_create(&mut self) -> u64 {
+        0
+    }
+
+    /// `PhysicsServer2D.area_set_space(area, space)`.
+    fn physics2d_area_set_space(&mut self, _area: u64, _space: u64) -> bool {
+        false
+    }
+
+    /// `PhysicsServer2D.area_add_shape(area, shape)`.
+    fn physics2d_area_add_shape(&mut self, _area: u64, _shape: u64) -> bool {
+        false
+    }
+
+    /// `PhysicsServer2D.area_set_transform(area, transform)` — origin only.
+    fn physics2d_area_set_position(&mut self, _area: u64, _position: (f32, f32)) -> bool {
+        false
+    }
+
+    /// `PhysicsServer2D.area_set_param(area, param, value)`.
+    ///
+    /// `param` is Godot's `AreaParameter`: GRAVITY_OVERRIDE_MODE 0, GRAVITY 1,
+    /// GRAVITY_VECTOR 2, GRAVITY_IS_POINT 3, GRAVITY_POINT_UNIT_DISTANCE 4,
+    /// LINEAR_DAMP_OVERRIDE_MODE 5, LINEAR_DAMP 6, ANGULAR_DAMP_OVERRIDE_MODE 7,
+    /// ANGULAR_DAMP 8, PRIORITY 9 (`servers/physics_server_2d.h`).
+    ///
+    /// ⚠️ Takes the value as a Vector2 AND a scalar because Godot's is a
+    /// Variant: GRAVITY is a float, GRAVITY_VECTOR is a Vector2. Passing both
+    /// and letting the implementation pick by `param` keeps the enum's meaning
+    /// in one place instead of splitting it across two bindings that a caller
+    /// could pair wrongly.
+    fn physics2d_area_set_param(
+        &mut self,
+        _area: u64,
+        _param: i64,
+        _scalar: f32,
+        _vector: (f32, f32),
+    ) -> bool {
+        false
+    }
+
+    /// `PhysicsServer2D.area_set_monitorable(area, monitorable)`.
+    fn physics2d_area_set_monitorable(&mut self, _area: u64, _monitorable: bool) -> bool {
+        false
     }
 
     /// `PhysicsServer2D.body_test_motion(body, motion)` — `(collided, travel)`,

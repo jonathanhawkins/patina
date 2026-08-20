@@ -2360,6 +2360,173 @@ impl SceneAccess for SceneTreeAccessor {
             return Some(value);
         }
 
+        // VehicleWheel3D's script surface (pat-s3rrv.194); declines every other
+        // node.
+        //
+        // ⚠️ Wired HERE and nowhere else on purpose. `call_method_on` in the
+        // interpreter falls back to this table for names it does not know
+        // (`interpreter.rs:14281`), so one registration serves BOTH
+        // `$Wheel.is_in_contact()` and the bare `is_in_contact()` a script on
+        // the wheel itself would write. Adding it to the interpreter instead
+        // would cover only the first spelling.
+        //
+        // The values are read off node properties the physics server published
+        // in `sync_from_physics` — by the time a script runs it has the tree and
+        // nothing else, so the simulated state has to travel on the node.
+        let is_wheel = self
+            .tree()
+            .get_node(nid)
+            .map(|n| n.class_name() == "VehicleWheel3D")
+            .unwrap_or(false);
+        if is_wheel {
+            match method {
+                "is_in_contact" => {
+                    let touching = matches!(
+                        self.tree()
+                            .get_node(nid)
+                            .map(|n| n.get_property("_wheel_in_contact")),
+                        Some(Variant::Bool(true))
+                    );
+                    return Some(Variant::Bool(touching));
+                }
+                "get_skidinfo" => {
+                    // Godot returns 1.0 for full grip and falls toward 0 as the
+                    // tire slips; an airborne wheel reports full grip because it
+                    // is not slipping against anything.
+                    let v = match self
+                        .tree()
+                        .get_node(nid)
+                        .map(|n| n.get_property("_wheel_compression"))
+                    {
+                        Some(Variant::Float(f)) => f,
+                        Some(Variant::Int(i)) => i as f64,
+                        _ => 1.0,
+                    };
+                    return Some(Variant::Float(v));
+                }
+                "get_contact_point" => {
+                    let p = match self
+                        .tree()
+                        .get_node(nid)
+                        .map(|n| n.get_property("_wheel_contact_point"))
+                    {
+                        Some(Variant::Vector3(v)) => v,
+                        _ => gdcore::math::Vector3::ZERO,
+                    };
+                    return Some(Variant::Vector3(p));
+                }
+                _ => {}
+            }
+        }
+
+        // AnimatedSprite2D/3D's playback surface (pat-s3rrv.182); declines every
+        // other node.
+        //
+        // ⚠️ These MUST be wired here as well as in
+        // `interpreter.rs::call_method_on`. The two tables serve different
+        // spellings: `$Sprite.play_backwards("walk")` goes through
+        // `call_method_on`, but a **bare** `play_backwards("walk")` — the form a
+        // script attached to the sprite itself uses, and the form Godot's own
+        // documentation shows — resolves through `call_self_func_or_native` into
+        // THIS table. Wiring only the interpreter side ships a surface that
+        // works from one spelling and raises `UndefinedFunction` from the one
+        // people actually write.
+        //
+        // The failure is also silent in a deceptive way: `UndefinedFunction`
+        // aborts the whole handler at the first unknown name, so every later
+        // statement in `_ready` quietly does not run and the symptom shows up on
+        // some unrelated property being left unset.
+        let is_animated_sprite = self
+            .tree()
+            .get_node(nid)
+            .map(|n| matches!(n.class_name(), "AnimatedSprite2D" | "AnimatedSprite3D"))
+            .unwrap_or(false);
+        if is_animated_sprite {
+            let clip = match args.first() {
+                Some(Variant::String(s)) => s.clone(),
+                Some(Variant::StringName(s)) => s.as_str().to_string(),
+                _ => String::new(),
+            };
+            match method {
+                "play" => {
+                    // Godot's default `custom_speed` is 1.0, and its SIGN is what
+                    // runs the clip backwards; `from_end` only picks the starting
+                    // frame. They are independent arguments.
+                    let custom_speed = match args.get(1) {
+                        Some(Variant::Float(f)) => *f,
+                        Some(Variant::Int(i)) => *i as f64,
+                        _ => 1.0,
+                    };
+                    let from_end = matches!(args.get(2), Some(Variant::Bool(true)));
+                    self.animated_sprite_play(node, &clip, custom_speed, from_end);
+                    return Some(Variant::Nil);
+                }
+                "play_backwards" => {
+                    self.animated_sprite_play_backwards(node, &clip);
+                    return Some(Variant::Nil);
+                }
+                "pause" => {
+                    self.animated_sprite_pause(node);
+                    return Some(Variant::Nil);
+                }
+                "stop" => {
+                    self.animated_sprite_stop(node);
+                    return Some(Variant::Nil);
+                }
+                "set_frame_and_progress" => {
+                    let frame = match args.first() {
+                        Some(Variant::Int(i)) => *i,
+                        Some(Variant::Float(f)) => *f as i64,
+                        _ => 0,
+                    };
+                    let progress = match args.get(1) {
+                        Some(Variant::Float(f)) => *f,
+                        Some(Variant::Int(i)) => *i as f64,
+                        _ => 0.0,
+                    };
+                    self.animated_sprite_set_frame_and_progress(node, frame, progress);
+                    return Some(Variant::Nil);
+                }
+                "get_playing_speed" => {
+                    return Some(Variant::Float(self.animated_sprite_playing_speed(node)));
+                }
+                _ => {}
+            }
+        }
+
+        // Node2D's global-transform surface (pat-s3rrv.184); declines every
+        // other node. The 2D side had no script method surface at all — this
+        // file grew a Node3D block (`look_at`, `rotate`, `to_global`) and
+        // nothing equivalent for 2D — so `sprite.get_global_position()` raised
+        // UndefinedFunction while `node2d::get_global_position` was computing
+        // the right answer one layer down.
+        if let Some(value) = crate::node2d::call_node2d_method(self.tree_mut(), nid, method, args) {
+            return Some(value);
+        }
+
+        // NavigationRegion3D's runtime bake (pat-s3rrv.180); declines every
+        // other node. A 3D baker has existed in `gdserver3d` since the port
+        // began with no caller able to reach it — this arm is what lets a script
+        // rebake a region and have the next `process_navigation` path over it.
+        if let Some(value) =
+            crate::nav_bake::call_nav_region_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
+
+        // ColorPicker's preset surface (pat-s3rrv.172). Declines every other
+        // node, INCLUDING ColorPickerButton: upstream gives the button only
+        // `get_picker`/`get_popup` (`doc/classes/ColorPickerButton.xml`), so
+        // forwarding the preset methods to it would invent API a real project
+        // cannot call. Answered here rather than by a generic property arm,
+        // which would hand back the raw `presets` Variant — Nil for a picker
+        // that has never had one set, instead of an empty PackedColorArray.
+        if let Some(value) =
+            crate::color_picker::call_color_picker_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
+
         if method == "force_shapecast_update" {
             // Inlined rather than factored into a helper method: this block is
             // inside `impl SceneAccess`, which may only contain that trait's own
@@ -4462,6 +4629,121 @@ impl SceneAccess for SceneTreeAccessor {
             .is_some_and(|p| p.server_body_set_state_vec2(body, state, value))
     }
 
+    // pat-s3rrv.191: the tier-1 PhysicsServer2D surface. Each of these is the
+    // thin half — the RID bookkeeping and the world mutation live in
+    // `physics_server.rs`, so this file stays a routing table.
+    fn physics2d_capsule_shape_create(&mut self) -> u64 {
+        self.physics_mut()
+            .map_or(0, |p| p.server_capsule_shape_create())
+    }
+
+    fn physics2d_shape_set_data_capsule(&mut self, shape: u64, radius: f32, height: f32) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_shape_set_data_capsule(shape, radius, height))
+    }
+
+    fn physics2d_body_set_param(&mut self, body: u64, param: i64, value: f32) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_body_set_param(body, param, value))
+    }
+
+    fn physics2d_body_get_param(&self, body: u64, param: i64) -> Option<f32> {
+        self.physics()
+            .and_then(|p| p.server_body_get_param(body, param))
+    }
+
+    fn physics2d_body_set_collision_layers(
+        &mut self,
+        body: u64,
+        layers: u32,
+        is_mask: bool,
+    ) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_body_set_collision_layers(body, layers, is_mask))
+    }
+
+    fn physics2d_body_apply_impulse(
+        &mut self,
+        body: u64,
+        impulse: (f32, f32),
+        at_point: Option<(f32, f32)>,
+    ) -> bool {
+        let impulse = Vector2::new(impulse.0, impulse.1);
+        let at = at_point.map(|(x, y)| Vector2::new(x, y));
+        self.physics_mut()
+            .is_some_and(|p| p.server_body_apply_impulse(body, impulse, at))
+    }
+
+    fn physics2d_body_apply_force(
+        &mut self,
+        body: u64,
+        force: (f32, f32),
+        at_point: Option<(f32, f32)>,
+    ) -> bool {
+        let force = Vector2::new(force.0, force.1);
+        let at = at_point.map(|(x, y)| Vector2::new(x, y));
+        self.physics_mut()
+            .is_some_and(|p| p.server_body_apply_force(body, force, at))
+    }
+
+    fn physics2d_body_apply_torque_impulse(&mut self, body: u64, torque: f32) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_body_apply_torque_impulse(body, torque))
+    }
+
+    fn physics2d_body_get_linear_velocity(&self, body: u64) -> Option<(f32, f32)> {
+        self.physics()
+            .and_then(|p| p.server_body_linear_velocity(body))
+            .map(|v| (v.x, v.y))
+    }
+
+    fn physics2d_body_get_angular_velocity(&self, body: u64) -> Option<f32> {
+        self.physics()
+            .and_then(|p| p.server_body_angular_velocity(body))
+    }
+
+    fn physics2d_body_get_sleep_state(&self, body: u64, can_sleep: bool) -> Option<bool> {
+        self.physics()
+            .and_then(|p| p.server_body_sleep_state(body, can_sleep))
+    }
+
+    fn physics2d_area_create(&mut self) -> u64 {
+        self.physics_mut().map_or(0, |p| p.server_area_create())
+    }
+
+    fn physics2d_area_set_space(&mut self, area: u64, space: u64) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_area_set_space(area, space))
+    }
+
+    fn physics2d_area_add_shape(&mut self, area: u64, shape: u64) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_area_add_shape(area, shape))
+    }
+
+    fn physics2d_area_set_position(&mut self, area: u64, position: (f32, f32)) -> bool {
+        let position = Vector2::new(position.0, position.1);
+        self.physics_mut()
+            .is_some_and(|p| p.server_area_set_position(area, position))
+    }
+
+    fn physics2d_area_set_param(
+        &mut self,
+        area: u64,
+        param: i64,
+        scalar: f32,
+        vector: (f32, f32),
+    ) -> bool {
+        let vector = Vector2::new(vector.0, vector.1);
+        self.physics_mut()
+            .is_some_and(|p| p.server_area_set_param(area, param, scalar, vector))
+    }
+
+    fn physics2d_area_set_monitorable(&mut self, area: u64, monitorable: bool) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_area_set_monitorable(area, monitorable))
+    }
+
     fn physics2d_body_get_position(&self, body: u64) -> Option<(f32, f32)> {
         let pos = self.physics()?.server_body_position(body)?;
         Some((pos.x, pos.y))
@@ -5816,6 +6098,205 @@ impl SceneAccess for SceneTreeAccessor {
                 true
             }
             None => false,
+        }
+    }
+
+    /// `AnimatedSprite2D.play_backwards(name)` — Godot's `play(name, -1, true)`
+    /// (`animated_sprite_2d.cpp:520-522`).
+    ///
+    /// ⚠️ Writes NODE PROPERTIES, not a playback struct.
+    /// `process_animated_sprites` rebuilds its `AnimatedSpritePlayback` from the
+    /// node every tick, so anything set on a struct here would be discarded
+    /// before the next frame.
+    /// `AnimatedSprite2D.play(name, custom_speed, from_end)`.
+    ///
+    /// ⚠️ The direction and the starting frame are INDEPENDENT arguments: the
+    /// sign of `custom_speed` decides which way the clip runs, `from_end`
+    /// decides where the playhead starts. Godot's `play_backwards(name)` is
+    /// exactly `play(name, -1, true)` (`animated_sprite_2d.cpp:520-522`) — both
+    /// at once — so folding them into a single flag would make
+    /// `play("walk", -1, false)`, a reverse run from wherever the clip is,
+    /// impossible to express.
+    fn animated_sprite_play(
+        &mut self,
+        node: u64,
+        name: &str,
+        custom_speed: f64,
+        from_end: bool,
+    ) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(n) = self.tree().get_node(nid) else {
+            return false;
+        };
+        let clip = if name.is_empty() {
+            match n.get_property("animation") {
+                Variant::String(s) if !s.is_empty() => s,
+                _ => "default".to_string(),
+            }
+        } else {
+            name.to_string()
+        };
+        let last = crate::scene_tree::sprite_frames_from_node(n)
+            .map(|f| f.frame_count(&clip).saturating_sub(1))
+            .unwrap_or(0);
+        let Some(n) = self.tree_mut().get_node_mut(nid) else {
+            return false;
+        };
+        n.set_property("animation", Variant::String(clip));
+        n.set_property(
+            "frame",
+            Variant::Int(if from_end { last as i64 } else { 0 }),
+        );
+        // ⚠️ A `__sf_time` of 0 is the START of the frame going forwards and the
+        // END of it going backwards, because a reversed clip counts down through
+        // `(-hold, 0]`. That is exactly Godot's `set_frame_and_progress(last,
+        // 1.0)` / `(0, 0.0)` pair, expressed once instead of twice.
+        n.set_property("__sf_time", Variant::Float(0.0));
+        // Godot keeps `speed_scale` and `custom_speed` separate and multiplies
+        // them; the node carries only `speed_scale`, so the custom speed lands
+        // there — the same place `play_backwards` negates.
+        let speed = if custom_speed == 0.0 {
+            1.0
+        } else {
+            custom_speed
+        };
+        n.set_property("speed_scale", Variant::Float(speed));
+        n.set_property("playing", Variant::Bool(true));
+        true
+    }
+
+    fn animated_sprite_play_backwards(&mut self, node: u64, name: &str) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(n) = self.tree().get_node(nid) else {
+            return false;
+        };
+        let clip = if name.is_empty() {
+            match n.get_property("animation") {
+                Variant::String(s) if !s.is_empty() => s,
+                _ => "default".to_string(),
+            }
+        } else {
+            name.to_string()
+        };
+        // `from_end`: start at the last frame. Without it a non-looping clip
+        // begins already at its reverse end and finishes without drawing.
+        let last = crate::scene_tree::sprite_frames_from_node(n)
+            .map(|f| f.frame_count(&clip).saturating_sub(1))
+            .unwrap_or(0);
+        let speed = match n.get_property("speed_scale") {
+            Variant::Float(f) => f as f32,
+            Variant::Int(i) => i as f32,
+            _ => 1.0,
+        };
+        let Some(n) = self.tree_mut().get_node_mut(nid) else {
+            return false;
+        };
+        n.set_property("animation", Variant::String(clip));
+        n.set_property("frame", Variant::Int(last as i64));
+        n.set_property("__sf_time", Variant::Float(0.0));
+        n.set_property(
+            "speed_scale",
+            Variant::Float(-(speed.abs().max(0.01)) as f64),
+        );
+        n.set_property("playing", Variant::Bool(true));
+        true
+    }
+
+    /// `AnimatedSprite2D.pause()` — freeze without resetting.
+    ///
+    /// ⚠️ Godot spells `pause` and `stop` as `_stop_internal(reset)`
+    /// (`animated_sprite_2d.cpp:524-540`); the ONLY difference is whether the
+    /// frame and progress are cleared. Collapsing them loses mid-clip resume.
+    fn animated_sprite_pause(&mut self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(n) = self.tree_mut().get_node_mut(nid) else {
+            return false;
+        };
+        n.set_property("playing", Variant::Bool(false));
+        true
+    }
+
+    /// `AnimatedSprite2D.stop()` — freeze AND reset to the clip start.
+    fn animated_sprite_stop(&mut self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(n) = self.tree_mut().get_node_mut(nid) else {
+            return false;
+        };
+        n.set_property("playing", Variant::Bool(false));
+        n.set_property("frame", Variant::Int(0));
+        n.set_property("__sf_time", Variant::Float(0.0));
+        // ⚠️ `frame_progress` has to be cleared HERE, not left to the next tick.
+        // `process_animated_sprites` skips a node whose `playing` is false, so
+        // nothing recomputes it after a stop — the sprite would sit rewound to
+        // frame 0 while still advertising the sub-frame offset it stopped at.
+        n.set_property("frame_progress", Variant::Float(0.0));
+        true
+    }
+
+    /// `AnimatedSprite2D.set_frame_and_progress(frame, progress)` — both at once.
+    ///
+    /// ⚠️ `progress` is a 0..1 FRACTION of the current frame, while the tick
+    /// stores raw seconds in `__sf_time` and derives progress as
+    /// `time / frame_seconds(frame)`. Storing the fraction directly would make a
+    /// progress of 0.5 mean half a second, which on a 10 fps clip is five frames.
+    fn animated_sprite_set_frame_and_progress(
+        &mut self,
+        node: u64,
+        frame: i64,
+        progress: f64,
+    ) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(n) = self.tree().get_node(nid) else {
+            return false;
+        };
+        let anim = match n.get_property("animation") {
+            Variant::String(s) if !s.is_empty() => s,
+            _ => "default".to_string(),
+        };
+        let idx = frame.max(0) as usize;
+        let hold = crate::scene_tree::sprite_frames_from_node(n)
+            .and_then(|f| f.animation(&anim).map(|a| a.frame_seconds(idx)))
+            .unwrap_or(0.0);
+        // ⚠️ Read BEFORE the mutable re-borrow, and read it at all: the
+        // fraction -> seconds conversion is direction-dependent, because a
+        // reversed clip stores `__sf_time` in `(-hold, 0]`. Writing
+        // `progress * hold` on a backwards sprite would put the playhead a
+        // whole frame ahead of where the caller asked for, and the reader in
+        // `process_animated_sprites` would clamp it straight back to 1.0.
+        // The two conversions have to agree; this is the inverse of that one.
+        let backwards = match n.get_property("speed_scale") {
+            Variant::Float(f) => f < 0.0,
+            Variant::Int(i) => i < 0,
+            _ => false,
+        };
+        let Some(n) = self.tree_mut().get_node_mut(nid) else {
+            return false;
+        };
+        let seconds = if backwards {
+            (progress - 1.0) * hold as f64
+        } else {
+            progress * hold as f64
+        };
+        n.set_property("frame", Variant::Int(idx as i64));
+        n.set_property("__sf_time", Variant::Float(seconds));
+        n.set_property("frame_progress", Variant::Float(progress));
+        true
+    }
+
+    /// `AnimatedSprite2D.get_playing_speed()` — the SIGNED effective speed, or
+    /// 0 while stopped. Negative means the clip is running backwards.
+    fn animated_sprite_playing_speed(&self, node: u64) -> f64 {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(n) = self.tree().get_node(nid) else {
+            return 0.0;
+        };
+        if !matches!(n.get_property("playing"), Variant::Bool(true)) {
+            return 0.0;
+        }
+        match n.get_property("speed_scale") {
+            Variant::Float(f) => f,
+            Variant::Int(i) => i as f64,
+            _ => 1.0,
         }
     }
 

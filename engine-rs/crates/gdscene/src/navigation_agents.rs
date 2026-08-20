@@ -324,6 +324,14 @@ fn tuned(node: &Node, key: &str, current: f32) -> f32 {
     }
 }
 
+/// The bool twin of [`tuned`], with the same absent-keeps-the-default rule.
+fn tuned_bool(node: &Node, key: &str, current: bool) -> bool {
+    match node.get_property(key) {
+        Variant::Bool(v) => v,
+        _ => current,
+    }
+}
+
 /// Copies the scene-authored tuning values onto the backing agent.
 ///
 /// Before this, `process_navigation` read only `target_position`, so a `.tscn`
@@ -339,6 +347,11 @@ pub fn sync_tuning_2d(tree: &SceneTree, node: NodeId, agent: &mut NavigationAgen
         tuned(n, "target_desired_distance", agent.target_desired_distance);
     agent.max_speed = tuned(n, "max_speed", agent.max_speed);
     agent.radius = tuned(n, "radius", agent.radius);
+    // pat-s3rrv.181: without these two the RDP reducer in `nav_simplify` had no
+    // way to be reached from a scene — the properties were registered in ClassDB
+    // and read by nobody.
+    agent.simplify_path = tuned_bool(n, "simplify_path", agent.simplify_path);
+    agent.simplify_epsilon = tuned(n, "simplify_epsilon", agent.simplify_epsilon);
 }
 
 /// The 3D twin of [`sync_tuning_2d`].
@@ -349,6 +362,11 @@ pub fn sync_tuning_3d(tree: &SceneTree, node: NodeId, agent: &mut NavigationAgen
         tuned(n, "target_desired_distance", agent.target_desired_distance);
     agent.max_speed = tuned(n, "max_speed", agent.max_speed);
     agent.radius = tuned(n, "radius", agent.radius);
+    // pat-s3rrv.181: without these two the RDP reducer in `nav_simplify` had no
+    // way to be reached from a scene — the properties were registered in ClassDB
+    // and read by nobody.
+    agent.simplify_path = tuned_bool(n, "simplify_path", agent.simplify_path);
+    agent.simplify_epsilon = tuned(n, "simplify_epsilon", agent.simplify_epsilon);
     // `height` is the agent cylinder's vertical extent used by the layered
     // avoidance solve. It is NOT `path_height_offset`, which Godot declares
     // separately as a vertical offset applied to the path position — Patina has

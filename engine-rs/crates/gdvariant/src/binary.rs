@@ -114,6 +114,11 @@ const T_STRING_NAME: u32 = 21;
 const T_NODE_PATH: u32 = 22;
 const T_RID: u32 = 23;
 const T_OBJECT: u32 = 24;
+/// Godot's `Variant::CALLABLE`. Carries **no payload** — see the encode arm.
+const T_CALLABLE: u32 = 25;
+/// Godot's `Variant::SIGNAL`: an encoded name string followed by a `u64`
+/// object id.
+const T_SIGNAL: u32 = 26;
 const T_DICTIONARY: u32 = 27;
 const T_ARRAY: u32 = 28;
 const T_PACKED_BYTE_ARRAY: u32 = 29;
@@ -530,10 +535,29 @@ fn encode_into(value: &Variant, out: &mut Vec<u8>, depth: u32) -> Result<(), Var
                 put_f32(out, p.w);
             }
         }
-        Variant::Callable(_) => return Err(VariantEncodeError::Unsupported(VariantType::Callable)),
+        Variant::Callable(_) => {
+            // ⚠️ Godot writes the header and NOTHING else
+            // (`marshalls.cpp:1817-1818` is an empty case), and decodes it back
+            // as a bare `Callable()`. A callable is a binding to a live object,
+            // so there is nothing meaningful to put on a wire — the type
+            // survives the round trip, the target does not.
+            //
+            // Encoding it as "nothing" rather than rejecting it is what Godot
+            // does, and it matters for RPC: an arg list containing a Callable
+            // still encodes, so argc and payload stay in step.
+            put_u32(out, T_CALLABLE);
+        }
         // Godot's `encode_variant` refuses SIGNAL for the same reason it refuses
         // CALLABLE: the value is a live binding to an object, not data.
-        Variant::Signal { .. } => return Err(VariantEncodeError::Unsupported(VariantType::Signal)),
+        Variant::Signal { object_id, name } => {
+            // `_encode_string(signal.get_name())` then
+            // `encode_uint64(signal.get_object_id())` (`marshalls.cpp:1819-1828`).
+            // Name first, id second — the reverse order decodes as garbage
+            // because the string is length-prefixed and would consume the id.
+            put_u32(out, T_SIGNAL);
+            encode_string(name, out);
+            out.extend_from_slice(&object_id.to_le_bytes());
+        }
         Variant::Resource(_) => return Err(VariantEncodeError::Unsupported(VariantType::Resource)),
     }
 
@@ -730,6 +754,21 @@ fn decode_from(r: &mut Reader, depth: u32) -> Result<Variant, VariantDecodeError
         // with ERR_UNAUTHORIZED when it is off (`marshalls.cpp:717`); this codec
         // has no allow-objects mode, so it always refuses.
         T_OBJECT => Err(VariantDecodeError::UnsupportedType(T_OBJECT)),
+        // Godot's decoder yields `Callable()` — an empty, invalid callable
+        // (`marshalls.cpp:788-790`). The nearest representation here is a method
+        // binding with no target and no method name; nothing can be invoked
+        // through it, which is exactly the point.
+        T_CALLABLE => Ok(Variant::Callable(Box::new(
+            crate::variant::CallableRef::Method {
+                target_id: 0,
+                method: String::new(),
+            },
+        ))),
+        T_SIGNAL => {
+            let name = decode_string(r)?;
+            let object_id = r.u64()?;
+            Ok(Variant::Signal { object_id, name })
+        }
         T_BOOL => Ok(Variant::Bool(r.u32()? != 0)),
         T_INT => {
             if flag64 {
@@ -1330,11 +1369,20 @@ mod tests {
         // (pat-nzgdu.189 added the as-id form, which decodes).
         let err = decode_variant(&[24, 0, 0, 0]).unwrap_err();
         assert_eq!(err, VariantDecodeError::UnsupportedType(24));
-        // PACKED_VECTOR4_ARRAY(38) is recognized by Godot but not carried here.
-        assert_eq!(
-            decode_variant(&[38, 0, 0, 0, 0, 0, 0, 0]).unwrap_err(),
-            VariantDecodeError::UnsupportedType(38)
-        );
+        // ⚠️ CONTRACT CHANGE: `PACKED_VECTOR4_ARRAY(38)` used to be asserted
+        // here as unsupported. It is carried now — the const, the encode arm and
+        // the decode arm all exist — so this test was failing against the
+        // implementation until the assertion was corrected. It now checks the
+        // opposite, which is what the codec actually promises.
+        //
+        // Whoever adds a type to this codec owns updating BOTH contract tests:
+        // this one and `encode_unsupported_variant_types_error`. They fail in
+        // opposite directions and it is easy to fix only the one you happened to
+        // run.
+        let (v, used) = decode_variant(&[38, 0, 0, 0, 0, 0, 0, 0])
+            .expect("PACKED_VECTOR4_ARRAY(38) decodes; it is in the const table");
+        assert_eq!(v, Variant::PackedVector4Array(vec![]));
+        assert_eq!(used, 8, "header plus a zero element count");
     }
 
     #[test]
@@ -1430,27 +1478,34 @@ mod tests {
     }
 
     /// ⚠️ CONTRACT CHANGE (pat-nzgdu.189): `ObjectId` used to be `Unsupported`.
-    /// It now encodes as a bare instance id (Godot's OBJECT_AS_ID), so the
-    /// unsupported set is `Callable`/`Resource` — and, importantly, the
-    /// propagate-out-of-containers behaviour this test guarded still holds; it
-    /// just needs a type that is still unsupported to demonstrate it.
+    /// It now encodes as a bare instance id (Godot's OBJECT_AS_ID).
+    ///
+    /// ⚠️ CONTRACT CHANGE (pat-s3rrv.179): `Callable` and `Signal` used to be
+    /// `Unsupported` too. Godot encodes both (`marshalls.cpp:1817-1828`) — a
+    /// Callable as its header alone, a Signal as name + object id — so the
+    /// unsupported set is now just `Resource`.
+    ///
+    /// The propagate-out-of-containers behaviour this test exists for is
+    /// unchanged; as the previous contract change already noted, it just needs a
+    /// type that is *still* unsupported to demonstrate it.
     #[test]
     fn encode_unsupported_variant_types_error() {
-        let callable = || {
-            Variant::Callable(Box::new(crate::variant::CallableRef::Method {
-                target_id: 1,
-                method: "m".to_string(),
+        let resource = || {
+            Variant::Resource(Box::new(crate::variant::ResourceRef {
+                path: "res://x.tres".to_string(),
+                class_name: "Resource".to_string(),
+                properties: Default::default(),
             }))
         };
         assert_eq!(
-            encode_variant(&callable()),
-            Err(VariantEncodeError::Unsupported(VariantType::Callable))
+            encode_variant(&resource()),
+            Err(VariantEncodeError::Unsupported(VariantType::Resource))
         );
         // The error still propagates out of nested containers.
-        let arr = Variant::Array(vec![Variant::Int(1), callable()]);
+        let arr = Variant::Array(vec![Variant::Int(1), resource()]);
         assert_eq!(
             encode_variant(&arr),
-            Err(VariantEncodeError::Unsupported(VariantType::Callable))
+            Err(VariantEncodeError::Unsupported(VariantType::Resource))
         );
         // ...and an ObjectId inside a container now encodes rather than
         // poisoning the whole array.

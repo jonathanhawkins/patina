@@ -194,6 +194,69 @@ fn limit_violation(value: f32, lower: f32, upper: f32) -> f32 {
 /// Impulse bounds for a one-sided limit: a violation past the *upper* bound may
 /// only be pushed back (negative impulse), and vice versa. Without this a limit
 /// would also stop a body that is already returning into range.
+/// The positional bias a spring of `stiffness` applies to remove `error` this
+/// step (pat-s3rrv.192).
+///
+/// ⚠️ Saturating, not linear. A raw `stiffness * error * inv_dt` bias makes a
+/// stiff spring overshoot and explode: the solver drives relative velocity to
+/// exactly `-bias`, so a bias larger than the error needs in one step throws the
+/// body past equilibrium harder than it arrived. `k / (1 + k)` with
+/// `k = stiffness * dt` maps any stiffness into "remove at most all of the error
+/// this step", which is stable for every value a scene can author.
+fn spring_bias(stiffness: f32, error: f32, dt: f32, inv_dt: f32) -> f32 {
+    let k = (stiffness * dt).max(0.0);
+    let erp = k / (1.0 + k);
+    erp * error * inv_dt
+}
+
+/// Bleeds relative linear velocity along `n` toward zero by `damping`.
+///
+/// ⚠️ Separate from the spring's positional bias because Godot's `damping` is a
+/// distinct parameter: a stiff spring with no damping is *supposed* to oscillate.
+/// Folding damping into the bias would make every spring critically damped and
+/// the parameter would be stored and unread.
+fn damp_linear_axis(
+    a: &mut JointBody,
+    b: &mut JointBody,
+    ra: Vector3,
+    rb: Vector3,
+    n: Vector3,
+    damping: f32,
+) {
+    if damping <= 0.0 {
+        return;
+    }
+    let k = point_effective_mass(a, b, ra, rb, n);
+    if k <= 1e-9 {
+        return;
+    }
+    let relative = (b.velocity_at(rb) - a.velocity_at(ra)).dot(n);
+    let lambda = (-relative / k) * damping.clamp(0.0, 1.0);
+    if lambda == 0.0 {
+        return;
+    }
+    apply_pair_impulse(a, b, ra, rb, n * lambda);
+}
+
+/// Angular twin of [`damp_linear_axis`].
+fn damp_angular_axis(a: &mut JointBody, b: &mut JointBody, n: Vector3, damping: f32) {
+    if damping <= 0.0 {
+        return;
+    }
+    let k = angular_effective_mass(a, b, n);
+    if k <= 1e-9 {
+        return;
+    }
+    let relative = (b.angular_velocity - a.angular_velocity).dot(n);
+    let lambda = (-relative / k) * damping.clamp(0.0, 1.0);
+    if lambda == 0.0 {
+        return;
+    }
+    let p = n * lambda;
+    a.angular_velocity = a.angular_velocity - a.inv_inertia_mul(p);
+    b.angular_velocity = b.angular_velocity + b.inv_inertia_mul(p);
+}
+
 fn one_sided_bounds(violation: f32) -> (f32, f32) {
     if violation > 0.0 {
         (f32::NEG_INFINITY, 0.0)
@@ -1122,6 +1185,66 @@ impl PhysicsWorld3D {
                         let (min, max) = one_sided_bounds(violation);
                         let bias = JOINT_LIMIT_BIAS * violation * inv_dt;
                         solve_angular_axis(&mut a, &mut b, n, 0.0, bias, min, max);
+                    }
+
+                    // -- motors (pat-s3rrv.192) ------------------------------
+                    //
+                    // A motor drives the RELATIVE velocity toward its target,
+                    // with the impulse capped by `force_limit`. Force is a rate,
+                    // so the per-step impulse cap is `force_limit * dt` — using
+                    // the force directly would make the cap depend on the tick
+                    // rate, and a 120 Hz world twice as strong as a 60 Hz one.
+                    let m = g.linear_motors[axis];
+                    if m.enabled && m.force_limit > 0.0 {
+                        let cap = m.force_limit * dt;
+                        // `solve_linear_axis` computes `(-relative - bias) / k`,
+                        // so a bias of `-target` drives toward `target` exactly
+                        // as the angular solver's own `target` argument does.
+                        solve_linear_axis(&mut a, &mut b, ra, rb, n, -m.target_velocity, -cap, cap);
+                    }
+                    let m = g.angular_motors[axis];
+                    if m.enabled && m.force_limit > 0.0 {
+                        let cap = m.force_limit * dt;
+                        solve_angular_axis(&mut a, &mut b, n, m.target_velocity, 0.0, -cap, cap);
+                    }
+
+                    // -- springs ---------------------------------------------
+                    //
+                    // A spring pulls the axis back toward its equilibrium rather
+                    // than merely stopping it at a limit, so the bias comes from
+                    // the POSITION error and the bounds are two-sided — a
+                    // one-sided clamp like the limits use could only ever push
+                    // one way and the spring would not return.
+                    let sp = g.linear_springs[axis];
+                    if sp.enabled && sp.stiffness > 0.0 {
+                        let error = offset.dot(n) - sp.equilibrium_point;
+                        let bias = spring_bias(sp.stiffness, error, dt, inv_dt);
+                        solve_linear_axis(
+                            &mut a,
+                            &mut b,
+                            ra,
+                            rb,
+                            n,
+                            bias,
+                            f32::NEG_INFINITY,
+                            f32::INFINITY,
+                        );
+                        damp_linear_axis(&mut a, &mut b, ra, rb, n, sp.damping);
+                    }
+                    let sp = g.angular_springs[axis];
+                    if sp.enabled && sp.stiffness > 0.0 {
+                        let error = angle - sp.equilibrium_point;
+                        let bias = spring_bias(sp.stiffness, error, dt, inv_dt);
+                        solve_angular_axis(
+                            &mut a,
+                            &mut b,
+                            n,
+                            0.0,
+                            bias,
+                            f32::NEG_INFINITY,
+                            f32::INFINITY,
+                        );
+                        damp_angular_axis(&mut a, &mut b, n, sp.damping);
                     }
                 }
             }

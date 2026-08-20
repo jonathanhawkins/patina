@@ -778,14 +778,16 @@ impl HttpRequestNode {
 /// ⚠️ PATCH is **8**, not 6 — 6 is TRACE. Counting the variants of Patina's own
 /// `HttpMethod` enum instead of reading the upstream header gets this wrong,
 /// because that enum omits three of Godot's nine.
+///
+/// 🔑 **Delegates rather than repeating the table.** This was a second copy of
+/// the same mapping; `HttpMethod` is defined in `gdplatform`, so the table lives
+/// there and this is the thin scene-side name for it. Two copies of an ordinal
+/// table are a drift hazard that no test catches until they disagree — and the
+/// value most likely to drift is exactly the one the ⚠️ above is about.
+///
+/// Kept as a function rather than a re-export so the doc-comment above travels
+/// with the call sites in `scripting.rs`, and so the scene layer keeps Godot's
+/// own spelling for it.
 pub fn method_from_int(v: i64) -> Option<HttpMethod> {
-    match v {
-        0 => Some(HttpMethod::Get),
-        1 => Some(HttpMethod::Head),
-        2 => Some(HttpMethod::Post),
-        3 => Some(HttpMethod::Put),
-        4 => Some(HttpMethod::Delete),
-        8 => Some(HttpMethod::Patch),
-        _ => None,
-    }
+    gdplatform::http_client_handle::method_from_ordinal(v)
 }

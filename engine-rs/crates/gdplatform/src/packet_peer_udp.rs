@@ -148,6 +148,67 @@ impl Default for PacketPeerUDP {
     }
 }
 
+/// Script-visible handle table for `PacketPeerUDP` (pat-s3rrv.178).
+///
+/// The class was registered in ClassDB and fully implemented here, but had no
+/// interpreter dispatch, so `PacketPeerUDP.new()` from GDScript reached nothing.
+/// Mirrors `packet_peer_stream.rs` exactly — same poison-tolerant table, same
+/// tag mask.
+///
+/// ⚠️ THE TAG BYTE IS A WORKSPACE-WIDE NAMESPACE. Two modules issuing the same
+/// top byte makes `is_*_handle` answer true for the other module's ids, and the
+/// symptom is a `MethodNotFound` naming the WRONG class. `0x60` was chosen after
+/// sweeping every tag constant in the workspace; it is unused, and follows the socket family (`0x5B`-`0x5F`); `0x5D` is WebRTC's connection tag.
+const PACKET_PEER_UDP_HANDLE_TAG: u64 = 0x6000_0000_0000_0000;
+static NEXT_PACKET_PEER_UDP_HANDLE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+static PACKET_PEER_UDP_HANDLES: std::sync::Mutex<
+    Option<std::collections::HashMap<u64, PacketPeerUDP>>,
+> = std::sync::Mutex::new(None);
+
+fn packet_peer_udp_handles(
+) -> std::sync::MutexGuard<'static, Option<std::collections::HashMap<u64, PacketPeerUDP>>> {
+    // A poisoned lock still holds a usable table: a panic in one script's
+    // handler must not make every later call fail.
+    PACKET_PEER_UDP_HANDLES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Returns `true` when `id` was issued by [`new_packet_peer_udp_handle`].
+pub fn is_packet_peer_udp_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == PACKET_PEER_UDP_HANDLE_TAG
+}
+
+/// Allocates a fresh [`PacketPeerUDP`] and returns its script-visible id
+/// (Godot `PacketPeerUDP.new()`).
+pub fn new_packet_peer_udp_handle() -> gdcore::id::ObjectId {
+    let seq = NEXT_PACKET_PEER_UDP_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let raw = PACKET_PEER_UDP_HANDLE_TAG | seq;
+    packet_peer_udp_handles()
+        .get_or_insert_with(std::collections::HashMap::new)
+        .insert(raw, PacketPeerUDP::new());
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+/// Runs `f` against the live peer behind `id`, or returns `None` when the
+/// handle was never issued or has already been released.
+pub fn with_packet_peer_udp<R>(
+    id: gdcore::id::ObjectId,
+    f: impl FnOnce(&mut PacketPeerUDP) -> R,
+) -> Option<R> {
+    let mut guard = packet_peer_udp_handles();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    map.get_mut(&id.raw()).map(f)
+}
+
+/// Drops the peer behind `id`, closing its socket.
+pub fn release_packet_peer_udp_handle(id: gdcore::id::ObjectId) -> bool {
+    let mut guard = packet_peer_udp_handles();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    map.remove(&id.raw()).is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

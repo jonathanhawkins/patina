@@ -699,6 +699,10 @@ pub struct PhysicsServer {
     /// geometry, body RID -> the world body once it has been given a space.
     server_shapes: std::collections::HashMap<u64, Shape2D>,
     server_bodies: std::collections::HashMap<u64, Option<BodyId>>,
+    /// Server-created areas by RID, `None` until `area_set_space` admits them
+    /// — the same two-phase shape `server_bodies` uses, and for the same reason:
+    /// Godot's spaceless area affects nothing.
+    server_areas: std::collections::HashMap<u64, Option<AreaId>>,
     /// RIDs are opaque; starting above zero keeps `0` meaning "no space", which
     /// is how Godot spells a spaceless body.
     next_server_rid: u64,
@@ -777,6 +781,7 @@ impl PhysicsServer {
             area_store: AreaStore::new(),
             server_shapes: std::collections::HashMap::new(),
             server_bodies: std::collections::HashMap::new(),
+            server_areas: std::collections::HashMap::new(),
             next_server_rid: 1,
             node_to_body: HashMap::new(),
             body_to_node: HashMap::new(),
@@ -823,6 +828,64 @@ impl PhysicsServer {
     /// Returns the number of registered areas.
     pub fn area_count(&self) -> usize {
         self.node_to_area.len()
+    }
+
+    /// The audio bus an `Area2D` imposes on a point — `Area2D.audio_bus_override`
+    /// / `audio_bus_name` (pat-s3rrv.190).
+    ///
+    /// The 2D twin of [`PhysicsServer3D::audio_bus_at`]. Godot resolves it the
+    /// same way it resolves the space overrides: every area containing the point
+    /// is a candidate and the highest `priority` wins (`area_2d.cpp`). An
+    /// `AudioStreamPlayer2D` standing inside such an area has its voice rerouted
+    /// to that bus — the usual use being a reverb bus for a room or a cave.
+    ///
+    /// ⚠️ A POINT test, not a body-overlap query. An `AudioStreamPlayer2D` is
+    /// not a physics body and never appears in `overlapping_bodies`, so the
+    /// overlap machinery cannot answer this.
+    ///
+    /// ⚠️ Uses `AreaStore::point_query` rather than the 3D side's hand-rolled
+    /// `shape.contains_point(point - area.position)`. That helper goes
+    /// world -> local through `shape_owners()`, so it honours a ROTATED area, an
+    /// authored `shape_transform` offset, and an area with several colliders —
+    /// all three of which the subtraction misses (pat-s3rrv.25 fixed exactly
+    /// that bug for area picking).
+    ///
+    /// Returns `None` when no overriding area contains the point, which leaves
+    /// the voice on whatever bus it already had. A player outside every
+    /// overriding area is deliberately NOT forced back to Master: its bus is
+    /// whatever the node itself asked for.
+    pub fn audio_bus_at(&self, tree: &SceneTree, point: Vector2) -> Option<String> {
+        let mut best: Option<(i32, String)> = None;
+        for area_id in self.area_store.point_query(point) {
+            let Some(node_id) = self.area_to_node.get(&area_id).copied() else {
+                continue;
+            };
+            if !bool_prop(tree, node_id, "audio_bus_override", false) {
+                continue;
+            }
+            let bus = match tree
+                .get_node(node_id)
+                .map(|n| n.get_property("audio_bus_name"))
+            {
+                Some(Variant::String(name)) if !name.is_empty() => name,
+                // Godot's default bus name. An override with no name still means
+                // "route somewhere", and Master is where it routes.
+                _ => "Master".to_string(),
+            };
+            let priority = self
+                .area_store
+                .get_area(area_id)
+                .map(|a| a.priority)
+                .unwrap_or(0);
+            let better = match &best {
+                Some((p, _)) => priority > *p,
+                None => true,
+            };
+            if better {
+                best = Some((priority, bus));
+            }
+        }
+        best.map(|(_, bus)| bus)
     }
 
     /// Returns the collision events from the last physics step.
@@ -903,6 +966,21 @@ impl PhysicsServer {
                 *half_extents = extents.unwrap_or(Vector2::new(radius, radius));
                 true
             }
+            // 🔑 A capsule takes `Vector2(radius, height)`, the SAME call shape a
+            // rectangle uses for its half-extents. Godot has one
+            // `shape_set_data` and disambiguates by the shape the RID already
+            // names — so the dispatch must happen here, on the stored shape, not
+            // in the interpreter where only the argument's type is visible and
+            // the two are indistinguishable (pat-s3rrv.191).
+            Some(Shape2D::Capsule {
+                radius: r,
+                height: h,
+            }) => {
+                let e = extents.unwrap_or(Vector2::new(radius, radius));
+                *r = e.x.max(0.0);
+                *h = e.y.max(0.0);
+                true
+            }
             _ => false,
         }
     }
@@ -978,15 +1056,344 @@ impl PhysicsServer {
         };
         match self.world.get_body_mut(id) {
             Some(b) => {
+                // ⚠️ Godot's `BodyState` is TRANSFORM 0, LINEAR_VELOCITY 1,
+                // ANGULAR_VELOCITY 2, SLEEPING 3, CAN_SLEEP 4
+                // (`servers/physics_2d/physics_server_2d.h`). This mapped
+                // LINEAR_VELOCITY to **2**, which is ANGULAR_VELOCITY: a script
+                // passing Godot's real value (1) got `false` and no effect,
+                // while passing 2 set the linear velocity it did not ask for.
+                // The getter carried the same wrong table in a comment
+                // (pat-s3rrv.191).
                 match state {
                     0 => b.position = value,
-                    2 => b.linear_velocity = value,
+                    1 => b.linear_velocity = value,
                     _ => return false,
                 }
                 true
             }
             None => false,
         }
+    }
+
+    /// `PhysicsServer2D.area_create()` — an area not yet in any space
+    /// (pat-s3rrv.191).
+    pub fn server_area_create(&mut self) -> u64 {
+        let rid = self.next_server_rid;
+        self.next_server_rid += 1;
+        self.server_areas.insert(rid, None);
+        rid
+    }
+
+    /// `PhysicsServer2D.area_set_space(area, space)` — a non-zero space admits
+    /// the area to this server's `AreaStore`; `0` removes it.
+    ///
+    /// 🔑 `Area2D::new` already defaults `monitoring = true` and
+    /// `collision_mask = 1`, which matters: `overlapping_areas_sorted` skips any
+    /// area with `monitoring == false` OR whose mask misses the body's layer, so
+    /// an area created with either unset would be registered, queryable, and
+    /// completely inert — the exact "wired but does nothing" shape this bead
+    /// exists to remove.
+    pub fn server_area_set_space(&mut self, area: u64, space: u64) -> bool {
+        let Some(slot) = self.server_areas.get(&area).copied() else {
+            return false;
+        };
+        match (space, slot) {
+            (s, Some(_)) if s != 0 => true,
+            (s, None) if s != 0 => {
+                let a = Area2D::new(
+                    AreaId(0),
+                    Vector2::ZERO,
+                    // A unit circle until `area_add_shape` replaces it, matching
+                    // how `body_set_space` seeds a shapeless body.
+                    Shape2D::Circle { radius: 1.0 },
+                );
+                let id = self.area_store.add_area(a);
+                self.server_areas.insert(area, Some(id));
+                true
+            }
+            (0, Some(id)) => {
+                let _ = self.area_store.remove_area(id);
+                self.server_areas.insert(area, None);
+                true
+            }
+            _ => true,
+        }
+    }
+
+    /// `PhysicsServer2D.area_add_shape(area, shape)`.
+    pub fn server_area_add_shape(&mut self, area: u64, shape: u64) -> bool {
+        let Some(Some(id)) = self.server_areas.get(&area).copied() else {
+            return false;
+        };
+        let Some(sh) = self.server_shapes.get(&shape).copied() else {
+            return false;
+        };
+        match self.area_store.get_area_mut(id) {
+            Some(a) => {
+                a.shape = sh;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `PhysicsServer2D.area_set_transform(area, xform)` — origin only.
+    pub fn server_area_set_position(&mut self, area: u64, position: Vector2) -> bool {
+        let Some(Some(id)) = self.server_areas.get(&area).copied() else {
+            return false;
+        };
+        match self.area_store.get_area_mut(id) {
+            Some(a) => {
+                a.position = position;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `PhysicsServer2D.area_set_param(area, param, value)`.
+    ///
+    /// Godot's `AreaParameter`: GRAVITY_OVERRIDE_MODE 0, GRAVITY 1,
+    /// GRAVITY_VECTOR 2, GRAVITY_IS_POINT 3, GRAVITY_POINT_UNIT_DISTANCE 4,
+    /// LINEAR_DAMP_OVERRIDE_MODE 5, LINEAR_DAMP 6, ANGULAR_DAMP_OVERRIDE_MODE 7,
+    /// ANGULAR_DAMP 8, PRIORITY 9 — transcribed from
+    /// `servers/physics_2d/physics_server_2d.h`.
+    ///
+    /// ⚠️ Setting GRAVITY alone changes nothing until the override MODE leaves
+    /// `Disabled`, which is `Area2D`'s default and Godot's. That is upstream
+    /// behaviour, not a gap: an area that merely names a gravity is not yet
+    /// overriding anything.
+    pub fn server_area_set_param(
+        &mut self,
+        area: u64,
+        param: i64,
+        scalar: f32,
+        vector: Vector2,
+    ) -> bool {
+        let Some(Some(id)) = self.server_areas.get(&area).copied() else {
+            return false;
+        };
+        let Some(a) = self.area_store.get_area_mut(id) else {
+            return false;
+        };
+        match param {
+            0 => {
+                a.gravity_space_override = match scalar as i64 {
+                    1 => AreaSpaceOverride::Combine,
+                    2 => AreaSpaceOverride::CombineReplace,
+                    3 => AreaSpaceOverride::Replace,
+                    4 => AreaSpaceOverride::ReplaceCombine,
+                    _ => AreaSpaceOverride::Disabled,
+                }
+            }
+            1 => a.gravity = scalar,
+            2 => a.gravity_direction = vector,
+            3 => a.gravity_is_point = scalar != 0.0,
+            4 => a.gravity_point_unit_distance = scalar,
+            9 => a.priority = scalar as i32,
+            _ => return false,
+        }
+        true
+    }
+
+    /// `PhysicsServer2D.area_set_monitorable(area, monitorable)`.
+    pub fn server_area_set_monitorable(&mut self, area: u64, monitorable: bool) -> bool {
+        let Some(Some(id)) = self.server_areas.get(&area).copied() else {
+            return false;
+        };
+        match self.area_store.get_area_mut(id) {
+            Some(a) => {
+                a.monitorable = monitorable;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `PhysicsServer2D.capsule_shape_create()` (pat-s3rrv.191).
+    pub fn server_capsule_shape_create(&mut self) -> u64 {
+        let rid = self.next_server_rid;
+        self.next_server_rid += 1;
+        self.server_shapes.insert(
+            rid,
+            Shape2D::Capsule {
+                radius: 10.0,
+                height: 40.0,
+            },
+        );
+        rid
+    }
+
+    /// Sets a capsule shape's `(radius, height)`.
+    pub fn server_shape_set_data_capsule(&mut self, shape: u64, radius: f32, height: f32) -> bool {
+        match self.server_shapes.get_mut(&shape) {
+            Some(Shape2D::Capsule {
+                radius: r,
+                height: h,
+            }) => {
+                *r = radius.max(0.0);
+                *h = height.max(0.0);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// `PhysicsServer2D.body_set_param(body, param, value)`.
+    ///
+    /// Godot's `BodyParameter`: BOUNCE 0, FRICTION 1, MASS 2, INERTIA 3,
+    /// CENTER_OF_MASS 4, GRAVITY_SCALE 5, LINEAR_DAMP_MODE 6,
+    /// ANGULAR_DAMP_MODE 7, LINEAR_DAMP 8, ANGULAR_DAMP 9 — transcribed from
+    /// `servers/physics_2d/physics_server_2d.h`, not derived.
+    ///
+    /// ⚠️ INERTIA and the two DAMP_MODE params are DECLINED, not accepted and
+    /// dropped: `PhysicsBody2D` has no field for them, and a setter that reports
+    /// success while changing nothing is worse than one that reports failure —
+    /// the caller cannot tell the difference until the simulation misbehaves.
+    pub fn server_body_set_param(&mut self, body: u64, param: i64, value: f32) -> bool {
+        let Some(Some(id)) = self.server_bodies.get(&body).copied() else {
+            return false;
+        };
+        let Some(b) = self.world.get_body_mut(id) else {
+            return false;
+        };
+        match param {
+            0 => b.bounce = value,
+            1 => b.friction = value,
+            2 => b.mass = value.max(0.0),
+            5 => b.gravity_scale = value,
+            8 => b.linear_damp = value,
+            9 => b.angular_damp = value,
+            _ => return false,
+        }
+        true
+    }
+
+    /// `PhysicsServer2D.body_get_param(body, param)`.
+    pub fn server_body_get_param(&self, body: u64, param: i64) -> Option<f32> {
+        let Some(Some(id)) = self.server_bodies.get(&body).copied() else {
+            return None;
+        };
+        let b = self.world.get_body(id)?;
+        match param {
+            0 => Some(b.bounce),
+            1 => Some(b.friction),
+            2 => Some(b.mass),
+            5 => Some(b.gravity_scale),
+            8 => Some(b.linear_damp),
+            9 => Some(b.angular_damp),
+            _ => None,
+        }
+    }
+
+    /// `body_set_collision_layer` / `body_set_collision_mask`.
+    pub fn server_body_set_collision_layers(
+        &mut self,
+        body: u64,
+        layers: u32,
+        is_mask: bool,
+    ) -> bool {
+        let Some(Some(id)) = self.server_bodies.get(&body).copied() else {
+            return false;
+        };
+        match self.world.get_body_mut(id) {
+            Some(b) => {
+                if is_mask {
+                    b.collision_mask = layers;
+                } else {
+                    b.collision_layer = layers;
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `body_apply_impulse` / `body_apply_central_impulse` (server form).
+    ///
+    /// 🔑 An impulse changes velocity instantaneously; a force accumulates over
+    /// the step. They are separate methods upstream for that reason, and
+    /// `PhysicsBody2D` already distinguishes them — routing both here would be
+    /// wrong by the mass factor and invisible to a test that only asks "did it
+    /// move".
+    pub fn server_body_apply_impulse(
+        &mut self,
+        body: u64,
+        impulse: Vector2,
+        at_point: Option<Vector2>,
+    ) -> bool {
+        let Some(Some(id)) = self.server_bodies.get(&body).copied() else {
+            return false;
+        };
+        match self.world.get_body_mut(id) {
+            Some(b) => {
+                match at_point {
+                    Some(p) => b.apply_impulse_at_point(impulse, p),
+                    None => b.apply_central_impulse(impulse),
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `body_apply_force` / `body_apply_central_force` (server form).
+    pub fn server_body_apply_force(
+        &mut self,
+        body: u64,
+        force: Vector2,
+        _at_point: Option<Vector2>,
+    ) -> bool {
+        let Some(Some(id)) = self.server_bodies.get(&body).copied() else {
+            return false;
+        };
+        match self.world.get_body_mut(id) {
+            Some(b) => {
+                b.apply_force(force);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `body_apply_torque_impulse` (server form).
+    pub fn server_body_apply_torque_impulse(&mut self, body: u64, torque: f32) -> bool {
+        let Some(Some(id)) = self.server_bodies.get(&body).copied() else {
+            return false;
+        };
+        match self.world.get_body_mut(id) {
+            Some(b) => {
+                b.apply_torque_impulse(torque);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `body_get_state(body, LINEAR_VELOCITY)`.
+    pub fn server_body_linear_velocity(&self, body: u64) -> Option<Vector2> {
+        let Some(Some(id)) = self.server_bodies.get(&body).copied() else {
+            return None;
+        };
+        self.world.get_body(id).map(|b| b.linear_velocity)
+    }
+
+    /// `body_get_state(body, ANGULAR_VELOCITY)`.
+    pub fn server_body_angular_velocity(&self, body: u64) -> Option<f32> {
+        let Some(Some(id)) = self.server_bodies.get(&body).copied() else {
+            return None;
+        };
+        self.world.get_body(id).map(|b| b.angular_velocity)
+    }
+
+    /// `body_get_state(body, SLEEPING | CAN_SLEEP)`.
+    pub fn server_body_sleep_state(&self, body: u64, can_sleep: bool) -> Option<bool> {
+        let Some(Some(id)) = self.server_bodies.get(&body).copied() else {
+            return None;
+        };
+        self.world
+            .get_body(id)
+            .map(|b| if can_sleep { b.can_sleep } else { b.sleeping })
     }
 
     /// The world-space position of a server-created body, for

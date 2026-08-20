@@ -721,6 +721,34 @@ pub fn current_camera3d(tree: &SceneTree) -> Option<NodeId> {
 // Projection matrix from scene tree state
 // ===========================================================================
 
+/// Converts the authored `fov` into the vertical FOV the projection needs,
+/// honouring `keep_aspect` (pat-s3rrv.186).
+///
+/// 🔑 Godot's `fov` is VERTICAL under `KEEP_HEIGHT` (the default) and
+/// HORIZONTAL under `KEEP_WIDTH`. `camera_3d.cpp:274` passes
+/// `keep_aspect == KEEP_WIDTH` as `set_perspective`'s `flip_fov`, and
+/// `projection.cpp:253-255` then re-derives the vertical angle with
+/// `get_fovy(fov, 1.0 / aspect)`.
+///
+/// Ignoring this does not merely tweak the framing: on a wide viewport a
+/// KEEP_WIDTH camera authored at 75° would render as if 75° were vertical,
+/// which is a much narrower view than Godot shows.
+fn fovy_for_keep_aspect(tree: &SceneTree, node_id: NodeId, fov: f32, aspect: f32) -> f32 {
+    match get_keep_aspect(tree, node_id) {
+        KeepAspect::KeepHeight => fov,
+        // Godot: get_fovy(p_fovx, p_aspect) =
+        //   rad_to_deg(atan(p_aspect * tan(deg_to_rad(p_fovx) * 0.5)) * 2.0)
+        // called with p_aspect = 1.0 / aspect.
+        KeepAspect::KeepWidth => {
+            let inv_aspect = 1.0 / aspect.max(f32::EPSILON);
+            (inv_aspect * (fov.to_radians() * 0.5).tan())
+                .atan()
+                .to_degrees()
+                * 2.0
+        }
+    }
+}
+
 /// Builds the projection matrix for a Camera3D node given viewport dimensions.
 ///
 /// Reads the camera's projection type, FOV, size, near, far, and frustum
@@ -739,7 +767,12 @@ pub fn get_camera_projection(
     match proj_type {
         ProjectionType::Perspective => {
             let fov = node3d::get_fov(tree, node_id) as f32;
-            Projection::create_perspective(fov, aspect, near, far)
+            Projection::create_perspective(
+                fovy_for_keep_aspect(tree, node_id, fov, aspect),
+                aspect,
+                near,
+                far,
+            )
         }
         ProjectionType::Orthogonal => {
             let size = get_size(tree, node_id) as f32;
@@ -748,7 +781,13 @@ pub fn get_camera_projection(
         ProjectionType::Frustum => {
             let fov = node3d::get_fov(tree, node_id) as f32;
             let offset = get_frustum_offset(tree, node_id);
-            Projection::create_perspective_with_offset(fov, aspect, offset, near, far)
+            Projection::create_perspective_with_offset(
+                fovy_for_keep_aspect(tree, node_id, fov, aspect),
+                aspect,
+                offset,
+                near,
+                far,
+            )
         }
     }
 }

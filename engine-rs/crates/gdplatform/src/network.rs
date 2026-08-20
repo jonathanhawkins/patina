@@ -32,6 +32,20 @@ pub enum NetworkError {
     /// Generic transport error.
     #[error("{0}")]
     Transport(String),
+    /// An RPC argument has no binary wire representation, so the call cannot be
+    /// sent (pat-s3rrv.179).
+    ///
+    /// ⚠️ This exists so the failure is LOUD. The encoder previously skipped an
+    /// unencodable argument while `argc` still counted it, producing a packet
+    /// whose declared argument count did not match its payload — the receiver
+    /// then read the following arguments from the wrong offsets.
+    #[error("RPC argument {index} cannot be encoded: {source}")]
+    UnencodableArgument {
+        /// Zero-based position of the offending argument.
+        index: usize,
+        /// Why the codec refused it.
+        source: gdvariant::binary::VariantEncodeError,
+    },
 }
 
 /// Convenience alias used throughout this module.
@@ -378,7 +392,7 @@ impl MultiplayerAPI {
             .copied()
             .unwrap_or(PeerId::SERVER);
 
-        let data = encode_rpc_packet(node_path, method, &args);
+        let data = encode_rpc_packet(node_path, method, &args)?;
 
         let packet = Packet {
             sender: sender_id,
@@ -420,7 +434,7 @@ impl MultiplayerAPI {
 
         let peer_handle = self.peer.as_mut().ok_or(NetworkError::NoPeer)?;
         let sender_id = peer_handle.get_unique_id();
-        let data = encode_rpc_packet(node_path, method, &args);
+        let data = encode_rpc_packet(node_path, method, &args)?;
 
         let packet = Packet {
             sender: sender_id,
@@ -1022,7 +1036,7 @@ pub fn encode_rpc_call(
     node_path: u64,
     method: &str,
     args: &[Variant],
-) -> (Option<Vec<u8>>, Vec<u8>) {
+) -> Result<(Option<Vec<u8>>, Vec<u8>)> {
     let known = cache.id_for(node_path).is_some();
     let id = cache.assign(node_path);
     let simplify = if known {
@@ -1032,50 +1046,54 @@ pub fn encode_rpc_call(
     };
 
     let call = if cache.confirmed.contains(&id) {
-        encode_rpc_packet_with_id(id, method, args)
+        encode_rpc_packet_with_id(id, method, args)?
     } else {
-        encode_rpc_packet(node_path, method, args)
+        encode_rpc_packet(node_path, method, args)?
     };
-    (simplify, call)
+    Ok((simplify, call))
 }
 
 /// A `RemoteCall` addressed by its negotiated id rather than the full path.
-pub fn encode_rpc_packet_with_id(id: u16, method: &str, args: &[Variant]) -> Vec<u8> {
+pub fn encode_rpc_packet_with_id(id: u16, method: &str, args: &[Variant]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     out.push(NetworkCommand::RemoteCall.to_byte());
     out.push(RpcAddressing::CachedId.to_byte());
     out.extend_from_slice(&id.to_be_bytes());
-    encode_rpc_tail(&mut out, method, args);
-    out
+    encode_rpc_tail(&mut out, method, args)?;
+    Ok(out)
 }
 
 /// Shared `method | argc | args…` tail of both `RemoteCall` forms.
-fn encode_rpc_tail(out: &mut Vec<u8>, method: &str, args: &[Variant]) {
+fn encode_rpc_tail(out: &mut Vec<u8>, method: &str, args: &[Variant]) -> Result<()> {
     let mb = method.as_bytes();
     out.extend_from_slice(&(mb.len() as u16).to_be_bytes());
     out.extend_from_slice(mb);
     out.extend_from_slice(&(args.len() as u16).to_be_bytes());
-    for a in args {
-        // The faithful marshalls port, rather than the old private 5-type codec
-        // whose fallback arm stringified Vector2/Array/Dictionary and lost them
-        // (pat-0q2kx.95). An arg that cannot be encoded is skipped rather than
-        // silently downgraded to a String — the receiver's arg count check then
-        // rejects the call instead of running it with a wrong value.
-        if let Ok(bytes) = gdvariant::binary::encode_variant(a) {
-            out.extend_from_slice(&bytes);
-        }
+    for (index, a) in args.iter().enumerate() {
+        // ⚠️ Propagate, never skip. This used to be
+        // `if let Ok(bytes) = encode_variant(a) { … }`, which dropped an
+        // unencodable argument from the payload while the `argc` written above
+        // still counted it. The receiver then decoded the REMAINING arguments
+        // from the wrong offsets — a wrong-value dispatch, not a clean failure.
+        //
+        // Godot fails the call instead
+        // (`MultiplayerAPI::decode_and_decompress_variants`), and so does this.
+        let bytes = gdvariant::binary::encode_variant(a)
+            .map_err(|source| NetworkError::UnencodableArgument { index, source })?;
+        out.extend_from_slice(&bytes);
     }
+    Ok(())
 }
 
 /// Encode an RPC into the binary wire format:
 /// `cmd | mode:u8 | node_path:u64 | method_len:u16 | method | argc:u16 | args…`
-pub fn encode_rpc_packet(node_path: u64, method: &str, args: &[Variant]) -> Vec<u8> {
+pub fn encode_rpc_packet(node_path: u64, method: &str, args: &[Variant]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     out.push(NetworkCommand::RemoteCall.to_byte());
     out.push(RpcAddressing::FullPath.to_byte());
     out.extend_from_slice(&node_path.to_be_bytes());
-    encode_rpc_tail(&mut out, method, args);
-    out
+    encode_rpc_tail(&mut out, method, args)?;
+    Ok(out)
 }
 
 /// Decode a binary RPC packet. Returns `(node_path, method, args)`.
@@ -1771,8 +1789,17 @@ impl MultiplayerSpawner {
 /// updates. Full SceneReplicationConfig / visibility is out of scope.
 #[derive(Debug, Clone)]
 pub struct MultiplayerSynchronizer {
-    /// Property paths to synchronize.
+    /// Property paths to synchronize every tick
+    /// (`SceneReplicationConfig` REPLICATION_MODE_ALWAYS).
     pub properties_to_sync: Vec<String>,
+    /// Property paths replicated ONLY when their value changes
+    /// (REPLICATION_MODE_ON_CHANGE — Godot's `watch_props`).
+    ///
+    /// 🔑 Watch and sync are mutually exclusive upstream: both are views over the
+    /// single `mode` field (`scene_replication_config.cpp`, `_update()` routes
+    /// ALWAYS -> sync_props and ON_CHANGE -> watch_props). A path must never be
+    /// in both lists.
+    pub properties_to_watch: Vec<String>,
     /// Minimum interval between sync updates, in milliseconds.
     pub sync_interval_ms: u32,
     /// Root path of the synchronized node (Godot `root_path`).
@@ -1783,6 +1810,12 @@ pub struct MultiplayerSynchronizer {
     property_values: HashMap<String, Variant>,
     /// Last time (ms) a sync packet was emitted (`0` = never).
     last_sync_ms: u64,
+    /// The value most recently PUT ON THE WIRE for each watched property.
+    ///
+    /// ⚠️ Updated only when a packet is actually sent, never when a change is
+    /// merely observed. A value that changes while the interval gate is holding
+    /// the packet back would otherwise be recorded as sent and never travel.
+    watch_last_sent: HashMap<String, Variant>,
     /// Per-peer visibility overrides (Godot per-peer visibility). A peer absent
     /// from the map falls back to `public_visibility`.
     visibility: HashMap<PeerId, bool>,
@@ -1797,11 +1830,13 @@ impl MultiplayerSynchronizer {
     pub fn new(sync_interval_ms: u32) -> Self {
         Self {
             properties_to_sync: Vec::new(),
+            properties_to_watch: Vec::new(),
             sync_interval_ms,
             root_path: String::from(".."),
             net_id: 0,
             property_values: HashMap::new(),
             last_sync_ms: 0,
+            watch_last_sent: HashMap::new(),
             visibility: HashMap::new(),
             public_visibility: true,
             replication_config: SceneReplicationConfig::new(),
@@ -1858,6 +1893,21 @@ impl MultiplayerSynchronizer {
         }
     }
 
+    /// Registers a property replicated ONLY when its value changes
+    /// (REPLICATION_MODE_ON_CHANGE).
+    ///
+    /// ⚠️ Removes `path` from the every-tick sync list if it is there. Upstream's
+    /// sync and watch sets are disjoint views of one `mode`, so a path in both
+    /// would be sent unconditionally AND on change — the every-tick send winning,
+    /// which is exactly the bug the mode exists to prevent.
+    pub fn add_watch_property(&mut self, path: impl Into<String>) {
+        let path = path.into();
+        self.properties_to_sync.retain(|p| p != &path);
+        if !self.properties_to_watch.contains(&path) {
+            self.properties_to_watch.push(path);
+        }
+    }
+
     /// Godot `root_path` getter.
     pub fn get_root_path(&self) -> &str {
         &self.root_path
@@ -1891,7 +1941,15 @@ impl MultiplayerSynchronizer {
     /// Write a property value on the authority, as the [`Variant`] it will be
     /// replicated as (pat-s3rrv.17).
     pub fn set_property_value(&mut self, name: &str, value: Variant) {
-        if !self.properties_to_sync.iter().any(|p| p == name) {
+        // ⚠️ This auto-registers unknown names into the every-tick sync list, so
+        // a WATCHED property must be excluded explicitly. Without this guard the
+        // per-frame value copy — which has to record watched values in order to
+        // detect changes — would silently move every watched property back into
+        // `properties_to_sync`, restoring the every-tick send this mode exists to
+        // avoid. The feature would look wired and do nothing.
+        if !self.properties_to_watch.iter().any(|p| p == name)
+            && !self.properties_to_sync.iter().any(|p| p == name)
+        {
             self.properties_to_sync.push(name.to_string());
         }
         self.property_values.insert(name.to_string(), value);
@@ -1926,7 +1984,13 @@ impl MultiplayerSynchronizer {
         now_ms: u64,
         force: bool,
     ) -> Result<bool> {
-        let props = self.property_snapshot();
+        let mut props = self.property_snapshot();
+        // 🔑 Watched properties join the packet ONLY when their value differs from
+        // what was last sent (REPLICATION_MODE_ON_CHANGE). Before this they rode
+        // in `properties_to_sync` and were retransmitted every tick, which is the
+        // behaviour ON_CHANGE exists to avoid.
+        let changed = self.changed_watch_properties();
+        props.extend(changed.iter().cloned());
         if props.is_empty() {
             return Ok(false);
         }
@@ -1949,7 +2013,33 @@ impl MultiplayerSynchronizer {
         };
         peer.send_packet(to, packet)?;
         self.last_sync_ms = now_ms;
+        // ⚠️ Recorded here, AFTER a successful send — not where the change was
+        // detected. If a watched value changes while the interval gate is holding
+        // the packet back, marking it sent at detection time would drop the
+        // update permanently: the next poll would compare equal and skip it.
+        for (name, value) in changed {
+            self.watch_last_sent.insert(name, value);
+        }
         Ok(true)
+    }
+
+    /// Watched properties whose current value differs from the last one sent.
+    ///
+    /// ⚠️ A property with no recorded last-sent value counts as changed, so the
+    /// first update after configuration always travels. Treating "never sent" as
+    /// unchanged would leave a watched property silent until it happened to be
+    /// written twice.
+    fn changed_watch_properties(&self) -> Vec<(String, Variant)> {
+        self.properties_to_watch
+            .iter()
+            .filter_map(|name| self.property_values.get(name).map(|v| (name, v)))
+            .filter(|(name, value)| {
+                self.watch_last_sent
+                    .get(name.as_str())
+                    .map_or(true, |sent| sent != *value)
+            })
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect()
     }
 
     /// Apply an inbound sync packet, updating local property values.
@@ -1958,7 +2048,11 @@ impl MultiplayerSynchronizer {
     pub fn apply_sync_packet(&mut self, packet: &Packet) -> Option<SyncPacket> {
         let decoded = decode_sync_packet(&packet.data)?;
         for (name, value) in &decoded.properties {
-            if !self.properties_to_sync.iter().any(|p| p == name) {
+            // Same guard as `set_property_value`: an inbound watched property
+            // must not be reclassified as every-tick sync on the receiver.
+            if !self.properties_to_watch.iter().any(|p| p == name)
+                && !self.properties_to_sync.iter().any(|p| p == name)
+            {
                 self.properties_to_sync.push(name.clone());
             }
             self.property_values.insert(name.clone(), value.clone());
@@ -1998,16 +2092,93 @@ impl ReplicationMode {
     }
 }
 
+// --------------------------------------------------- SceneReplicationConfig handles
+//
+// `SceneReplicationConfig` is a `Resource`, so a script reaches one through a
+// tagged `ObjectId` into a process-wide table — the same shape as
+// `crate::packet_peer_stream` and `crate::http_client_handle`.
+
+/// Tags an `ObjectId` issued by [`new_replication_config_handle`]. `0x53` is
+/// ASCII `S`.
+///
+/// ⚠️ THE TAG BYTE IS A WORKSPACE-WIDE NAMESPACE, and it is filling up fast —
+/// the occupied set grew from 31 to 54 distinct bytes in the time I was working
+/// on this bead. Sweep IMMEDIATELY before claiming one, and sweep two ways: by
+/// value shape (`0x[0-9A-Fa-f]{2}_?00_0000_0000_0000`, note some are written
+/// `0xA7_00_…`) AND by declaration shape (`const [A-Z_]*(TAG|HANDLE)[A-Z_]*: u64`).
+/// Neither alone is complete. A collision makes `is_*_handle` answer true for
+/// another module's ids and surfaces as `MethodNotFound` naming the wrong class.
+const REPLICATION_CONFIG_HANDLE_TAG: u64 = 0x5300_0000_0000_0000;
+
+static NEXT_REPLICATION_CONFIG_HANDLE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+static REPLICATION_CONFIG_HANDLES: std::sync::Mutex<
+    Option<std::collections::HashMap<u64, SceneReplicationConfig>>,
+> = std::sync::Mutex::new(None);
+
+fn replication_config_handles(
+) -> std::sync::MutexGuard<'static, Option<std::collections::HashMap<u64, SceneReplicationConfig>>>
+{
+    // A poisoned lock still holds a usable table: a panic in one script's
+    // handler must not make every later call fail.
+    REPLICATION_CONFIG_HANDLES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Returns `true` when `id` was issued by [`new_replication_config_handle`].
+pub fn is_replication_config_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == REPLICATION_CONFIG_HANDLE_TAG
+}
+
+/// Allocates an empty config and returns its script-visible id
+/// (Godot `SceneReplicationConfig.new()`).
+pub fn new_replication_config_handle() -> gdcore::id::ObjectId {
+    let seq = NEXT_REPLICATION_CONFIG_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let raw = REPLICATION_CONFIG_HANDLE_TAG | seq;
+    replication_config_handles()
+        .get_or_insert_with(std::collections::HashMap::new)
+        .insert(raw, SceneReplicationConfig::new());
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+/// Runs `f` against the live config behind `id`, or returns `None` when the
+/// handle was never issued or has already been released.
+pub fn with_replication_config<R>(
+    id: gdcore::id::ObjectId,
+    f: impl FnOnce(&mut SceneReplicationConfig) -> R,
+) -> Option<R> {
+    let mut guard = replication_config_handles();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    map.get_mut(&id.raw()).map(f)
+}
+
+/// Drops a handle. Idempotent.
+pub fn release_replication_config_handle(id: gdcore::id::ObjectId) {
+    let mut guard = replication_config_handles();
+    if let Some(map) = guard.as_mut() {
+        map.remove(&id.raw());
+    }
+}
+
 /// A single property entry in a [`SceneReplicationConfig`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplicationProperty {
     /// The node-relative property path (e.g. `.:position`).
     pub path: String,
     /// Whether the property is part of the spawn state.
+    ///
+    /// Independent of [`mode`](Self::mode): upstream's `_update()` pushes into
+    /// `spawn_props` outside the mode switch entirely.
     pub spawn: bool,
-    /// Whether the property is part of the periodic sync state.
-    pub sync: bool,
-    /// When the sync value is sent.
+    /// Whether the value is sent every tick, only on change, or never.
+    ///
+    /// 🔑 There is no separate `sync` field, matching upstream: `sync` and
+    /// `watch` are both DERIVED from this one value (`Always` and `OnChange`
+    /// respectively). Storing a `sync` bool alongside it made the contradictory
+    /// state `sync = true, mode = OnChange` representable, which upstream cannot
+    /// express at all.
     pub mode: ReplicationMode,
 }
 
@@ -2035,7 +2206,6 @@ impl SceneReplicationConfig {
             self.properties.push(ReplicationProperty {
                 path,
                 spawn: true,
-                sync: true,
                 mode: ReplicationMode::Always,
             });
         }
@@ -2077,18 +2247,67 @@ impl SceneReplicationConfig {
             .unwrap_or(false)
     }
 
-    /// Sets whether `path` is part of the periodic sync state.
+    /// Sets whether `path` is replicated every tick.
+    ///
+    /// ⚠️ Same asymmetry as [`property_set_watch`](Self::property_set_watch),
+    /// and for the same reason: enabling sets `Always`, but disabling only
+    /// downgrades to `Never` **if the mode was `Always`**. An unconditional
+    /// `else` would clobber a watched property into `Never` merely because
+    /// something cleared its sync flag.
     pub fn property_set_sync(&mut self, path: &str, enabled: bool) {
-        if let Some(i) = self.index_of(path) {
-            self.properties[i].sync = enabled;
+        if enabled {
+            self.property_set_replication_mode(path, ReplicationMode::Always);
+        } else if self.property_get_replication_mode(path) == ReplicationMode::Always {
+            self.property_set_replication_mode(path, ReplicationMode::Never);
         }
     }
 
-    /// Whether `path` is part of the sync state (false if absent).
+    /// Whether `path` is replicated every tick (false if absent).
+    ///
+    /// Derived from the mode, exactly as upstream's `property_get_sync` is.
     pub fn property_get_sync(&self, path: &str) -> bool {
         self.index_of(path)
-            .map(|i| self.properties[i].sync)
+            .map(|i| self.properties[i].mode == ReplicationMode::Always)
             .unwrap_or(false)
+    }
+
+    /// Whether `path` is replicated only on change (upstream
+    /// `property_get_watch`).
+    ///
+    /// 🔑 Upstream stores no `watch` bool — this IS
+    /// `mode == REPLICATION_MODE_ON_CHANGE`
+    /// (`scene_replication_config.cpp`), which is why watch and sync can never
+    /// both be true for one property.
+    pub fn property_get_watch(&self, path: &str) -> bool {
+        self.index_of(path)
+            .map(|i| self.properties[i].mode == ReplicationMode::OnChange)
+            .unwrap_or(false)
+    }
+
+    /// Sets whether `path` is replicated only on change.
+    ///
+    /// ⚠️ Mirrors upstream's asymmetry exactly: enabling sets `OnChange`, but
+    /// DISABLING only downgrades to `Never` **if the mode was `OnChange`** — it
+    /// must not clobber an `Always` property into `Never`. Writing the `else`
+    /// branch unconditionally would silently switch off a perfectly good
+    /// every-tick property whenever something cleared its watch flag.
+    pub fn property_set_watch(&mut self, path: &str, enabled: bool) {
+        if enabled {
+            self.property_set_replication_mode(path, ReplicationMode::OnChange);
+        } else if self.property_get_replication_mode(path) == ReplicationMode::OnChange {
+            self.property_set_replication_mode(path, ReplicationMode::Never);
+        }
+    }
+
+    /// Property paths replicated only on change — mode `OnChange`, in order.
+    ///
+    /// Disjoint from [`sync_properties`](Self::sync_properties) by construction.
+    pub fn watch_properties(&self) -> Vec<String> {
+        self.properties
+            .iter()
+            .filter(|p| p.mode == ReplicationMode::OnChange)
+            .map(|p| p.path.clone())
+            .collect()
     }
 
     /// Sets the replication mode for `path`.
@@ -2114,11 +2333,16 @@ impl SceneReplicationConfig {
             .collect()
     }
 
-    /// Property paths flagged for the sync state (excluding `Never`), in order.
+    /// Property paths in the periodic sync set — mode `Always`, in order.
+    ///
+    /// ⚠️ Was `p.mode != Never`, which let `OnChange` into the every-tick set.
+    /// Upstream's `_update()` routes ALWAYS into `sync_props` and ON_CHANGE into
+    /// `watch_props`; the two are disjoint, so an `OnChange` property here would
+    /// be retransmitted every tick AND treated as watched.
     pub fn sync_properties(&self) -> Vec<String> {
         self.properties
             .iter()
-            .filter(|p| p.sync && p.mode != ReplicationMode::Never)
+            .filter(|p| p.mode == ReplicationMode::Always)
             .map(|p| p.path.clone())
             .collect()
     }
@@ -2207,6 +2431,48 @@ mod tests {
         );
         assert_eq!(cfg.sync_properties(), vec!["health".to_string()]);
         assert_eq!(ReplicationMode::OnChange.to_godot(), 2);
+
+        // 🔑 ON_CHANGE partitions into WATCH, never into sync. Before this,
+        // `sync_properties` filtered on `mode != Never`, so a watched property
+        // was in the every-tick set as well.
+        cfg.property_set_watch("health", true);
+        assert!(cfg.property_get_watch("health"));
+        assert_eq!(cfg.watch_properties(), vec!["health".to_string()]);
+        assert!(
+            cfg.sync_properties().is_empty(),
+            "a watched property must leave the sync set: the two are disjoint \
+             views of one mode"
+        );
+
+        // ⚠️ Disabling watch on a property that is NOT watched must not touch it.
+        cfg.property_set_replication_mode("health", ReplicationMode::Always);
+        cfg.property_set_watch("health", false);
+        assert_eq!(
+            cfg.property_get_replication_mode("health"),
+            ReplicationMode::Always,
+            "clearing watch on an Always property must leave it Always, not \
+             downgrade it to Never"
+        );
+
+        // …and the mirror: clearing SYNC on a watched property must not clobber
+        // it into Never either. The two setters share the asymmetry because they
+        // are two views of one field.
+        cfg.property_set_watch("health", true);
+        cfg.property_set_sync("health", false);
+        assert_eq!(
+            cfg.property_get_replication_mode("health"),
+            ReplicationMode::OnChange,
+            "clearing sync on a watched property must leave it OnChange"
+        );
+
+        // 🔑 The contradictory state upstream cannot express is now unrepresentable:
+        // enabling one mode necessarily disables the other.
+        cfg.property_set_sync("health", true);
+        assert!(cfg.property_get_sync("health"));
+        assert!(
+            !cfg.property_get_watch("health"),
+            "sync and watch are one field — turning sync on must turn watch off"
+        );
 
         cfg.remove_property("health");
         assert!(!cfg.has_property("health"));
@@ -2416,7 +2682,7 @@ mod tests {
                     .collect(),
             ),
         ];
-        let data = encode_rpc_packet(0x1234, "take_damage", &args);
+        let data = encode_rpc_packet(0x1234, "take_damage", &args).unwrap();
         let (path, method, decoded) = decode_rpc_packet(&data).expect("decode");
 
         assert_eq!(path, 0x1234);
@@ -2447,7 +2713,7 @@ mod tests {
         assert_eq!(decode_raw_packet(&raw), Some(b"hello".to_vec()));
 
         // ...and the reverse: an RPC must not be consumed as a raw payload.
-        let rpc = encode_rpc_packet(1, "ping", &[]);
+        let rpc = encode_rpc_packet(1, "ping", &[]).unwrap();
         assert!(decode_raw_packet(&rpc).is_none());
     }
 
@@ -2455,7 +2721,7 @@ mod tests {
     /// must also stay out of RPC dispatch.
     #[test]
     fn non_remote_call_commands_are_rejected_by_the_rpc_decoder() {
-        let mut packet = encode_rpc_packet(9, "m", &[]);
+        let mut packet = encode_rpc_packet(9, "m", &[]).unwrap();
         for cmd in [
             NetworkCommand::SimplifyPath,
             NetworkCommand::ConfirmPath,
@@ -2537,7 +2803,7 @@ mod tests {
     #[test]
     fn object_args_are_denied_unless_explicitly_allowed() {
         let args = vec![Variant::ObjectId(gdcore::id::ObjectId::from_raw(7))];
-        let data = encode_rpc_packet(1, "grab", &args);
+        let data = encode_rpc_packet(1, "grab", &args).unwrap();
 
         assert!(
             decode_rpc_packet(&data).is_none(),
@@ -2560,7 +2826,8 @@ mod tests {
                 Variant::String("ok".into()),
                 Variant::Bool(true),
             ],
-        );
+        )
+        .unwrap();
         // Godot's command byte leads the packet, not a bespoke magic.
         assert_eq!(data[0], NetworkCommand::RemoteCall.to_byte());
         assert!(!data.starts_with(b"rpc:"));

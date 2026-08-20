@@ -87,6 +87,15 @@ fn spawn_properties_from_node(node: &crate::node::Node) -> Vec<String> {
     replication_paths_from_node(node, "spawn")
 }
 
+/// The properties a `MultiplayerSynchronizer` replicates ONLY on change
+/// (`SceneReplicationConfig` REPLICATION_MODE_ON_CHANGE — Godot's `watch_props`).
+///
+/// ⚠️ Disjoint from [`replication_properties_from_node`] by construction: sync is
+/// mode ALWAYS, watch is mode ON_CHANGE, and a property has exactly one mode.
+fn watch_properties_from_node(node: &crate::node::Node) -> Vec<String> {
+    replication_paths_from_node(node, "watch")
+}
+
 fn replication_paths_from_node(node: &crate::node::Node, flag_name: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     // Godot numbers the entries densely from 0, so stop at the first gap rather
@@ -105,14 +114,44 @@ fn replication_paths_from_node(node: &crate::node::Node, flag_name: &str) -> Vec
                 _ => default,
             }
         };
-        // `replication_mode` 0 is NEVER. Absent means Godot's default, ALWAYS.
-        let mode_never = matches!(
-            node.get_property(&format!(
-                "__replication__properties/{index}/replication_mode"
-            )),
-            Variant::Int(0)
-        );
-        if mode_never || !flag(flag_name, true) {
+        // Godot's `ReplicationMode`, transcribed positionally from
+        // `modules/multiplayer/scene_replication_config.h`:
+        // NEVER 0, ALWAYS 1, ON_CHANGE 2. Absent means the default, ALWAYS.
+        let mode = match node.get_property(&format!(
+            "__replication__properties/{index}/replication_mode"
+        )) {
+            Variant::Int(i) => i,
+            _ => 1,
+        };
+        // 🔑 `sync` and `watch` are two VIEWS over the single `mode` field, not
+        // independent flags — `_update()` in scene_replication_config.cpp routes
+        // ALWAYS into `sync_props` and ON_CHANGE into `watch_props`, so a path is
+        // never in both.
+        //
+        // ⚠️ ON_CHANGE used to fall through this check into the SYNC list, which
+        // meant a watched property was retransmitted every tick — precisely the
+        // behaviour the mode exists to avoid.
+        let include = match flag_name {
+            "sync" => mode == 1 && flag("sync", true),
+            // Upstream has no `watch` bool; membership is the mode alone.
+            "watch" => mode == 2,
+            // 🔑 `spawn` is gated on the flag ALONE. Upstream's `_update()`
+            // pushes into `spawn_props` on `prop.spawn` with no reference to
+            // `mode` at all — only the sync/watch routing below it consults the
+            // mode. So a `spawn = true, replication_mode = 0` property IS spawn
+            // state: it travels once with the spawn packet and never syncs
+            // afterwards, which is a perfectly ordinary way to author immutable
+            // per-instance data.
+            //
+            // ⚠️ This used to also require `mode != 0`, so exactly that
+            // combination was dropped from the spawn state and the value never
+            // reached the client at all.
+            "spawn" => flag("spawn", true),
+            // No other flag name is used today; kept conservative rather than
+            // unreachable so a future caller cannot silently get spawn's rule.
+            _ => mode != 0 && flag(flag_name, true),
+        };
+        if !include {
             continue;
         }
         // ⚠️ A config path is `<node>:<property>`, e.g. `.:position`. Split from
@@ -888,6 +927,8 @@ impl SceneTree {
                 root_path: String,
                 interval_ms: u32,
                 properties: Vec<String>,
+                /// REPLICATION_MODE_ON_CHANGE paths — disjoint from `properties`.
+                watch_properties: Vec<String>,
                 public_visibility: bool,
             },
         }
@@ -941,6 +982,7 @@ impl SceneTree {
                     // an empty snapshot, so a synchronizer with no config is
                     // inert rather than guessing at `position`.
                     let properties = replication_properties_from_node(node);
+                    let watch_properties = watch_properties_from_node(node);
                     pending.push((
                         id,
                         Pending::Synchronizer {
@@ -948,6 +990,7 @@ impl SceneTree {
                                 .unwrap_or_default(),
                             interval_ms,
                             properties,
+                            watch_properties,
                             // Godot's `public_visibility` defaults to TRUE
                             // (doc_classes/MultiplayerSynchronizer.xml), which
                             // is also what `MultiplayerSynchronizer::new` and
@@ -989,12 +1032,16 @@ impl SceneTree {
                     root_path,
                     interval_ms,
                     properties,
+                    watch_properties,
                     public_visibility,
                 } => {
                     let mut sync = MultiplayerSynchronizer::new(interval_ms);
                     sync.set_root_path(root_path);
                     for name in properties {
                         sync.add_property(name);
+                    }
+                    for name in watch_properties {
+                        sync.add_watch_property(name);
                     }
                     sync.set_visibility_public(public_visibility);
                     self.replication.synchronizers.insert(id, sync);
@@ -1470,7 +1517,10 @@ impl SceneTree {
         // it cannot be fused with the write-back below.
         let mut snapshots: Vec<(NodeId, Vec<(String, Variant)>)> = Vec::new();
         for (id, sync) in &self.replication.synchronizers {
-            if sync.properties_to_sync.is_empty() {
+            // ⚠️ Both lists, not just sync: a synchronizer configured entirely
+            // with REPLICATION_MODE_ON_CHANGE properties has an empty sync list
+            // and would otherwise be skipped before its values were ever read.
+            if sync.properties_to_sync.is_empty() && sync.properties_to_watch.is_empty() {
                 continue;
             }
             // Godot's `root_path` defaults to ".." — the synchronizer replicates
@@ -1496,7 +1546,15 @@ impl SceneTree {
             // it, and keeping both as ordinary shared borrows in a loop body is
             // the shape the surrounding code already proves compiles.
             let mut values: Vec<(String, Variant)> = Vec::new();
-            for key in &sync.properties_to_sync {
+            // 🔑 Watched properties are read here as well. Change detection
+            // compares the live value against the last one SENT, so a watched
+            // property whose value was never sampled looks permanently absent and
+            // never travels at all.
+            for key in sync
+                .properties_to_sync
+                .iter()
+                .chain(sync.properties_to_watch.iter())
+            {
                 let value = match key.rsplit_once(':') {
                     Some((subpath, prop)) => {
                         let Some(child) = self.get_node_or_null(root, subpath) else {
@@ -4159,7 +4217,20 @@ impl SceneTree {
             };
 
             let previous_frame = playback.frame;
-            let finished = playback.advance(delta as f32, &frames);
+            // ⚠️ The previously SELECTED clip comes from a companion the last
+            // tick published, not from `playback`. `playback` is rebuilt from
+            // the node's `animation` property at the top of every tick, and
+            // `advance` never changes it — so any before/after comparison around
+            // the call is always equal and `animation_changed` could never fire.
+            // The switch happens BETWEEN ticks, so that is where it must be seen.
+            let previous_animation = match node.get_property("__sf_last_animation") {
+                Variant::String(s) => s,
+                _ => String::new(),
+            };
+            let animation_switched =
+                !previous_animation.is_empty() && previous_animation != playback.animation;
+            let outcome = playback.advance(delta as f32, &frames);
+            let finished = outcome.finished;
             let frame_changed = playback.frame != previous_frame;
             // The texture the current frame shows. Publishing it as the node's
             // own `texture` is what makes an AnimatedSprite2D actually draw
@@ -4179,13 +4250,31 @@ impl SceneTree {
                 }
                 node.set_property("frame", Variant::Int(playback.frame as i64));
                 node.set_property("__sf_time", Variant::Float(playback.time as f64));
+                // Remembered for the next tick's `animation_changed` comparison.
+                node.set_property(
+                    "__sf_last_animation",
+                    Variant::String(playback.animation.clone()),
+                );
                 // Godot exposes the sub-frame position as `frame_progress`, a
                 // 0..1 fraction of the current frame rather than raw seconds.
                 let progress = match frames.animation(&playback.animation) {
                     Some(a) => {
                         let hold = a.frame_seconds(playback.frame);
                         if hold > 0.0 {
-                            (playback.time / hold).clamp(0.0, 1.0)
+                            // ⚠️ A reversed clip's `time` runs in `(-hold, 0]`, so the
+                            // raw ratio is NEGATIVE and the clamp alone would pin
+                            // `frame_progress` at 0.0 for the whole of backwards
+                            // playback — the feature this property exists to
+                            // describe. Godot keeps it a 0..1 fraction in both
+                            // directions and starts a `from_end` play at 1.0
+                            // (`animated_sprite_2d.cpp:520-522`), which is exactly
+                            // what `1.0 + ratio` gives at `time == 0`.
+                            let ratio = playback.time / hold;
+                            if playback.speed_scale < 0.0 {
+                                (1.0 + ratio).clamp(0.0, 1.0)
+                            } else {
+                                ratio.clamp(0.0, 1.0)
+                            }
                         } else {
                             0.0
                         }
@@ -4202,6 +4291,18 @@ impl SceneTree {
             }
             if frame_changed {
                 self.emit_signal(node_id, "frame_changed", &[]);
+            }
+            // A looping clip wrapped: Godot emits this per wrap, and it is
+            // mutually exclusive with `animation_finished` — a clip that loops
+            // never finishes (`animated_sprite_2d.cpp:45-46`, `:69-70`).
+            if outcome.looped {
+                self.emit_signal(node_id, "animation_looped", &[]);
+            }
+            // The selected clip changed since the last tick. Compared against
+            // the value the NODE carried, so a script assigning `animation`
+            // between frames is what the comparison sees.
+            if animation_switched {
+                self.emit_signal(node_id, "animation_changed", &[]);
             }
             if finished {
                 self.emit_signal(node_id, "animation_finished", &[]);
@@ -5331,6 +5432,15 @@ impl SceneTree {
             if self.input_handled {
                 return;
             }
+            // Built-in BaseButton accelerators run AFTER script
+            // `_shortcut_input` handlers, so a script can consume the key
+            // first, exactly as Godot orders them (pat-s3rrv.175). This is a
+            // no-op tree walk on any scene that declares no Shortcut, since it
+            // only reacts to nodes carrying `__shortcut__events`.
+            crate::shortcut::dispatch_shortcuts(self, event);
+            if self.input_handled {
+                return;
+            }
         }
         if matches!(event, Ev::Key { .. }) {
             self.call_input_stage("_unhandled_key_input", &payload);
@@ -6181,6 +6291,56 @@ impl SceneTree {
             }
         }
 
+        // pat-s3rrv.172: a ColorPicker tracks the pointer exactly as a slider
+        // does — the press picks immediately and every captured motion keeps
+        // picking, which is what makes a drag across the SV square a continuous
+        // gesture rather than a series of jumps.
+        //
+        // Placed HERE, before the BaseButton block below, for the same reason
+        // the range controls sit after the wheel block: a press on a picker must
+        // be consumed as a colour pick, not fall through and be read as a click.
+        // It deliberately does NOT return — falling through is what lets the
+        // block below set `gui_mouse_focus`, and without that capture the
+        // motions that follow would never route back here.
+        let picker_press = match event {
+            Ev::MouseButton {
+                pressed: true,
+                button: gdplatform::input::MouseButton::Left,
+                ..
+            } => Some(true),
+            // Captured, so the drag survives the pointer leaving the square —
+            // Godot keeps picking while the button is held and clamps at the
+            // edges, which is what `sv_uv_at` / `hue_t_at` do.
+            Ev::MouseMotion { .. } if self.gui_mouse_focus == Some(hit) => Some(false),
+            _ => None,
+        };
+        if picker_press.is_some() {
+            if let Some(color) = self.drag_color_picker(hit, position) {
+                // 🔑 Emitted ONLY on a real change. `drag_color_picker` returns
+                // `None` when the model reports the colour unchanged, mirroring
+                // `drag_range_control` above — and `ColorPickerModel` was written
+                // to answer exactly that question, because Godot does not
+                // re-emit for a click landing on the value already selected.
+                // Emitting per motion sample would flood every handler connected
+                // during one drag.
+                self.emit_signal(hit, "color_changed", &[Variant::Color(color)]);
+                // 🔑 A picker opened BY a ColorPickerButton also reports through
+                // the button, which is what makes the button's swatch follow the
+                // colour. Upstream wires this at construction —
+                // `picker->connect("color_changed", ..._color_changed)` inside
+                // `_update_picker()` — and the handler assigns, redraws and
+                // re-emits. Without it the picker moves and the swatch behind it
+                // does not.
+                if let Some(button) = self.color_picker_host(hit) {
+                    if let Some(n) = self.get_node_mut(button) {
+                        n.set_property("color", Variant::Color(color));
+                    }
+                    self.emit_signal(button, "color_changed", &[Variant::Color(color)]);
+                }
+                self.input_handled = true;
+            }
+        }
+
         if let Ev::MouseButton {
             pressed, button, ..
         } = event
@@ -6394,6 +6554,95 @@ impl SceneTree {
             cursor = self.nodes.get(&id).and_then(|n| n.parent());
         }
         None
+    }
+
+    /// The `ColorPickerButton` that hosts `picker`, if one does (pat-s3rrv.172).
+    ///
+    /// ⚠️ The PARENT only, not an ancestor search. A ColorPicker dropped into a
+    /// VBox that happens to sit inside some button-like control is not hosted by
+    /// it, and reporting its colour through that control would invent a
+    /// relationship the scene never declared. A hosted picker is always a direct
+    /// child, because `control::color_picker_button_pressed` is what created it.
+    fn color_picker_host(&self, picker: NodeId) -> Option<NodeId> {
+        let parent = self.get_node(picker)?.parent()?;
+        (self.get_node(parent)?.class_name() == "ColorPickerButton").then_some(parent)
+    }
+
+    /// Maps a pointer position onto a `ColorPicker`'s model and writes the
+    /// resulting colour back onto the node (pat-s3rrv.172).
+    ///
+    /// Returns the new colour only when it actually changed, which is what gates
+    /// `color_changed`.
+    ///
+    /// 🔑 The geometry comes from `color_picker::picker_layout` — the SAME
+    /// function the draw arm uses — so a click always resolves to the colour
+    /// that was painted under it. Duplicating the sub-rect arithmetic here is
+    /// the obvious shortcut, and it is exactly how a picker ends up visually
+    /// correct and one bar-width out on every click.
+    fn drag_color_picker(
+        &mut self,
+        node_id: NodeId,
+        position: gdcore::math::Vector2,
+    ) -> Option<gdcore::math::Color> {
+        let is_picker = self
+            .get_node(node_id)
+            .map(|n| n.class_name() == "ColorPicker")
+            .unwrap_or(false);
+        if !is_picker {
+            return None;
+        }
+
+        // ⚠️ GLOBAL space, matching what the draw arm passes `picker_layout`
+        // (`control_render.rs:571` builds `Rect2::new(global_pos, size)`). The
+        // sub-rects come back in whatever space the rect went in, so mixing
+        // local and global here would hit-test a picker as though it sat at the
+        // viewport origin — correct at (0, 0) and wrong everywhere else.
+        //
+        // 🔑 `get_global_rect` rather than composing it by hand: its own doc says
+        // "anything mapping a click onto sub-parts of a control (rows, tabs)
+        // must measure from here", which is precisely this.
+        let rect = crate::control::get_global_rect(self, node_id);
+
+        let edit_alpha = !matches!(
+            self.get_node(node_id).map(|n| n.get_property("edit_alpha")),
+            Some(Variant::Bool(false))
+        );
+        let layout = crate::color_picker::picker_layout(rect, edit_alpha);
+        let part = crate::color_picker::part_at(&layout, position)?;
+
+        let current = match self.get_node(node_id).map(|n| n.get_property("color")) {
+            Some(Variant::Color(c)) => c,
+            _ => gdcore::math::Color::WHITE,
+        };
+        let mut model = crate::color_picker::ColorPickerModel::from_color(current);
+
+        let changed = match part {
+            crate::color_picker::PickerPart::Sv => {
+                let (u, v) = crate::color_picker::sv_uv_at(&layout, position)?;
+                model.pick_sv_rect(u, v)
+            }
+            crate::color_picker::PickerPart::Hue => {
+                let t = crate::color_picker::hue_t_at(&layout, position)?;
+                model.pick_hue_bar(t)
+            }
+            crate::color_picker::PickerPart::Alpha => {
+                // The alpha bar runs left-to-right, unlike the vertical hue bar.
+                let bar = layout.alpha?;
+                let a = ((position.x - bar.position.x) / bar.size.x).clamp(0.0, 1.0);
+                let before = model.alpha;
+                model.alpha = a;
+                model.alpha != before
+            }
+        };
+        if !changed {
+            return None;
+        }
+
+        let color = model.color();
+        if let Some(n) = self.get_node_mut(node_id) {
+            n.set_property("color", Variant::Color(color));
+        }
+        Some(color)
     }
 
     /// Begins or continues a divider drag. Returns whether the event was for a
@@ -7511,7 +7760,7 @@ impl Default for SceneTree {
 ///
 /// Returns `None` when the node declares no animations, so the caller can skip
 /// it without allocating.
-fn sprite_frames_from_node(node: &Node) -> Option<SpriteFrames> {
+pub(crate) fn sprite_frames_from_node(node: &Node) -> Option<SpriteFrames> {
     let names = match node.get_property("__sf_anims__") {
         Variant::PackedStringArray(v) if !v.is_empty() => v,
         _ => return None,

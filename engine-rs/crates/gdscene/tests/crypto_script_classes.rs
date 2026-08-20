@@ -244,6 +244,72 @@ fn the_crypto_classes_are_registered() {
     );
 }
 
+/// **pat-s3rrv.195.** `HMACContext` is constructible and its streaming digest
+/// matches the one-shot `Crypto.hmac_digest`.
+///
+/// The class was registered in ClassDB and implemented in `gdcore::crypto`
+/// (unit-tested against the RFC 2202 vectors), but nothing constructed one —
+/// `HMACContext.new()` reached no handle, so the streaming API was unusable
+/// from a script while `ClassDB.class_exists` cheerfully reported true.
+///
+/// The assertion is that the two paths AGREE, not that either matches a
+/// hard-coded constant: a shared digest that both compute wrongly would be a
+/// different bug, and `hmac_sha256` above already pins the value itself.
+#[test]
+fn hmac_context_streams_to_the_same_digest_as_hmac_digest() {
+    const HMAC_GD: &str = "\
+extends Node
+var streamed = null
+var one_shot = null
+var started_late = null
+
+func _ready():
+    var h = HMACContext.new()
+    h.start(2, 'key')
+    h.update('ms')
+    h.update('g')
+    self.streamed = h.finish()
+
+    var c = Crypto.new()
+    self.one_shot = c.hmac_digest(2, 'key', 'msg')
+
+    # `update` before `start` must report an error, not accumulate silently.
+    var late = HMACContext.new()
+    self.started_late = late.update('x')
+";
+    let mut tree = SceneTree::new();
+    let root_id = tree.root_id();
+    let node = tree.add_child(root_id, Node::new("Hmac", "Node")).unwrap();
+    tree.attach_script(
+        node,
+        Box::new(GDScriptNodeInstance::from_source(HMAC_GD, node).unwrap()),
+    );
+    LifecycleManager::enter_tree(&mut tree, node);
+    let mut ml = MainLoop::new(tree);
+    ml.step(1.0 / 60.0);
+
+    let streamed = script_var(&ml, node, "streamed");
+    let one_shot = script_var(&ml, node, "one_shot");
+
+    // Split across two `update` calls on purpose: a context that ignored all
+    // but the last chunk would still produce *a* digest, just not this one.
+    assert_eq!(
+        streamed, one_shot,
+        "HMACContext.start/update/update/finish must equal Crypto.hmac_digest \
+         over the concatenated message"
+    );
+    assert!(
+        !matches!(streamed, Some(Variant::PackedByteArray(ref b)) if b.is_empty()),
+        "an empty digest would make the equality above pass vacuously, got {streamed:?}"
+    );
+
+    assert_eq!(
+        script_var(&ml, node, "started_late"),
+        Some(Variant::Int(3)),
+        "update() before start() must return ERR_UNCONFIGURED, not OK"
+    );
+}
+
 /// The stage-2 surface must fail visibly rather than return something that looks
 /// like a key or a signature.
 #[test]

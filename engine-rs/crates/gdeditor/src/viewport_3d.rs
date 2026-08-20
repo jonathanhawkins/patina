@@ -7,8 +7,9 @@
 //! - **Fly**: Right-click + WASD for free-look navigation.
 //! - **Zoom**: Scroll wheel moves towards/away from the focus point.
 
-use gdcore::math::{Color, Vector3};
+use gdcore::math::{Color, Vector2, Vector3};
 use gdcore::math3d::{Aabb, Basis, Transform3D};
+use gdscene::camera3d::KeepAspect;
 use gdscene::node3d;
 use gdscene::SceneTree;
 use gdserver3d::environment::{AmbientSource, BackgroundMode, Environment3D, ToneMapper};
@@ -86,6 +87,23 @@ pub struct ViewportCamera3D {
     /// scene `Camera3D`'s viewpoint (the camera-preview inset / cinematic mode)
     /// rather than the editor's orbit camera. `None` for the normal editor camera.
     pub override_transform: Option<Transform3D>,
+    /// Near clip plane (`Camera3D.near`, Godot default 0.05) — pat-s3rrv.186.
+    ///
+    /// The struct had no clip planes at all, so a scene camera's `near`/`far`
+    /// never clipped anything: a mesh past Godot's default `far = 4000` still
+    /// drew in the Play view.
+    pub near: f32,
+    /// Far clip plane (`Camera3D.far`, Godot default 4000).
+    pub far: f32,
+    /// Whether `fov_degrees` is vertical (KEEP_HEIGHT, the Godot default) or
+    /// horizontal (KEEP_WIDTH).
+    pub keep_aspect: KeepAspect,
+    /// `Camera3D.h_offset` — shifts the view sideways in world units.
+    pub h_offset: f32,
+    /// `Camera3D.v_offset` — shifts the view vertically in world units.
+    pub v_offset: f32,
+    /// `Camera3D.frustum_offset`, used only by the FRUSTUM projection.
+    pub frustum_offset: Vector2,
 }
 
 impl Default for ViewportCamera3D {
@@ -104,6 +122,14 @@ impl Default for ViewportCamera3D {
             pan_sensitivity: 0.01,
             zoom_sensitivity: 0.1,
             override_transform: None,
+            // Godot's Camera3D defaults (doc/classes/Camera3D.xml): near 0.05,
+            // far 4000, keep_aspect KEEP_HEIGHT, offsets zero.
+            near: 0.05,
+            far: 4000.0,
+            keep_aspect: KeepAspect::KeepHeight,
+            h_offset: 0.0,
+            v_offset: 0.0,
+            frustum_offset: Vector2::ZERO,
         }
     }
 }

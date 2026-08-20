@@ -11520,7 +11520,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     _runtimeStatusInflight = true;
     try {
       var r = await api('GET', '/api/runtime/status');
-      if (r) { runtimeRunning = r.running; runtimePaused = r.paused; runtimeFrameCount = r.frame_count; runtimeFps = r.fps; updatePlayButtonStates(); showPlayingOverlay(runtimeRunning); updateRuntimeStatusBar(); if (!runtimeRunning) { restoreViewAfterStop(); setRuntimeEditingDisabled(false); stopRuntimePolling(); stopGameInput(); } }
+      if (r) { runtimeRunning = r.running; runtimePaused = r.paused; runtimeFrameCount = r.frame_count; runtimeFps = r.fps; if (r.midi_open) startWebMidi(); updatePlayButtonStates(); showPlayingOverlay(runtimeRunning); updateRuntimeStatusBar(); if (!runtimeRunning) { restoreViewAfterStop(); setRuntimeEditingDisabled(false); stopRuntimePolling(); stopGameInput(); } }
     } finally { _runtimeStatusInflight = false; }
   }
   function startRuntimePolling() { if (runtimeStatusInterval) return; runtimeStatusInterval = setInterval(pollRuntimeStatus, 200); }
@@ -11629,6 +11629,65 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   // Read engine-side rumble every 8th pad poll (~8Hz) instead of every frame.
   var GAMEPAD_RUMBLE_EVERY = 8;
   var gamepadRumbleTick = 0;
+
+  // ---- Web MIDI (pat-s3rrv.176) ----
+  // Godot's web platform starts its MIDI driver only when a game calls
+  // `OS.open_midi_inputs()`; `navigator.requestMIDIAccess()` is that driver.
+  // `onmidimessage` bytes become `InputEventMIDI` and reach `_input`.
+  var midiAccess = null, midiPorts = [], midiRequested = false;
+
+  function midiPortNames() {
+    var names = [];
+    for (var i = 0; i < midiPorts.length; i++) names.push(midiPorts[i].name || ('MIDI ' + i));
+    return names;
+  }
+
+  // Re-read every port and re-subscribe. Called on connect and on every
+  // `statechange`, so hot-plugging a controller mid-session both starts
+  // delivering its notes and refreshes `OS.get_connected_midi_inputs()`.
+  function bindMidiPorts(access) {
+    for (var i = 0; i < midiPorts.length; i++) midiPorts[i].onmidimessage = null;
+    midiPorts = [];
+    access.inputs.forEach(function(port) { midiPorts.push(port); });
+    midiPorts.forEach(function(port, index) {
+      port.onmidimessage = function(ev) {
+        if (!runtimeRunning) return;
+        // `ev.data` is a Uint8Array; JSON.stringify would emit it as an object
+        // keyed by index, which the route reads as an empty packet.
+        var bytes = [];
+        for (var b = 0; b < ev.data.length; b++) bytes.push(ev.data[b]);
+        // `device` is the port INDEX, not its name — the route reads
+        // `v["device"].as_u64()` and hands it to `decode_midi_message` as the
+        // device id.
+        api('POST', '/api/runtime/input/midi', { device: index, ports: midiPortNames(), data: bytes });
+      };
+    });
+    // A ports-only report carries no packet and is not an error: it is how
+    // `OS.get_connected_midi_inputs()` learns about a device that has not
+    // played a note yet.
+    api('POST', '/api/runtime/input/midi', { ports: midiPortNames(), data: [] });
+  }
+
+  function startWebMidi() {
+    if (midiRequested || !navigator.requestMIDIAccess) return;
+    midiRequested = true;
+    navigator.requestMIDIAccess().then(function(access) {
+      midiAccess = access;
+      bindMidiPorts(access);
+      access.onstatechange = function() { bindMidiPorts(access); };
+    }).catch(function() {
+      // Permission refused, or no MIDI stack. Clear the latch so a later run
+      // can ask again rather than staying silently dead for the session.
+      midiRequested = false;
+    });
+  }
+
+  function stopWebMidi() {
+    for (var i = 0; i < midiPorts.length; i++) midiPorts[i].onmidimessage = null;
+    midiPorts = [];
+    if (midiAccess) { midiAccess.onstatechange = null; midiAccess = null; }
+    midiRequested = false;
+  }
 
   function startGameInput() {
     if (gameInputActive) return;
@@ -11946,6 +12005,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       if (gameInputTouchCancelHandler) { vp.removeEventListener('touchcancel', gameInputTouchCancelHandler); gameInputTouchCancelHandler = null; }
     }
     stopGamepadPolling();
+    stopWebMidi();
     showGameInputIndicator(false);
   }
 

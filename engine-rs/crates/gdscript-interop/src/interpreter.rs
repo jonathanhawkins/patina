@@ -3543,6 +3543,28 @@ impl Interpreter {
                                         gdplatform::websocket_peer::new_websocket_peer_handle(),
                                     ));
                                 }
+                                // SceneReplicationConfig is a Resource, and a script
+                                // builds one to hand to MultiplayerSynchronizer
+                                // (pat-s3rrv.177). ⚠️ Registered in ClassDB with
+                                // THIRTEEN methods and no dispatch at all, so
+                                // `has_method` answered true while every call
+                                // returned Nil.
+                                if class_name == "SceneReplicationConfig" {
+                                    return Ok(Variant::ObjectId(
+                                        gdplatform::network::new_replication_config_handle(),
+                                    ));
+                                }
+                                // HTTPClient is RefCounted too (pat-s3rrv.78).
+                                // ⚠️ It was registered in ClassDB with TEN
+                                // methods and no dispatch at all, so `has_method`
+                                // answered true while every call returned Nil — and
+                                // the 639-line `gdplatform::http_client` behind it
+                                // had no consumer anywhere in the engine.
+                                if class_name == "HTTPClient" {
+                                    return Ok(Variant::ObjectId(
+                                        gdplatform::http_client_handle::new_http_client_handle(),
+                                    ));
+                                }
                                 // WebRTCPeerConnection is RefCounted: a script
                                 // does `WebRTCPeerConnection.new()` and drives
                                 // the handshake from its signalling code
@@ -3557,6 +3579,30 @@ impl Interpreter {
                                 }
                                 // PacketPeerStream is RefCounted too
                                 // (pat-s3rrv.80).
+                                // The socket peers were implemented in
+                                // gdplatform and registered in ClassDB, but had
+                                // no handle path here, so `.new()` reached
+                                // nothing (pat-s3rrv.178).
+                                if class_name == "StreamPeerTCP" {
+                                    return Ok(Variant::ObjectId(
+                                        gdplatform::stream_peer_tcp::new_stream_peer_tcp_handle(),
+                                    ));
+                                }
+                                if class_name == "PacketPeerUDP" {
+                                    return Ok(Variant::ObjectId(
+                                        gdplatform::packet_peer_udp::new_packet_peer_udp_handle(),
+                                    ));
+                                }
+                                if class_name == "TCPServer" {
+                                    return Ok(Variant::ObjectId(
+                                        gdplatform::tcp_server::new_tcp_server_handle(),
+                                    ));
+                                }
+                                if class_name == "UDPServer" {
+                                    return Ok(Variant::ObjectId(
+                                        gdplatform::udp_server::new_udp_server_handle(),
+                                    ));
+                                }
                                 if class_name == "PacketPeerStream" {
                                     return Ok(Variant::ObjectId(
                                         gdplatform::packet_peer_stream::new_packet_peer_stream_handle(),
@@ -3688,6 +3734,9 @@ impl Interpreter {
                                 }
                                 if class_name == "Crypto" {
                                     return Ok(Variant::ObjectId(new_crypto_handle()));
+                                }
+                                if class_name == "HMACContext" {
+                                    return Ok(Variant::ObjectId(new_hmac_context_handle()));
                                 }
                                 // pat-s3rrv.57: an abstract class is a
                                 // DIFFERENT error from an unknown one. Falling
@@ -7941,7 +7990,13 @@ impl Interpreter {
                     .is_some_and(|a| a.physics2d_body_add_shape(body, shape));
                 Ok(Variant::Bool(ok))
             }
-            // BODY_STATE_TRANSFORM = 0, BODY_STATE_LINEAR_VELOCITY = 2.
+            // Godot's BodyState: TRANSFORM 0, LINEAR_VELOCITY 1,
+            // ANGULAR_VELOCITY 2, SLEEPING 3, CAN_SLEEP 4
+            // (servers/physics_2d/physics_server_2d.h). This comment said
+            // LINEAR_VELOCITY = 2 — that is ANGULAR_VELOCITY — and
+            // `server_body_set_state_vec2` mapped it the same way, so a
+            // script passing Godot's real 1 got `false` and no effect
+            // (pat-s3rrv.191).
             "body_set_state" => {
                 arity(3)?;
                 let body = rid_arg(args, 0);
@@ -7952,23 +8007,201 @@ impl Interpreter {
                 });
                 Ok(Variant::Bool(ok))
             }
+            // Godot's BodyState: TRANSFORM 0, LINEAR_VELOCITY 1,
+            // ANGULAR_VELOCITY 2, SLEEPING 3, CAN_SLEEP 4.
             "body_get_state" => {
                 arity(2)?;
                 let body = rid_arg(args, 0);
                 let state = float_arg(args, 1) as i64;
-                // Only TRANSFORM is readable so far; anything else would have to
-                // invent a value, so report Nil instead.
-                if state != 0 {
+                let Some(access) = self.scene_access.as_ref() else {
                     return Ok(Variant::Nil);
-                }
-                let pos = self
-                    .scene_access
-                    .as_ref()
-                    .and_then(|a| a.physics2d_body_get_position(body));
-                Ok(match pos {
-                    Some((x, y)) => Variant::Vector2(gdcore::math::Vector2::new(x, y)),
-                    None => Variant::Nil,
+                };
+                Ok(match state {
+                    0 => match access.physics2d_body_get_position(body) {
+                        Some((x, y)) => Variant::Vector2(gdcore::math::Vector2::new(x, y)),
+                        None => Variant::Nil,
+                    },
+                    1 => match access.physics2d_body_get_linear_velocity(body) {
+                        Some((x, y)) => Variant::Vector2(gdcore::math::Vector2::new(x, y)),
+                        None => Variant::Nil,
+                    },
+                    2 => match access.physics2d_body_get_angular_velocity(body) {
+                        Some(w) => Variant::Float(w as f64),
+                        None => Variant::Nil,
+                    },
+                    3 | 4 => match access.physics2d_body_get_sleep_state(body, state == 4) {
+                        Some(b) => Variant::Bool(b),
+                        None => Variant::Nil,
+                    },
+                    // An unknown state is Nil rather than an error, matching the
+                    // arm this replaces: Godot returns an empty Variant.
+                    _ => Variant::Nil,
                 })
+            }
+            "capsule_shape_create" => {
+                arity(0)?;
+                let rid = self
+                    .scene_access
+                    .as_mut()
+                    .map_or(0, |a| a.physics2d_capsule_shape_create());
+                Ok(Variant::Int(rid as i64))
+            }
+            "body_set_param" => {
+                arity(3)?;
+                let body = rid_arg(args, 0);
+                let param = float_arg(args, 1) as i64;
+                let value = float_arg(args, 2) as f32;
+                let ok = self
+                    .scene_access
+                    .as_mut()
+                    .is_some_and(|a| a.physics2d_body_set_param(body, param, value));
+                Ok(Variant::Bool(ok))
+            }
+            "body_get_param" => {
+                arity(2)?;
+                let body = rid_arg(args, 0);
+                let param = float_arg(args, 1) as i64;
+                Ok(
+                    match self
+                        .scene_access
+                        .as_ref()
+                        .and_then(|a| a.physics2d_body_get_param(body, param))
+                    {
+                        Some(v) => Variant::Float(v as f64),
+                        None => Variant::Nil,
+                    },
+                )
+            }
+            // Godot has two methods; they differ only in destination, so one
+            // binding serves both and the arm names carry the distinction.
+            "body_set_collision_layer" | "body_set_collision_mask" => {
+                arity(2)?;
+                let body = rid_arg(args, 0);
+                let layers = float_arg(args, 1).max(0.0) as u32;
+                let is_mask = method == "body_set_collision_mask";
+                let ok = self
+                    .scene_access
+                    .as_mut()
+                    .is_some_and(|a| a.physics2d_body_set_collision_layers(body, layers, is_mask));
+                Ok(Variant::Bool(ok))
+            }
+            // ⚠️ `body_apply_impulse(body, impulse, position = Vector2())` —
+            // the POSITION IS OPTIONAL and defaults to the centre of mass, so
+            // the 2-arg form is the central one. `arity` is deliberately not
+            // used here: it demands an exact count.
+            "body_apply_impulse" | "body_apply_central_impulse" => {
+                if args.len() < 2 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "PhysicsServer2D.{method}() takes at least 2 arguments, got {}",
+                        args.len()
+                    ))));
+                }
+                let body = rid_arg(args, 0);
+                let impulse = vec2_arg(args, 1);
+                let at = if method == "body_apply_impulse" && args.len() > 2 {
+                    let p = vec2_arg(args, 2);
+                    Some((p.x, p.y))
+                } else {
+                    None
+                };
+                let ok = self.scene_access.as_mut().is_some_and(|a| {
+                    a.physics2d_body_apply_impulse(body, (impulse.x, impulse.y), at)
+                });
+                Ok(Variant::Bool(ok))
+            }
+            "body_apply_force" | "body_apply_central_force" => {
+                if args.len() < 2 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "PhysicsServer2D.{method}() takes at least 2 arguments, got {}",
+                        args.len()
+                    ))));
+                }
+                let body = rid_arg(args, 0);
+                let force = vec2_arg(args, 1);
+                let at = if method == "body_apply_force" && args.len() > 2 {
+                    let p = vec2_arg(args, 2);
+                    Some((p.x, p.y))
+                } else {
+                    None
+                };
+                let ok = self
+                    .scene_access
+                    .as_mut()
+                    .is_some_and(|a| a.physics2d_body_apply_force(body, (force.x, force.y), at));
+                Ok(Variant::Bool(ok))
+            }
+            "body_apply_torque_impulse" => {
+                arity(2)?;
+                let body = rid_arg(args, 0);
+                let torque = float_arg(args, 1) as f32;
+                let ok = self
+                    .scene_access
+                    .as_mut()
+                    .is_some_and(|a| a.physics2d_body_apply_torque_impulse(body, torque));
+                Ok(Variant::Bool(ok))
+            }
+            "area_create" => {
+                arity(0)?;
+                let rid = self
+                    .scene_access
+                    .as_mut()
+                    .map_or(0, |a| a.physics2d_area_create());
+                Ok(Variant::Int(rid as i64))
+            }
+            "area_set_space" => {
+                arity(2)?;
+                let (area, space) = (rid_arg(args, 0), rid_arg(args, 1));
+                let ok = self
+                    .scene_access
+                    .as_mut()
+                    .is_some_and(|a| a.physics2d_area_set_space(area, space));
+                Ok(Variant::Bool(ok))
+            }
+            "area_add_shape" => {
+                arity(2)?;
+                let (area, shape) = (rid_arg(args, 0), rid_arg(args, 1));
+                let ok = self
+                    .scene_access
+                    .as_mut()
+                    .is_some_and(|a| a.physics2d_area_add_shape(area, shape));
+                Ok(Variant::Bool(ok))
+            }
+            // Godot takes a Transform2D; only the origin is modelled, which is
+            // what `Area2D` carries.
+            "area_set_transform" => {
+                arity(2)?;
+                let area = rid_arg(args, 0);
+                let p = vec2_arg(args, 1);
+                let ok = self
+                    .scene_access
+                    .as_mut()
+                    .is_some_and(|a| a.physics2d_area_set_position(area, (p.x, p.y)));
+                Ok(Variant::Bool(ok))
+            }
+            // ⚠️ `area_set_param`'s value is a Variant in Godot — GRAVITY is a
+            // float, GRAVITY_VECTOR a Vector2 — so BOTH readings are passed and
+            // the server picks by `param`. Reading only one here would make
+            // whichever param it did not match silently set zero.
+            "area_set_param" => {
+                arity(3)?;
+                let area = rid_arg(args, 0);
+                let param = float_arg(args, 1) as i64;
+                let scalar = float_arg(args, 2) as f32;
+                let vector = vec2_arg(args, 2);
+                let ok = self.scene_access.as_mut().is_some_and(|a| {
+                    a.physics2d_area_set_param(area, param, scalar, (vector.x, vector.y))
+                });
+                Ok(Variant::Bool(ok))
+            }
+            "area_set_monitorable" => {
+                arity(2)?;
+                let area = rid_arg(args, 0);
+                let monitorable = matches!(args.get(1), Some(Variant::Bool(true)));
+                let ok = self
+                    .scene_access
+                    .as_mut()
+                    .is_some_and(|a| a.physics2d_area_set_monitorable(area, monitorable));
+                Ok(Variant::Bool(ok))
             }
             // Godot: `body_test_motion(body, PhysicsTestMotionParameters2D,
             // [PhysicsTestMotionResult2D]) -> bool`.
@@ -8605,6 +8838,23 @@ impl Interpreter {
         Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
             "ClassDB.class_call_static(): no static method \"{method}\" on \"{class}\""
         ))))
+    }
+
+    /// Whether `id` names an `AnimatedSprite2D` (pat-s3rrv.182).
+    ///
+    /// ⚠️ The method arms that use this guard — `play_backwards`, `pause`,
+    /// `stop`, `get_playing_speed` — are ALL names `AnimationPlayer` also
+    /// answers to. The AnimationPlayer arms discriminate by probing "does this
+    /// node answer an AnimationPlayer query", which works for them but cannot
+    /// distinguish a second class that shares the name. Asking for the class
+    /// outright is the only guard that stays correct as more classes acquire
+    /// these very generic verbs.
+    fn node_is_animated_sprite(&self, id: u64) -> bool {
+        self.scene_access
+            .as_ref()
+            .and_then(|a| a.get_class(id))
+            .as_deref()
+            == Some("AnimatedSprite2D")
     }
 
     fn classdb_instantiate(&mut self, args: &[Variant]) -> Result<Variant, RuntimeError> {
@@ -9692,6 +9942,24 @@ impl Interpreter {
             if gdplatform::packet_peer_stream::is_packet_peer_stream_handle(*oid) {
                 return call_packet_peer_stream_instance(*oid, method, args);
             }
+            if gdplatform::stream_peer_tcp::is_stream_peer_tcp_handle(*oid) {
+                return call_stream_peer_tcp_instance(*oid, method, args);
+            }
+            if gdplatform::packet_peer_udp::is_packet_peer_udp_handle(*oid) {
+                return call_packet_peer_udp_instance(*oid, method, args);
+            }
+            if gdplatform::tcp_server::is_tcp_server_handle(*oid) {
+                return call_tcp_server_instance(*oid, method, args);
+            }
+            if gdplatform::udp_server::is_udp_server_handle(*oid) {
+                return call_udp_server_instance(*oid, method, args);
+            }
+            if gdplatform::http_client_handle::is_http_client_handle(*oid) {
+                return call_http_client_instance(*oid, method, args);
+            }
+            if gdplatform::network::is_replication_config_handle(*oid) {
+                return call_replication_config_instance(*oid, method, args);
+            }
             if gdobject::physics_direct_body_state::is_direct_body_state_2d_handle(*oid) {
                 return call_direct_body_state_2d_instance(*oid, method, args);
             }
@@ -9815,6 +10083,9 @@ impl Interpreter {
             }
             if is_crypto_handle(*oid) {
                 return call_crypto_instance(*oid, method, args);
+            }
+            if is_hmac_context_handle(*oid) {
+                return call_hmac_context_instance(*oid, method, args);
             }
             if is_regex_match_handle(*oid) {
                 return call_regex_match_instance(*oid, method, args);
@@ -11738,6 +12009,33 @@ impl Interpreter {
                     // `stream_paused` pauses it, `seek_request` requests a seek, and
                     // `playback_position` is read back. Before this, these calls hit
                     // the `_` arm below and threw `UndefinedFunction("ObjectId.play")`.
+                    // ⚠️ MUST precede the unguarded `"play"` arm below. That one
+                    // routes to an attached AnimationPlayer and otherwise falls
+                    // through to AudioStreamPlayer semantics — an
+                    // AnimatedSprite2D reaching it gets `playing = true` and its
+                    // clip name dropped, which is precisely the "looks wired,
+                    // does nothing" behaviour this bead exists to remove. A
+                    // positively-guarded arm placed AFTER a catch-all is dead
+                    // code; the `stop()` arm further down records the same trap.
+                    "play" if self.node_is_animated_sprite(id) => {
+                        let clip = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            Some(Variant::StringName(s)) => s.as_str().to_string(),
+                            _ => String::new(),
+                        };
+                        // Godot's default `custom_speed` is 1.0, and its sign is
+                        // what runs the clip backwards.
+                        let custom_speed = match args.get(1) {
+                            Some(Variant::Float(f)) => *f,
+                            Some(Variant::Int(i)) => *i as f64,
+                            _ => 1.0,
+                        };
+                        let from_end = matches!(args.get(2), Some(Variant::Bool(true)));
+                        if let Some(ref mut access) = self.scene_access {
+                            access.animated_sprite_play(id, &clip, custom_speed, from_end);
+                        }
+                        Ok(Variant::Nil)
+                    }
                     "play" => {
                         if let Some(ref mut access) = self.scene_access {
                             // `AnimationPlayer.play("walk")` names a *clip*,
@@ -11781,6 +12079,22 @@ impl Interpreter {
                                 "no scene access".into(),
                             )))
                         }
+                    }
+                    // ⚠️ MUST precede the broad `stop()` arm below, which is
+                    // guarded against `Timer` and nothing else — an
+                    // AnimatedSprite2D reaching it would be "stopped" by that
+                    // arm's `playing = false` fallback, freezing the sprite
+                    // without rewinding it. That is `pause()`, not `stop()`, and
+                    // the two differing only in whether the playhead resets is
+                    // the whole distinction (`animated_sprite_2d.cpp:524-540`).
+                    // Same shape as the Timer bug the comment below records
+                    // (pat-s3rrv.121): a positively-guarded arm placed after a
+                    // near-catch-all is dead code.
+                    "stop" if self.node_is_animated_sprite(id) => {
+                        if let Some(ref mut access) = self.scene_access {
+                            access.animated_sprite_stop(id);
+                        }
+                        Ok(Variant::Nil)
                     }
                     // ⚠️ This arm is the AnimationPlayer/playback `stop()`, and
                     // its fallback sets `playing = false` on ANY node that
@@ -11946,6 +12260,55 @@ impl Interpreter {
                             access.animation_player_queue(id, &clip);
                         }
                         Ok(Variant::Nil)
+                    }
+                    // ⚠️ AnimatedSprite2D arms come FIRST and carry an explicit
+                    // class guard, because `play_backwards` and
+                    // `get_playing_speed` are shared method names with
+                    // AnimationPlayer below. The AnimationPlayer guards probe
+                    // "does this node answer an AnimationPlayer query", which is
+                    // false for a sprite — so ordering plus a precise guard
+                    // keeps each class on its own arm and leaves the existing
+                    // AnimationPlayer behaviour untouched (pat-s3rrv.182).
+                    "play_backwards" if self.node_is_animated_sprite(id) => {
+                        let clip = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            Some(Variant::StringName(s)) => s.as_str().to_string(),
+                            _ => String::new(),
+                        };
+                        if let Some(ref mut access) = self.scene_access {
+                            access.animated_sprite_play_backwards(id, &clip);
+                        }
+                        Ok(Variant::Nil)
+                    }
+                    "pause" if self.node_is_animated_sprite(id) => {
+                        if let Some(ref mut access) = self.scene_access {
+                            access.animated_sprite_pause(id);
+                        }
+                        Ok(Variant::Nil)
+                    }
+                    "set_frame_and_progress" if self.node_is_animated_sprite(id) => {
+                        let frame = match args.first() {
+                            Some(Variant::Int(i)) => *i,
+                            Some(Variant::Float(f)) => *f as i64,
+                            _ => 0,
+                        };
+                        let progress = match args.get(1) {
+                            Some(Variant::Float(f)) => *f,
+                            Some(Variant::Int(i)) => *i as f64,
+                            _ => 0.0,
+                        };
+                        if let Some(ref mut access) = self.scene_access {
+                            access.animated_sprite_set_frame_and_progress(id, frame, progress);
+                        }
+                        Ok(Variant::Nil)
+                    }
+                    "get_playing_speed" if self.node_is_animated_sprite(id) => {
+                        let speed = self
+                            .scene_access
+                            .as_ref()
+                            .map(|a| a.animated_sprite_playing_speed(id))
+                            .unwrap_or(0.0);
+                        Ok(Variant::Float(speed))
                     }
                     "play_backwards"
                         if self
@@ -20232,6 +20595,43 @@ fn call_stream_peer_instance(
             _ => Vec::new(),
         }
     };
+    let float_arg = |i: usize| -> f64 {
+        match args.get(i) {
+            Some(Variant::Float(f)) => *f,
+            Some(Variant::Int(n)) => *n as f64,
+            _ => 0.0,
+        }
+    };
+    let str_arg = |i: usize| -> String {
+        match args.get(i) {
+            Some(Variant::String(s)) => s.clone(),
+            _ => String::new(),
+        }
+    };
+    // `get_string(bytes = -1)` means "read the length prefix"; a non-negative
+    // count means "read exactly this many bytes, no prefix". Absent argument
+    // and negative argument are the same request.
+    let count_arg = |i: usize| -> Option<usize> {
+        match args.get(i) {
+            Some(Variant::Int(n)) if *n >= 0 => Some(*n as usize),
+            _ => None,
+        }
+    };
+
+    // ⚠️ `duplicate` mints a second handle, which re-enters the STREAM_PEERS
+    // RefCell. Doing that inside the `with_stream_peer` closure below would be
+    // a double mutable borrow and panic at runtime, so it runs first, as three
+    // sequential borrows (pat-s3rrv.178).
+    if method == "duplicate" {
+        let Some(copy) = with_stream_peer(id, |b| b.duplicate()) else {
+            return Ok(Variant::Nil);
+        };
+        let new_id = new_stream_peer_handle();
+        // `Option` is #[must_use]; the handle was minted on the line above, so
+        // the lookup cannot miss and there is nothing to branch on.
+        let _ = with_stream_peer(new_id, move |b| *b = copy);
+        return Ok(Variant::ObjectId(new_id));
+    }
 
     let out = with_stream_peer(id, |b| match method {
         // The Variant codec this bead exists for.
@@ -20241,13 +20641,32 @@ fn call_stream_peer_instance(
         }
         "get_var" => Some(b.get_var().unwrap_or(Variant::Nil)),
 
-        "put_data" | "put_partial_data" => {
+        // ⚠️ Return SHAPES, per doc/classes/StreamPeer.xml — these were aliased
+        // to put_data/get_data, so `var r = peer.get_partial_data(4)` handed the
+        // script a bare PackedByteArray and `r[0]` read the first BYTE as the
+        // error code (pat-s3rrv.178). Godot:
+        //   put_data         -> Error
+        //   put_partial_data -> [Error, bytes_written]
+        //   get_data         -> [Error, PackedByteArray]
+        //   get_partial_data -> [Error, PackedByteArray]
+        "put_data" => {
             b.put_data(&bytes_arg(0));
-            Some(Variant::Nil)
+            Some(Variant::Int(0))
         }
-        "get_data" | "get_partial_data" => Some(Variant::PackedByteArray(
-            b.get_data(int_arg(0).max(0) as usize),
-        )),
+        "put_partial_data" => {
+            let (err, written) = b.put_partial_data(&bytes_arg(0));
+            Some(Variant::Array(vec![
+                Variant::Int(err),
+                Variant::Int(written as i64),
+            ]))
+        }
+        "get_data" | "get_partial_data" => {
+            let (err, data) = b.get_partial_data(int_arg(0).max(0) as usize);
+            Some(Variant::Array(vec![
+                Variant::Int(err),
+                Variant::PackedByteArray(data),
+            ]))
+        }
 
         "put_8" => {
             b.put_8(int_arg(0) as i8);
@@ -20310,7 +20729,46 @@ fn call_stream_peer_instance(
             b.set_big_endian(matches!(args.first(), Some(Variant::Bool(true))));
             Some(Variant::Nil)
         }
-        "is_big_endian" => Some(Variant::Bool(b.is_big_endian())),
+        // Godot's getter is `is_big_endian_enabled`; the short spelling is kept
+        // because scripts in this repo already use it.
+        "is_big_endian" | "is_big_endian_enabled" => Some(Variant::Bool(b.is_big_endian())),
+
+        // ---- typed accessors (pat-s3rrv.178) ------------------------------
+        "put_half" => {
+            b.put_half(float_arg(0) as f32);
+            Some(Variant::Nil)
+        }
+        "put_float" => {
+            b.put_float(float_arg(0) as f32);
+            Some(Variant::Nil)
+        }
+        "put_double" => {
+            b.put_double(float_arg(0));
+            Some(Variant::Nil)
+        }
+        "get_half" => Some(Variant::Float(b.get_half() as f64)),
+        "get_float" => Some(Variant::Float(b.get_float() as f64)),
+        "get_double" => Some(Variant::Float(b.get_double())),
+
+        "put_string" => {
+            b.put_string(&str_arg(0));
+            Some(Variant::Nil)
+        }
+        "put_utf8_string" => {
+            b.put_utf8_string(&str_arg(0));
+            Some(Variant::Nil)
+        }
+        "get_string" => Some(Variant::String(b.get_string(count_arg(0)))),
+        "get_utf8_string" => Some(Variant::String(b.get_utf8_string_sized(count_arg(0)))),
+
+        "resize" => {
+            b.resize(int_arg(0).max(0) as usize);
+            Some(Variant::Nil)
+        }
+        "set_data_array" => {
+            b.set_data_array(&bytes_arg(0));
+            Some(Variant::Nil)
+        }
         _ => None,
     })
     .flatten();
@@ -21271,6 +21729,10 @@ const HASHING_CONTEXT_HANDLE_TAG: u64 = 0xC1_00_0000_0000_0000;
 const AES_CONTEXT_HANDLE_TAG: u64 = 0xC2_00_0000_0000_0000;
 /// Tag bits marking an `ObjectId` as a `Crypto` handle.
 const CRYPTO_HANDLE_TAG: u64 = 0xC3_00_0000_0000_0000;
+/// `HMACContext` handles (pat-s3rrv.195). `0xC4` continues the crypto family —
+/// `0xC1` hashing, `0xC2` AES, `0xC3` Crypto — and was confirmed unused by a
+/// full sweep of the workspace's tag bytes.
+const HMAC_CONTEXT_HANDLE_TAG: u64 = 0xC4_00_0000_0000_0000;
 
 thread_local! {
     static HASHING_CONTEXTS: std::cell::RefCell<HashMap<u64, gdcore::crypto::MultiHashContext>> =
@@ -21284,6 +21746,9 @@ thread_local! {
     static CRYPTOS: std::cell::RefCell<HashMap<u64, ()>> =
         std::cell::RefCell::new(HashMap::new());
     static NEXT_CRYPTO: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    static HMAC_CONTEXTS: std::cell::RefCell<HashMap<u64, gdcore::crypto::HmacContext>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_HMAC_CONTEXT: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
 }
 
 /// Returns `true` when `id` was issued by [`new_hashing_context_handle`].
@@ -21325,6 +21790,31 @@ fn new_aes_context_handle() -> gdcore::id::ObjectId {
     AES_CONTEXTS.with(|m| {
         m.borrow_mut()
             .insert(raw, gdcore::crypto::AesContext::new())
+    });
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+/// Returns `true` when `id` was issued by [`new_hmac_context_handle`].
+fn is_hmac_context_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == HMAC_CONTEXT_HANDLE_TAG
+}
+
+/// Allocates an `HMACContext` (Godot `HMACContext.new()`), pat-s3rrv.195.
+///
+/// `gdcore::crypto::HmacContext` was implemented and unit-tested against the
+/// RFC 2202 vectors, and `HMACContext` was registered in ClassDB — but nothing
+/// constructed one, so `HMACContext.new()` reached nothing and the streaming
+/// HMAC was unusable from a script.
+fn new_hmac_context_handle() -> gdcore::id::ObjectId {
+    let seq = NEXT_HMAC_CONTEXT.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = HMAC_CONTEXT_HANDLE_TAG | seq;
+    HMAC_CONTEXTS.with(|m| {
+        m.borrow_mut()
+            .insert(raw, gdcore::crypto::HmacContext::new())
     });
     gdcore::id::ObjectId::from_raw(raw)
 }
@@ -21428,6 +21918,65 @@ fn call_hashing_context_instance(
 }
 
 /// `AESContext`'s script surface (`doc/classes/AESContext.xml`).
+/// `HMACContext`'s script surface: `start(hash_type, key)` / `update(data)` /
+/// `finish()` (pat-s3rrv.195).
+///
+/// The hash-type int is mapped through the SAME `hash_type_from_int` that
+/// `Crypto.hmac_digest` uses, so the streaming and one-shot paths cannot drift
+/// apart on what `2` means — the acceptance requires the two to agree digit for
+/// digit.
+///
+/// `start` and `update` return Godot Error codes (0 = OK); `finish` returns the
+/// tag, or an empty PackedByteArray when the context was never started —
+/// matching how the neighbouring HashingContext surface reports the same
+/// mistake.
+fn call_hmac_context_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    let raw = id.raw();
+    match method {
+        "start" => {
+            let kind = crypto_int_arg(args, 0, "HMACContext.start()")?;
+            let Some(kind) = hash_type_from_int(kind) else {
+                // Godot's ERR_INVALID_PARAMETER (5) for an unknown hash type,
+                // rather than silently starting under a default digest.
+                return Ok(Variant::Int(5));
+            };
+            let key = crypto_bytes_arg(args, 1, "HMACContext.start()")?;
+            HMAC_CONTEXTS.with(|m| {
+                if let Some(ctx) = m.borrow_mut().get_mut(&raw) {
+                    ctx.start(kind, &key);
+                }
+            });
+            Ok(Variant::Int(0))
+        }
+        "update" => {
+            let data = crypto_bytes_arg(args, 0, "HMACContext.update()")?;
+            let ok = HMAC_CONTEXTS.with(|m| {
+                m.borrow_mut()
+                    .get_mut(&raw)
+                    .map(|ctx| ctx.update(&data).is_ok())
+                    .unwrap_or(false)
+            });
+            // ERR_UNCONFIGURED (3) when `update` precedes `start`.
+            Ok(Variant::Int(if ok { 0 } else { 3 }))
+        }
+        "finish" => {
+            let out = HMAC_CONTEXTS.with(|m| {
+                m.borrow_mut()
+                    .get_mut(&raw)
+                    .and_then(|ctx| ctx.finish().ok())
+            });
+            Ok(Variant::PackedByteArray(out.unwrap_or_default()))
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("HMACContext.{other}"),
+        ))),
+    }
+}
+
 fn call_aes_context_instance(
     id: gdcore::id::ObjectId,
     method: &str,
@@ -21462,7 +22011,9 @@ fn call_aes_context_instance(
         "update" => {
             let data = crypto_bytes_arg(args, 0, "AESContext.update()")?;
             let out =
-                AES_CONTEXTS.with(|m| m.borrow().get(&raw).and_then(|ctx| ctx.update(&data).ok()));
+                // `update` chains the CBC IV now, so it needs &mut (pat-s3rrv.195).
+                AES_CONTEXTS
+                    .with(|m| m.borrow_mut().get_mut(&raw).and_then(|ctx| ctx.update(&data).ok()));
             // An empty PackedByteArray is Godot's failure return here.
             Ok(Variant::PackedByteArray(out.unwrap_or_default()))
         }
@@ -21474,12 +22025,19 @@ fn call_aes_context_instance(
             });
             Ok(Variant::Nil)
         }
-        // ⚠️ Godot's `get_iv_state()` returns the IV as it stands after the
-        // chained blocks processed so far, for resuming a stream. This context
-        // encrypts whole buffers in one `update`, so there is no partial state
-        // to report and returning the starting IV would be a lie. Empty is the
-        // honest answer; see the completion report.
-        "get_iv_state" => Ok(Variant::PackedByteArray(Vec::new())),
+        // Godot's `get_iv_state()` returns the IV as it stands after the blocks
+        // processed so far, so a caller can checkpoint and resume a CBC stream.
+        //
+        // This used to return an empty array, and the comment here argued that
+        // was "the honest answer" because `update` did not chain — which was
+        // true of the old behaviour and is the right instinct: reporting the
+        // STARTING IV as though it were live state would have been a lie. Now
+        // that `update` chains (pat-s3rrv.195), there is real state to report.
+        "get_iv_state" => Ok(Variant::PackedByteArray(
+            AES_CONTEXTS
+                .with(|m| m.borrow().get(&raw).map(|ctx| ctx.get_iv_state()))
+                .unwrap_or_default(),
+        )),
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("AESContext.{other}"),
         ))),
@@ -23066,6 +23624,382 @@ fn call_webrtc_data_channel_instance(
     })
 }
 
+/// Godot `StreamPeerTCP` (pat-s3rrv.178).
+///
+/// Godot's web export keeps the class present and fails every socket call with
+/// `ERR_UNAVAILABLE` rather than making the class vanish, so a method this
+/// build cannot honour returns that code instead of an unknown-method error.
+/// The distinction matters to a script: one is a portability branch it can
+/// take, the other is a crash.
+fn call_stream_peer_tcp_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    use gdplatform::stream_peer_tcp::with_stream_peer_tcp;
+
+    /// Godot `Error.OK` / `FAILED` / `ERR_UNAVAILABLE` (enum positions 0/1/2).
+    const OK: i64 = 0;
+    const FAILED: i64 = 1;
+    const ERR_UNAVAILABLE: i64 = 2;
+
+    let str_arg = |i: usize| -> String {
+        match args.get(i) {
+            Some(Variant::String(s)) => s.clone(),
+            _ => String::new(),
+        }
+    };
+    let int_arg = |i: usize| -> i64 {
+        match args.get(i) {
+            Some(Variant::Int(n)) => *n,
+            Some(Variant::Float(f)) => *f as i64,
+            _ => 0,
+        }
+    };
+    let bytes_arg = |i: usize| -> Vec<u8> {
+        match args.get(i) {
+            Some(Variant::PackedByteArray(b)) => b.clone(),
+            Some(Variant::String(s)) => s.as_bytes().to_vec(),
+            _ => Vec::new(),
+        }
+    };
+
+    let result = with_stream_peer_tcp(id, |peer| -> Result<Variant, RuntimeError> {
+        match method {
+            "connect_to_host" => {
+                let port = u16::try_from(int_arg(1).clamp(0, u16::MAX as i64)).unwrap_or(0);
+                Ok(Variant::Int(
+                    match peer.connect_to_host(&str_arg(0), port) {
+                        Ok(()) => OK,
+                        Err(_) => FAILED,
+                    },
+                ))
+            }
+            "disconnect_from_host" => {
+                peer.close();
+                Ok(Variant::Nil)
+            }
+            "get_status" => Ok(Variant::Int(peer.get_status() as u8 as i64)),
+            "poll" => {
+                peer.poll();
+                Ok(Variant::Int(OK))
+            }
+            "get_connected_host" => Ok(Variant::String(
+                peer.get_connected_host()
+                    .map(|a| a.ip().to_string())
+                    .unwrap_or_default(),
+            )),
+            "get_connected_port" => Ok(Variant::Int(
+                peer.get_connected_host()
+                    .map(|a| a.port() as i64)
+                    .unwrap_or(0),
+            )),
+            "put_data" | "put_partial_data" => {
+                let bytes = bytes_arg(0);
+                let written = bytes.len() as i64;
+                let code = match peer.put_data(&bytes) {
+                    Ok(()) => OK,
+                    Err(_) => FAILED,
+                };
+                // Same shapes as StreamPeerBuffer: put_data -> Error,
+                // put_partial_data -> [Error, bytes_written].
+                if method == "put_data" {
+                    Ok(Variant::Int(code))
+                } else {
+                    Ok(Variant::Array(vec![
+                        Variant::Int(code),
+                        Variant::Int(if code == OK { written } else { 0 }),
+                    ]))
+                }
+            }
+            "get_data" | "get_partial_data" => {
+                let data = peer.get_data(int_arg(0).max(0) as usize);
+                Ok(Variant::Array(vec![
+                    Variant::Int(OK),
+                    Variant::PackedByteArray(data),
+                ]))
+            }
+            "get_available_bytes" => Ok(Variant::Int(peer.get_available_bytes() as i64)),
+            // Documented on the class but not backed by this transport. An
+            // honest ERR_UNAVAILABLE beats a method-not-found: the script can
+            // branch on it the same way it does on the web export.
+            "bind" | "set_no_delay" | "get_local_port" => Ok(Variant::Int(ERR_UNAVAILABLE)),
+            other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("StreamPeerTCP.{other}"),
+            ))),
+        }
+    });
+    result.unwrap_or_else(|| {
+        Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("StreamPeerTCP.{method} on a released handle"),
+        )))
+    })
+}
+
+/// Godot `PacketPeerUDP` (pat-s3rrv.178). See the note on
+/// [`call_stream_peer_tcp_instance`] about `ERR_UNAVAILABLE`.
+fn call_packet_peer_udp_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    use gdplatform::packet_peer_udp::with_packet_peer_udp;
+
+    const OK: i64 = 0;
+    const FAILED: i64 = 1;
+    const ERR_UNAVAILABLE: i64 = 2;
+
+    let str_arg = |i: usize| -> String {
+        match args.get(i) {
+            Some(Variant::String(s)) => s.clone(),
+            _ => String::new(),
+        }
+    };
+    let int_arg = |i: usize| -> i64 {
+        match args.get(i) {
+            Some(Variant::Int(n)) => *n,
+            Some(Variant::Float(f)) => *f as i64,
+            _ => 0,
+        }
+    };
+
+    let result = with_packet_peer_udp(id, |peer| -> Result<Variant, RuntimeError> {
+        match method {
+            "bind" => {
+                // Godot: bind(port, bind_address = "*", recv_buf_size = 65536).
+                let port = int_arg(0).clamp(0, u16::MAX as i64);
+                let host = match str_arg(1).as_str() {
+                    "" | "*" => "0.0.0.0".to_string(),
+                    other => other.to_string(),
+                };
+                Ok(Variant::Int(
+                    match peer.bind((host.as_str(), port as u16)) {
+                        Ok(_) => OK,
+                        Err(_) => FAILED,
+                    },
+                ))
+            }
+            "close" => {
+                peer.close();
+                Ok(Variant::Nil)
+            }
+            "connect_to_host" | "set_dest_address" => {
+                let port = int_arg(1).clamp(0, u16::MAX as i64) as u16;
+                let host = str_arg(0);
+                Ok(Variant::Int(
+                    match peer.set_dest_address((host.as_str(), port)) {
+                        Ok(()) => OK,
+                        Err(_) => FAILED,
+                    },
+                ))
+            }
+            "get_local_port" => Ok(Variant::Int(
+                peer.local_addr().map(|a| a.port() as i64).unwrap_or(0),
+            )),
+            "get_packet_ip" => Ok(Variant::String(
+                peer.get_packet_address()
+                    .map(|a| a.ip().to_string())
+                    .unwrap_or_default(),
+            )),
+            "get_packet_port" => Ok(Variant::Int(
+                peer.get_packet_address()
+                    .map(|a| a.port() as i64)
+                    .unwrap_or(0),
+            )),
+            "is_bound" => Ok(Variant::Bool(peer.is_bound())),
+            "is_socket_connected" => Ok(Variant::Bool(peer.dest_address().is_some())),
+            "wait" => {
+                // Ours is non-blocking, so `wait` drains what has arrived
+                // rather than parking the interpreter on a socket.
+                peer.poll();
+                Ok(Variant::Int(OK))
+            }
+            "put_packet" => {
+                let bytes = match args.first() {
+                    Some(Variant::PackedByteArray(b)) => b.clone(),
+                    Some(Variant::String(s)) => s.as_bytes().to_vec(),
+                    _ => Vec::new(),
+                };
+                Ok(Variant::Int(match peer.put_packet(&bytes) {
+                    Ok(()) => OK,
+                    Err(_) => FAILED,
+                }))
+            }
+            // Godot returns an EMPTY PackedByteArray when nothing is queued,
+            // not an error, so a `while get_available_packet_count()` loop does
+            // not have to tell Nil from empty.
+            "get_packet" => Ok(Variant::PackedByteArray(peer.get_packet())),
+            "get_available_packet_count" => {
+                peer.poll();
+                Ok(Variant::Int(peer.get_available_packet_count() as i64))
+            }
+            // No multicast or broadcast in this transport; see the note above
+            // on why this is not an unknown-method error.
+            "join_multicast_group" | "leave_multicast_group" | "set_broadcast_enabled" => {
+                Ok(Variant::Int(ERR_UNAVAILABLE))
+            }
+            other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("PacketPeerUDP.{other}"),
+            ))),
+        }
+    });
+    result.unwrap_or_else(|| {
+        Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("PacketPeerUDP.{method} on a released handle"),
+        )))
+    })
+}
+
+/// Godot `TCPServer` (pat-s3rrv.178).
+///
+/// `take_connection` mints a `StreamPeerTCP` handle, which re-enters that
+/// module's table — so it is done AFTER the server borrow is released, not
+/// inside it. Nesting the two would be a double borrow of separate tables here,
+/// but the sequential form is the one that stays correct if either table is
+/// ever backed by the same lock.
+fn call_tcp_server_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    use gdplatform::tcp_server::with_tcp_server;
+
+    let str_arg = |i: usize| -> String {
+        match args.get(i) {
+            Some(Variant::String(s)) => s.clone(),
+            _ => String::new(),
+        }
+    };
+    let int_arg = |i: usize| -> i64 {
+        match args.get(i) {
+            Some(Variant::Int(n)) => *n,
+            Some(Variant::Float(f)) => *f as i64,
+            _ => 0,
+        }
+    };
+
+    // Handled first: it allocates a second handle, so it must not run while the
+    // server's own entry is borrowed.
+    if method == "take_connection" {
+        let Some(taken) = with_tcp_server(id, |srv| srv.take_connection()) else {
+            return Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                "TCPServer.take_connection on a released handle".to_string(),
+            )));
+        };
+        // Godot returns null when nobody is waiting; Nil is that.
+        let Some(peer) = taken else {
+            return Ok(Variant::Nil);
+        };
+        let peer_id = gdplatform::stream_peer_tcp::new_stream_peer_tcp_handle();
+        let _ = gdplatform::stream_peer_tcp::with_stream_peer_tcp(peer_id, move |slot| {
+            *slot = peer;
+        });
+        return Ok(Variant::ObjectId(peer_id));
+    }
+
+    let result = with_tcp_server(id, |srv| -> Result<Variant, RuntimeError> {
+        match method {
+            "listen" => {
+                let port = int_arg(0).clamp(0, u16::MAX as i64) as u16;
+                let addr = match str_arg(1).as_str() {
+                    "" => "*".to_string(),
+                    other => other.to_string(),
+                };
+                Ok(Variant::Int(srv.listen(port, &addr)))
+            }
+            "is_listening" => Ok(Variant::Bool(srv.is_listening())),
+            "is_connection_available" => Ok(Variant::Bool(srv.is_connection_available())),
+            "get_local_port" => Ok(Variant::Int(srv.get_local_port() as i64)),
+            "stop" => {
+                srv.stop();
+                Ok(Variant::Nil)
+            }
+            other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("TCPServer.{other}"),
+            ))),
+        }
+    });
+    result.unwrap_or_else(|| {
+        Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("TCPServer.{method} on a released handle"),
+        )))
+    })
+}
+
+/// Godot `UDPServer` (pat-s3rrv.178). Same handle-minting note as
+/// [`call_tcp_server_instance`].
+fn call_udp_server_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    use gdplatform::udp_server::with_udp_server;
+
+    let str_arg = |i: usize| -> String {
+        match args.get(i) {
+            Some(Variant::String(s)) => s.clone(),
+            _ => String::new(),
+        }
+    };
+    let int_arg = |i: usize| -> i64 {
+        match args.get(i) {
+            Some(Variant::Int(n)) => *n,
+            Some(Variant::Float(f)) => *f as i64,
+            _ => 0,
+        }
+    };
+
+    if method == "take_connection" {
+        let Some(taken) = with_udp_server(id, |srv| srv.take_connection()) else {
+            return Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                "UDPServer.take_connection on a released handle".to_string(),
+            )));
+        };
+        let Some(peer) = taken else {
+            return Ok(Variant::Nil);
+        };
+        let peer_id = gdplatform::packet_peer_udp::new_packet_peer_udp_handle();
+        let _ = gdplatform::packet_peer_udp::with_packet_peer_udp(peer_id, move |slot| {
+            *slot = peer;
+        });
+        return Ok(Variant::ObjectId(peer_id));
+    }
+
+    let result = with_udp_server(id, |srv| -> Result<Variant, RuntimeError> {
+        match method {
+            "listen" => {
+                let port = int_arg(0).clamp(0, u16::MAX as i64) as u16;
+                let addr = match str_arg(1).as_str() {
+                    "" => "*".to_string(),
+                    other => other.to_string(),
+                };
+                Ok(Variant::Int(srv.listen(port, &addr)))
+            }
+            "poll" => Ok(Variant::Int(srv.poll())),
+            "is_listening" => Ok(Variant::Bool(srv.is_listening())),
+            "is_connection_available" => Ok(Variant::Bool(srv.is_connection_available())),
+            "get_local_port" => Ok(Variant::Int(srv.get_local_port() as i64)),
+            "set_max_pending_connections" => {
+                srv.set_max_pending_connections(int_arg(0).max(0) as usize);
+                Ok(Variant::Nil)
+            }
+            "get_max_pending_connections" => Ok(Variant::Int(srv.max_pending_connections() as i64)),
+            "stop" => {
+                srv.stop();
+                Ok(Variant::Nil)
+            }
+            other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("UDPServer.{other}"),
+            ))),
+        }
+    });
+    result.unwrap_or_else(|| {
+        Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("UDPServer.{method} on a released handle"),
+        )))
+    })
+}
+
 /// Godot `PacketPeerStream` — a PacketPeer that frames packets over a byte
 /// stream with a 4-byte little-endian length prefix (pat-s3rrv.80).
 ///
@@ -23111,6 +24045,205 @@ fn call_packet_peer_stream_instance(
     result.unwrap_or_else(|| {
         Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("PacketPeerStream.{method} on a released handle"),
+        )))
+    })
+}
+
+/// Routes the ten `HTTPClient` methods ClassDB advertises onto the handle in
+/// `gdplatform` (pat-s3rrv.78).
+///
+/// 🔑 Godot's `HTTPClient` is poll-driven; the transport behind this is
+/// blocking. The wrapper does the work eagerly and shapes the readout like a
+/// poll API — see `gdplatform::http_client_handle`. `poll()` therefore reports
+/// `OK` rather than an error, so a Godot-shaped `while c.poll() == OK:` loop
+/// does not see a false failure.
+/// Routes `SceneReplicationConfig`'s thirteen ClassDB methods onto the model in
+/// gdplatform (pat-s3rrv.177).
+///
+/// 🔑 `sync` and `watch` are two VIEWS over one `mode` upstream
+/// (`property_get_watch()` *is* `mode == ON_CHANGE`), so the setters here are
+/// deliberately not symmetric flags — see `SceneReplicationConfig` in
+/// `gdplatform::network`.
+fn call_replication_config_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    use gdplatform::network::{with_replication_config, ReplicationMode};
+
+    // Godot passes NodePaths here; a script may equally write a plain string.
+    let path_arg = |i: usize| -> String {
+        match args.get(i) {
+            // ⚠️ `Variant::NodePath` wraps a `NodePath`, not a `String` —
+            // `.to_string()` is the accessor the rest of this file uses.
+            Some(Variant::NodePath(p)) => p.to_string(),
+            Some(Variant::String(s)) => s.clone(),
+            other => other.map(|v| v.to_string_lossy()).unwrap_or_default(),
+        }
+    };
+    let bool_arg = |i: usize| -> bool { matches!(args.get(i), Some(Variant::Bool(true))) };
+
+    let result = with_replication_config(id, |cfg| -> Result<Variant, RuntimeError> {
+        match method {
+            "add_property" => {
+                cfg.add_property(path_arg(0));
+                Ok(Variant::Nil)
+            }
+            "remove_property" => {
+                cfg.remove_property(&path_arg(0));
+                Ok(Variant::Nil)
+            }
+            "has_property" => Ok(Variant::Bool(cfg.has_property(&path_arg(0)))),
+            // ⚠️ Godot returns -1 for an unknown path, not null: a script does
+            // `if cfg.property_get_index(p) == -1`. Returning Nil would make that
+            // comparison silently false.
+            "property_get_index" => Ok(Variant::Int(
+                cfg.property_get_index(&path_arg(0))
+                    .map(|i| i as i64)
+                    .unwrap_or(-1),
+            )),
+            "get_properties" => Ok(Variant::Array(
+                cfg.get_properties()
+                    .into_iter()
+                    .map(|p| Variant::NodePath(p.into()))
+                    .collect(),
+            )),
+            "property_set_spawn" => {
+                cfg.property_set_spawn(&path_arg(0), bool_arg(1));
+                Ok(Variant::Nil)
+            }
+            "property_get_spawn" => Ok(Variant::Bool(cfg.property_get_spawn(&path_arg(0)))),
+            "property_set_sync" => {
+                cfg.property_set_sync(&path_arg(0), bool_arg(1));
+                Ok(Variant::Nil)
+            }
+            "property_get_sync" => Ok(Variant::Bool(cfg.property_get_sync(&path_arg(0)))),
+            "property_set_watch" => {
+                cfg.property_set_watch(&path_arg(0), bool_arg(1));
+                Ok(Variant::Nil)
+            }
+            "property_get_watch" => Ok(Variant::Bool(cfg.property_get_watch(&path_arg(0)))),
+            "property_set_replication_mode" => {
+                let mode = match args.get(1) {
+                    Some(Variant::Int(0)) => ReplicationMode::Never,
+                    Some(Variant::Int(2)) => ReplicationMode::OnChange,
+                    // ⚠️ Godot's default is ALWAYS, and an out-of-range ordinal
+                    // must not silently become NEVER — that would stop a property
+                    // replicating with no error anywhere.
+                    _ => ReplicationMode::Always,
+                };
+                cfg.property_set_replication_mode(&path_arg(0), mode);
+                Ok(Variant::Nil)
+            }
+            "property_get_replication_mode" => Ok(Variant::Int(
+                cfg.property_get_replication_mode(&path_arg(0)).to_godot(),
+            )),
+            other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("SceneReplicationConfig.{other}"),
+            ))),
+        }
+    });
+    result.unwrap_or_else(|| {
+        Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("SceneReplicationConfig.{method} on a released handle"),
+        )))
+    })
+}
+
+fn call_http_client_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    use gdplatform::http_client_handle::{method_from_ordinal, with_http_client, ERR_UNAVAILABLE};
+
+    let result = with_http_client(id, |client| -> Result<Variant, RuntimeError> {
+        match method {
+            "connect_to_host" => {
+                let host = match args.first() {
+                    Some(Variant::String(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                // ⚠️ Godot's default is `port = -1`, meaning "the scheme
+                // default" — not 0, and not an error.
+                let port = match args.get(1) {
+                    Some(Variant::Int(p)) => *p,
+                    _ => -1,
+                };
+                // Any non-null third argument is a TLSOptions, i.e. a request
+                // for TLS. There is no TLS backend, so the handle refuses it.
+                let use_tls = !matches!(args.get(2), None | Some(Variant::Nil));
+                let port = i32::try_from(port).unwrap_or(i32::MAX);
+                Ok(Variant::Int(
+                    client.connect_to_host(&host, port, use_tls) as i64
+                ))
+            }
+            "request" => {
+                let ordinal = match args.first() {
+                    Some(Variant::Int(m)) => *m,
+                    _ => 0,
+                };
+                let Some(http_method) = method_from_ordinal(ordinal) else {
+                    // OPTIONS/TRACE/CONNECT have no transport variant, and
+                    // silently sending a GET instead would look successful.
+                    return Ok(Variant::Int(ERR_UNAVAILABLE as i64));
+                };
+                let url = match args.get(1) {
+                    Some(Variant::String(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                // ⚠️ An untyped Array of strings is accepted too: a GDScript
+                // literal `["X: 1"]` produces one, and a PackedStringArray-only
+                // reader would silently drop every header.
+                let headers: Vec<String> = match args.get(2) {
+                    Some(Variant::PackedStringArray(h)) => h.clone(),
+                    Some(Variant::Array(a)) => a.iter().map(|v| v.to_string_lossy()).collect(),
+                    _ => Vec::new(),
+                };
+                let body: Vec<u8> = match args.get(3) {
+                    Some(Variant::PackedByteArray(b)) => b.clone(),
+                    Some(Variant::String(s)) => s.clone().into_bytes(),
+                    _ => Vec::new(),
+                };
+                Ok(Variant::Int(
+                    client.request(http_method, &url, &headers, &body) as i64,
+                ))
+            }
+            "poll" => Ok(Variant::Int(client.poll() as i64)),
+            "get_status" => Ok(Variant::Int(client.get_status() as i64)),
+            "has_response" => Ok(Variant::Bool(client.has_response())),
+            "get_response_code" => Ok(Variant::Int(client.get_response_code() as i64)),
+            "get_response_headers" => Ok(Variant::PackedStringArray(client.get_response_headers())),
+            "get_response_body_length" => Ok(Variant::Int(client.get_response_body_length())),
+            "read_response_body_chunk" => {
+                Ok(Variant::PackedByteArray(client.read_response_body_chunk()))
+            }
+            "set_read_chunk_size" => {
+                if let Some(Variant::Int(bytes)) = args.first() {
+                    client.set_read_chunk_size(*bytes);
+                }
+                Ok(Variant::Nil)
+            }
+            "get_read_chunk_size" => Ok(Variant::Int(client.get_read_chunk_size())),
+            "set_blocking_mode" => {
+                if let Some(Variant::Bool(enabled)) = args.first() {
+                    client.set_blocking_mode(*enabled);
+                }
+                Ok(Variant::Nil)
+            }
+            "is_blocking_mode_enabled" => Ok(Variant::Bool(client.is_blocking_mode_enabled())),
+            "close" => {
+                client.close();
+                Ok(Variant::Nil)
+            }
+            other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("HTTPClient.{other}"),
+            ))),
+        }
+    });
+    result.unwrap_or_else(|| {
+        Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("HTTPClient.{method} on a released handle"),
         )))
     })
 }

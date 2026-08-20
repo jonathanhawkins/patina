@@ -11,6 +11,7 @@
 //! colour; the drawing and popup layers build on top of it.
 
 use gdcore::math::{Color, Rect2, Vector2};
+use gdvariant::Variant;
 
 /// Godot's `Color::set_hsv` (`core/math/color.cpp:182`), ported exactly.
 ///
@@ -168,6 +169,17 @@ pub const BAR_GAP: f32 = 4.0;
 /// Height of the alpha bar shown when `edit_alpha` is set.
 pub const ALPHA_BAR_H: f32 = 12.0;
 
+/// The size a `ColorPickerButton` gives the picker it opens.
+///
+/// Godot's default theme sizes the SV square 256x256 (`default_theme.cpp:1077`),
+/// so with the 4px gap and the 30px hue bar the control is `256 + 4 + 30` = 290
+/// wide, and `256 + 4 + 12` = 272 tall once the alpha bar is counted. Written as
+/// the sums rather than the totals so it stays consistent with
+/// [`picker_layout`]: feeding this size back through it recovers exactly a
+/// 256x256 SV square, which is the check that the two cannot drift apart.
+pub const DEFAULT_PICKER_SIZE: Vector2 =
+    Vector2::new(256.0 + BAR_GAP + HUE_BAR_W, 256.0 + BAR_GAP + ALPHA_BAR_H);
+
 /// Where a `ColorPicker`'s parts sit inside its control rect.
 ///
 /// ⚠️ All three are in the SAME space as the rect passed in (global viewport
@@ -282,4 +294,110 @@ pub fn part_at(layout: &PickerLayout, point: Vector2) -> Option<PickerPart> {
         Some(a) if inside(a) => Some(PickerPart::Alpha),
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// pat-s3rrv.172 — the script method surface
+// ---------------------------------------------------------------------------
+
+/// The node property the preset list is stored under.
+///
+/// 🔑 An ordinary (non-`__`-prefixed) property name on purpose. `scene_saver`
+/// writes every non-internal property verbatim and `parse_variant_value` already
+/// reads `PackedColorArray(...)` back, so storing the list here is what makes
+/// presets survive a `.tscn` round-trip without a single line of serializer
+/// work. A `__presets__` companion key would be skipped by
+/// `scene_saver::is_internal_prop` and silently vanish on save.
+pub const PRESETS_PROP: &str = "presets";
+
+/// The picker's preset list, in order.
+pub fn get_presets(
+    tree: &crate::scene_tree::SceneTree,
+    node_id: crate::node::NodeId,
+) -> Vec<Color> {
+    match tree.get_node(node_id).map(|n| n.get_property(PRESETS_PROP)) {
+        Some(Variant::PackedColorArray(v)) => v,
+        // An `Array` of Colors is what a `.tscn` hand-written as `presets = [
+        // Color(1, 0, 0, 1) ]` parses to, and a script may build one the same
+        // way. Accepted rather than discarded, because dropping it would look
+        // exactly like "the round-trip lost my presets".
+        Some(Variant::Array(items)) => items
+            .iter()
+            .filter_map(|v| match v {
+                Variant::Color(c) => Some(*c),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn set_presets(
+    tree: &mut crate::scene_tree::SceneTree,
+    node_id: crate::node::NodeId,
+    presets: Vec<Color>,
+) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property(PRESETS_PROP, Variant::PackedColorArray(presets));
+    }
+}
+
+/// Answers `ColorPicker`'s script method surface, or `None` for any other node.
+///
+/// Runs ahead of the generic node-method table in `scripting::call_node_method`
+/// and declines every non-ColorPicker node, the contract
+/// `tilemap::call_tilemap_method` follows.
+///
+/// ⚠️ **`ColorPickerButton` is deliberately NOT accepted.** It looks like it
+/// should forward these to the picker it hosts, but upstream gives it only
+/// `get_picker` and `get_popup` (`doc/classes/ColorPickerButton.xml`) — the
+/// preset methods live on `ColorPicker` alone. Accepting the button here would
+/// invent API that a real Godot project cannot call.
+pub fn call_color_picker_method(
+    tree: &mut crate::scene_tree::SceneTree,
+    node_id: crate::node::NodeId,
+    method: &str,
+    args: &[Variant],
+) -> Option<Variant> {
+    if tree.get_node(node_id)?.class_name() != "ColorPicker" {
+        return None;
+    }
+    let color_arg = || match args.first() {
+        Some(Variant::Color(c)) => Some(*c),
+        _ => None,
+    };
+
+    Some(match method {
+        "add_preset" => {
+            let color = color_arg()?;
+            let mut presets = get_presets(tree, node_id);
+            // 🔑 Adding a colour ALREADY in the list is not a no-op and does not
+            // duplicate it — Godot moves the existing entry to the back
+            // (`color_picker.cpp:1069`, `presets.move_to_back(e)`), so the list
+            // is most-recently-added-last. Treating a repeat as "already there,
+            // nothing to do" is the natural reading and it silently loses that
+            // ordering, which is the only thing the list is for.
+            presets.retain(|c| *c != color);
+            presets.push(color);
+            set_presets(tree, node_id, presets);
+            // ⚠️ No `preset_added` here. Upstream emits it from
+            // `_add_preset_pressed` (`:1522`) — the UI button — and NOT from
+            // `add_preset` itself, so a script calling this must not see the
+            // signal fire. Emitting from both would be a plausible-looking
+            // parity bug that only a handler-counting test catches.
+            Variant::Nil
+        }
+        "erase_preset" => {
+            let color = color_arg()?;
+            let mut presets = get_presets(tree, node_id);
+            // Absent colour: upstream's `if (e)` guard makes the whole body a
+            // no-op (`color_picker.cpp:1101`). `retain` matches that.
+            presets.retain(|c| *c != color);
+            set_presets(tree, node_id, presets);
+            // Likewise emitted only from `_preset_input` (`:1482`, `:1492`).
+            Variant::Nil
+        }
+        "get_presets" => Variant::PackedColorArray(get_presets(tree, node_id)),
+        _ => return None,
+    })
 }

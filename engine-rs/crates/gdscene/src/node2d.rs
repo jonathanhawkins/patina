@@ -50,6 +50,31 @@ pub fn get_rotation(tree: &SceneTree, node_id: NodeId) -> f32 {
         .unwrap_or(0.0)
 }
 
+/// Sets `Node2D.skew` in radians (pat-s3rrv.184).
+pub fn set_skew(tree: &mut SceneTree, node_id: NodeId, radians: f32) {
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("skew", Variant::Float(radians as f64));
+    }
+}
+
+/// Reads the `"skew"` property in radians, defaulting to `0.0`.
+///
+/// ⚠️ Accepts `Int` as well as `Float`, unlike its neighbours here. That is
+/// deliberate rather than accidental divergence: a `.tscn` may write a whole
+/// number without a decimal point (`skew = 1`), which parses to `Variant::Int`,
+/// and a Float-only reader would silently answer 0.0 — turning a type mismatch
+/// into "no skew at all", the failure mode that is hardest to notice because it
+/// looks exactly like the un-skewed default.
+pub fn get_skew(tree: &SceneTree, node_id: NodeId) -> f32 {
+    tree.get_node(node_id)
+        .map(|n| match n.get_property("skew") {
+            Variant::Float(f) => f as f32,
+            Variant::Int(i) => i as f32,
+            _ => 0.0,
+        })
+        .unwrap_or(0.0)
+}
+
 /// Sets the `"scale"` property on a node.
 pub fn set_scale(tree: &mut SceneTree, node_id: NodeId, scale: Vector2) {
     if let Some(node) = tree.get_node_mut(node_id) {
@@ -93,8 +118,21 @@ pub fn get_local_transform(tree: &SceneTree, node_id: NodeId) -> Transform2D {
     let pos = get_position(tree, node_id);
     let rot = get_rotation(tree, node_id);
     let scl = get_scale(tree, node_id);
+    let skew = get_skew(tree, node_id);
 
-    Transform2D::translated(pos) * Transform2D::rotated(rot) * Transform2D::scaled(scl)
+    // pat-s3rrv.184: Godot builds this as `Transform2D(rotation, scale, skew,
+    // position)` (`scene/2d/node_2d.cpp::_update_transform`), where skew shears
+    // the Y basis relative to X. `skew` was never read here, so a skewed Node2D
+    // round-tripped through the `.tscn` and the inspector and drew unskewed.
+    //
+    // 🔑 Behaviour-preserving at `skew == 0`, which matters because this
+    // function is the whole 2D transform path — render, physics and input.
+    // `translated(pos) * rotated(rot) * scaled(scl)` expands to
+    // `x = (cos*sx, sin*sx)`, `y = (-sin*sy, cos*sy)`, `origin = pos`, and
+    // `from_rotation_scale_skew_origin(rot, scl, 0.0, pos)` produces exactly
+    // those same three, term for term. So every existing scene composes
+    // identically and only a non-zero skew changes anything.
+    Transform2D::from_rotation_scale_skew_origin(rot, scl, skew, pos)
 }
 
 /// Computes the global transform by walking the parent chain and multiplying
@@ -211,6 +249,15 @@ pub fn get_global_scale(tree: &SceneTree, node_id: NodeId) -> Vector2 {
     while let Some(id) = current {
         let s = get_scale(tree, id);
         scale = Vector2::new(scale.x * s.x, scale.y * s.y);
+        // pat-s3rrv.184: stop at a `top_level` node, exactly as
+        // `get_global_rotation` above and `get_global_transform` already do.
+        // pat-s3rrv.22 swept the rotation and position helpers and missed this
+        // one, so a detached node reported its ancestors' scale while its
+        // transform correctly ignored them — the two answers disagreed about
+        // the same node.
+        if is_top_level(tree, id) {
+            break;
+        }
         current = tree.get_node(id).and_then(|n| n.parent());
     }
     scale
@@ -1456,5 +1503,49 @@ mod tests {
              a quarter turn applied here would put the child near (0, 10); got \
              {origin:?}"
         );
+    }
+}
+
+/// Answers `Node2D`'s global-transform script methods, or `None` for any other
+/// node (pat-s3rrv.184).
+///
+/// Runs ahead of the generic node-method table in `scripting::call_node_method`
+/// and declines every non-Node2D node, the contract
+/// `tilemap::call_tilemap_method` follows.
+///
+/// 🔑 **The 2D side had no script method surface at all.** `scripting.rs` grew a
+/// Node3D block (`look_at`, `rotate`, `to_global`, `to_local`) and nothing
+/// equivalent for 2D, so `sprite.get_global_position()` raised
+/// `UndefinedFunction` — the value was computed correctly by
+/// [`get_global_position`] and simply unreachable from a game. Registration
+/// alone would not fix it: a ClassDB entry makes a method *reflectable*, but a
+/// call still has to land on an arm.
+///
+/// ⚠️ The setter ships with the getter deliberately. A getter-only surface reads
+/// as complete and then breaks `node.global_position += delta`, which needs both
+/// halves — and that failure surfaces at the caller, not here.
+pub fn call_node2d_method(
+    tree: &mut SceneTree,
+    node_id: NodeId,
+    method: &str,
+    args: &[Variant],
+) -> Option<Variant> {
+    // `is_class` rather than a name equality test: every 2D node worth asking
+    // (Sprite2D, CharacterBody2D, a scripted subclass) inherits Node2D, and a
+    // `class_name() == "Node2D"` check would answer only for the bare base.
+    if !tree.get_node(node_id)?.is_class("Node2D") {
+        return None;
+    }
+    match method {
+        "get_global_position" => Some(Variant::Vector2(get_global_position(tree, node_id))),
+        "set_global_position" => {
+            let target = match args.first() {
+                Some(Variant::Vector2(v)) => *v,
+                _ => return None,
+            };
+            set_global_position(tree, node_id, target);
+            Some(Variant::Nil)
+        }
+        _ => None,
     }
 }
