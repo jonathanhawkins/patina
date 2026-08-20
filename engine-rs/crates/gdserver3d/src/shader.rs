@@ -1182,7 +1182,7 @@ fn parse_fragment_statement_3d(s: &str) -> Option<FragmentInstruction3D> {
 
 /// Parses a color expression from source text.
 fn parse_color_expr_3d(s: &str) -> ColorExpr3D {
-    let s = s.trim();
+    let s = strip_color_swizzle_3d(s.trim());
 
     // vec4(r, g, b, a) or vec4(v) — literal components only.
     if let Some(inner) = strip_func_call_3d(s, "vec4") {
@@ -1345,6 +1345,34 @@ fn parse_float_expr_3d(s: &str) -> FloatExpr3D {
     }
 
     FloatExpr3D::Literal(0.0)
+}
+
+/// Drops a trailing `.rgb` / `.rgba` swizzle from a colour-valued expression.
+///
+/// Godot writes `ALBEDO = texture(tex, UV).rgb` as readily as
+/// `ALBEDO = texture(tex, UV)`, and both mean the same thing to an ALBEDO
+/// assignment: [`ColorExpr3D`] already carries RGBA, and ALPHA is a separate
+/// builtin that an ALBEDO write does not touch. So the swizzle is dropped
+/// rather than modelled.
+///
+/// ⚠️ Without this, the swizzled form parsed to **nothing usable**. Every
+/// branch of [`parse_color_expr_3d`] is anchored on the whole string —
+/// `strip_func_call_3d` requires `s.ends_with(')')`, and the bare-identifier
+/// branch rejects `(`, `,` and `.` — so `texture(tex, UV).rgb` fell through to
+/// the `BuiltinAlbedo` catch-all. That is a silent passthrough of the material
+/// albedo, so a bound texture rendered as flat WHITE and looked exactly like an
+/// unbound sampler hitting the placeholder (pat-s3rrv.122).
+fn strip_color_swizzle_3d(s: &str) -> &str {
+    // `.rgba` first: a plain `.rgb` prefix test would leave a stray `a`.
+    for suffix in [".rgba", ".rgb"] {
+        if let Some(base) = s.strip_suffix(suffix) {
+            let base = base.trim_end();
+            if !base.is_empty() {
+                return base;
+            }
+        }
+    }
+    s
 }
 
 /// Strips a function call wrapper like `func(inner)` and returns `inner`.
@@ -2947,6 +2975,76 @@ uniform bool enabled = true;
                 Box::new(FloatExpr3D::UvComponent(UvAxis3D::X)),
                 Box::new(FloatExpr3D::UvComponent(UvAxis3D::Y)),
             ))]
+        );
+    }
+
+    /// pat-s3rrv.122: the swizzled form must parse to the SAME node as the
+    /// bare one.
+    ///
+    /// ⚠️ Asserted against `parse_texture_uv`'s expected value rather than
+    /// merely "not BuiltinAlbedo": the old failure WAS `BuiltinAlbedo`, which
+    /// is a legitimate node, so a weaker assertion would pass on a parser that
+    /// silently dropped the texture again.
+    #[test]
+    fn parse_texture_uv_rgb_swizzle_matches_the_bare_form() {
+        let bare = parse_fragment_body_3d(
+            "shader_type spatial;\nvoid fragment() {\n    ALBEDO = texture(tex, UV);\n}",
+        );
+        let swizzled = parse_fragment_body_3d(
+            "shader_type spatial;\nvoid fragment() {\n    ALBEDO = texture(tex, UV).rgb;\n}",
+        );
+        assert_eq!(
+            swizzled, bare,
+            "`texture(tex, UV).rgb` must parse exactly like `texture(tex, UV)`; \
+             falling through to BuiltinAlbedo renders a bound texture as flat \
+             white, indistinguishable from an unbound sampler"
+        );
+        assert_eq!(
+            swizzled,
+            vec![FragmentInstruction3D::SetAlbedo(ColorExpr3D::Texture(
+                "tex".to_string(),
+                Box::new(FloatExpr3D::UvComponent(UvAxis3D::X)),
+                Box::new(FloatExpr3D::UvComponent(UvAxis3D::Y)),
+            ))]
+        );
+    }
+
+    /// `.rgba` too, and a swizzle on a plain uniform reference.
+    #[test]
+    fn parse_color_swizzle_handles_rgba_and_uniforms() {
+        let rgba = parse_fragment_body_3d(
+            "shader_type spatial;\nvoid fragment() {\n    ALBEDO = texture(tex, UV).rgba;\n}",
+        );
+        assert_eq!(
+            rgba,
+            vec![FragmentInstruction3D::SetAlbedo(ColorExpr3D::Texture(
+                "tex".to_string(),
+                Box::new(FloatExpr3D::UvComponent(UvAxis3D::X)),
+                Box::new(FloatExpr3D::UvComponent(UvAxis3D::Y)),
+            ))]
+        );
+
+        let uniform = parse_fragment_body_3d(
+            "shader_type spatial;\nvoid fragment() {\n    ALBEDO = tint.rgb;\n}",
+        );
+        assert_eq!(
+            uniform,
+            vec![FragmentInstruction3D::SetAlbedo(ColorExpr3D::Uniform(
+                "tint".to_string()
+            ))]
+        );
+    }
+
+    /// ⚠️ A bare `.rgb` has no base expression and must NOT be stripped into an
+    /// empty string — the guard that keeps the helper from inventing a node out
+    /// of nothing.
+    #[test]
+    fn parse_color_swizzle_leaves_a_bare_swizzle_alone() {
+        assert_eq!(strip_color_swizzle_3d(".rgb"), ".rgb");
+        assert_eq!(strip_color_swizzle_3d("tint"), "tint");
+        assert_eq!(
+            strip_color_swizzle_3d("texture(t, UV).rgb"),
+            "texture(t, UV)"
         );
     }
 

@@ -1102,9 +1102,18 @@ fn collect_tileset_tables(tree: &SceneTree, node_ids: &[NodeId]) -> TileSetTable
         // `physics_layer_0/collision_layer` and `occlusion_layer_0/light_mask`
         // mandatory above.
         //
-        // ⚠️ `name` only. Godot also stores `custom_data_layer_<i>/type`, but a
-        // guessed type is worse than an absent one: it would silently coerce the
-        // value on load, whereas an absent type leaves the Variant as authored.
+        // ⚠️ A type is emitted only when the LOADED FILE declared one. A
+        // guessed type is worse than an absent one — it would silently coerce
+        // the value on load, whereas an absent type leaves the Variant as
+        // authored — so nothing here infers a type from a value. `-1`, and any
+        // index past the end of the array, means "untyped" and emits no key,
+        // which is exactly what an editor-authored TileSet produces.
+        //
+        // Without this, a `.tscn` written by real Godot lost its
+        // `custom_data_layer_<i>/type` declarations on every round trip through
+        // Patina: the loader read only `/name`, so the saver could only write
+        // `/name` back (pat-s3rrv.65).
+        let custom_layer_types = tileset_custom_data_layer_types(node);
         for (index, name) in tileset_custom_data_layer_names(node).iter().enumerate() {
             writeln!(
                 text,
@@ -1112,6 +1121,9 @@ fn collect_tileset_tables(tree: &SceneTree, node_ids: &[NodeId]) -> TileSetTable
                 format_variant_value(&Variant::String(name.clone()))
             )
             .unwrap();
+            if let Some(ty) = custom_layer_types.get(index).copied().filter(|t| *t >= 0) {
+                writeln!(text, "custom_data_layer_{index}/type = {ty}").unwrap();
+            }
         }
         for (source_id, sub_id) in &source_refs {
             writeln!(text, "sources/{source_id} = SubResource(\"{sub_id}\")").unwrap();
@@ -1563,6 +1575,27 @@ fn tileset_custom_data_layer_names(node: &crate::node::Node) -> Vec<String> {
             .filter_map(|v| match v {
                 Variant::String(s) => Some(s.clone()),
                 _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The declared Variant type of each custom data layer, parallel to
+/// [`tileset_custom_data_layer_names`]. `-1` means the layer carries no
+/// declared type, and a shorter array simply leaves later layers untyped.
+///
+/// ⚠️ Never inferred from a value — see the call site. This reads back only
+/// what the loader preserved from the file.
+fn tileset_custom_data_layer_types(node: &crate::node::Node) -> Vec<i32> {
+    match node.get_property(crate::tilemap::TILE_CUSTOM_DATA_TYPES) {
+        Variant::PackedInt32Array(v) => v,
+        Variant::PackedInt64Array(v) => v.iter().map(|t| *t as i32).collect(),
+        Variant::Array(items) => items
+            .iter()
+            .map(|v| match v {
+                Variant::Int(t) => *t as i32,
+                _ => -1,
             })
             .collect(),
         _ => Vec::new(),

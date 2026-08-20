@@ -364,6 +364,59 @@ fn the_aabb_query_methods_answer() {
     assert_eq!(got[12], Variant::Bool(true), "is_finite");
 }
 
+/// `is_equal_approx` on the three types the bead names that no other test in
+/// this file exercises it for: Basis, Quaternion and Transform2D.
+///
+/// AABB, Plane and Rect2 are already covered above. These three were dispatched
+/// in `variant_math.rs` and asserted nowhere — the bead asks for the whole
+/// `is_finite`/`is_equal_approx` family to "execute and match Godot", and half a
+/// family is how a copy-paste slip in one arm survives a green suite.
+///
+/// ⚠️ `Transform2D(rotation, origin)` — the TWO-argument form. Godot also has
+/// a four-argument `(rotation, scale, skew, origin)` constructor, but
+/// `variant_math::construct` implements arities 0-3 only, so the four-arg
+/// spelling raises rather than building a transform.
+///
+/// ⚠️ Each type is checked BOTH ways: equal-to-itself must be true, and a
+/// perturbed copy must be false. The true half alone passes on an arm that
+/// returns `true` unconditionally, which is exactly the shape a bad copy-paste
+/// produces.
+#[test]
+fn the_is_equal_approx_family_covers_basis_quaternion_and_transform2d() {
+    let got = run(&[
+        "var b = Basis.from_euler(Vector3(0.2, 0.4, 0.6))",
+        "var b2 = Basis.from_euler(Vector3(0.2, 0.4, 0.6))",
+        "var bx = Basis.from_euler(Vector3(0.9, 0.4, 0.6))",
+        "var q = Quaternion.from_euler(Vector3(0.2, 0.4, 0.6))",
+        "var q2 = Quaternion.from_euler(Vector3(0.2, 0.4, 0.6))",
+        "var qx = Quaternion.from_euler(Vector3(0.9, 0.4, 0.6))",
+        "var t = Transform2D(0.0, Vector2(3, 4))",
+        "var t2 = Transform2D(0.0, Vector2(3, 4))",
+        "var tx = Transform2D(0.0, Vector2(9, 4))",
+        "return [b.is_equal_approx(b2), b.is_equal_approx(bx), \
+         q.is_equal_approx(q2), q.is_equal_approx(qx), \
+         t.is_equal_approx(t2), t.is_equal_approx(tx)]",
+    ]);
+
+    for (i, (label, want)) in [
+        ("Basis equal", true),
+        ("Basis differing", false),
+        ("Quaternion equal", true),
+        ("Quaternion differing", false),
+        ("Transform2D equal", true),
+        ("Transform2D differing", false),
+    ]
+    .iter()
+    .enumerate()
+    {
+        assert_eq!(
+            got[i],
+            Variant::Bool(*want),
+            "{label}: is_equal_approx must be {want}, got {:?}",
+            got[i]
+        );
+    }
+}
 /// The Quaternion additions, including the two that are easy to get wrong.
 #[test]
 fn the_quaternion_methods_answer() {

@@ -19,6 +19,7 @@ use gdscene::SceneTree;
 use gdserver3d::compositor::{Compositor, CompositorRenderData, EffectCallbackType};
 use gdserver3d::decal::Decal3D;
 use gdserver3d::fog_volume::FogVolume;
+use gdserver3d::gi::{VoxelGI, VoxelGIId, VoxelGISubdiv};
 use gdserver3d::instance::GeometryInstanceSettings;
 use gdserver3d::light::{Light3D, Light3DId, LightType};
 use gdserver3d::material::Material3D;
@@ -656,10 +657,25 @@ pub struct SceneLight3D {
     /// `negative`, the `distance_fade_*` set and the directional shadow fade,
     /// on both the software and GPU paths.
     ///
-    /// Still carried but NOT consumed by any shading code:
-    /// `indirect_energy` and `volumetric_fog_energy` (no GI or fog path
-    /// exists), `shadow_caster_mask`, and the `shadow_split_*`/`blend_splits`
-    /// cascade controls.
+    /// Still carried but NOT consumed by any shading code: `indirect_energy`
+    /// and the `shadow_split_1/2/3`/`blend_splits` cascade controls. Checked
+    /// 2026-08-20 for read sites across `gdrender3d/src` and `gdserver3d/src`;
+    /// those four appear only as declarations and default initialisers.
+    ///
+    /// ⚠️ **Two entries were removed from this list because they were wrong**,
+    /// and a third claim with them:
+    ///
+    /// * `shadow_caster_mask` IS consumed — `gdrender3d/src/shadow_map.rs:291`.
+    /// * `volumetric_fog_energy` IS consumed — `gdrender3d/src/renderer.rs:2251`
+    ///   scales the sky scatter term by it.
+    /// * "no GI ... path exists" was false: `gdserver3d/src/gi.rs` bakes
+    ///   lightmaps, and it is also where `light_projector` is sampled
+    ///   (`gi.rs:512`, `projector_modulate`). What `light_projector` lacks is a
+    ///   *rasterizer* path — `grep projector gdrender3d/src/*.rs` finds nothing.
+    ///
+    /// A stale "not consumed" list is worse than no list: it sends the next
+    /// worker to re-implement something that already works. This one nearly
+    /// did (pat-s3rrv.90).
     ///
     /// The temperature remains the odd one out: it reaches pixels only because
     /// the shared reader folds it into [`color`](Self::color), which the
@@ -1785,16 +1801,40 @@ pub struct SceneEnvEffects3D {
     pub reflection_probes: Vec<ReflectionProbe>,
     /// Occluders, each with a shape and world transform.
     pub occluders: Vec<OccluderInstance3D>,
+    /// `VoxelGI` volumes contributing indirect ambient (pat-s3rrv.114).
+    ///
+    /// ⚠️ Both renderers already held a `voxel_gis` list, a full `VoxelGI` type
+    /// and `sample_voxel_gi_at` — and **nothing in the scene layer ever filled
+    /// it**. `scene_env_effects` collected the other four effect families and
+    /// skipped this one, so authoring a VoxelGI changed no pixel. This is the
+    /// producer that was missing, not the shading.
+    pub voxel_gis: Vec<VoxelGI>,
 }
 
 /// Builds [`Editor3DRenderInputs`] from the viewport + scene tree. This is the
 /// only step that touches the tree, so callers run *just this* under the state
 /// lock and render from the returned owned snapshot afterward.
 pub fn editor_3d_render_inputs(viewport: &Viewport3D, tree: &SceneTree) -> Editor3DRenderInputs {
+    let items = viewport.build_render_list(tree);
+    let scene_lights = scene_lights(tree);
+    let mut env_effects = scene_env_effects(tree);
+
+    // pat-s3rrv.114 — bake the collected `VoxelGI` volumes.
+    //
+    // ⚠️ This is the step that was missing, and its absence was invisible: the
+    // collector, both renderers' `voxel_gis` lists and the per-pixel
+    // `sample_voxel_gi_at` modulation all existed, but an UNBAKED volume samples
+    // pure black and the shading pass skips black. So authoring a VoxelGI
+    // changed no pixel while every piece looked wired.
+    //
+    // Here rather than in `scene_env_effects` because the bake needs the scene's
+    // lights and surfaces, and this is the only place all three are in hand.
+    crate::gi_bake::bake_voxel_gis(&mut env_effects.voxel_gis, &scene_lights, &items);
+
     Editor3DRenderInputs {
-        items: viewport.build_render_list(tree),
-        scene_lights: scene_lights(tree),
-        env_effects: scene_env_effects(tree),
+        items,
+        scene_lights,
+        env_effects,
         root_motion_grid: root_motion_grid(tree),
         // Effects carry Rust callbacks, which a `.tscn` cannot express; a
         // caller installs the compositor for the frame. See
@@ -1956,6 +1996,10 @@ fn env_vec3(node: &gdscene::node::Node, key: &str, default: Vector3) -> Vector3 
 fn scene_env_effects(tree: &SceneTree) -> SceneEnvEffects3D {
     let mut out = SceneEnvEffects3D::default();
     let mut next_probe_id = 1u64;
+    // Minted per collection pass, exactly as probe ids are: the renderer keys
+    // its GI list on them and the snapshot is rebuilt each frame, so they only
+    // need to be stable within one frame.
+    let mut next_voxel_gi_id = 1u64;
 
     for nid in tree.all_nodes_in_tree_order() {
         let Some(node) = tree.get_node(nid) else {
@@ -1965,7 +2009,8 @@ fn scene_env_effects(tree: &SceneTree) -> SceneEnvEffects3D {
         let is_decal = node.is_class("Decal");
         let is_probe = node.is_class("ReflectionProbe");
         let is_occluder = node.is_class("OccluderInstance3D");
-        if !(is_fog || is_decal || is_probe || is_occluder) {
+        let is_voxel_gi = node.is_class("VoxelGI");
+        if !(is_fog || is_decal || is_probe || is_occluder || is_voxel_gi) {
             continue;
         }
         if !gdscene::node3d::is_visible_in_tree(tree, nid) {
@@ -2067,6 +2112,34 @@ fn scene_env_effects(tree: &SceneTree) -> SceneEnvEffects3D {
                 };
             }
             out.reflection_probes.push(probe);
+        } else if is_voxel_gi {
+            // ⚠️ The node carries `size` and `subdiv`; the rest of the surface
+            // (energy/bias/normal_bias/propagation/interior) belongs to the
+            // `VoxelGIData` sub-resource, which the `.tscn` loader flattens onto
+            // the node — the same treatment `OccluderInstance3D`'s shape gets
+            // below. Reading them off the node is therefore correct, not a
+            // shortcut.
+            let mut gi = VoxelGI::new(VoxelGIId(next_voxel_gi_id));
+            next_voxel_gi_id += 1;
+            gi.transform = transform;
+            gi.size = env_vec3(node, "size", gi.size);
+            // Godot's default is subdiv 1 (128³), NOT the zeroth constant — so
+            // an absent property must keep the type's own default rather than
+            // fall to `Subdiv64`.
+            if let gdvariant::Variant::Int(sd) = node.get_property("subdiv") {
+                gi.subdiv = match sd {
+                    0 => VoxelGISubdiv::Subdiv64,
+                    2 => VoxelGISubdiv::Subdiv256,
+                    3 => VoxelGISubdiv::Subdiv512,
+                    _ => VoxelGISubdiv::Subdiv128,
+                };
+            }
+            gi.energy = env_f32(node, "energy", gi.energy);
+            gi.bias = env_f32(node, "bias", gi.bias);
+            gi.normal_bias = env_f32(node, "normal_bias", gi.normal_bias);
+            gi.propagation = env_f32(node, "propagation", gi.propagation);
+            gi.interior = env_bool(node, "interior", gi.interior);
+            out.voxel_gis.push(gi);
         } else {
             let mut inst = OccluderInstance3D::new();
             inst.transform = transform;
@@ -2147,6 +2220,13 @@ fn populate_editor_scene_3d(
     for probe in &env_effects.reflection_probes {
         renderer.add_reflection_probe(probe.id);
         renderer.update_reflection_probe(probe);
+    }
+    // The same add-then-update pair the probes use: `add_*` reserves the slot,
+    // `update_*` fills it. Both are `RenderingServer3D` methods, so this works
+    // for the software and GPU editor renderers alike (pat-s3rrv.114).
+    for gi in &env_effects.voxel_gis {
+        renderer.add_voxel_gi(gi.id);
+        renderer.update_voxel_gi(gi);
     }
     let mut selected_tfs: Vec<Transform3D> = Vec::new();
     let mut primary_tf: Option<Transform3D> = None;
@@ -2256,70 +2336,85 @@ fn setup_editor_lighting_3d(
     // position plus range/attenuation (and a cone, for spot) instead of just a
     // direction (pat-0q2kx.41).
     for (i, sl) in scene_lights.iter().enumerate() {
-        let id = Light3DId(9_000_001 + i as u64);
-        let mut light = match sl.kind {
-            SceneLightKind::Directional => Light3D::directional(id),
-            // Point is Godot's omni. Spot starts from the same positional light
-            // and switches type, since the library has no spot constructor.
-            SceneLightKind::Omni => Light3D::point(id, sl.position),
-            SceneLightKind::Spot => {
-                let mut l = Light3D::point(id, sl.position);
-                l.light_type = LightType::Spot;
-                l.spot_angle = sl.spot_angle;
-                l.spot_angle_attenuation = sl.spot_angle_attenuation;
-                l
-            }
-        };
-        if sl.kind != SceneLightKind::Directional {
-            light.position = sl.position;
-            light.range = sl.range;
-            light.attenuation = sl.attenuation;
-        }
-        // Without this no shadow map is ever generated, which is why shadows
-        // never appeared in the product however they were authored.
-        light.shadow_enabled = sl.shadow_enabled;
-        light.direction = sl.direction;
-        light.color = sl.color;
-        light.energy = sl.energy.max(0.0);
-        light.angular_distance = sl.angular_distance;
-        // Everything the editor path used to drop on the floor (pat-s3rrv.90).
-        // `light.color` above already carries the `light_temperature` tint,
-        // folded in by the shared reader — that is the one property here the
-        // rasterizer actually consumes, because it reads `color` and knows
-        // nothing about temperature.
-        light.temperature = sl.temperature;
-        light.cull_mask = sl.cull_mask;
-        light.indirect_energy = sl.indirect_energy;
-        light.volumetric_fog_energy = sl.volumetric_fog_energy;
-        light.distance_fade_enabled = sl.distance_fade_enabled;
-        light.distance_fade_begin = sl.distance_fade_begin;
-        light.distance_fade_shadow = sl.distance_fade_shadow;
-        light.distance_fade_length = sl.distance_fade_length;
-        light.shadow_opacity = sl.shadow_opacity;
-        light.shadow_caster_mask = sl.shadow_caster_mask;
-        // ⚠️ These six were read by the shared reader and then DROPPED here, so
-        // they reached `RenderServer3DAdapter` (which has no non-test callers)
-        // but never the shipped editor or Play view. Carrying a property into
-        // `SceneLight3D` is only half the wiring; this copy is the other half,
-        // and a field missing from it fails silently at its default.
-        light.shadow_bias = sl.shadow_bias;
-        light.shadow_normal_bias = sl.shadow_normal_bias;
-        light.specular = sl.specular;
-        light.negative = sl.negative;
-        light.directional_shadow_max_distance = sl.directional_shadow_max_distance;
-        light.directional_shadow_fade_start = sl.directional_shadow_fade_start;
-        light.shadow_split_1 = sl.shadow_split_1;
-        light.shadow_split_2 = sl.shadow_split_2;
-        light.shadow_split_3 = sl.shadow_split_3;
-        light.blend_splits = sl.blend_splits;
-        // Godot's sky_mode: LIGHT_ONLY lights shade the scene but draw no sky
-        // sun disc (sky_suns_from_lights filters on this); SKY_ONLY lights draw
-        // the disc but do not shade the scene (affects_scene gates that).
-        light.sky = sl.sky;
-        light.affects_scene = sl.affects_scene;
+        let light = scene_light_to_light3d(sl, Light3DId(9_000_001 + i as u64));
         renderer.add_light(light.id);
         renderer.update_light(&light);
     }
+}
+
+/// Converts an editor [`SceneLight3D`] into the renderer's [`Light3D`]
+/// (pat-s3rrv.114).
+///
+/// ⚠️ Extracted from the render push, which was its only home. Anything
+/// else needing real `Light3D` values — the VoxelGI bake, for one — had
+/// nowhere to get them, and a second copy of this twenty-field mapping
+/// would be two hand-maintained copies of one conversion: the frame and
+/// the bake would then be lit by subtly different lights, with nothing to
+/// say so.
+///
+/// Behaviour-preserving: the body is the render loop's, verbatim.
+pub(crate) fn scene_light_to_light3d(sl: &SceneLight3D, id: Light3DId) -> Light3D {
+    let mut light = match sl.kind {
+        SceneLightKind::Directional => Light3D::directional(id),
+        // Point is Godot's omni. Spot starts from the same positional light
+        // and switches type, since the library has no spot constructor.
+        SceneLightKind::Omni => Light3D::point(id, sl.position),
+        SceneLightKind::Spot => {
+            let mut l = Light3D::point(id, sl.position);
+            l.light_type = LightType::Spot;
+            l.spot_angle = sl.spot_angle;
+            l.spot_angle_attenuation = sl.spot_angle_attenuation;
+            l
+        }
+    };
+    if sl.kind != SceneLightKind::Directional {
+        light.position = sl.position;
+        light.range = sl.range;
+        light.attenuation = sl.attenuation;
+    }
+    // Without this no shadow map is ever generated, which is why shadows
+    // never appeared in the product however they were authored.
+    light.shadow_enabled = sl.shadow_enabled;
+    light.direction = sl.direction;
+    light.color = sl.color;
+    light.energy = sl.energy.max(0.0);
+    light.angular_distance = sl.angular_distance;
+    // Everything the editor path used to drop on the floor (pat-s3rrv.90).
+    // `light.color` above already carries the `light_temperature` tint,
+    // folded in by the shared reader — that is the one property here the
+    // rasterizer actually consumes, because it reads `color` and knows
+    // nothing about temperature.
+    light.temperature = sl.temperature;
+    light.cull_mask = sl.cull_mask;
+    light.indirect_energy = sl.indirect_energy;
+    light.volumetric_fog_energy = sl.volumetric_fog_energy;
+    light.distance_fade_enabled = sl.distance_fade_enabled;
+    light.distance_fade_begin = sl.distance_fade_begin;
+    light.distance_fade_shadow = sl.distance_fade_shadow;
+    light.distance_fade_length = sl.distance_fade_length;
+    light.shadow_opacity = sl.shadow_opacity;
+    light.shadow_caster_mask = sl.shadow_caster_mask;
+    // ⚠️ These six were read by the shared reader and then DROPPED here, so
+    // they reached `RenderServer3DAdapter` (which has no non-test callers)
+    // but never the shipped editor or Play view. Carrying a property into
+    // `SceneLight3D` is only half the wiring; this copy is the other half,
+    // and a field missing from it fails silently at its default.
+    light.shadow_bias = sl.shadow_bias;
+    light.shadow_normal_bias = sl.shadow_normal_bias;
+    light.specular = sl.specular;
+    light.negative = sl.negative;
+    light.directional_shadow_max_distance = sl.directional_shadow_max_distance;
+    light.directional_shadow_fade_start = sl.directional_shadow_fade_start;
+    light.shadow_split_1 = sl.shadow_split_1;
+    light.shadow_split_2 = sl.shadow_split_2;
+    light.shadow_split_3 = sl.shadow_split_3;
+    light.blend_splits = sl.blend_splits;
+    // Godot's sky_mode: LIGHT_ONLY lights shade the scene but draw no sky
+    // sun disc (sky_suns_from_lights filters on this); SKY_ONLY lights draw
+    // the disc but do not shade the scene (affects_scene gates that).
+    light.sky = sl.sky;
+    light.affects_scene = sl.affects_scene;
+    light
 }
 
 /// Builds the `RenderViewport3D` (editor camera + clip planes) at `width`×

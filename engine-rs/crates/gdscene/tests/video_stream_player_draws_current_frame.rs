@@ -7,14 +7,18 @@
 //! Godot fills the control when it is true and keeps the source size when
 //! false, and it defaults to **false** (doc/classes/VideoStreamPlayer.xml).
 
+use gdcore::id::ObjectId;
 use gdcore::math::Vector2;
+use gdobject::signal::Connection;
 use gdscene::node::NodeId;
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
 use gdscene::scene_tree::SceneTree;
 use gdserver2d::canvas::DrawCommand;
 use gdserver2d::viewport::Viewport;
+use gdvariant::Variant;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 /// 4x2 frames — deliberately NOT the control's size, so "fills the control"
 /// and "keeps the source size" are distinguishable. Equal sizes would make the
@@ -169,6 +173,59 @@ fn a_playing_video_draws_every_frame_and_advances_its_position() {
     );
 }
 
+/// The acceptance's `finished` clause: emitted **once**, at the end.
+///
+/// Nothing in this file covered it — `finished` appeared zero times — even
+/// though `process_video_players` emits it and the bead names it. The emission
+/// is driven by `VideoStreamPlayer::advance` clearing `playing` at the end of a
+/// non-looping stream, so it is real behaviour that simply had no assertion.
+///
+/// ⚠️ Observed through a Rust callback connection rather than a scripted
+/// listener node. The signal is emitted by the engine, not by a script, so a
+/// script listener would add a GDScript dependency to a test about video
+/// decoding — and a failure there would be ambiguous between the two.
+///
+/// ⚠️ The count is asserted as EXACTLY one, and checked again after further
+/// ticks. `advance` runs every tick; an implementation that re-emitted on each
+/// tick past the end, or latched and re-fired, satisfies `>= 1` and is wrong —
+/// a game connecting `finished` to "load the next clip" would load it forever.
+#[test]
+fn finished_is_emitted_once_at_the_end_of_the_stream() {
+    let (mut tree, _root, screen) = load(true, true);
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&hits);
+    tree.connect_signal(
+        screen,
+        "finished",
+        Connection::with_callback(ObjectId::from_raw(1), "on_finished", move |_args| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Variant::Nil
+        }),
+    );
+
+    // The fixture is 3 frames at 10 fps — 0.3s. Two ticks of 0.1s stay inside
+    // it, so nothing should have finished yet.
+    tree.process_video_players(0.1);
+    tree.process_video_players(0.1);
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "`finished` must not fire while the stream is still playing — if it \
+         does, the assertion below passes for the wrong reason"
+    );
+
+    // Run well past the end.
+    for _ in 0..5 {
+        tree.process_video_players(0.1);
+    }
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "`finished` must be emitted exactly once at the end of a non-looping \
+         stream, not once per tick thereafter"
+    );
+}
 /// No stream assigned: nothing is drawn, and no placeholder marker either.
 #[test]
 fn a_player_without_a_stream_draws_nothing() {

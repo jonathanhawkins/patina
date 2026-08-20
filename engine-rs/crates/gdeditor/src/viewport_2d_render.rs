@@ -3658,8 +3658,14 @@ pub fn canvas_surface_buffer(
             _ => None,
         };
 
-        let Some(bounds) = item_screen_bounds(&item) else {
-            continue;
+        // Sprites fall through to the cache-aware helper: `item_screen_bounds`
+        // has no texture size and so returns `None` for every one of them.
+        let bounds = match item_screen_bounds(&item) {
+            Some(b) => b,
+            None => match sprite_screen_bounds(&item, cache) {
+                Some(b) => b,
+                None => continue,
+            },
         };
         let Some(tex) = cache.get(&normal_path) else {
             continue;
@@ -3750,6 +3756,80 @@ fn item_screen_bounds(item: &Render2DItem) -> Option<Rect2> {
     };
     // Transform the four corners and take their axis-aligned extent, so a
     // rotated or scaled item still bounds correctly.
+    let xf = item.global_transform;
+    let corners = [
+        xf.xform(local.position),
+        xf.xform(Vector2::new(
+            local.position.x + local.size.x,
+            local.position.y,
+        )),
+        xf.xform(Vector2::new(
+            local.position.x + local.size.x,
+            local.position.y + local.size.y,
+        )),
+        xf.xform(Vector2::new(
+            local.position.x,
+            local.position.y + local.size.y,
+        )),
+    ];
+    let mut min = corners[0];
+    let mut max = corners[0];
+    for c in &corners[1..] {
+        min = Vector2::new(min.x.min(c.x), min.y.min(c.y));
+        max = Vector2::new(max.x.max(c.x), max.y.max(c.y));
+    }
+    Some(Rect2::new(min, Vector2::new(max.x - min.x, max.y - min.y)))
+}
+
+/// Screen bounds for a `Sprite2D` item, which [`item_screen_bounds`] cannot
+/// give (pat-s3rrv.203).
+///
+/// 🔑 A sprite's extent is its TEXTURE's size, so bounding one needs the cache.
+/// `item_screen_bounds` deliberately has none and returns `None` for every
+/// sprite — which meant [`canvas_surface_buffer`] skipped every sprite, left the
+/// surface buffer entirely `None`, and normal-mapped sprites shaded **exactly**
+/// like flat ones. Bit-identical output, not merely wrong output.
+///
+/// ⚠️ The local rect is computed the same way the rasterizer computes it
+/// (`sprite_source_rect` for the region/sheet cell, then Godot's `centered`
+/// rule). Deriving it independently is how the lit extent and the drawn quad
+/// drift apart.
+fn sprite_screen_bounds(item: &Render2DItem, cache: &mut TextureCache) -> Option<Rect2> {
+    let Render2DKind::Sprite {
+        texture,
+        offset,
+        sheet,
+        ..
+    } = &item.kind
+    else {
+        return None;
+    };
+    // ⚠️ Copy the dimensions out immediately: `get` borrows the cache, and the
+    // caller needs it again for the normal map on the next line.
+    let (tw, th) = {
+        let tex = cache.get(texture)?;
+        (tex.width as f32, tex.height as f32)
+    };
+    if tw <= 0.0 || th <= 0.0 {
+        return None;
+    }
+    let src = gdscene::sprite_frames::sprite_source_rect(
+        Vector2::new(tw, th),
+        sheet.region_enabled,
+        sheet.region_rect,
+        sheet.hframes,
+        sheet.vframes,
+        sheet.frame,
+    );
+    let (dw, dh) = (src.size.x, src.size.y);
+    let local = if sheet.centered {
+        Rect2::new(
+            Vector2::new(offset.x - dw / 2.0, offset.y - dh / 2.0),
+            Vector2::new(dw, dh),
+        )
+    } else {
+        Rect2::new(*offset, Vector2::new(dw, dh))
+    };
     let xf = item.global_transform;
     let corners = [
         xf.xform(local.position),

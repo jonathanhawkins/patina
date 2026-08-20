@@ -2007,10 +2007,22 @@ impl PackedScene {
             // ⚠️ Densely numbered from 0 like every Godot array property, so
             // stop at the first gap rather than scanning an arbitrary range.
             let mut custom_data_layers: Vec<String> = Vec::new();
+            // Godot also declares each layer's Variant TYPE
+            // (`custom_data_layer_<i>/type`). Carried through verbatim so a
+            // round trip does not silently strip it: values are still copied
+            // as authored, and nothing is ever inferred — a layer the file
+            // typed keeps its type, a layer it did not stays untyped (-1).
+            let mut custom_data_types: Vec<i32> = Vec::new();
             for index in 0.. {
                 match set_props.get(&format!("custom_data_layer_{index}/name")) {
                     Some(Variant::String(name)) if !name.is_empty() => {
                         custom_data_layers.push(name.clone());
+                        custom_data_types.push(
+                            match set_props.get(&format!("custom_data_layer_{index}/type")) {
+                                Some(Variant::Int(t)) => *t as i32,
+                                _ => -1,
+                            },
+                        );
                     }
                     _ => break,
                 }
@@ -2020,6 +2032,16 @@ impl PackedScene {
                     crate::tilemap::TILE_CUSTOM_DATA_LAYERS.to_string(),
                     Variant::PackedStringArray(custom_data_layers.clone()),
                 );
+                // Only when the file actually typed something. An all `-1`
+                // array would be indistinguishable from an editor-authored
+                // TileSet and would make the saver emit nothing anyway, so
+                // omitting it keeps the companion set minimal.
+                if custom_data_types.iter().any(|t| *t >= 0) {
+                    tmpl.properties.insert(
+                        crate::tilemap::TILE_CUSTOM_DATA_TYPES.to_string(),
+                        Variant::PackedInt32Array(custom_data_types),
+                    );
+                }
             }
 
             let mut source_ids: Vec<i32> = Vec::new();

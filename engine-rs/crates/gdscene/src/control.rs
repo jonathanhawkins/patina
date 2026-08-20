@@ -397,6 +397,13 @@ pub fn get_offset_left(tree: &SceneTree, node_id: NodeId) -> f32 {
     tree.get_node(node_id)
         .map(|n| match n.get_property("offset_left") {
             Variant::Float(f) => f as f32,
+            // ⚠️ A `.tscn` writes a whole-number offset as an INTEGER —
+            // `offset_right = 320`, not `320.0` — and Godot's own scenes are
+            // full of them. Accepting only `Float` here silently returned 0.0,
+            // collapsing the control to a zero-size rect: the node laid out,
+            // took no space, and drew nothing, with no error anywhere
+            // (pat-s3rrv.174).
+            Variant::Int(i) => i as f32,
             _ => 0.0,
         })
         .unwrap_or(0.0)
@@ -414,6 +421,13 @@ pub fn get_offset_top(tree: &SceneTree, node_id: NodeId) -> f32 {
     tree.get_node(node_id)
         .map(|n| match n.get_property("offset_top") {
             Variant::Float(f) => f as f32,
+            // ⚠️ A `.tscn` writes a whole-number offset as an INTEGER —
+            // `offset_right = 320`, not `320.0` — and Godot's own scenes are
+            // full of them. Accepting only `Float` here silently returned 0.0,
+            // collapsing the control to a zero-size rect: the node laid out,
+            // took no space, and drew nothing, with no error anywhere
+            // (pat-s3rrv.174).
+            Variant::Int(i) => i as f32,
             _ => 0.0,
         })
         .unwrap_or(0.0)
@@ -431,6 +445,13 @@ pub fn get_offset_right(tree: &SceneTree, node_id: NodeId) -> f32 {
     tree.get_node(node_id)
         .map(|n| match n.get_property("offset_right") {
             Variant::Float(f) => f as f32,
+            // ⚠️ A `.tscn` writes a whole-number offset as an INTEGER —
+            // `offset_right = 320`, not `320.0` — and Godot's own scenes are
+            // full of them. Accepting only `Float` here silently returned 0.0,
+            // collapsing the control to a zero-size rect: the node laid out,
+            // took no space, and drew nothing, with no error anywhere
+            // (pat-s3rrv.174).
+            Variant::Int(i) => i as f32,
             _ => 0.0,
         })
         .unwrap_or(0.0)
@@ -448,6 +469,13 @@ pub fn get_offset_bottom(tree: &SceneTree, node_id: NodeId) -> f32 {
     tree.get_node(node_id)
         .map(|n| match n.get_property("offset_bottom") {
             Variant::Float(f) => f as f32,
+            // ⚠️ A `.tscn` writes a whole-number offset as an INTEGER —
+            // `offset_right = 320`, not `320.0` — and Godot's own scenes are
+            // full of them. Accepting only `Float` here silently returned 0.0,
+            // collapsing the control to a zero-size rect: the node laid out,
+            // took no space, and drew nothing, with no error anywhere
+            // (pat-s3rrv.174).
+            Variant::Int(i) => i as f32,
             _ => 0.0,
         })
         .unwrap_or(0.0)

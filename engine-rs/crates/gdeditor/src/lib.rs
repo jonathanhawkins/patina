@@ -71,6 +71,7 @@ pub mod fs_file_ops;
 pub mod fs_import_pipeline;
 pub mod fs_thumbnails;
 pub mod gdscript_highlight;
+pub mod gi_bake;
 pub mod gizmo_multi;
 pub mod gizmo_snap;
 pub mod goto_definition;

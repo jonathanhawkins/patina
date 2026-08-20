@@ -237,3 +237,61 @@ fn a_polygon_without_a_skeleton_is_untouched() {
     assert_eq!(pts.len(), 3);
     assert!(approx(pts[1], Vector2::new(10.0, 0.0), 1e-4));
 }
+
+/// Clause 3 of the acceptance: `SkeletonModificationStack2D` and
+/// `SkeletonModification2DTwoBoneIK` survive scene load as registered classes.
+///
+/// ⚠️ This clause was the one part of the bead's "Prove it" that nothing here
+/// asserted. `load()` calls `register_all_classes()`, but calling it is not the
+/// same as the two classes being present afterwards — and the IK test above
+/// reaches them only indirectly, through `__skelmod_count__`, which is written
+/// by the loader's sub-resource flatten and would still be 1 if the class rows
+/// themselves were missing.
+///
+/// The name deliberately sorts AFTER `skeleton2d_poses_bones_and_skins_polygon`
+/// ('2' < '_'), so it can never consume nextest's fail-fast budget ahead of the
+/// acceptance it supports.
+#[test]
+fn skeleton_modification_classes_survive_scene_load() {
+    // Load the rig that actually references both classes, rather than calling
+    // the registrar directly: clause 3 is about surviving a LOAD, and a scene
+    // whose sub-resources name a missing class is exactly the case that drops
+    // nodes silently.
+    let tree = load(IK_RIG);
+    assert!(
+        tree.get_node_by_path("/root/Main/Skel").is_some(),
+        "the Skeleton2D must survive the load that names both modification classes"
+    );
+
+    for class in [
+        "SkeletonModificationStack2D",
+        "SkeletonModification2D",
+        "SkeletonModification2DTwoBoneIK",
+    ] {
+        assert!(
+            gdobject::class_db::class_exists(class),
+            "{class} is not registered, so a .tscn naming it loses the node"
+        );
+    }
+
+    // The CHAIN, not just presence. Registering TwoBoneIK with the wrong parent
+    // (or leaving the intermediate `SkeletonModification2D` unregistered) still
+    // passes `class_exists` above while breaking inherited-property lookup,
+    // because the walk stops at the first base that is missing.
+    assert!(
+        gdobject::class_db::is_parent_class(
+            "SkeletonModification2DTwoBoneIK",
+            "SkeletonModification2D"
+        ),
+        "TwoBoneIK must derive from SkeletonModification2D"
+    );
+    assert!(
+        gdobject::class_db::is_parent_class("SkeletonModification2DTwoBoneIK", "Resource"),
+        "the chain must reach Resource transitively — a gap at the intermediate \
+         base would surface here and nowhere else"
+    );
+    assert!(
+        gdobject::class_db::is_parent_class("SkeletonModificationStack2D", "Resource"),
+        "the stack is a Resource in Godot (doc/classes/SkeletonModificationStack2D.xml)"
+    );
+}

@@ -716,8 +716,28 @@ pub const TILE_SET_TILE_SIZE: &str = "__tile_set__tile_size";
 /// from script.
 pub const TILE_CUSTOM_DATA_LAYERS: &str = "__tile_custom_data_layers__";
 
+/// Node property listing each custom data layer's Godot Variant TYPE, parallel
+/// to [`TILE_CUSTOM_DATA_LAYERS`] and in the same index order.
+///
+/// ⚠️ This exists to PRESERVE a type the file already declares, never to invent
+/// one. A guessed type is worse than an absent one — it silently coerces the
+/// value on load, whereas an absent type leaves the Variant as authored — so
+/// layers authored in the editor carry no entry here and the saver emits no
+/// `custom_data_layer_<i>/type` for them, exactly as before.
+///
+/// `-1` marks "the file declared this layer without a type", which keeps the
+/// array parallel to the names rather than collapsing the index mapping.
+/// Godot's own values are `Variant::Type` ordinals (`tile_set.cpp:4211`).
+pub const TILE_CUSTOM_DATA_TYPES: &str = "__tile_custom_data_types__";
+
 /// Prefix of the flattened per-tile custom data companions. Full keys are
 /// `__tile_custom_data_<source>_<ax>_<ay>_<layer name>`.
+///
+/// ⚠️ Also covers [`TILE_CUSTOM_DATA_TYPES`] for `is_internal_prop` filtering,
+/// which is intentional: both are companions and neither belongs in a `.tscn`
+/// as a literal node property. Nothing SCANS this prefix — the per-tile keys
+/// are always built by [`tile_custom_data_key`] — so there is no parser for the
+/// types key to confuse.
 pub const TILE_CUSTOM_DATA_PREFIX: &str = "__tile_custom_data_";
 
 /// Builds the flattened property key holding one tile's value for one custom

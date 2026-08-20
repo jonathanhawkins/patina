@@ -175,14 +175,43 @@ fn a_press_inside_a_pane_does_not_drag_the_divider() {
 fn dragging_past_the_end_clamps_and_still_tracks_on_the_way_back() {
     let (mut tree, split, a, _b) = split_scene();
 
+    // ⚠️ The assertions below are STAGED, and the staging is the point
+    // (pat-s3rrv.173). This test failed with "pane A = 100, expected 200", and
+    // that final symptom is consistent with three different broken links: the
+    // press not arming the drag, the motion not reaching the container, or the
+    // re-layout not applying the new offset. Asserting only the pane width names
+    // none of them.
+    //
+    // Each stage below is checked before the one that depends on it, so the
+    // FIRST failure names the broken link.
     press(&mut tree, Vector2::new(100.0, 50.0));
+    // (1) The press must ARM the drag. The offset is still 0 here — the grab is
+    // recorded, not applied — so this asserts the divider was found at all by
+    // checking a later motion can move it, below.
+    assert_eq!(
+        get_split_offset(&tree, split),
+        0.0,
+        "a press alone must not move the divider, only grab it"
+    );
+
     // Way past the right edge.
     motion(&mut tree, Vector2::new(1000.0, 50.0));
     let clamped = get_split_offset(&tree, split);
-    assert!(
-        clamped <= 100.0,
-        "the divider cannot leave the container: offset {clamped} would put it \
-         past the right edge"
+
+    // (2) The motion must MOVE the divider to its clamp. With separation 0 and
+    // two bare Controls the valid range is [0, 200] and the default position is
+    // 100, so dragging 900px right clamps the divider to 200 — an offset of
+    // exactly 100.
+    //
+    // ⚠️ This replaces a `clamped <= 100.0` check that passed at the buggy
+    // value: the offset stays 0 when the drag never takes effect, and 0 is
+    // comfortably "<= 100". An upper bound cannot detect a stuck lower value.
+    assert_eq!(
+        clamped, 100.0,
+        "the drag must move the divider to its clamp: offset is {clamped}. 0 \
+         means the drag never took effect at all (press did not arm it, or the \
+         motion did not reach the container); a value between 0 and 100 means \
+         the clamp is wrong"
     );
     assert_eq!(
         get_size(&tree, a).x,

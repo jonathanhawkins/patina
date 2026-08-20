@@ -126,6 +126,15 @@ const CONTROL_CLASSES: &[&str] = &[
     "Separator",
     "HSeparator",
     "VSeparator",
+    // pat-s3rrv.167. The `"NinePatchRect"` draw arm existed and was never
+    // reached: membership here is what makes the walk descend to a Control, and
+    // without it the class emitted NOTHING — every nine-patch test failed with
+    // an empty command list while the arm below looked perfectly correct.
+    //
+    // ⚠️ Same bug as the `GraphEdit` note at the top of this list. That is twice
+    // now: adding a draw arm is only half of wiring a Control, and the missing
+    // half fails silently rather than at compile time.
+    "NinePatchRect",
 ];
 
 /// One primitive of a control's drawing, in global viewport space, expressed
