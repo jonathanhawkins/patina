@@ -49,6 +49,7 @@ pub mod shader_preprocessor;
 pub mod shader_tokenizer;
 pub mod uid;
 pub mod unified;
+pub mod woff;
 pub mod zip;
 
 // Re-export the most-used types at the crate root.
@@ -74,7 +75,7 @@ pub use resource::{ExtResource, Resource};
 pub use saver::{ResourceSaver, TresSaver};
 pub use uid::{id_to_text, parse_uid_sidecar, text_to_id, UidRegistry, UID_INVALID_TEXT};
 pub use unified::UnifiedLoader;
-pub use zip::{is_zip_packer_handle, is_zip_reader_handle, ZipAppend, ZipPacker, ZipReader};
+pub use zip::{crc32, is_zip_packer_handle, is_zip_reader_handle, ZipAppend, ZipPacker, ZipReader};
 
 /// Import a glTF 2.0 (`.gltf` / `.glb`) asset into a mesh document resource.
 ///

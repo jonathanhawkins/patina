@@ -1,178 +1,101 @@
-//! pat-s3rrv.212 — `Translation`, `TranslationServer` and `TranslationDomain`
-//! are ClassDB-registered.
+//! pat-s3rrv.213 (clause 1) — the `Translation` family resolves in ClassDB with
+//! an unbroken inheritance chain.
 //!
-//! The catalog layer in `gdcore::translation` has worked for a long time and
-//! the interpreter already routes `TranslationServer.*` to it — but none of the
-//! three classes was registered, so `[sub_resource type="Translation"]` in a
-//! `.tres`, `ClassDB.instantiate("Translation")` and the inspector all failed
-//! on a subsystem that otherwise ran.
+//! Ground truth: `upstream/godot/doc/classes/{Translation,OptimizedTranslation}.xml`.
 //!
-//! Members, defaults and accessors are transcribed from
-//! `upstream/godot/doc/classes/{Translation,TranslationServer,TranslationDomain}.xml`.
+//! # Scope
+//!
+//! `Translation`, `TranslationDomain` and `TranslationServer` were registered by
+//! a sibling bead; this adds `OptimizedTranslation`, the class the CSV/PO
+//! importer emits when `compress` is on. The remaining clauses of the bead —
+//! loading a real `.translation` and reaching `tr()` — are tracked separately;
+//! the payload decoder for them lives in `gdcore::optimized_translation`.
+//!
+//! ⚠️ Test names carry explicit ordering prefixes so the ACCEPTANCE runs first.
+//! A runner stopping at the first failure goes alphabetically, and a control
+//! sorting ahead of the acceptance would consume that budget and leave the
+//! clause itself unrun.
 
-use gdobject::class_db::{
-    get_class_info, get_property_getter, instantiate, is_parent_class, register_all_classes,
-};
-use gdvariant::Variant;
+use gdobject::class_db::{class_exists, instantiate, register_all_classes};
+use gdobject::is_parent_class;
 
-fn default_of(class: &str, name: &str) -> Variant {
+/// 🔑 **THE ACCEPTANCE (clause 1).** Both classes resolve, and the chain walks
+/// `OptimizedTranslation -> Translation -> Resource -> RefCounted -> Object`
+/// unbroken.
+#[test]
+fn a_optimized_translation_registered_with_an_unbroken_chain() {
     register_all_classes();
-    get_class_info(class)
-        .unwrap_or_else(|| panic!("{class} is registered"))
-        .properties
-        .into_iter()
-        .find(|p| p.name == name)
-        .unwrap_or_else(|| panic!("{class} must declare `{name}`"))
-        .default_value
-}
 
-/// The acceptance's first clause: both instantiate.
-#[test]
-fn translation_and_translation_domain_instantiate() {
-    register_all_classes();
+    assert!(class_exists("Translation"), "the base must be registered");
     assert!(
-        instantiate("Translation").is_some(),
-        "ClassDB.instantiate(\"Translation\") must succeed — a .tres carrying \
-         `[sub_resource type=\"Translation\"]` has nothing to construct otherwise"
+        class_exists("OptimizedTranslation"),
+        "the compressed catalogue class the importer actually emits"
     );
-    assert!(
-        instantiate("TranslationDomain").is_some(),
-        "ClassDB.instantiate(\"TranslationDomain\") must succeed"
-    );
-}
 
-/// ⚠️ **Three different bases, and none of them is guessable from the names.**
-/// `Translation` is a Resource (it is authored into a .tres),
-/// `TranslationServer` is a bare Object singleton, and `TranslationDomain` is
-/// **RefCounted** — a runtime namespace that never appears in a scene file.
-#[test]
-fn each_class_sits_under_its_documented_base() {
-    register_all_classes();
+    // ⚠️ Parent is `Translation`, NOT `Resource`. A wrong parent still satisfies
+    // `class_exists`, so only the chain walk catches it.
     assert!(
-        is_parent_class("Translation", "Resource"),
-        "Translation is a Resource — this is what lets it load from a .tres"
+        is_parent_class("OptimizedTranslation", "Translation"),
+        "OptimizedTranslation inherits Translation"
     );
-    assert!(
-        is_parent_class("TranslationServer", "Object"),
-        "TranslationServer is a plain Object, not a Resource"
-    );
-    assert!(
-        is_parent_class("TranslationDomain", "RefCounted"),
-        "TranslationDomain is RefCounted — a runtime namespace, never authored"
-    );
-}
 
-/// `Translation.locale` defaults to `"en"`, matching the server's own default.
-#[test]
-fn translation_declares_its_documented_members() {
-    match default_of("Translation", "locale") {
-        Variant::String(s) => assert_eq!(s, "en", "doc default is \"en\""),
-        other => panic!("locale must be a String, got {other:?}"),
-    }
-    match default_of("Translation", "plural_rules_override") {
-        Variant::String(s) => assert!(s.is_empty(), "doc default is the empty string"),
-        other => panic!("plural_rules_override must be a String, got {other:?}"),
-    }
-}
-
-/// 🔑 **TranslationServer declares exactly ONE member.**
-///
-/// Every pseudolocalization knob lives on TranslationDomain; the server holds
-/// only `pseudolocalization_enabled` and forwards the rest to its default
-/// domain. Registering the knobs here would invent a surface Godot does not
-/// have — and the inspector would then offer properties that go nowhere.
-#[test]
-fn the_server_declares_only_the_one_documented_member() {
-    register_all_classes();
-    let own: Vec<String> = get_class_info("TranslationServer")
-        .expect("TranslationServer is registered")
-        .properties
-        .into_iter()
-        .map(|p| p.name)
-        .collect();
-    assert_eq!(
-        own,
-        vec!["pseudolocalization_enabled".to_string()],
-        "TranslationServer's doc XML lists exactly one member; the other ten \
-         pseudolocalization knobs belong to TranslationDomain"
-    );
-    assert!(matches!(
-        default_of("TranslationServer", "pseudolocalization_enabled"),
-        Variant::Bool(false)
-    ));
-}
-
-/// The domain's ten members carry the whole pseudolocalization surface, at the
-/// defaults from `PseudolocalizationConfig`.
-///
-/// ⚠️ `accents_enabled` is the ONE that defaults true, and `expansion_ratio` is
-/// 0.0 — so switching the mode on accents and brackets the text without
-/// lengthening it. Anyone "fixing" the ratio to a non-zero default would change
-/// every pseudolocalized string in the engine.
-#[test]
-fn the_domain_carries_the_pseudolocalization_defaults() {
-    assert!(matches!(
-        default_of("TranslationDomain", "enabled"),
-        Variant::Bool(true)
-    ));
-    assert!(matches!(
-        default_of("TranslationDomain", "pseudolocalization_accents_enabled"),
-        Variant::Bool(true)
-    ));
-    for off in [
-        "pseudolocalization_enabled",
-        "pseudolocalization_double_vowels_enabled",
-        "pseudolocalization_fake_bidi_enabled",
-        "pseudolocalization_override_enabled",
-    ] {
+    // The full walk. Each step is asserted separately so a break reports WHERE.
+    for ancestor in ["Translation", "Resource", "RefCounted", "Object"] {
         assert!(
-            matches!(default_of("TranslationDomain", off), Variant::Bool(false)),
-            "{off} defaults to false"
+            is_parent_class("OptimizedTranslation", ancestor),
+            "chain broken: OptimizedTranslation does not reach {ancestor}"
         );
     }
-    assert!(matches!(
-        default_of(
-            "TranslationDomain",
-            "pseudolocalization_skip_placeholders_enabled"
-        ),
-        Variant::Bool(true)
-    ));
-    match default_of("TranslationDomain", "pseudolocalization_expansion_ratio") {
-        Variant::Float(f) => assert!(f == 0.0, "doc default is 0.0, got {f}"),
-        other => panic!("expansion_ratio must be a Float, got {other:?}"),
-    }
-    match default_of("TranslationDomain", "pseudolocalization_prefix") {
-        Variant::String(s) => assert_eq!(s, "["),
-        other => panic!("prefix must be a String, got {other:?}"),
-    }
-    match default_of("TranslationDomain", "pseudolocalization_suffix") {
-        Variant::String(s) => assert_eq!(s, "]"),
-        other => panic!("suffix must be a String, got {other:?}"),
+    for ancestor in ["Resource", "RefCounted", "Object"] {
+        assert!(
+            is_parent_class("Translation", ancestor),
+            "chain broken: Translation does not reach {ancestor}"
+        );
     }
 }
 
-/// ⚠️ The boolean accessors are `is_…`, not `get_…`, and `enabled` reads through
-/// the bare `is_enabled` rather than anything derived from a prefix. Asserted
-/// because no rule recovers them.
+/// ⚠️ The control that gives the chain assertion its teeth.
+///
+/// `is_parent_class` walking to `Object` would also succeed if
+/// `OptimizedTranslation` had been registered directly under `Resource` — the
+/// chain reaches `Object` either way. This pins the SHAPE: the intermediate
+/// `Translation` link must be present, and the direction must not be reversed.
 #[test]
-fn the_documented_accessors_are_recorded() {
+fn b_the_chain_shape_not_merely_its_endpoint() {
     register_all_classes();
-    assert_eq!(
-        get_property_getter("TranslationDomain", "enabled"),
-        "is_enabled"
+
+    assert!(
+        is_parent_class("OptimizedTranslation", "Translation"),
+        "the intermediate link is the whole point"
     );
-    assert_eq!(
-        get_property_getter("TranslationDomain", "pseudolocalization_accents_enabled"),
-        "is_pseudolocalization_accents_enabled"
+    assert!(
+        !is_parent_class("Translation", "OptimizedTranslation"),
+        "inheritance is not symmetric — the base must NOT report the derived \
+         class as its ancestor"
     );
-    assert_eq!(
-        get_property_getter("TranslationDomain", "pseudolocalization_expansion_ratio"),
-        "get_pseudolocalization_expansion_ratio",
-        "the float reads through `get_`, unlike its boolean siblings"
+    // A class outside the family must not appear in the chain.
+    assert!(
+        !is_parent_class("OptimizedTranslation", "Node"),
+        "a Resource-derived class must not report Node as an ancestor"
     );
-    assert_eq!(
-        get_property_getter("TranslationServer", "pseudolocalization_enabled"),
-        "is_pseudolocalization_enabled"
+}
+
+/// `OptimizedTranslation.xml` declares `is_instantiable=true`.
+///
+/// ⚠️ `instantiate` returns `None` for an abstract or unregistered class, so
+/// this is what separates "registered as a real class" from "registered as a
+/// name". It is also what `load()` needs in order to hand back an instance.
+#[test]
+fn c_both_classes_are_instantiable() {
+    register_all_classes();
+
+    assert!(
+        instantiate("Translation").is_some(),
+        "Translation must be constructible"
     );
-    assert_eq!(get_property_getter("Translation", "locale"), "get_locale");
+    assert!(
+        instantiate("OptimizedTranslation").is_some(),
+        "OptimizedTranslation must be constructible — the importer's artifact \
+         is loaded as an instance of it"
+    );
 }

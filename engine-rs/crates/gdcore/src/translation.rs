@@ -6,6 +6,7 @@
 //! loader, exposing `tr()`/`tr_n()` to GDScript, and seeding the active locale
 //! from `project.godot` are separate integration steps.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// A single-locale message catalog: maps message keys to translated text
@@ -23,6 +24,20 @@ pub struct Translation {
     /// So `tr("FILE")` and `tr("FILE", "menu")` may legitimately resolve to
     /// different strings, or one may exist while the other does not.
     contexts: HashMap<(String, String), String>,
+    /// A compressed catalogue, when this came from an imported
+    /// `OptimizedTranslation` (pat-s3rrv.213).
+    ///
+    /// Consulted only after `messages` misses, so a plain catalogue behaves
+    /// exactly as it did before — no allocation, same lookups.
+    ///
+    /// ⚠️ Held ALONGSIDE `messages` rather than replacing it with an enum. The
+    /// compressed format stores a hash of each source text and never the text,
+    /// so there is nothing to populate `messages` with; leaving it empty keeps
+    /// every other method (`add_message`, `parse_po`, `parse_csv`, `len`)
+    /// working untouched. `len()`/`is_empty()` then report 0 for a compressed
+    /// catalogue, which is what Godot does too:
+    /// `OptimizedTranslation::get_message_count()` returns 0 by design.
+    optimized: Option<crate::optimized_translation::OptimizedTranslation>,
 }
 
 impl Translation {
@@ -32,6 +47,7 @@ impl Translation {
             locale: locale.into(),
             messages: HashMap::new(),
             contexts: HashMap::new(),
+            optimized: None,
         }
     }
 
@@ -68,17 +84,48 @@ impl Translation {
     /// matching Godot's exact-pair lookup. Falling back would silently return
     /// the wrong translation for a word whose meaning depends on its context,
     /// which is the entire reason `msgctxt` exists.
-    pub fn get_message_with_context(&self, context: &str, key: &str) -> Option<&str> {
+    pub fn get_message_with_context(&self, context: &str, key: &str) -> Option<Cow<'_, str>> {
         if context.is_empty() {
             return self.get_message(key);
         }
+        // ⚠️ Deliberately does NOT fall through to `optimized`. Godot's
+        // `OptimizedTranslation::generate` WARNS and DROPS any key carrying a
+        // msgctxt (it splits on 0x04), so a compressed catalogue holds no
+        // contextual entries at all. Consulting it here would return the
+        // CONTEXT-FREE translation for a contextual lookup — exactly the
+        // silently-wrong string the exact-pair rule above exists to prevent.
         self.contexts
             .get(&(context.to_string(), key.to_string()))
-            .map(|s| s.as_str())
+            .map(|s| Cow::Borrowed(s.as_str()))
     }
 
-    pub fn get_message(&self, key: &str) -> Option<&str> {
-        self.messages.get(key).map(String::as_str)
+    /// The translation for `key`, or `None` when this catalogue has none.
+    ///
+    /// ⚠️ Returns `Cow` because a compressed catalogue decompresses each entry
+    /// on demand and yields an owned `String`. The plain path still borrows, so
+    /// the common case allocates nothing; returning `String` instead would make
+    /// every existing lookup allocate.
+    pub fn get_message(&self, key: &str) -> Option<Cow<'_, str>> {
+        if let Some(text) = self.messages.get(key) {
+            return Some(Cow::Borrowed(text.as_str()));
+        }
+        self.optimized
+            .as_ref()
+            .and_then(|c| c.get_message(key))
+            .map(Cow::Owned)
+    }
+
+    /// Wraps a decoded `OptimizedTranslation` as a catalogue for `locale`.
+    pub fn from_optimized(
+        locale: impl Into<String>,
+        catalog: crate::optimized_translation::OptimizedTranslation,
+    ) -> Self {
+        Self {
+            locale: locale.into(),
+            messages: HashMap::new(),
+            contexts: HashMap::new(),
+            optimized: Some(catalog),
+        }
     }
 
     /// Number of messages in the catalog.
@@ -322,7 +369,9 @@ impl TranslationServer {
     pub fn translate(&self, key: &str) -> String {
         for candidate in self.locale_chain() {
             if let Some(text) = self.lookup(&candidate, key) {
-                return self.apply_pseudolocalization(text);
+                // `text` is a Cow: borrowed for a plain catalogue, owned when it
+                // came out of a compressed one (pat-s3rrv.213).
+                return self.apply_pseudolocalization(&text);
             }
         }
         // 🔑 A MISS is pseudolocalized too. Godot returns
@@ -361,7 +410,7 @@ impl TranslationServer {
         key.to_string()
     }
 
-    fn lookup_with_context(&self, locale: &str, key: &str, context: &str) -> Option<&str> {
+    fn lookup_with_context(&self, locale: &str, key: &str, context: &str) -> Option<Cow<'_, str>> {
         self.translations.iter().find_map(|t| {
             let matches =
                 t.locale() == locale || t.locale().split(['_', '-']).next() == Some(locale);
@@ -389,7 +438,7 @@ impl TranslationServer {
 
     /// Finds the first catalog matching `locale` (exact, or by language part —
     /// an `fr_FR` catalog satisfies a request for `fr`) that contains `key`.
-    fn lookup(&self, locale: &str, key: &str) -> Option<&str> {
+    fn lookup(&self, locale: &str, key: &str) -> Option<Cow<'_, str>> {
         self.translations.iter().find_map(|t| {
             let matches =
                 t.locale() == locale || t.locale().split(['_', '-']).next() == Some(locale);
@@ -420,15 +469,15 @@ mod tests {
         assert_eq!(cats.len(), 2);
         assert_eq!(cats[0].locale(), "en");
         assert_eq!(cats[1].locale(), "fr");
-        assert_eq!(cats[0].get_message("HELLO"), Some("Hello"));
-        assert_eq!(cats[1].get_message("HELLO"), Some("Bonjour"));
+        assert_eq!(cats[0].get_message("HELLO").as_deref(), Some("Hello"));
+        assert_eq!(cats[1].get_message("HELLO").as_deref(), Some("Bonjour"));
 
         // PO: a `de` catalog with comments and blank lines.
         let po = "# a comment\nmsgid \"HELLO\"\nmsgstr \"Hallo\"\n\nmsgid \"BYE\"\nmsgstr \"Tschuess\"\n";
         let de = parse_po("de", po);
         assert_eq!(de.locale(), "de");
-        assert_eq!(de.get_message("HELLO"), Some("Hallo"));
-        assert_eq!(de.get_message("BYE"), Some("Tschuess"));
+        assert_eq!(de.get_message("HELLO").as_deref(), Some("Hallo"));
+        assert_eq!(de.get_message("BYE").as_deref(), Some("Tschuess"));
 
         // Server + fallback chain.
         let mut server = TranslationServer::new();
@@ -460,12 +509,18 @@ mod tests {
     #[test]
     fn po_escapes_and_csv_quoted_fields() {
         let po = "msgid \"NL\"\nmsgstr \"line1\\nline2\"\n";
-        assert_eq!(parse_po("en", po).get_message("NL"), Some("line1\nline2"));
+        assert_eq!(
+            parse_po("en", po).get_message("NL").as_deref(),
+            Some("line1\nline2")
+        );
 
         // Quoted CSV field with an embedded comma.
         let csv = "keys,en\nGREETING,\"Hello, world\"\n";
         let cats = parse_csv(csv);
-        assert_eq!(cats[0].get_message("GREETING"), Some("Hello, world"));
+        assert_eq!(
+            cats[0].get_message("GREETING").as_deref(),
+            Some("Hello, world")
+        );
     }
 }
 
@@ -889,7 +944,7 @@ impl TranslationDomain {
         };
         for candidate in locale_chain_for(active, fallback) {
             if let Some(text) = self.lookup(&candidate, key) {
-                return self.finish(text);
+                return self.finish(&text);
             }
         }
         self.finish(key)
@@ -903,7 +958,7 @@ impl TranslationDomain {
         }
     }
 
-    fn lookup(&self, locale: &str, key: &str) -> Option<&str> {
+    fn lookup(&self, locale: &str, key: &str) -> Option<Cow<'_, str>> {
         self.translations.iter().find_map(|t| {
             let matches =
                 t.locale() == locale || t.locale().split(['_', '-']).next() == Some(locale);

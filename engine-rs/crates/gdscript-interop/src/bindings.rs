@@ -194,6 +194,14 @@ pub trait ScriptInstance {
     /// for scripts without coroutine support (pat-nzgdu.6).
     fn poll_coroutines(&mut self, _delta: f32) {}
 
+    /// Delivers XR interface signals queued since the last frame.
+    ///
+    /// Defaulted, so only the GDScript instance overrides it and the other
+    /// implementors are untouched. This is the seam that lets a browser
+    /// `selectstart` reach a connected Callable through the ordinary frame
+    /// tick, with no script-side call in between (pat-s3rrv.218).
+    fn pump_xr_signals(&mut self) {}
+
     /// Notifies suspended coroutines that a signal named `name` fired with
     /// `args`, resuming any `await` parked on it and binding the argument(s) as
     /// the awaited value. Driven by the SceneTree after each `emit_signal` and

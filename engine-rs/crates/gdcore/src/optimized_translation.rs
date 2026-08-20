@@ -115,6 +115,15 @@ pub fn smaz_decompress(input: &[u8], uncompressed_len: usize) -> Option<String> 
     String::from_utf8(out).ok()
 }
 
+/// Drops one trailing NUL, the terminator `CharString` sizing folds into the
+/// stored length. A string that has none is returned unchanged.
+fn strip_trailing_nul(mut text: String) -> String {
+    if text.ends_with('\0') {
+        text.pop();
+    }
+    text
+}
+
 /// A decoded `OptimizedTranslation` resource.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OptimizedTranslation {
@@ -164,20 +173,39 @@ impl OptimizedTranslation {
     }
 
     /// Reads the string an element points at, decompressing when needed.
+    ///
+    /// ⚠️ **`uncomp_size` counts the NUL terminator.** `generate()` stores
+    /// `orig_len = src_s.size()` where `src_s` is a `CharString`, and
+    /// `ustring.h:182` documents `size()` as "the number of characters in the
+    /// buffer, **including** the terminating NUL" (`length()` is `size() - 1`).
+    /// So a three-character translation is stored as four bytes with
+    /// `uncomp_size == 4`, and the writer's empty-string case makes it explicit:
+    /// it emits `orig_len = 1` with a single `0` byte.
+    ///
+    /// Taking the length at face value therefore yields `"Bonjour\0"` for every
+    /// entry of a real `.translation`. The trailing NUL is stripped here.
+    ///
+    /// Godot itself is inconsistent about this: the compressed branch ends with
+    /// `String::utf8(uncomp.get_data())`, which stops at the NUL, while the
+    /// uncompressed branch passes an explicit length and so keeps it. The NUL is
+    /// an artifact of `CharString` sizing rather than part of the message, so it
+    /// is dropped in both branches here.
     fn read_entry(&self, elem: usize) -> Option<String> {
         let str_offset = *self.bucket_table.get(elem + 1)? as usize;
         let comp_size = *self.bucket_table.get(elem + 2)? as usize;
         let uncomp_size = *self.bucket_table.get(elem + 3)? as usize;
 
-        if comp_size == uncomp_size {
+        let text = if comp_size == uncomp_size {
             let end = str_offset.checked_add(uncomp_size)?;
             let bytes = self.strings.get(str_offset..end)?;
-            String::from_utf8(bytes.to_vec()).ok()
+            String::from_utf8(bytes.to_vec()).ok()?
         } else {
             let end = str_offset.checked_add(comp_size)?;
             let bytes = self.strings.get(str_offset..end)?;
-            smaz_decompress(bytes, uncomp_size)
-        }
+            smaz_decompress(bytes, uncomp_size)?
+        };
+
+        Some(strip_trailing_nul(text))
     }
 
     /// Always empty — the source texts are not stored.

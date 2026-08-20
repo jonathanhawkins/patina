@@ -6,6 +6,7 @@
 //! interpolated over particle lifetime.
 
 use gdcore::math::{Color, Vector3};
+use gdcore::math3d::Transform3D;
 
 // ---------------------------------------------------------------------------
 // Deterministic random (xorshift32)
@@ -263,6 +264,24 @@ pub struct ParticleMaterial3D {
     pub tangential_accel: f32,
     /// Radial acceleration (toward/away from emitter origin).
     pub radial_accel: f32,
+    /// Godot `ParticleProcessMaterial.attractor_interaction_enabled`. When
+    /// false the emitter ignores every attractor in the scene.
+    pub attractor_interaction_enabled: bool,
+    /// Godot `ParticleProcessMaterial.collision_mode`.
+    pub collision_mode: ParticleCollisionMode,
+    /// Godot `collision_friction` — damps the velocity left tangential to the
+    /// contact after the normal component is removed. Clamped to [0, 1].
+    pub collision_friction: f32,
+    /// Godot `collision_bounce` — restitution along the contact normal.
+    pub collision_bounce: f32,
+    /// Godot `collision_use_scale` — scales a particle's collision radius by
+    /// its own display scale.
+    pub collision_use_scale: bool,
+    /// The particle's base collision radius (Godot's `FRAME.particle_size`).
+    pub particle_size: f32,
+    /// Layers this emitter occupies, matched against an attractor's or
+    /// collider's `cull_mask`.
+    pub cull_mask: u32,
 }
 
 impl Default for ParticleMaterial3D {
@@ -281,6 +300,281 @@ impl Default for ParticleMaterial3D {
             lifetime_randomness: 0.0,
             tangential_accel: 0.0,
             radial_accel: 0.0,
+            // Godot defaults attractor interaction ON, so an attractor placed
+            // in a scene affects a default emitter without extra setup.
+            attractor_interaction_enabled: true,
+            collision_mode: ParticleCollisionMode::Disabled,
+            collision_friction: 0.0,
+            collision_bounce: 0.0,
+            collision_use_scale: false,
+            particle_size: 0.0,
+            cull_mask: 0xFFFF_FFFF,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Attractors and colliders (pat-s3rrv.216)
+// ---------------------------------------------------------------------------
+
+/// How a particle answers a collision, mirroring Godot's
+/// `ParticleProcessMaterial.CollisionMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParticleCollisionMode {
+    /// `COLLISION_DISABLED` (0) — particles pass through everything.
+    #[default]
+    Disabled,
+    /// `COLLISION_RIGID` (1) — bounce using `collision_bounce`/`collision_friction`.
+    Rigid,
+    /// `COLLISION_HIDE_ON_CONTACT` (2) — the particle dies on contact.
+    HideOnContact,
+}
+
+impl ParticleCollisionMode {
+    /// Maps Godot's integer enum, treating anything unknown as disabled.
+    pub fn from_godot(value: i64) -> Self {
+        match value {
+            1 => Self::Rigid,
+            2 => Self::HideOnContact,
+            _ => Self::Disabled,
+        }
+    }
+}
+
+/// The analytic volume shared by attractor and collider nodes.
+///
+/// Stage 1 of pat-s3rrv.216 covers the two analytic shapes; `VectorField3D`,
+/// `HeightField3D` and `SDF3D` are follow-ups.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ParticleVolume3D {
+    /// `*Box3D` — `half_extents` is Godot's `size * 0.5`.
+    Box {
+        /// Half of the box's `size`, matching the shader's `extents`.
+        half_extents: Vector3,
+    },
+    /// `*Sphere3D`.
+    Sphere {
+        /// The sphere's radius.
+        radius: f32,
+    },
+}
+
+/// One `GPUParticlesAttractor3D` for the frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParticleAttractor3D {
+    /// The node's global transform.
+    pub transform: Transform3D,
+    /// The attractor's volume.
+    pub volume: ParticleVolume3D,
+    /// Godot `strength`; negative repels.
+    pub strength: f32,
+    /// Godot `attenuation` — the falloff exponent over normalized distance.
+    pub attenuation: f32,
+    /// Godot `directionality` — 0 pulls radially, 1 pushes along the
+    /// attractor's Z axis.
+    pub directionality: f32,
+    /// Matched against the emitter's `cull_mask`.
+    pub cull_mask: u32,
+}
+
+/// One `GPUParticlesCollision3D` for the frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParticleCollider3D {
+    /// The node's global transform.
+    pub transform: Transform3D,
+    /// The collider's volume.
+    pub volume: ParticleVolume3D,
+    /// Matched against the emitter's `cull_mask`.
+    pub cull_mask: u32,
+}
+
+/// Everything in the scene that a particle step must react to.
+///
+/// Built once per frame by `MainLoop::process_particles` and shared by every
+/// simulator, so collecting the nodes is done once rather than per emitter.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ParticleField3D {
+    /// Attractors active this frame.
+    pub attractors: Vec<ParticleAttractor3D>,
+    /// Colliders active this frame.
+    pub colliders: Vec<ParticleCollider3D>,
+}
+
+impl ParticleField3D {
+    /// An empty field — no attractors, no colliders.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Whether there is nothing to react to, letting `step` skip the work.
+    pub fn is_empty(&self) -> bool {
+        self.attractors.is_empty() && self.colliders.is_empty()
+    }
+}
+
+/// A contact between a particle and a collider.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParticleContact3D {
+    /// Unit contact normal, pointing out of the collider.
+    pub normal: Vector3,
+    /// Penetration depth to push back out along `normal`.
+    pub depth: f32,
+}
+
+/// Normalizes, or returns zero for a degenerate vector — the shader's
+/// `safe_normalize`.
+fn safe_normalize(v: Vector3) -> Vector3 {
+    let len = v.length();
+    if len > 1e-6 {
+        v * (1.0 / len)
+    } else {
+        Vector3::new(0.0, 0.0, 0.0)
+    }
+}
+
+/// GLSL `sign`, except zero maps to `1.0`.
+///
+/// The shader's `sign()` yields 0 on an exactly-centred axis, which would zero
+/// that component of the contact normal; biasing to `+1` keeps the normal unit
+/// length in that measure-zero case.
+fn sign_nonzero(x: f32) -> f32 {
+    if x < 0.0 {
+        -1.0
+    } else {
+        1.0
+    }
+}
+
+impl ParticleVolume3D {
+    /// The shader's `extents` vector for this shape.
+    fn extents(self) -> Vector3 {
+        match self {
+            ParticleVolume3D::Box { half_extents } => half_extents,
+            ParticleVolume3D::Sphere { radius } => Vector3::new(radius, radius, radius),
+        }
+    }
+}
+
+impl ParticleAttractor3D {
+    /// The acceleration applied to a particle at `position`, or `None` when the
+    /// particle lies outside the attractor's volume.
+    ///
+    /// Ported from `servers/rendering/renderer_rd/shaders/particles.glsl:452-491`.
+    /// ⚠️ The shader *subtracts* the term, and `dir` points from the attractor
+    /// toward the particle, so a **positive `strength` pulls inward** and a
+    /// negative one repels. Getting that sign backwards is the whole feature.
+    pub fn force_at(&self, position: Vector3) -> Option<Vector3> {
+        let rel = position - self.transform.origin;
+        // `rel_vec * mat3(transform)` in GLSL is the transpose applied to the
+        // vector, which is exactly `Basis::xform_inv`.
+        let local = self.transform.basis.xform_inv(rel);
+        let extents = self.volume.extents();
+        let radial = safe_normalize(rel);
+
+        let d = match self.volume {
+            ParticleVolume3D::Sphere { radius } => {
+                if radius.abs() < 1e-6 {
+                    return None;
+                }
+                local.length() / radius
+            }
+            ParticleVolume3D::Box { .. } => {
+                if extents.x.abs() < 1e-6 || extents.y.abs() < 1e-6 || extents.z.abs() < 1e-6 {
+                    return None;
+                }
+                let ax = (local.x / extents.x).abs();
+                let ay = (local.y / extents.y).abs();
+                let az = (local.z / extents.z).abs();
+                ax.max(ay).max(az)
+            }
+        };
+        if d > 1.0 {
+            return None;
+        }
+
+        let amount = (1.0 - d).max(0.0).powf(self.attenuation);
+        // mix(dir, transform[2].xyz, directionality) — the basis Z column.
+        let t = self.directionality.clamp(0.0, 1.0);
+        let dir = safe_normalize(radial * (1.0 - t) + self.transform.basis.z * t);
+        Some(dir * (-amount * self.strength))
+    }
+}
+
+impl ParticleCollider3D {
+    /// The contact for a particle at `position` with radius `particle_size`,
+    /// or `None` when it is clear of the volume.
+    ///
+    /// Ported from `particles.glsl:546-592`.
+    pub fn contact(&self, position: Vector3, particle_size: f32) -> Option<ParticleContact3D> {
+        // The shader's epsilon, so a particle exactly touching counts as hit.
+        const EPSILON: f32 = 0.001;
+        let rel = position - self.transform.origin;
+        let local = self.transform.basis.xform_inv(rel);
+
+        match self.volume {
+            ParticleVolume3D::Sphere { radius } => {
+                let d = rel.length() - (particle_size + radius);
+                if d <= EPSILON {
+                    Some(ParticleContact3D {
+                        normal: safe_normalize(rel),
+                        depth: -d,
+                    })
+                } else {
+                    None
+                }
+            }
+            ParticleVolume3D::Box { half_extents } => {
+                let e = half_extents;
+                let abs_pos = Vector3::new(local.x.abs(), local.y.abs(), local.z.abs());
+                let sgn = Vector3::new(
+                    sign_nonzero(local.x),
+                    sign_nonzero(local.y),
+                    sign_nonzero(local.z),
+                );
+
+                if abs_pos.x > e.x || abs_pos.y > e.y || abs_pos.z > e.z {
+                    // Outside the box: measure to the closest surface point.
+                    let closest = Vector3::new(
+                        abs_pos.x.min(e.x),
+                        abs_pos.y.min(e.y),
+                        abs_pos.z.min(e.z),
+                    );
+                    let rel_out = abs_pos - closest;
+                    let depth = rel_out.length() - particle_size;
+                    if depth > EPSILON {
+                        return None;
+                    }
+                    let n = safe_normalize(rel_out);
+                    let n = Vector3::new(n.x * sgn.x, n.y * sgn.y, n.z * sgn.z);
+                    Some(ParticleContact3D {
+                        normal: safe_normalize(self.transform.basis.xform(n)),
+                        depth: -depth,
+                    })
+                } else {
+                    // Inside the box: escape along the nearest face.
+                    let axis_len = Vector3::new(e.x - abs_pos.x, e.y - abs_pos.y, e.z - abs_pos.z);
+                    let n_local = if axis_len.x <= axis_len.y && axis_len.x <= axis_len.z {
+                        Vector3::new(1.0, 0.0, 0.0)
+                    } else if axis_len.y <= axis_len.x && axis_len.y <= axis_len.z {
+                        Vector3::new(0.0, 1.0, 0.0)
+                    } else {
+                        Vector3::new(0.0, 0.0, 1.0)
+                    };
+                    let depth = n_local.x * axis_len.x
+                        + n_local.y * axis_len.y
+                        + n_local.z * axis_len.z
+                        + particle_size;
+                    let n = Vector3::new(
+                        n_local.x * sgn.x,
+                        n_local.y * sgn.y,
+                        n_local.z * sgn.z,
+                    );
+                    Some(ParticleContact3D {
+                        normal: safe_normalize(self.transform.basis.xform(n)),
+                        depth,
+                    })
+                }
+            }
         }
     }
 }
@@ -496,8 +790,18 @@ impl ParticleSimulator3D {
         }
     }
 
-    /// Advance the simulation by `dt` seconds.
+    /// Advance the simulation by `dt` seconds with nothing to react to.
+    ///
+    /// Kept alongside [`step_with_field`](Self::step_with_field) rather than
+    /// replaced: every existing call site keeps compiling, and an emitter in a
+    /// scene with no attractors or colliders behaves exactly as before.
     pub fn step(&mut self, dt: f32) {
+        self.step_with_field(dt, &ParticleField3D::empty());
+    }
+
+    /// Advance the simulation by `dt` seconds, applying `field`'s attractor
+    /// forces before the position update and resolving its colliders after it.
+    pub fn step_with_field(&mut self, dt: f32, field: &ParticleField3D) {
         let dt_scaled = dt * self.emitter.speed_scale;
 
         // --- Age and integrate existing particles ---
@@ -535,8 +839,87 @@ impl ParticleSimulator3D {
                 }
             }
 
+            // Apply attractor forces (pat-s3rrv.216). Godot gates the whole
+            // interaction on the material flag, so a disabled emitter ignores
+            // every attractor in the scene.
+            if self.emitter.material.attractor_interaction_enabled {
+                let mut accel = Vector3::new(0.0, 0.0, 0.0);
+                for attractor in &field.attractors {
+                    if attractor.cull_mask & self.emitter.material.cull_mask == 0 {
+                        continue;
+                    }
+                    if let Some(force) = attractor.force_at(p.position) {
+                        accel = accel + force;
+                    }
+                }
+                p.velocity = p.velocity + accel * dt_scaled;
+            }
+
             // Integrate position
             p.position = p.position + p.velocity * dt_scaled;
+
+            // Resolve collisions (pat-s3rrv.216).
+            if self.emitter.material.collision_mode != ParticleCollisionMode::Disabled
+                && !field.colliders.is_empty()
+            {
+                let mut size = self.emitter.material.particle_size;
+                if self.emitter.material.collision_use_scale {
+                    size *= p.scale;
+                }
+
+                // Merge overlapping contacts the way particles.glsl:654-664
+                // does, so a particle wedged between two colliders is pushed
+                // out of both rather than only the last one.
+                let mut contact: Option<ParticleContact3D> = None;
+                for collider in &field.colliders {
+                    if collider.cull_mask & self.emitter.material.cull_mask == 0 {
+                        continue;
+                    }
+                    let Some(hit) = collider.contact(p.position, size) else {
+                        continue;
+                    };
+                    contact = Some(match contact {
+                        None => hit,
+                        Some(prev) => {
+                            let acc = prev.normal * prev.depth;
+                            let acc =
+                                acc + hit.normal * (hit.depth - hit.normal.dot(acc)).max(0.0);
+                            ParticleContact3D {
+                                normal: safe_normalize(acc),
+                                depth: acc.length(),
+                            }
+                        }
+                    });
+                }
+
+                if let Some(hit) = contact {
+                    if self.emitter.material.collision_mode
+                        == ParticleCollisionMode::HideOnContact
+                    {
+                        // Godot sets `ACTIVE = false`; the retain below reaps it.
+                        p.lifetime_remaining = 0.0;
+                    } else {
+                        // particle_process_material.cpp:1021-1031.
+                        let response = hit.normal.dot(p.velocity);
+                        let bounce = self.emitter.material.collision_bounce;
+                        let trigger = if response.abs()
+                            >= 2.0 / (bounce + 1.0).clamp(1.0, 2.0)
+                        {
+                            1.0
+                        } else {
+                            0.0
+                        };
+                        p.position = p.position + hit.normal * hit.depth;
+                        // Remove the normal component, damp what is left
+                        // tangentially, then add the bounce back along it.
+                        p.velocity = p.velocity - hit.normal * response;
+                        let friction =
+                            self.emitter.material.collision_friction.clamp(0.0, 1.0);
+                        p.velocity = p.velocity * (1.0 - friction);
+                        p.velocity = p.velocity - hit.normal * response * (bounce * trigger);
+                    }
+                }
+            }
 
             // Update color and scale from curves
             let t = p.age_ratio();

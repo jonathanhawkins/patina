@@ -64,6 +64,7 @@ pub mod export_groups;
 pub mod export_layout;
 pub mod export_presets;
 pub mod filesystem;
+pub mod feature_profile;
 pub mod find_in_files;
 pub mod find_replace;
 pub mod fs_file_ops;

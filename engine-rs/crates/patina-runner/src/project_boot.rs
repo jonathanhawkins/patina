@@ -148,6 +148,66 @@ fn parse_res_path_list(raw: &str) -> Vec<String> {
 /// Unreadable or unparseable entries are skipped rather than aborting the boot:
 /// Godot logs and continues, and a missing translation degrades to the key
 /// itself rather than to no game.
+/// Builds a catalog from a compressed `.translation` Resource (pat-s3rrv.213).
+///
+/// Property names transcribed from `OptimizedTranslation::_set`
+/// (`upstream/godot/core/string/optimized_translation.cpp`): `hash_table` and
+/// `bucket_table` are `PACKED_INT32_ARRAY`, `strings` is `PACKED_BYTE_ARRAY`.
+///
+/// ⚠️ `load_from` also appears in `_get_property_list`, but it is
+/// `PROPERTY_USAGE_EDITOR` and write-only — it triggers `generate()` and is
+/// never persisted, so there is nothing to read there.
+fn optimized_translation_from_resource(
+    res: &gdresource::resource::Resource,
+    rel_path: &str,
+) -> Option<gdcore::translation::Translation> {
+    // ⚠️ Accept the Godot 3 spelling too: `renames_map_3_to_4.cpp:1557` maps
+    // `PHashTranslation` -> `OptimizedTranslation`, so a project upgraded from
+    // 3.x can still carry the old class name in its imported artifact.
+    if res.class_name != "OptimizedTranslation" && res.class_name != "PHashTranslation" {
+        return None;
+    }
+
+    // 🔑 `as u32`, NOT a checked conversion. Godot declares these as
+    // `Vector<int>` and reinterprets the buffer as `uint32_t*`, so the
+    // empty-slot sentinel `0xFFFFFFFF` arrives here as `-1`. A `try_from` would
+    // reject exactly the sentinel and turn every empty hash slot into a load
+    // failure.
+    let ints = |key: &str| match res.get_property(key) {
+        Some(gdvariant::Variant::PackedInt32Array(v)) => {
+            Some(v.iter().map(|i| *i as u32).collect::<Vec<u32>>())
+        }
+        _ => None,
+    };
+
+    let hash_table = ints("hash_table")?;
+    let bucket_table = ints("bucket_table")?;
+    let strings = match res.get_property("strings") {
+        Some(gdvariant::Variant::PackedByteArray(b)) => b.clone(),
+        _ => return None,
+    };
+    if hash_table.is_empty() {
+        // Nothing can be looked up; treat as unusable rather than as an empty
+        // catalog that would look like a successful load.
+        return None;
+    }
+
+    let locale = match res.get_property("locale") {
+        Some(gdvariant::Variant::String(s)) if !s.is_empty() => s.clone(),
+        _ => locale_from_artifact_name(rel_path),
+    };
+
+    Some(gdcore::translation::Translation::from_optimized(
+        locale,
+        gdcore::optimized_translation::OptimizedTranslation {
+            locale: String::new(),
+            hash_table,
+            bucket_table,
+            strings,
+        },
+    ))
+}
+
 /// Builds a catalog from a loaded `.translation` Resource (pat-s3rrv.139).
 ///
 /// Godot's `Translation` stores its catalog in a **Dictionary** property named
@@ -225,11 +285,16 @@ fn load_project_translations(project_root: &Path, settings: &ProjectSettings) {
                         gdresource::res_loader::load_res_binary(&bytes, res_path)
                             .map_err(|e| e.to_string())
                     }) {
-                    Ok(res) => match translation_from_resource(&res, rel) {
+                    // Plain `Translation` first, then the compressed
+                    // `OptimizedTranslation` the importer emits with
+                    // `compress` on (pat-s3rrv.213).
+                    Ok(res) => match translation_from_resource(&res, rel)
+                        .or_else(|| optimized_translation_from_resource(&res, rel))
+                    {
                         Some(t) => server.add_translation(t),
                         None => tracing::warn!(
                             "translation `{res_path}` is a `{}` with no readable \
-                             `messages`; skipping",
+                             `messages` or hash tables; skipping",
                             res.class_name
                         ),
                     },
@@ -572,8 +637,8 @@ mod tests {
             translation_from_resource(&translation_res(Some("fr")), "ui/strings.fr.translation")
                 .expect("a Translation resource must convert");
         assert_eq!(t.locale(), "fr");
-        assert_eq!(t.get_message("GREETING"), Some("Bonjour"));
-        assert_eq!(t.get_message("FAREWELL"), Some("Au revoir"));
+        assert_eq!(t.get_message("GREETING").as_deref(), Some("Bonjour"));
+        assert_eq!(t.get_message("FAREWELL").as_deref(), Some("Au revoir"));
     }
 
     /// ⚠️ Only plain-String keys are read. The `Int` key above is Godot's
@@ -614,13 +679,93 @@ mod tests {
         assert_eq!(t2.locale(), "fr");
     }
 
-    /// ⚠️ `OptimizedTranslation` stores compressed hash/bucket tables and has no
-    /// `messages`. It must yield `None` — an empty catalog would look like a
-    /// successful load and leave every key untranslated with no warning.
+    /// ⚠️ `OptimizedTranslation` has no `messages`, so the PLAIN reader must
+    /// still refuse it. Its intent is unchanged from when it was written: an
+    /// empty catalog would look like a successful load and leave every key
+    /// untranslated with no warning.
+    ///
+    /// What changed (pat-s3rrv.213) is that refusing it is no longer the end of
+    /// the story — `load_project_translations` now falls through to
+    /// `optimized_translation_from_resource`. So this asserts the plain reader
+    /// declines, and the test below asserts the compressed reader picks it up.
     #[test]
-    fn an_optimized_translation_is_refused_not_silently_empty() {
+    fn an_optimized_translation_is_refused_by_the_plain_reader() {
         let res = Resource::new("OptimizedTranslation");
         assert!(translation_from_resource(&res, "x.fr.translation").is_none());
+    }
+
+    /// A compressed resource with no payload is refused rather than accepted as
+    /// an EMPTY catalog — the silent failure the plain reader also guards.
+    #[test]
+    fn an_optimized_translation_without_tables_is_refused() {
+        let res = Resource::new("OptimizedTranslation");
+        assert!(optimized_translation_from_resource(&res, "x.fr.translation").is_none());
+    }
+
+    /// 🔑 A compressed `.translation` becomes a catalog whose messages resolve.
+    ///
+    /// The bucket layout is written by hand exactly as `generate()` emits it:
+    /// `[size, func, (key, str_offset, comp_size, uncomp_size)]`, with the
+    /// string arena holding the NUL terminator that `uncomp_size` counts.
+    ///
+    /// ⚠️ `hash_table` / `bucket_table` are authored as **i32** here, the way
+    /// the resource actually stores them, so the `-1` sentinel round-trips.
+    #[test]
+    fn an_optimized_translation_becomes_a_working_catalog() {
+        use gdcore::optimized_translation::hash;
+
+        let func = 0x41u32;
+        let key = "GREETING";
+        let stored: &[u8] = b"Bonjour\0"; // 8 bytes: 7 + terminator
+
+        let mut res = Resource::new("OptimizedTranslation");
+        res.set_property("locale", gdvariant::Variant::String("fr".to_string()));
+        res.set_property("hash_table", gdvariant::Variant::PackedInt32Array(vec![0]));
+        res.set_property(
+            "bucket_table",
+            gdvariant::Variant::PackedInt32Array(vec![
+                1,
+                func as i32,
+                hash(func, key) as i32,
+                0,
+                stored.len() as i32,
+                stored.len() as i32,
+            ]),
+        );
+        res.set_property(
+            "strings",
+            gdvariant::Variant::PackedByteArray(stored.to_vec()),
+        );
+
+        let t = optimized_translation_from_resource(&res, "ui/strings.fr.translation")
+            .expect("a compressed resource with tables must load");
+        assert_eq!(t.locale(), "fr");
+        assert_eq!(
+            t.get_message(key).as_deref(),
+            Some("Bonjour"),
+            "the compressed catalog must answer lookups — this is what makes \
+             tr() return the translation instead of the key"
+        );
+        assert_eq!(t.get_message("ABSENT").as_deref(), None);
+    }
+
+    /// The Godot 3 class name still loads.
+    ///
+    /// ⚠️ `renames_map_3_to_4.cpp:1557` maps `PHashTranslation` ->
+    /// `OptimizedTranslation`; an upgraded project can still ship the old name.
+    #[test]
+    fn the_godot_3_phash_translation_name_is_accepted() {
+        let mut res = Resource::new("PHashTranslation");
+        res.set_property("hash_table", gdvariant::Variant::PackedInt32Array(vec![-1]));
+        res.set_property("bucket_table", gdvariant::Variant::PackedInt32Array(vec![]));
+        res.set_property("strings", gdvariant::Variant::PackedByteArray(vec![]));
+
+        let t = optimized_translation_from_resource(&res, "x.de.translation")
+            .expect("the 3.x class name must still be recognised");
+        assert_eq!(t.locale(), "de");
+        // 🔑 The -1 sentinel survived the i32 -> u32 round trip. Had it been
+        // rejected by a checked conversion, this would have returned None above.
+        assert_eq!(t.get_message("ANY").as_deref(), None);
     }
 
     // `boot_project` mutates the process-global `res://` path roots via

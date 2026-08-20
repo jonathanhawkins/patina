@@ -13,6 +13,31 @@
 use gdscript_interop::interpreter::Interpreter;
 use gdvariant::Variant;
 
+/// Installs the platform WebXR backend, the way the web entry point does.
+///
+/// Replaces the old `xr._set_test_stub(..)` script call, which pat-s3rrv.218
+/// removed from the script-visible method table — it was never a Godot method,
+/// and a scene should not need one to get a working interface. Installing here
+/// also proves the backend reaches the interface through
+/// `XRServer.find_interface`, with no script-side setup at all.
+fn install_backend(modes: &[&str], features: &[&str], failure: Option<&str>) {
+    gdplatform::set_default_backend(gdplatform::WebXrBackend {
+        stub: gdplatform::WebXrStub {
+            supported_modes: modes
+                .iter()
+                .map(|m| match *m {
+                    "immersive-vr" => gdplatform::WebXrSessionMode::ImmersiveVr,
+                    "immersive-ar" => gdplatform::WebXrSessionMode::ImmersiveAr,
+                    _ => gdplatform::WebXrSessionMode::Inline,
+                })
+                .collect(),
+            available_features: features.iter().map(|s| s.to_string()).collect(),
+            force_failure: failure.map(|s| s.to_string()),
+        },
+        frame_events: Vec::new(),
+    });
+}
+
 fn call_check(src: &str) -> Variant {
     let mut interp = Interpreter::new();
     let class_def = interp.run_class(src).expect("script parses");
@@ -132,10 +157,10 @@ func check():
     xr.connect(\"session_started\", _on_started)
     xr.set_session_mode(\"immersive-vr\")
     xr.set_required_features([\"local-floor\"])
-    xr._set_test_stub([\"immersive-vr\"], [\"local-floor\"], \"\")
     var ok = xr.initialize()
     return [ok, started, xr.is_initialized()]
 ";
+    install_backend(&["immersive-vr"], &["local-floor"], None);
     match call_check(src) {
         Variant::Array(v) => {
             // True here means "request accepted" — see the note on
@@ -184,10 +209,10 @@ func check():
     xr.set_session_mode(\"immersive-vr\")
     xr.set_required_features([\"hand-tracking\"])
     # The browser grants immersive-vr but NOT hand-tracking.
-    xr._set_test_stub([\"immersive-vr\"], [\"local-floor\"], \"\")
     var ok = xr.initialize()
     return [ok, reason, xr.is_initialized()]
 ";
+    install_backend(&["immersive-vr"], &["local-floor"], None);
     match call_check(src) {
         Variant::Array(v) => {
             assert_eq!(
@@ -234,10 +259,10 @@ func _on_supported(mode, supported):
 func check():
     var xr = XRServer.find_interface(\"WebXR\")
     xr.connect(\"session_supported\", _on_supported)
-    xr._set_test_stub([\"immersive-vr\"], [], \"\")
     xr.is_session_supported(\"immersive-vr\")
     return [seen_mode, seen_ok]
 ";
+    install_backend(&["immersive-vr"], &[], None);
     match call_check(src) {
         Variant::Array(v) => {
             assert_eq!(v[0], Variant::String("immersive-vr".to_string()));

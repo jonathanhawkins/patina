@@ -165,6 +165,90 @@ impl StyleBoxFlat {
             push_rounded(&mut out, sr, self.shadow_radius() + s, self.shadow_color);
         }
 
+        // A SHEARED box cannot be expressed as axis-aligned rectangles plus
+        // circular corners, so it takes the polygon emitter instead
+        // (pat-s3rrv.215).
+        //
+        // ⚠️ Deliberately gated on `skew != 0` rather than replacing the
+        // rect/disc path outright. That path is exact for an unsheared box,
+        // cheaper to rasterize, and is what every existing stylebox test and
+        // golden image was produced against; swapping it wholesale would change
+        // the pixels of every themed control in the engine to gain nothing on
+        // the boxes that are not skewed.
+        if self.skew != Vector2::ZERO {
+            let border = self.border_width.iter().any(|w| *w > 0.0) && self.border_color.a > 0.0;
+
+            // Anti-aliasing: a feathered ring `aa_size` px outside the shape,
+            // drawn FIRST so the solid box covers its inner half and only the
+            // outer fringe survives as partial-alpha edge pixels
+            // (pat-s3rrv.215).
+            //
+            // ⚠️ This is the bead's own suggested approach ("emit a feathered
+            // outer ring of aa_size px"), NOT Godot's. Godot computes real
+            // per-pixel edge coverage; this approximates it with one
+            // half-alpha ring, which softens the edge but does not match
+            // Godot's gradient exactly.
+            //
+            // 🔑 It is confined to the SKEWED path on purpose. `anti_aliasing`
+            // defaults to TRUE, so feathering the ordinary rect/disc path would
+            // move the edge pixels of every themed control in the engine and
+            // every render golden with it. Scoping it here makes the property
+            // observable without touching a single existing box; the unskewed
+            // path still wants real coverage AA in the rasterizer.
+            if self.anti_aliasing && self.aa_size > 0.0 {
+                let a = self.aa_size;
+                let feather_rect = Rect2::new(
+                    Vector2::new(rect.position.x - a, rect.position.y - a),
+                    Vector2::new(rect.size.x + 2.0 * a, rect.size.y + 2.0 * a),
+                );
+                // Growing the radius with the rect keeps the corner arc
+                // concentric — the same trick the drop shadow above uses.
+                let feather_radii = radii.map(|r| if r > 0.0 { r + a } else { 0.0 });
+                let edge = if border {
+                    self.border_color
+                } else {
+                    self.bg_color
+                };
+                out.push(DrawCommand::DrawPolygon {
+                    points: rounded_box_outline(
+                        feather_rect,
+                        feather_radii,
+                        self.corner_detail,
+                        self.skew,
+                    ),
+                    colors: vec![Color::new(edge.r, edge.g, edge.b, edge.a * 0.5)],
+                });
+            }
+
+            if border {
+                out.push(DrawCommand::DrawPolygon {
+                    points: rounded_box_outline(rect, radii, self.corner_detail, self.skew),
+                    colors: vec![self.border_color],
+                });
+            }
+            if self.draw_center {
+                let inner = Rect2::new(
+                    Vector2::new(
+                        rect.position.x + self.border_width[0],
+                        rect.position.y + self.border_width[1],
+                    ),
+                    Vector2::new(
+                        (rect.size.x - self.border_width[0] - self.border_width[2]).max(0.0),
+                        (rect.size.y - self.border_width[1] - self.border_width[3]).max(0.0),
+                    ),
+                );
+                let inset = |a: usize, b: usize| {
+                    (radii[a] - self.border_width[a].max(self.border_width[b])).max(0.0)
+                };
+                let inner_radii = [inset(0, 1), inset(1, 2), inset(2, 3), inset(3, 0)];
+                out.push(DrawCommand::DrawPolygon {
+                    points: rounded_box_outline(inner, inner_radii, self.corner_detail, self.skew),
+                    colors: vec![self.bg_color],
+                });
+            }
+            return out;
+        }
+
         let has_border = self.border_width.iter().any(|w| *w > 0.0) && self.border_color.a > 0.0;
         if has_border {
             // Border layer, then the background inset by the border widths.
@@ -214,6 +298,17 @@ pub struct StyleBoxTexture {
     pub modulate: Color,
     /// Whether to draw the center region.
     pub draw_center: bool,
+    /// Godot `StyleBoxTexture.region_rect` — the sub-rectangle of the SOURCE
+    /// texture the nine patches are cut from (pat-s3rrv.215).
+    ///
+    /// ⚠️ A **zero-size** rect means "use the whole texture". That is Godot's
+    /// default and it is what every existing atlas-free stylebox relies on, so
+    /// the zero case must stay byte-for-byte identical to the behaviour before
+    /// this field existed. Not an `Option`, matching the same decision on
+    /// `DrawCommand::DrawNinePatch::region`: the engine's own default IS a zero
+    /// `Rect2`, and an `Option` would let `None` and `Some(ZERO)` drift apart
+    /// while meaning the same thing.
+    pub region_rect: Rect2,
 }
 
 impl Default for StyleBoxTexture {
@@ -222,6 +317,7 @@ impl Default for StyleBoxTexture {
             texture_path: String::new(),
             texture_margin: [0.0; 4],
             expand_margin: [0.0; 4],
+            region_rect: Rect2::new(Vector2::ZERO, Vector2::ZERO),
             axis_h: AxisStretchMode::Stretch,
             axis_v: AxisStretchMode::Stretch,
             modulate: Color::WHITE,
@@ -261,10 +357,11 @@ impl StyleBoxTexture {
             axis_h: self.axis_h.to_nine_patch_axis(),
             axis_v: self.axis_v.to_nine_patch_axis(),
             modulate: self.modulate,
-            region: gdcore::math::Rect2::new(
-                gdcore::math::Vector2::ZERO,
-                gdcore::math::Vector2::ZERO,
-            ),
+            // 🔑 The authored region now reaches the rasterizer. It was
+            // hardcoded to zero here, so an atlas-backed stylebox stretched the
+            // ENTIRE source image over the box — the patches were cut from the
+            // whole sheet rather than from the intended tile.
+            region: self.region_rect,
         }]
     }
 }
@@ -634,7 +731,20 @@ pub fn stylebox_from_props(class: &str, props: &HashMap<String, Variant>) -> Opt
                     f("expand_margin_bottom", 0.0),
                 ],
                 corner_detail: f("corner_detail", def.corner_detail as f32) as i32,
-                skew: Vector2::new(f("skew_x", 0.0), f("skew_y", 0.0)),
+                // ⚠️ Godot writes `skew` as a SINGLE Vector2 member — its doc
+                // XML declares `skew: Vector2` — so a real `.tres` carries
+                // `skew = Vector2(0.4, 0)`. Reading only `skew_x`/`skew_y`
+                // dropped it silently, which stayed invisible for as long as
+                // `skew` was unused at draw time (pat-s3rrv.215).
+                //
+                // Both spellings are accepted: the Vector2 is what Godot
+                // authors, and the split floats are what this parser's own
+                // tests and any scene saved against it already use. The Vector2
+                // wins when present.
+                skew: match props.get("skew") {
+                    Some(Variant::Vector2(v)) => *v,
+                    _ => Vector2::new(f("skew_x", 0.0), f("skew_y", 0.0)),
+                },
                 border_blend: props
                     .get("border_blend")
                     .and_then(variant_bool)
@@ -682,6 +792,14 @@ pub fn stylebox_from_props(class: &str, props: &HashMap<String, Variant>) -> Opt
                     .get("draw_center")
                     .and_then(variant_bool)
                     .unwrap_or(true),
+                // ⚠️ An ABSENT `region_rect` must stay the zero rect, which
+                // means "the whole texture". Substituting the box's own size
+                // here would silently make every atlas-free stylebox sample a
+                // region instead of the full image.
+                region_rect: match props.get("region_rect") {
+                    Some(Variant::Rect2(r)) => *r,
+                    _ => def.region_rect,
+                },
             }))
         }
         "StyleBoxLine" => {
@@ -1294,4 +1412,80 @@ mod per_corner_coverage_tests {
             }
         }
     }
+}
+
+/// Builds the outline of a rounded, optionally sheared box as a closed polygon
+/// ring (pat-s3rrv.215).
+///
+/// Ported from `upstream/godot/scene/resources/style_box_flat.cpp`
+/// `draw_rounded_rectangle` (:313-392).
+///
+/// # Why a polygon at all
+///
+/// The existing [`push_rounded_per_corner`] decomposes a rounded box into
+/// axis-aligned `DrawRect`s plus a `DrawCircle` per corner. That is exact for an
+/// UNSHEARED box and cheaper to rasterize, but a sheared box is not a union of
+/// axis-aligned rectangles and a sheared corner is not a circle — so `skew` and
+/// `corner_detail` are unreachable from that representation. This emitter is
+/// what makes both observable.
+///
+/// # The two details worth transcribing
+///
+/// - **The shear pivots on the rect's CENTRE and its sign is negative**:
+///   `x' = x - skew.x * (y - cy)`, `y' = y - skew.y * (x - cx)`. With a positive
+///   `skew.x` that pushes the TOP edge right and the BOTTOM edge left. Pivoting
+///   on the top-left corner instead — the intuitive choice — shears the box the
+///   same amount but slides it sideways as well, so it no longer sits in its
+///   own layout rect.
+/// - **A square box drops to one segment per corner**, not `corner_detail`:
+///   Godot sets `adapted_corner_detail = any radius > 0 ? corner_detail : 1`, so
+///   a sharp-cornered box emits 8 vertices however high the detail is set.
+///
+/// The ring has `4 * (detail + 1)` vertices, wound the way Godot winds it: each
+/// corner's arc starts at angle π and sweeps a quarter turn, beginning at the
+/// top-left.
+pub fn rounded_box_outline(
+    rect: Rect2,
+    radii: [f32; 4],
+    corner_detail: i32,
+    skew: Vector2,
+) -> Vec<Vector2> {
+    let [tl, tr, br, bl] = clamp_corner_radii(rect, radii);
+    // ⚠️ `.max(1)` is not cosmetic: Godot divides by this value
+    // (`detail / (double)adapted_corner_detail`), so a zero would be a division
+    // by zero rather than simply a coarse box.
+    let detail = if tl > 0.0 || tr > 0.0 || br > 0.0 || bl > 0.0 {
+        corner_detail.max(1)
+    } else {
+        1
+    };
+
+    let (x, y, w, h) = (rect.position.x, rect.position.y, rect.size.x, rect.size.y);
+    let (cx, cy) = (x + w * 0.5, y + h * 0.5);
+
+    // Arc centres and radii in Godot's corner order: top-left, top-right,
+    // bottom-right, bottom-left.
+    let corners = [
+        (tl, x + tl, y + tl),
+        (tr, x + w - tr, y + tr),
+        (br, x + w - br, y + h - br),
+        (bl, x + bl, y + h - bl),
+    ];
+
+    let quarter = std::f32::consts::FRAC_PI_2;
+    let mut points = Vec::with_capacity(4 * (detail as usize + 1));
+    for (corner_idx, (r, ax, ay)) in corners.iter().enumerate() {
+        for step in 0..=detail {
+            let t = step as f32 / detail as f32;
+            let angle = (corner_idx as f32 + t) * quarter + std::f32::consts::PI;
+            let px = r * angle.cos() + ax;
+            let py = r * angle.sin() + ay;
+            // The shear, exactly as Godot spells it.
+            points.push(Vector2::new(
+                px - skew.x * (py - cy),
+                py - skew.y * (px - cx),
+            ));
+        }
+    }
+    points
 }

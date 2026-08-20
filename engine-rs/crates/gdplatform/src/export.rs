@@ -588,6 +588,13 @@ impl PackageExecutor {
             web_engine_loader_js(&slug, &wasm_name, &pck_name).as_bytes(),
         )?;
 
+        // 3b. Audio worklet glue. Which transport it uses is decided HERE, at
+        // export time, from the threaded variant flag (pat-s3rrv.217).
+        write_file(
+            &self.output_dir.join("patina.audio.worklet.js"),
+            web_audio_worklet_glue(web.threads_enabled).as_bytes(),
+        )?;
+
         // 4. Web app manifest.
         write_file(
             &self.output_dir.join("manifest.webmanifest"),
@@ -1174,6 +1181,90 @@ fn json_escape(s: &str) -> String {
 /// Builds the `index.html` shell: a `<canvas>`, a `<progress>` bar, and an
 /// error/status overlay, plus the loader `<script>` and any `head_include`.
 ///
+/// Emits the audio worklet glue for a web export (pat-s3rrv.217).
+///
+/// Godot ships two audio transports for the web and picks between them on the
+/// same fact this does: with cross-origin isolation the driver hands the
+/// worklet a `SharedArrayBuffer` ring and writes into it directly; without it,
+/// the worklet has to ask the main thread for each block over its message port
+/// (`platform/web/js/libs/library_godot_audio.js`).
+///
+/// 🔑 **The non-isolated path is not a degraded version of the same thing — it
+/// is the only thing that works.** `SharedArrayBuffer` is not merely slower
+/// without COOP/COEP, it is absent from the global object, so glue that
+/// references it throws on load and the page gets no audio at all. Emitting the
+/// ring unconditionally would break every export that is not served with both
+/// headers, which is the default for most static hosts.
+///
+/// The returned source is a module the export writes beside the loader.
+pub fn web_audio_worklet_glue(threads_enabled: bool) -> String {
+    if threads_enabled {
+        // Isolated: a lock-free ring the audio thread reads without ever
+        // touching the main thread. `Atomics.store` publishes the write index
+        // after the samples, so a reader that sees the index sees the data.
+        r#"// Patina audio worklet — SharedArrayBuffer ring (threaded export).
+class PatinaAudio extends AudioWorkletProcessor {
+  constructor(options) {
+    super();
+    const opts = (options && options.processorOptions) || {};
+    this.ring = opts.ring ? new Float32Array(opts.ring) : null;
+    this.state = opts.state ? new Int32Array(opts.state) : null;
+    this.readIndex = 0;
+  }
+  process(inputs, outputs) {
+    const out = outputs[0];
+    if (!this.ring || !this.state) {
+      for (let c = 0; c < out.length; c++) out[c].fill(0);
+      return true;
+    }
+    const writeIndex = Atomics.load(this.state, 0);
+    const frames = out[0].length;
+    for (let i = 0; i < frames; i++) {
+      const available = this.readIndex !== writeIndex;
+      const sample = available ? this.ring[this.readIndex] : 0;
+      if (available) this.readIndex = (this.readIndex + 1) % this.ring.length;
+      for (let c = 0; c < out.length; c++) out[c][i] = sample;
+    }
+    Atomics.store(this.state, 1, this.readIndex);
+    return true;
+  }
+}
+registerProcessor('patina-audio', PatinaAudio);
+"#
+        .to_string()
+    } else {
+        // Not isolated: SharedArrayBuffer does not exist on the global object,
+        // so the worklet asks the main thread for each block and plays silence
+        // until one arrives.
+        r#"// Patina audio worklet — message-port block passing (single-threaded export).
+class PatinaAudio extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.queue = [];
+    this.port.onmessage = (event) => { this.queue.push(event.data); };
+  }
+  process(inputs, outputs) {
+    const out = outputs[0];
+    const block = this.queue.shift();
+    if (!block) {
+      for (let c = 0; c < out.length; c++) out[c].fill(0);
+      this.port.postMessage("need-block");
+      return true;
+    }
+    for (let c = 0; c < out.length; c++) {
+      const src = block[c] || block[0];
+      out[c].set(src.subarray(0, out[c].length));
+    }
+    this.port.postMessage("need-block");
+    return true;
+  }
+}
+registerProcessor('patina-audio', PatinaAudio);
+"#
+        .to_string()
+    }
+}
+
 /// When `threads_enabled` the shell documents the COOP/COEP headers the host
 /// must send; when `pwa_enabled` it links the web manifest.
 fn web_index_html(app_name: &str, js_name: &str, web: &WebExportConfig) -> String {

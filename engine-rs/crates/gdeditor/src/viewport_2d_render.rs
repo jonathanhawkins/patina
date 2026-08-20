@@ -4587,9 +4587,27 @@ fn with_override_font<
             // `res://` is the project-relative spelling; strip it so the path
             // resolves against the working directory like every other asset read.
             let disk = path.strip_prefix("res://").unwrap_or(path);
-            std::fs::read(disk)
-                .ok()
-                .and_then(|bytes| gdrender2d::ttf_font::TtfFont::from_bytes(bytes).ok())
+            std::fs::read(disk).ok().and_then(|bytes| {
+                // pat-s3rrv.214: a WOFF is an SFNT with zlib-compressed tables,
+                // and `TtfFont::from_bytes` only understands SFNT — so a `.woff`
+                // face parsed as nothing and the Label silently drew the
+                // built-in fallback.
+                //
+                // 🔑 This is the ONLY file-backed font load in the engine
+                // (everything else builds a `TtfFont` from embedded bytes), so
+                // decoding here covers every path that can name a font on disk.
+                // It is also why the decoder stays in `gdresource` rather than
+                // being duplicated into `gdrender2d`: those two crates cannot
+                // see each other, but `gdeditor` — where this call lives — sees
+                // both.
+                let sfnt =
+                    if gdresource::woff::is_woff1(&bytes) || gdresource::woff::is_woff2(&bytes) {
+                        gdresource::woff::woff_to_sfnt(&bytes).ok()?
+                    } else {
+                        bytes
+                    };
+                gdrender2d::ttf_font::TtfFont::from_bytes(sfnt).ok()
+            })
         });
         match entry {
             Some(ttf) => {

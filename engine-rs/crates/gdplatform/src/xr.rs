@@ -251,6 +251,83 @@ pub struct WebXrStub {
     pub force_failure: Option<String>,
 }
 
+/// Something the browser makes happen to a running session.
+///
+/// On wasm32 these are pushed by the `navigator.xr` event callbacks; natively
+/// and in tests they come from [`WebXrBackend::frame_events`]. Both paths land
+/// in the same state machine, which is the point of the split.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WebXrFrameEvent {
+    /// An input source appeared (`inputsourceschange`).
+    InputSourceConnected {
+        /// The browser's index for the source.
+        input_source_id: usize,
+        /// How the source is aimed.
+        target_ray_mode: TargetRayMode,
+    },
+    /// An input source went away.
+    InputSourceDisconnected {
+        /// The browser's index for the source.
+        input_source_id: usize,
+    },
+    /// `selectstart`/`selectend`/`squeezestart`/`squeezeend`.
+    Input {
+        /// Which event fired.
+        event: WebXrInputEvent,
+        /// The source that fired it.
+        input_source_id: usize,
+    },
+    /// The session's `visibilitychange`.
+    VisibilityState(String),
+    /// The reference space's `reset`.
+    ReferenceSpaceReset,
+    /// The session's `end`.
+    SessionEnded,
+}
+
+/// The platform's WebXR backend — what a fresh [`WebXrInterface`] starts with.
+///
+/// This is the seam the bead's acceptance means by "installed as the platform
+/// backend": no script method is involved, so a scene gets a working WebXR
+/// interface without calling anything Godot does not have.
+#[derive(Debug, Clone, Default)]
+pub struct WebXrBackend {
+    /// What `navigator.xr` answers about support and features.
+    pub stub: WebXrStub,
+    /// Events replayed by [`WebXrInterface::poll`], one bucket per poll taken
+    /// while a session is running. Bucket `i` is delivered on the `i`-th poll
+    /// after the session becomes active.
+    pub frame_events: Vec<Vec<WebXrFrameEvent>>,
+}
+
+thread_local! {
+    /// The backend every new interface is built from.
+    ///
+    /// Thread-local rather than a global: `XR_INTERFACES` on the binding side is
+    /// thread-local too, and tests must not leak a backend into each other.
+    static DEFAULT_BACKEND: std::cell::RefCell<Option<WebXrBackend>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Installs the process's WebXR backend.
+///
+/// The web entry point calls this with the real `navigator.xr` backend; a test
+/// calls it with a scripted one. Either way `XRServer.find_interface("WebXR")`
+/// hands back an interface already wired to it.
+pub fn set_default_backend(backend: WebXrBackend) {
+    DEFAULT_BACKEND.with(|b| *b.borrow_mut() = Some(backend));
+}
+
+/// Removes the installed backend, restoring "no WebXR in this browser".
+pub fn clear_default_backend() {
+    DEFAULT_BACKEND.with(|b| *b.borrow_mut() = None);
+}
+
+/// The installed backend, if any.
+pub fn default_backend() -> Option<WebXrBackend> {
+    DEFAULT_BACKEND.with(|b| b.borrow().clone())
+}
+
 /// Godot's `WebXRInterface` — the session lifecycle and its signal queue
 /// (pat-nzgdu.150).
 ///
@@ -281,18 +358,90 @@ pub struct WebXrInterface {
     input_sources: Vec<WebXrInputSource>,
     display_refresh_rate: f32,
     available_display_refresh_rates: Vec<f32>,
+    /// Scheduled browser events, one bucket per poll (pat-s3rrv.218).
+    frame_events: Vec<Vec<WebXrFrameEvent>>,
+    /// How many polls have been taken while a session was running.
+    frame_cursor: usize,
+    /// Events pushed directly by the wasm32 `navigator.xr` callbacks, applied
+    /// on the next poll.
+    incoming: Vec<WebXrFrameEvent>,
 }
 
 impl WebXrInterface {
-    /// A fresh interface with no session and no browser support (the correct
-    /// native answer).
+    /// A fresh interface, wired to the installed platform backend.
+    ///
+    /// With no backend installed this is "a browser with no WebXR at all",
+    /// which is the correct native answer and the previous behaviour.
     pub fn new() -> Self {
-        Self::default()
+        let mut iface = Self::default();
+        if let Some(backend) = default_backend() {
+            iface.stub = backend.stub;
+            iface.frame_events = backend.frame_events;
+        }
+        iface
     }
 
     /// Installs the stand-in for `navigator.xr`.
     pub fn set_stub(&mut self, stub: WebXrStub) {
         self.stub = stub;
+    }
+
+    /// Queues a browser event to be applied on the next [`poll`](Self::poll).
+    ///
+    /// This is what the wasm32 `navigator.xr` event callbacks call; they cannot
+    /// run script directly, so they record and let the frame loop deliver.
+    pub fn push_frame_event(&mut self, event: WebXrFrameEvent) {
+        self.incoming.push(event);
+    }
+
+    /// Advances the backend by one frame, turning browser events into signals.
+    ///
+    /// Called once per frame by the runtime. Scheduled events are only consumed
+    /// while a session is actually running — a browser cannot deliver a
+    /// `selectstart` before `requestSession` resolves, and gating here keeps the
+    /// signal order deterministic (`session_started` always precedes them).
+    pub fn poll(&mut self) {
+        // On the web the browser's callbacks have been recording events since
+        // the last frame; pull them in before anything else so they are applied
+        // in arrival order.
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.incoming
+                .extend(crate::xr_web::drain_events());
+        }
+        for event in std::mem::take(&mut self.incoming) {
+            self.apply_frame_event(event);
+        }
+        if self.state != WebXrSessionState::Active {
+            return;
+        }
+        if self.frame_cursor < self.frame_events.len() {
+            let bucket = std::mem::take(&mut self.frame_events[self.frame_cursor]);
+            for event in bucket {
+                self.apply_frame_event(event);
+            }
+        }
+        self.frame_cursor = self.frame_cursor.saturating_add(1);
+    }
+
+    /// Routes one browser event into the existing state machine.
+    fn apply_frame_event(&mut self, event: WebXrFrameEvent) {
+        match event {
+            WebXrFrameEvent::InputSourceConnected {
+                input_source_id,
+                target_ray_mode,
+            } => self.set_input_source(input_source_id, target_ray_mode),
+            WebXrFrameEvent::InputSourceDisconnected { input_source_id } => {
+                self.remove_input_source(input_source_id)
+            }
+            WebXrFrameEvent::Input {
+                event,
+                input_source_id,
+            } => self.on_input_event(event, input_source_id),
+            WebXrFrameEvent::VisibilityState(state) => self.set_visibility_state(&state),
+            WebXrFrameEvent::ReferenceSpaceReset => self.notify_reference_space_reset(),
+            WebXrFrameEvent::SessionEnded => self.uninitialize(),
+        }
     }
 
     /// Godot's `WebXRInterface.name`.

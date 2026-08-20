@@ -34,6 +34,7 @@ pub mod memory_profiler;
 pub mod nightly_ci;
 pub mod node_path;
 pub mod ok_color;
+pub mod optimized_translation;
 pub mod perf_comparison;
 pub mod performance;
 pub mod project_settings;

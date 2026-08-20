@@ -1039,6 +1039,7 @@ dependencies = [
  "gdresource",
  "gdserver2d",
  "gdvariant",
+ "miniz_oxide",
  "proptest",
  "serde_json",
  "stacker",

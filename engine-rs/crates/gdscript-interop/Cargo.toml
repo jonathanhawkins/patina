@@ -25,6 +25,10 @@ gdplatform = { path = "../gdplatform" }
 gdrender2d = { path = "../gdrender2d" }
 serde_json = { workspace = true }
 stacker = "0.1"
+# DEFLATE for `PackedByteArray.compress/decompress` (pat-s3rrv.224). Already a
+# direct dependency of gdrender2d, gdresource and gdscene at this exact version,
+# so this adds no new crate to the graph.
+miniz_oxide = "0.8"
 thiserror.workspace = true
 tracing.workspace = true
 

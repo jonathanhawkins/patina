@@ -2613,26 +2613,6 @@ impl Interpreter {
                 "get_optional_features" => {
                     Ok(Variant::PackedStringArray(iface.optional_features.clone()))
                 }
-                // NOT a Godot method — the leading underscore marks it as a
-                // Patina test seam. There is no real `navigator.xr` here, so a
-                // test has no other way to say "the browser grants immersive-vr
-                // with these features". Named explicitly rather than smuggled in
-                // as a fake `initialize()` argument.
-                "_set_test_stub" => {
-                    let modes: Vec<gdplatform::WebXrSessionMode> = xr_string_list(args.first())
-                        .iter()
-                        .map(|m| xr_session_mode(m))
-                        .collect();
-                    iface.set_stub(gdplatform::WebXrStub {
-                        supported_modes: modes,
-                        available_features: xr_string_list(args.get(1)),
-                        force_failure: match args.get(2) {
-                            Some(Variant::String(msg)) if !msg.is_empty() => Some(msg.clone()),
-                            _ => None,
-                        },
-                    });
-                    Ok(Variant::Nil)
-                }
                 "is_session_supported" => {
                     iface.is_session_supported(&args.first().map(arg_str).unwrap_or_default());
                     Ok(Variant::Nil)
@@ -2650,6 +2630,40 @@ impl Interpreter {
 
         self.drain_xr_signals(raw)?;
         Ok(result)
+    }
+
+    /// Delivers every live XR interface's queued signals to `instance`.
+    ///
+    /// Called once per script per frame by the runtime. Before this bead
+    /// `drain_xr_signals` ran only at the end of a script's own call into the
+    /// interface, so a browser event arriving between script calls could never
+    /// reach a connected Callable.
+    ///
+    /// ⚠️ **`instance` is threaded in as `self` and that is load-bearing**, for
+    /// the same reason as [`tick_instance_coroutine_frames`](Self::tick_instance_coroutine_frames)
+    /// (pat-nzgdu.6). Running off the SceneTree tick means `self_instance` has
+    /// already been torn down, so without this the callback's method never
+    /// resolves *and* a `self.x += 1` it performs is discarded. My first version
+    /// omitted it and the signal silently reached nobody.
+    ///
+    /// ⚠️ Deliberately does **not** poll. Polling advances the backend by one
+    /// frame, and the runtime runs this for *every* script — polling here would
+    /// advance the browser-event schedule N times per frame in a scene with N
+    /// scripts. [`poll_xr_interfaces`] does that once, before the loop.
+    pub fn pump_instance_xr_signals(
+        &mut self,
+        instance: &mut ClassInstance,
+    ) -> Result<(), RuntimeError> {
+        let handles: Vec<u64> = XR_INTERFACES.with(|m| m.borrow().keys().copied().collect());
+        if handles.is_empty() {
+            return Ok(());
+        }
+        self.resume_with_instance_self(instance, move |i| {
+            for raw in handles {
+                i.drain_xr_signals(raw)?;
+            }
+            Ok(())
+        })
     }
 
     /// Delivers any queued interface signals to connected script Callables.
@@ -3520,6 +3534,14 @@ impl Interpreter {
                                     class_name.as_str(),
                                     "XRTracker"
                                         | "XRPositionalTracker"
+                                        // XRControllerTracker is what an XR
+                                        // runtime registers for a hand
+                                        // controller, and what an XRController3D
+                                        // binds by name (pat-s3rrv.219). It was
+                                        // absent, so the acceptance's own
+                                        // `XRControllerTracker.new()` could not
+                                        // be constructed.
+                                        | "XRControllerTracker"
                                         | "XRHandTracker"
                                         | "XRBodyTracker"
                                         | "XRFaceTracker"
@@ -10338,6 +10360,14 @@ impl Interpreter {
             }
             Variant::Array(arr) => match method {
                 "size" | "length" => Ok(Variant::Int(arr.len() as i64)),
+                // `Array.hash()` (pat-s3rrv.223). Godot binds this and scripts
+                // use it to compare arrays cheaply; it was reachable only as the
+                // global `hash(arr)`.
+                //
+                // ⓘ The clone is the price of hashing through the `Variant`
+                // form. Godot walks every element too, so this is the same order
+                // of work, and a hash of a mutable array cannot be cached.
+                "hash" => Ok(Variant::Int(variant_hash(&Variant::Array(arr.clone())))),
                 "is_empty" => Ok(Variant::Bool(arr.is_empty())),
                 "push_back" | "append" => {
                     Self::require_args(method, args, 1)?;
@@ -11203,6 +11233,10 @@ impl Interpreter {
             },
             Variant::Dictionary(d) => match method {
                 "size" => Ok(Variant::Int(d.len() as i64)),
+                // `Dictionary.hash()` (pat-s3rrv.223) — see the Array arm.
+                "hash" => Ok(Variant::Int(variant_hash(&Variant::Dictionary(
+                    d.clone(),
+                )))),
                 "is_empty" => Ok(Variant::Bool(d.is_empty())),
                 "has" => {
                     if args.len() != 1 {
@@ -13908,6 +13942,107 @@ impl Interpreter {
                     obj.variant_type()
                 )))),
             },
+            // -- Wide string decoders (pat-s3rrv.224) --
+            //
+            // ⚠️ Godot's `String::parse_utf16` honours a BOM and otherwise
+            // assumes LITTLE endian. Defaulting to big endian would decode every
+            // BOM-less buffer into mojibake that still "succeeds".
+            "get_string_from_utf16" => match obj {
+                Variant::PackedByteArray(b) => Ok(Variant::String(decode_utf16_bytes(b))),
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "{} has no method 'get_string_from_utf16'",
+                    obj.variant_type()
+                )))),
+            },
+            "get_string_from_utf32" => match obj {
+                Variant::PackedByteArray(b) => Ok(Variant::String(decode_utf32_bytes(b))),
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "{} has no method 'get_string_from_utf32'",
+                    obj.variant_type()
+                )))),
+            },
+            // ⓘ `wchar_t` is 32-bit on Unix and 16-bit on Windows. Patina's
+            // native and web targets are the 32-bit case, so this is UTF-32;
+            // a Windows host would need the UTF-16 decoder here instead.
+            "get_string_from_wchar" => match obj {
+                Variant::PackedByteArray(b) => Ok(Variant::String(decode_utf32_bytes(b))),
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "{} has no method 'get_string_from_wchar'",
+                    obj.variant_type()
+                )))),
+            },
+            // Godot decodes with the C locale; with no locale layer here the
+            // bytes are read as Latin-1, which is what the C locale gives for
+            // a single-byte encoding.
+            "get_string_from_multibyte_char" => match obj {
+                Variant::PackedByteArray(b) => Ok(Variant::String(
+                    b.iter()
+                        .take_while(|&&c| c != 0)
+                        .map(|&c| c as char)
+                        .collect(),
+                )),
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "{} has no method 'get_string_from_multibyte_char'",
+                    obj.variant_type()
+                )))),
+            },
+            // -- Compression (pat-s3rrv.224) --
+            //
+            // Modes are Godot's `Compression::Mode` ordinals
+            // (`core/io/compression.h:48-52`): FASTLZ 0, DEFLATE 1, ZSTD 2,
+            // GZIP 3, BROTLI 4.
+            //
+            // ⚠️ Only DEFLATE and GZIP are implemented; FASTLZ, ZSTD and BROTLI
+            // have no codec in this workspace and would each need a new external
+            // crate. They return an EMPTY array, which is Godot's own failure
+            // signal — deliberately not a silent pass-through of the input,
+            // which would look like a successful round-trip while storing
+            // uncompressed bytes.
+            "compress" => match obj {
+                Variant::PackedByteArray(b) => {
+                    let mode = args.first().map(|a| to_int(a)).transpose()?.unwrap_or(0);
+                    Ok(Variant::PackedByteArray(pba_compress(b, mode)))
+                }
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "{} has no method 'compress'",
+                    obj.variant_type()
+                )))),
+            },
+            "decompress" => match obj {
+                Variant::PackedByteArray(b) => {
+                    let size = args.first().map(|a| to_int(a)).transpose()?.unwrap_or(0);
+                    let mode = args.get(1).map(|a| to_int(a)).transpose()?.unwrap_or(0);
+                    let out = pba_decompress(b, mode);
+                    // ⚠️ Godot fails when the result does not fit the buffer the
+                    // caller sized. Returning the oversized data instead would
+                    // hand a script more bytes than it asked for.
+                    if size < 0 || out.len() as i64 > size {
+                        return Ok(Variant::PackedByteArray(Vec::new()));
+                    }
+                    Ok(Variant::PackedByteArray(out))
+                }
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "{} has no method 'decompress'",
+                    obj.variant_type()
+                )))),
+            },
+            // `decompress_dynamic` grows to fit instead of demanding an exact
+            // size; `max_output_size < 0` means unbounded, as in Godot.
+            "decompress_dynamic" => match obj {
+                Variant::PackedByteArray(b) => {
+                    let max = args.first().map(|a| to_int(a)).transpose()?.unwrap_or(-1);
+                    let mode = args.get(1).map(|a| to_int(a)).transpose()?.unwrap_or(0);
+                    let out = pba_decompress(b, mode);
+                    if max >= 0 && out.len() as i64 > max {
+                        return Ok(Variant::PackedByteArray(Vec::new()));
+                    }
+                    Ok(Variant::PackedByteArray(out))
+                }
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "{} has no method 'decompress_dynamic'",
+                    obj.variant_type()
+                )))),
+            },
             "get_string_from_ascii" => match obj {
                 Variant::PackedByteArray(b) => {
                     // Each byte maps directly to a Latin-1 code point.
@@ -15730,6 +15865,46 @@ fn variant_component(value: &Variant, name: &str) -> Option<Variant> {
         // Nested one level: `rect:position:x` walks through here.
         (Variant::Rect2(r), "position") => Some(Variant::Vector2(r.position)),
         (Variant::Rect2(r), "size") => Some(Variant::Vector2(r.size)),
+        // The pat-s3rrv.59 builtins. ⚠️ This is a SECOND member table beside
+        // `variant_math::member_get`, and it had none of them: `Rect2i` was
+        // missing while its float twin `Rect2` was present, so a subname chain
+        // like `region:size:x` resolved for a Rect2 and silently returned
+        // `None` for a Rect2i. Anything driven by subname paths — animation
+        // tracks, the inspector, `set_indexed` — could therefore read a Rect2
+        // and not a Rect2i.
+        (Variant::Rect2i(r), "position") => Some(Variant::Vector2i(r.position)),
+        (Variant::Rect2i(r), "size") => Some(Variant::Vector2i(r.size)),
+        (Variant::Rect2i(r), "end") => Some(Variant::Vector2i(r.end())),
+        (Variant::Rect2(r), "end") => Some(Variant::Vector2(r.end())),
+        // Components stay in their own numeric domain: an integer vector's `x`
+        // is an `Int`, so `v.x == 3` holds instead of comparing against a
+        // silently widened float.
+        (Variant::Vector4(v), "x") => Some(Variant::Float(v.x as f64)),
+        (Variant::Vector4(v), "y") => Some(Variant::Float(v.y as f64)),
+        (Variant::Vector4(v), "z") => Some(Variant::Float(v.z as f64)),
+        (Variant::Vector4(v), "w") => Some(Variant::Float(v.w as f64)),
+        (Variant::Vector4i(v), "x") => Some(Variant::Int(v.x as i64)),
+        (Variant::Vector4i(v), "y") => Some(Variant::Int(v.y as i64)),
+        (Variant::Vector4i(v), "z") => Some(Variant::Int(v.z as i64)),
+        (Variant::Vector4i(v), "w") => Some(Variant::Int(v.w as i64)),
+        // ⚠️ A Projection's x/y/z/w are its four COLUMNS, each a whole Vector4
+        // (doc/classes/Projection.xml), not scalar components. Storage is
+        // column-major, so `m[i]` is the i-th column; reading rows would
+        // transpose every matrix reached through a subname path.
+        (Variant::Projection(p), "x")
+        | (Variant::Projection(p), "y")
+        | (Variant::Projection(p), "z")
+        | (Variant::Projection(p), "w") => {
+            let i = match name {
+                "x" => 0,
+                "y" => 1,
+                "z" => 2,
+                _ => 3,
+            };
+            Some(Variant::Vector4(gdcore::math::Vector4::new(
+                p.m[i][0], p.m[i][1], p.m[i][2], p.m[i][3],
+            )))
+        }
         _ => None,
     }
 }
@@ -22336,6 +22511,34 @@ pub(crate) struct ScriptXrTracker {
     joint_flags: HashMap<i64, i64>,
     joint_radius: HashMap<i64, f32>,
     blend_shapes: HashMap<i64, f32>,
+    /// Named poses (Godot `XRPositionalTracker.set_pose`), pat-s3rrv.219.
+    poses: HashMap<String, XrTrackerPose>,
+    /// Named inputs — buttons, triggers, thumbsticks — as raw Variants, which
+    /// is how Godot's `set_input(name, value)` carries them.
+    inputs: HashMap<String, Variant>,
+}
+
+/// One tracked pose, mirroring the arguments of Godot's
+/// `XRPositionalTracker.set_pose(name, transform, linear_velocity,
+/// angular_velocity, tracking_confidence)`.
+///
+/// A `pose` is what actually moves an `XRNode3D`: the node names the pose it
+/// follows (default `"default"`) and the frame tick copies this transform onto
+/// it. Before any pose is set the tracker has no entry at all, which is what
+/// makes `has_pose`/`get_has_tracking_data` false rather than "identity".
+// ⚠️ No `Default`: `Transform3D` has no `Default` impl (only `IDENTITY`), so
+// deriving it here is a hard error. Nothing constructs this by default —
+// `set_pose` always supplies every field.
+#[derive(Debug, Clone, PartialEq)]
+pub struct XrTrackerPose {
+    /// The pose's transform in tracking space.
+    pub transform: gdcore::math3d::Transform3D,
+    /// Linear velocity, if the runtime reports one.
+    pub linear_velocity: gdcore::math::Vector3,
+    /// Angular velocity, if the runtime reports one.
+    pub angular_velocity: gdcore::math::Vector3,
+    /// Godot `XRPose.TrackingConfidence`.
+    pub tracking_confidence: i64,
 }
 
 thread_local! {
@@ -22351,6 +22554,36 @@ thread_local! {
     static XR_TRACKER_REGISTRY: std::cell::RefCell<HashMap<String, u64>> =
         std::cell::RefCell::new(HashMap::new());
     static NEXT_XR_TRACKER: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// Looks up a named pose on a named tracker (pat-s3rrv.219).
+///
+/// `gdscene` drives XR nodes from the frame tick but cannot reach these
+/// thread-locals directly, so this is the read seam. `None` means either no
+/// such tracker or no such pose — both are "not tracking", which is exactly
+/// what `XRNode3D.get_has_tracking_data()` reports.
+pub fn xr_tracker_pose(tracker_name: &str, pose_name: &str) -> Option<XrTrackerPose> {
+    let raw = XR_TRACKER_REGISTRY.with(|r| r.borrow().get(tracker_name).copied())?;
+    XR_TRACKERS.with(|m| {
+        m.borrow()
+            .get(&raw)
+            .and_then(|t| t.poses.get(pose_name).cloned())
+    })
+}
+
+/// Reads a named input off a named tracker (Godot `get_input`).
+pub fn xr_tracker_input(tracker_name: &str, input_name: &str) -> Option<Variant> {
+    let raw = XR_TRACKER_REGISTRY.with(|r| r.borrow().get(tracker_name).copied())?;
+    XR_TRACKERS.with(|m| {
+        m.borrow()
+            .get(&raw)
+            .and_then(|t| t.inputs.get(input_name).cloned())
+    })
+}
+
+/// Whether `XRServer` currently has a tracker under this name.
+pub fn xr_tracker_exists(tracker_name: &str) -> bool {
+    XR_TRACKER_REGISTRY.with(|r| r.borrow().contains_key(tracker_name))
 }
 
 fn is_xr_tracker_handle(id: gdcore::id::ObjectId) -> bool {
@@ -22418,6 +22651,75 @@ fn call_xr_tracker_instance(
                 Variant::Nil
             }
             "get_tracker_hand" | "get_hand" => Variant::Int(t.hand),
+            // Pose and input API (pat-s3rrv.219). These are what an XRNode3D
+            // follows; without them the whole XR node family was inert.
+            "set_pose" => {
+                let name = args.first().map(arg_str).unwrap_or_default();
+                let transform = match args.get(1) {
+                    Some(Variant::Transform3D(x)) => *x,
+                    _ => gdcore::math3d::Transform3D::IDENTITY,
+                };
+                let vec_at = |i: usize| match args.get(i) {
+                    Some(Variant::Vector3(v)) => *v,
+                    _ => gdcore::math::Vector3::new(0.0, 0.0, 0.0),
+                };
+                t.poses.insert(
+                    name,
+                    XrTrackerPose {
+                        transform,
+                        linear_velocity: vec_at(2),
+                        angular_velocity: vec_at(3),
+                        tracking_confidence: int_arg(4),
+                    },
+                );
+                Variant::Nil
+            }
+            "has_pose" => Variant::Bool(
+                t.poses
+                    .contains_key(&args.first().map(arg_str).unwrap_or_default()),
+            ),
+            // Godot hands back an `XRPose` object; Patina has no such class, so
+            // the fields travel as a Dictionary. `Nil` for an unset pose is the
+            // load-bearing part — it is how "not tracking yet" is expressed.
+            "get_pose" => match t.poses.get(&args.first().map(arg_str).unwrap_or_default()) {
+                Some(pose) => {
+                    let mut d = gdvariant::Dictionary::new();
+                    d.insert(
+                        Variant::String("transform".into()),
+                        Variant::Transform3D(pose.transform),
+                    );
+                    d.insert(
+                        Variant::String("linear_velocity".into()),
+                        Variant::Vector3(pose.linear_velocity),
+                    );
+                    d.insert(
+                        Variant::String("angular_velocity".into()),
+                        Variant::Vector3(pose.angular_velocity),
+                    );
+                    d.insert(
+                        Variant::String("tracking_confidence".into()),
+                        Variant::Int(pose.tracking_confidence),
+                    );
+                    Variant::Dictionary(d)
+                }
+                None => Variant::Nil,
+            },
+            "invalidate_pose" => {
+                t.poses
+                    .remove(&args.first().map(arg_str).unwrap_or_default());
+                Variant::Nil
+            }
+            "set_input" => {
+                let name = args.first().map(arg_str).unwrap_or_default();
+                t.inputs
+                    .insert(name, args.get(1).cloned().unwrap_or(Variant::Nil));
+                Variant::Nil
+            }
+            "get_input" => t
+                .inputs
+                .get(&args.first().map(arg_str).unwrap_or_default())
+                .cloned()
+                .unwrap_or(Variant::Nil),
             "set_hand_joint_transform" => {
                 if let Some(Variant::Transform3D(x)) = args.get(1) {
                     t.joint_transforms.insert(int_arg(0), *x);
@@ -22484,6 +22786,20 @@ thread_local! {
     /// identity) can bind them. This registry is the handle-side equivalent.
     static XR_SIGNAL_CALLBACKS: std::cell::RefCell<HashMap<(u64, String), Vec<CallableRef>>> =
         std::cell::RefCell::new(HashMap::new());
+}
+
+/// Advances every live XR interface by one frame (pat-s3rrv.218).
+///
+/// Called once per frame by the runtime, **before** the per-script drain. This
+/// is where a browser event becomes a queued signal; keeping it out of the
+/// per-script path is what stops a scene with N scripts from advancing the
+/// backend N times a frame.
+pub fn poll_xr_interfaces() {
+    XR_INTERFACES.with(|m| {
+        for iface in m.borrow_mut().values_mut() {
+            iface.poll();
+        }
+    });
 }
 
 fn is_xr_interface_handle(id: gdcore::id::ObjectId) -> bool {
@@ -25912,7 +26228,10 @@ fn call_ip_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeErro
                         Variant::String("friendly".into()),
                         Variant::String(iface.friendly_name),
                     );
-                    d.insert(Variant::String("index".into()), Variant::String(iface.index));
+                    d.insert(
+                        Variant::String("index".into()),
+                        Variant::String(iface.index),
+                    );
                     d.insert(
                         Variant::String("addresses".into()),
                         Variant::Array(iface.addresses.into_iter().map(Variant::String).collect()),
@@ -25942,9 +26261,8 @@ fn call_ip_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeErro
 /// only consumer was `macos.rs`; this promotes it to the singleton's backing
 /// store so scripts reach the same bookkeeping.
 fn native_menus() -> std::sync::MutexGuard<'static, gdplatform::native_menu::NativeMenuBar> {
-    static MENUS: std::sync::OnceLock<
-        std::sync::Mutex<gdplatform::native_menu::NativeMenuBar>,
-    > = std::sync::OnceLock::new();
+    static MENUS: std::sync::OnceLock<std::sync::Mutex<gdplatform::native_menu::NativeMenuBar>> =
+        std::sync::OnceLock::new();
     MENUS
         .get_or_init(|| std::sync::Mutex::new(gdplatform::native_menu::NativeMenuBar::new()))
         .lock()
@@ -26037,7 +26355,10 @@ fn call_nativemenu_static(method: &str, args: &[Variant]) -> Result<Variant, Run
             let idx = singleton_int_arg(args, 1, "NativeMenu.set_item_text()")?;
             let text = singleton_string_arg(args, 2, "NativeMenu.set_item_text()")?;
             if let Some(menu) = bar.get_menu_mut(MenuId(rid)) {
-                if let Some(item) = usize::try_from(idx).ok().and_then(|i| menu.items.get_mut(i)) {
+                if let Some(item) = usize::try_from(idx)
+                    .ok()
+                    .and_then(|i| menu.items.get_mut(i))
+                {
                     item.label = text;
                 }
             }
@@ -26098,10 +26419,7 @@ impl SingletonRegistry {
 }
 
 /// `TextServerManager` — the shipped interface is gdrender2d's real shaper.
-fn call_textservermanager_static(
-    method: &str,
-    args: &[Variant],
-) -> Result<Variant, RuntimeError> {
+fn call_textservermanager_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
     static REG: std::sync::OnceLock<std::sync::Mutex<SingletonRegistry>> =
         std::sync::OnceLock::new();
     let mut reg = REG
@@ -26130,16 +26448,17 @@ fn call_textservermanager_static(
                 .map(|(i, name)| {
                     let mut d = gdvariant::Dictionary::new();
                     d.insert(Variant::String("id".into()), Variant::Int(i as i64));
-                    d.insert(Variant::String("name".into()), Variant::String(name.clone()));
+                    d.insert(
+                        Variant::String("name".into()),
+                        Variant::String(name.clone()),
+                    );
                     if i == 0 {
                         // The shipped interface is gdrender2d's real shaper, so
                         // its descriptor reports the shaper's actual state
                         // rather than a hard-coded string.
                         d.insert(
                             Variant::String("has_ttf".into()),
-                            Variant::Bool(
-                                gdrender2d::text_server::TextServerLite::new().has_ttf(),
-                            ),
+                            Variant::Bool(gdrender2d::text_server::TextServerLite::new().has_ttf()),
                         );
                     }
                     Variant::Dictionary(d)
@@ -26318,7 +26637,8 @@ fn call_navigationmeshgenerator_static(
     args: &[Variant],
 ) -> Result<Variant, RuntimeError> {
     match method {
-        "parse_source_geometry_data" | "bake_from_source_geometry_data"
+        "parse_source_geometry_data"
+        | "bake_from_source_geometry_data"
         | "bake_from_source_geometry_data_async" => {
             // Godot's argument order is (navigation_mesh, source_geometry_data).
             let source = args.get(1).or_else(|| args.first());
@@ -26363,10 +26683,7 @@ fn call_navigationmeshgenerator_static(
                 Variant::String("vertices".into()),
                 Variant::PackedVector3Array(vertices),
             );
-            out.insert(
-                Variant::String("polygons".into()),
-                Variant::Array(polygons),
-            );
+            out.insert(Variant::String("polygons".into()), Variant::Array(polygons));
             Ok(Variant::Dictionary(out))
         }
         // Baking is synchronous here, so nothing is ever in flight.
@@ -28918,6 +29235,126 @@ impl ScriptInstance for GDScriptInstance {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Godot `Compression::Mode` ordinals (`core/io/compression.h:48-52`).
+const COMPRESS_FASTLZ: i64 = 0;
+const COMPRESS_DEFLATE: i64 = 1;
+const COMPRESS_ZSTD: i64 = 2;
+const COMPRESS_GZIP: i64 = 3;
+const COMPRESS_BROTLI: i64 = 4;
+
+/// The gzip member header Godot's GZIP mode writes: magic, CM=8 (deflate),
+/// FLG=0, MTIME=0, XFL=0, OS=255 (unknown).
+const GZIP_HEADER: [u8; 10] = [0x1f, 0x8b, 0x08, 0, 0, 0, 0, 0, 0, 0xff];
+
+/// `PackedByteArray.compress(mode)`.
+///
+/// Returns an empty vector for a mode with no codec here, which is Godot's
+/// failure signal. Passing the input through unchanged would be worse: it looks
+/// like a successful round-trip while storing uncompressed bytes.
+fn pba_compress(data: &[u8], mode: i64) -> Vec<u8> {
+    match mode {
+        COMPRESS_DEFLATE => miniz_oxide::deflate::compress_to_vec(data, 6),
+        COMPRESS_GZIP => {
+            let mut out = GZIP_HEADER.to_vec();
+            out.extend_from_slice(&miniz_oxide::deflate::compress_to_vec(data, 6));
+            out.extend_from_slice(&gdresource::crc32(data).to_le_bytes());
+            out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            out
+        }
+        COMPRESS_FASTLZ | COMPRESS_ZSTD | COMPRESS_BROTLI => Vec::new(),
+        _ => Vec::new(),
+    }
+}
+
+/// `PackedByteArray.decompress(..)`'s codec half, size checks left to callers.
+fn pba_decompress(data: &[u8], mode: i64) -> Vec<u8> {
+    match mode {
+        COMPRESS_DEFLATE => miniz_oxide::inflate::decompress_to_vec(data).unwrap_or_default(),
+        COMPRESS_GZIP => {
+            let Some(body) = gzip_strip_header(data) else {
+                return Vec::new();
+            };
+            // The 8-byte CRC+ISIZE trailer is not part of the deflate stream.
+            let end = body.len().saturating_sub(8);
+            miniz_oxide::inflate::decompress_to_vec(&body[..end]).unwrap_or_default()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Skips a gzip member header, honouring the optional FLG fields.
+///
+/// Returns `None` for anything that is not deflate-compressed gzip. Our own
+/// writer emits FLG=0, but a buffer read from disk may carry FNAME or FEXTRA,
+/// and blindly skipping ten bytes would feed the filename into the inflater.
+fn gzip_strip_header(data: &[u8]) -> Option<&[u8]> {
+    if data.len() < 18 || data[0] != 0x1f || data[1] != 0x8b || data[2] != 0x08 {
+        return None;
+    }
+    let flg = data[3];
+    let mut i = 10usize;
+    if flg & 0x04 != 0 {
+        // FEXTRA: a two-byte length then that many bytes.
+        let xlen = u16::from_le_bytes([*data.get(i)?, *data.get(i + 1)?]) as usize;
+        i = i.checked_add(2)?.checked_add(xlen)?;
+    }
+    for bit in [0x08u8, 0x10] {
+        if flg & bit != 0 {
+            // FNAME / FCOMMENT: NUL-terminated.
+            while *data.get(i)? != 0 {
+                i += 1;
+            }
+            i += 1;
+        }
+    }
+    if flg & 0x02 != 0 {
+        i = i.checked_add(2)?; // FHCRC
+    }
+    data.get(i..)
+}
+
+/// `PackedByteArray.get_string_from_utf16()`.
+///
+/// ⚠️ BOM-aware, defaulting to LITTLE endian like `String::parse_utf16`. An odd
+/// trailing byte is dropped rather than treated as a half code unit.
+fn decode_utf16_bytes(b: &[u8]) -> String {
+    let (body, big) = match b {
+        [0xFF, 0xFE, rest @ ..] => (rest, false),
+        [0xFE, 0xFF, rest @ ..] => (rest, true),
+        _ => (b, false),
+    };
+    let units: Vec<u16> = body
+        .chunks_exact(2)
+        .map(|c| {
+            if big {
+                u16::from_be_bytes([c[0], c[1]])
+            } else {
+                u16::from_le_bytes([c[0], c[1]])
+            }
+        })
+        .collect();
+    String::from_utf16_lossy(&units)
+}
+
+/// `PackedByteArray.get_string_from_utf32()` / `get_string_from_wchar()`.
+fn decode_utf32_bytes(b: &[u8]) -> String {
+    let (body, big) = match b {
+        [0xFF, 0xFE, 0x00, 0x00, rest @ ..] => (rest, false),
+        [0x00, 0x00, 0xFE, 0xFF, rest @ ..] => (rest, true),
+        _ => (b, false),
+    };
+    body.chunks_exact(4)
+        .map(|c| {
+            let v = if big {
+                u32::from_be_bytes([c[0], c[1], c[2], c[3]])
+            } else {
+                u32::from_le_bytes([c[0], c[1], c[2], c[3]])
+            };
+            char::from_u32(v).unwrap_or(char::REPLACEMENT_CHARACTER)
+        })
+        .collect()
+}
 
 #[cfg(test)]
 mod tests {

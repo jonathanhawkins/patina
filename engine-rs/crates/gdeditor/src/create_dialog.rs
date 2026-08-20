@@ -89,6 +89,31 @@ impl NodeCatalog2D {
         &self.entries
     }
 
+    /// Entries the active feature profile still allows (pat-s3rrv.225).
+    ///
+    /// 🔑 This is what "a profile that disables `Sprite2D` removes it from
+    /// Create Node" actually means. [`entries`](Self::entries) deliberately
+    /// stays unfiltered — the Manage-Profiles dialog itself has to list every
+    /// class in order to offer them for disabling, so a globally filtered
+    /// catalog would hide the very entries the user is trying to tick.
+    ///
+    /// With no profile selected this returns everything, so every existing
+    /// caller behaves exactly as before.
+    pub fn visible_entries(&self) -> Vec<&CatalogEntry> {
+        self.entries
+            .iter()
+            .filter(|e| !crate::feature_profile::is_class_disabled(&e.class_name))
+            .collect()
+    }
+
+    /// [`search`](Self::search) restricted to what the active profile allows.
+    pub fn visible_search(&self, query: &str) -> Vec<&CatalogEntry> {
+        self.search(query)
+            .into_iter()
+            .filter(|e| !crate::feature_profile::is_class_disabled(&e.class_name))
+            .collect()
+    }
+
     /// Returns entries filtered by category.
     pub fn entries_by_category(&self, category: NodeCategory) -> Vec<&CatalogEntry> {
         self.entries

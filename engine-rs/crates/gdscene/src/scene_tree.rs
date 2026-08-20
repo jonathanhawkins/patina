@@ -2022,6 +2022,15 @@ impl SceneTree {
         self.process_timers_phase(delta as f64, unscaled_delta, false);
         let fired = self.take_timeout_signals();
 
+        // Advance every XR interface exactly once for this frame, turning any
+        // browser event into a queued signal (pat-s3rrv.218).
+        //
+        // ⚠️ Deliberately OUTSIDE the loop below. That loop visits *every*
+        // script, so polling per-script would advance the backend N times a
+        // frame in a scene with N scripts — invisible with one script, wrong
+        // with two. The per-script call inside only drains.
+        gdscript_interop::poll_xr_interfaces();
+
         // Temporarily remove each script while it runs so a resumed coroutine
         // body can call back into the tree via SceneTreeAccessor without
         // violating borrow rules (mirrors `call_script_with_access`).
@@ -2049,6 +2058,11 @@ impl SceneTree {
                 script.notify_await_signal(sig, &[]);
             }
             script.poll_coroutines(delta);
+            // Deliver XR interface signals to this script's connected Callables
+            // (pat-s3rrv.218). Placed before `clear_scene_access` so a callback
+            // can reach the tree, and before the property sync below so a var a
+            // callback writes reaches the node like any other.
+            script.pump_xr_signals();
             script.clear_scene_access();
 
             // Sync any variables a resumed coroutine wrote (e.g. `done = true`)

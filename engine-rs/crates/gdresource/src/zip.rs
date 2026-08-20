@@ -104,7 +104,12 @@ fn u32_at(data: &[u8], off: usize) -> EngineResult<u32> {
 }
 
 /// Computes the ZIP entry checksum (CRC-32, polynomial 0xEDB88320).
-fn crc32(data: &[u8]) -> u32 {
+/// CRC-32 (IEEE), the checksum both ZIP and gzip trailers carry.
+///
+/// Exported for `PackedByteArray.compress(MODE_GZIP)` (pat-s3rrv.224) rather
+/// than duplicated there: `crc32_matches_known_vector` in this file already
+/// pins it against a known vector, and two implementations could drift.
+pub fn crc32(data: &[u8]) -> u32 {
     let mut crc: u32 = 0xFFFF_FFFF;
     for &byte in data {
         let idx = ((crc ^ byte as u32) & 0xFF) as usize;

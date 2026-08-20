@@ -87,9 +87,16 @@ pub fn has_feature(feature: &str) -> bool {
         // Build-config tags.
         "debug" => is_debug_build(),
         "release" => !is_debug_build(),
-        // Threads: available on native; on the web target only with a threaded
-        // export, which is assumed off here.
-        "threads" => platform != Platform::Web,
+        // Threads: always available natively. On the web it depends on the
+        // EXPORT VARIANT, not on the target, so this reads a runtime capability
+        // the wasm entry sets from `self.crossOriginIsolated` (pat-s3rrv.217).
+        //
+        // ⚠️ It used to be hardcoded `platform != Platform::Web`, with a comment
+        // saying a threaded export was "assumed off". That made the tag a
+        // property of the build target rather than of the running page, so a
+        // correctly threaded export could never report itself and a script had
+        // no way to branch on what it actually had.
+        "threads" => platform != Platform::Web || is_cross_origin_isolated(),
         // Pointer-width tags (Godot exports these as "64"/"32").
         "64" => cfg!(target_pointer_width = "64"),
         "32" => cfg!(target_pointer_width = "32"),
@@ -115,6 +122,37 @@ static EDITOR_BUILD: AtomicBool = AtomicBool::new(false);
 /// true and `has_feature("template")` false — the split Godot exports.
 pub fn set_editor_build(is_editor: bool) {
     EDITOR_BUILD.store(is_editor, Ordering::Relaxed);
+}
+
+/// Whether the page is cross-origin isolated, i.e. whether `SharedArrayBuffer`
+/// and wasm threads are actually available (pat-s3rrv.217).
+///
+/// Godot's web export ships a `thread_support` variant that only works when the
+/// server sends `Cross-Origin-Opener-Policy: same-origin` and
+/// `Cross-Origin-Embedder-Policy: require-corp`; the browser then reports
+/// `self.crossOriginIsolated`. This mirrors that single browser-supplied fact.
+///
+/// ⚠️ It is a RUNTIME capability, not a build flag. The same wasm bundle is
+/// isolated or not depending on the headers the server happens to send, so
+/// deciding it at compile time is wrong in both directions — and the editor's
+/// own dev server already sends both headers.
+static CROSS_ORIGIN_ISOLATED: AtomicBool = AtomicBool::new(false);
+
+/// Records whether the host page is cross-origin isolated.
+///
+/// Called by the wasm entry point with `self.crossOriginIsolated`. Native hosts
+/// never call it: `has_feature("threads")` is already true off-web, so the flag
+/// only ever decides the web answer.
+pub fn set_cross_origin_isolated(isolated: bool) {
+    CROSS_ORIGIN_ISOLATED.store(isolated, Ordering::Relaxed);
+}
+
+/// Whether the host page reported cross-origin isolation.
+///
+/// Also decides which audio-worklet transport an export emits: a
+/// `SharedArrayBuffer` ring when isolated, message-port block passing when not.
+pub fn is_cross_origin_isolated() -> bool {
+    CROSS_ORIGIN_ISOLATED.load(Ordering::Relaxed)
 }
 
 /// Custom feature tags. Godot collects these from `application/config/features`

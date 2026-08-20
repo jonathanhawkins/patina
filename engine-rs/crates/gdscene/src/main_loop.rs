@@ -438,7 +438,105 @@ fn read_emitter_3d(node: &crate::node::Node) -> crate::particle3d::ParticleEmitt
         // start/end pair — a flat authored `color` is the degenerate gradient.
         emitter.material.color_curve = crate::particle3d::ColorCurve::linear(c, c);
     }
+
+    // ParticleProcessMaterial collision/attractor parameters (pat-s3rrv.216).
+    // The .tscn flattener lands these on the node alongside `gravity`/`spread`,
+    // so they are read exactly like every other material parameter here.
+    if let Variant::Bool(enabled) = node.get_property("attractor_interaction_enabled") {
+        emitter.material.attractor_interaction_enabled = enabled;
+    }
+    emitter.material.collision_mode = crate::particle3d::ParticleCollisionMode::from_godot(
+        match node.get_property("collision_mode") {
+            Variant::Int(v) => v,
+            Variant::Float(f) => f as i64,
+            _ => 0,
+        },
+    );
+    if let Some(v) = prop_f32(node.get_property("collision_friction")) {
+        emitter.material.collision_friction = v;
+    }
+    if let Some(v) = prop_f32(node.get_property("collision_bounce")) {
+        emitter.material.collision_bounce = v;
+    }
+    if let Variant::Bool(v) = node.get_property("collision_use_scale") {
+        emitter.material.collision_use_scale = v;
+    }
+    // Godot's collision radius comes from the emitter's `collision_base_size`.
+    if let Some(v) = prop_f32(node.get_property("collision_base_size")) {
+        emitter.material.particle_size = v;
+    }
+    if let Variant::Int(v) = node.get_property("visibility_layer") {
+        emitter.material.cull_mask = v as u32;
+    }
     emitter
+}
+
+/// Collects every `GPUParticlesAttractor*3D` and `GPUParticlesCollision*3D` in
+/// the tree into the frame's [`ParticleField3D`] (pat-s3rrv.216).
+///
+/// Stage 1 covers the analytic Box and Sphere shapes; `VectorField3D`,
+/// `HeightField3D` and `SDF3D` need baked textures and are follow-ups. An
+/// unrecognised subclass is skipped rather than defaulted, so a follow-up shape
+/// cannot silently behave like a box.
+fn read_particle_field_3d(tree: &SceneTree) -> crate::particle3d::ParticleField3D {
+    use crate::particle3d::{
+        ParticleAttractor3D, ParticleCollider3D, ParticleField3D, ParticleVolume3D,
+    };
+    use gdcore::math::Vector3;
+
+    let mut field = ParticleField3D::empty();
+    for id in tree.all_nodes_in_tree_order() {
+        let Some(node) = tree.get_node(id) else {
+            continue;
+        };
+        let class = node.class_name();
+        let is_attractor = class.starts_with("GPUParticlesAttractor");
+        let is_collider = class.starts_with("GPUParticlesCollision");
+        if !is_attractor && !is_collider {
+            continue;
+        }
+
+        // Godot's defaults: size Vector3(2, 2, 2) and radius 1.0.
+        let volume = if class.ends_with("Box3D") {
+            let size = match node.get_property("size") {
+                Variant::Vector3(s) => s,
+                _ => Vector3::new(2.0, 2.0, 2.0),
+            };
+            ParticleVolume3D::Box {
+                half_extents: size * 0.5,
+            }
+        } else if class.ends_with("Sphere3D") {
+            ParticleVolume3D::Sphere {
+                radius: prop_f32(node.get_property("radius")).unwrap_or(1.0),
+            }
+        } else {
+            continue;
+        };
+
+        let transform = crate::node3d::get_global_transform(tree, id);
+        let cull_mask = match node.get_property("cull_mask") {
+            Variant::Int(v) => v as u32,
+            _ => 0xFFFF_FFFF,
+        };
+
+        if is_attractor {
+            field.attractors.push(ParticleAttractor3D {
+                transform,
+                volume,
+                strength: prop_f32(node.get_property("strength")).unwrap_or(1.0),
+                attenuation: prop_f32(node.get_property("attenuation")).unwrap_or(1.0),
+                directionality: prop_f32(node.get_property("directionality")).unwrap_or(0.0),
+                cull_mask,
+            });
+        } else {
+            field.colliders.push(ParticleCollider3D {
+                transform,
+                volume,
+                cull_mask,
+            });
+        }
+    }
+    field
 }
 
 /// Builds a [`ColorCurve`](crate::particle3d::ColorCurve) from the
@@ -1014,6 +1112,11 @@ impl MainLoop {
         // mutable borrow of `self.particles_3d`, and `emit_signal` needs
         // `self.tree`. The 2D pass above is split for the same reason.
         let mut finished_emitters_3d: Vec<NodeId> = Vec::new();
+        // The frame's attractors and colliders, collected once and shared by
+        // every 3D emitter (pat-s3rrv.216). Built before the loop because the
+        // loop borrows `self.particles_3d` mutably, so `&self.tree` cannot be
+        // read inside it.
+        let particle_field_3d = read_particle_field_3d(&self.tree);
         for (id, is_emitting, emitter) in configs_3d {
             let sim = self
                 .particles_3d
@@ -1034,7 +1137,7 @@ impl MainLoop {
             let emitting = is_emitting && !one_shot_finished;
             sim.emitter = emitter;
             sim.emitter.emitting = emitting;
-            sim.step(dt);
+            sim.step_with_field(dt, &particle_field_3d);
             // Drain the one-shot completion edge (fires exactly once per drain).
             if sim.take_finished() {
                 finished_emitters_3d.push(id);
@@ -3920,6 +4023,19 @@ impl MainLoop {
                 real_delta_secs,
                 crate::tween::TweenProcessMode::Idle,
             );
+
+            // -- XR node phase (pat-s3rrv.219) --
+            // Copy each XRNode3D's tracker pose onto its transform before the
+            // skeleton phase, so a SkeletonModifier3D targeting a controller
+            // sees this frame's pose rather than last frame's — Godot delivers
+            // poses ahead of NOTIFICATION_UPDATE_SKELETON for the same reason.
+            //
+            // `tracking_changed` is emitted out here rather than inside the walk
+            // because a connected script may touch the tree, which the walk
+            // holds mutably.
+            for id in crate::xr_nodes::update_xr_nodes(&mut self.tree) {
+                self.tree.emit_signal(id, "tracking_changed", &[]);
+            }
 
             // -- skeleton phase (pat-0q2kx.3) --
             // Godot's NOTIFICATION_UPDATE_SKELETON: after the mixer has written

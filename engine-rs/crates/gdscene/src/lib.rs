@@ -107,6 +107,7 @@ pub mod transform_inspector;
 pub mod tween;
 pub mod video_stream;
 pub mod viewport;
+pub mod xr_nodes;
 pub mod visibility_3d;
 // Turning a parsed `.tres` VisualShader into a compilable graph. Lives here
 // because gdresource (parsing) and gdserver2d (the graph type) are siblings —

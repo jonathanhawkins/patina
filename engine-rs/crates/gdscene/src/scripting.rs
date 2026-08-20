@@ -318,6 +318,18 @@ impl ScriptInstance for GDScriptNodeInstance {
             .tick_instance_coroutine_frames(&mut self.instance);
     }
 
+    fn pump_xr_signals(&mut self) {
+        // Errors here are a script's own fault (a bad signal callback) and must
+        // not abort the frame, matching how `call_script_method` swallows a
+        // failed script call.
+        if let Err(err) = self
+            .interpreter
+            .pump_instance_xr_signals(&mut self.instance)
+        {
+            tracing::debug!("XR signal pump failed: {err}");
+        }
+    }
+
     fn list_signals(&self) -> Vec<String> {
         self.instance.class_def.signals.clone()
     }
@@ -2355,6 +2367,11 @@ impl SceneAccess for SceneTreeAccessor {
         if let Some(value) = kinematic_collision_call(self.tree(), node, method, args) {
             return Some(value);
         }
+        // XRNode3D and its subclasses answer their own surface (pat-s3rrv.219).
+        // Declines every non-XR node, so the table below stays reachable.
+        if let Some(value) = crate::xr_nodes::call_xr_node_method(self.tree(), nid, method, args) {
+            return Some(value);
+        }
         // Timer's own surface (pat-s3rrv.121); declines every non-Timer node.
         if let Some(value) = timer_node_call(self.tree_mut(), nid, method, args) {
             return Some(value);
@@ -3952,6 +3969,37 @@ impl SceneAccess for SceneTreeAccessor {
             }
             "is_queued_for_redraw" => Some(Variant::Bool(self.tree().is_queued_for_redraw(nid))),
             // draw_rect(rect, color, filled = true, width = -1.0)
+            // draw_style_box(stylebox, rect) — CanvasItem's themed-box draw
+            // (pat-s3rrv.215).
+            //
+            // 🔑 It emits through the SAME `StyleBox::draw` the themed control
+            // path calls, so a script-drawn box and a theme-drawn one cannot
+            // diverge. Reimplementing the geometry here is the obvious shortcut
+            // and it is how the two silently drift apart.
+            //
+            // The argument arrives as a `Variant::Resource`, which is what
+            // `load("res://box.tres")` returns — it carries the file's real
+            // class name and property bag, which is exactly what
+            // `stylebox_from_props` consumes.
+            "draw_style_box" => {
+                let rect = arg_rect2(args, 1)?;
+                let commands = match args.first() {
+                    Some(Variant::Resource(res)) => {
+                        crate::stylebox::stylebox_from_props(&res.class_name, &res.properties)
+                            .map(|sb| sb.draw(rect))
+                    }
+                    _ => None,
+                };
+                // ⚠️ An unrecognised or absent resource draws NOTHING rather
+                // than falling back to a default box. Godot's `draw_style_box`
+                // with a null StyleBox is a no-op, and inventing a grey panel
+                // here would make a broken resource reference look like a
+                // deliberate one.
+                for command in commands.unwrap_or_default() {
+                    self.tree_mut().push_draw_command(command);
+                }
+                Some(Variant::Nil)
+            }
             "draw_rect" => {
                 let rect = arg_rect2(args, 0)?;
                 let color = arg_color(args, 1).unwrap_or(Color::WHITE);

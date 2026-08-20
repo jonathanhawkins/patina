@@ -1662,9 +1662,9 @@ fn vector2_method(v: Vector2, method: &str, args: &[Variant]) -> Result<Variant,
         "max_axis_index" => Ok(Variant::Int(if v.x < v.y { 1 } else { 0 })),
         "min_axis_index" => Ok(Variant::Int(if v.x < v.y { 0 } else { 1 })),
         "is_normalized" => Ok(Variant::Bool(is_equal_approx_f(v.length_squared(), 1.0))),
-        "is_zero_approx" => {
-            Ok(Variant::Bool(v.x.abs() < CMP_EPSILON && v.y.abs() < CMP_EPSILON))
-        }
+        "is_zero_approx" => Ok(Variant::Bool(
+            v.x.abs() < CMP_EPSILON && v.y.abs() < CMP_EPSILON,
+        )),
         "is_finite" => Ok(Variant::Bool(v.x.is_finite() && v.y.is_finite())),
         "is_equal_approx" => {
             let o = arg_vec2(args, 0, &ctx)?;
@@ -2085,9 +2085,7 @@ fn vector3_method(v: Vector3, method: &str, args: &[Variant]) -> Result<Variant,
         }
         "angle_to" => {
             let o = arg_vec3(args, 0, &ctx)?;
-            Ok(Variant::Float(
-                v.cross(o).length().atan2(v.dot(o)) as f64
-            ))
+            Ok(Variant::Float(v.cross(o).length().atan2(v.dot(o)) as f64))
         }
         // Godot returns the axis INDEX (0=X, 1=Y, 2=Z), not the component.
         "max_axis_index" => Ok(Variant::Int(if v.x < v.y {
@@ -2339,20 +2337,12 @@ fn vector3i_method(v: Vector3i, method: &str, args: &[Variant]) -> Result<Varian
         })),
         "distance_to" => {
             let o = arg_vec3i(args, 0, &ctx)?;
-            let (dx, dy, dz) = (
-                (o.x - v.x) as f64,
-                (o.y - v.y) as f64,
-                (o.z - v.z) as f64,
-            );
+            let (dx, dy, dz) = ((o.x - v.x) as f64, (o.y - v.y) as f64, (o.z - v.z) as f64);
             Ok(Variant::Float((dx * dx + dy * dy + dz * dz).sqrt()))
         }
         "distance_squared_to" => {
             let o = arg_vec3i(args, 0, &ctx)?;
-            let (dx, dy, dz) = (
-                (o.x - v.x) as i64,
-                (o.y - v.y) as i64,
-                (o.z - v.z) as i64,
-            );
+            let (dx, dy, dz) = ((o.x - v.x) as i64, (o.y - v.y) as i64, (o.z - v.z) as i64);
             Ok(Variant::Int(dx * dx + dy * dy + dz * dz))
         }
         "snapped" => {

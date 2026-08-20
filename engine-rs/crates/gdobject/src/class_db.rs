@@ -8415,6 +8415,28 @@ pub fn register_3d_classes() {
         );
     }
 
+    if !class_exists("OptimizedTranslation") {
+        // The compressed catalogue Godot's CSV/PO importer emits when its
+        // `compress` option is on, and what `internationalization/locale/
+        // translations` points at in a real project (pat-s3rrv.213).
+        //
+        // ⚠️ Parent is `Translation`, NOT `Resource`. A wrong parent still
+        // satisfies `class_exists`, so it passes an existence check and only
+        // surfaces as a broken inheritance walk.
+        //
+        // `generate(from: Translation)` is its only method and it has no members
+        // of its own (`doc/classes/OptimizedTranslation.xml`). Its payload —
+        // `hash_table`, `bucket_table`, `strings` — is `PROPERTY_USAGE_NO_EDITOR`
+        // and travels through `_set`/`_get`, so it is not part of the
+        // registration; the decoder for it lives in
+        // `gdcore::optimized_translation`.
+        register_class(
+            ClassRegistration::new("OptimizedTranslation")
+                .parent("Translation")
+                .method(MethodInfo::new("generate", 1)),
+        );
+    }
+
     if !class_exists("TranslationServer") {
         register_class(
             // ⚠️ Godot's TranslationServer declares exactly ONE member —
@@ -10449,6 +10471,68 @@ pub fn register_3d_classes() {
             .constant("TRACKER_HAND_MAX", 3),
     );
     register_class(
+        // The concrete controller tracker `XRController3D` consumes
+        // (pat-s3rrv.220). ⚠️ Parent is `XRPositionalTracker`, not `XRTracker`:
+        // it inherits the pose/input/signal surface, and a wrong parent still
+        // satisfies `class_exists` while breaking the inheritance walk.
+        //
+        // No members of its own — `doc/classes/XRControllerTracker.xml` lists
+        // only the inherited `type`, which its constructor fixes to
+        // TRACKER_CONTROLLER (2).
+        ClassRegistration::new("XRControllerTracker").parent("XRPositionalTracker"),
+    );
+    register_class(
+        // The pose value `XRPositionalTracker.get_pose()` returns and the
+        // `pose_changed` / `pose_lost_tracking` signals carry (pat-s3rrv.220).
+        //
+        // Names and defaults transcribed from `doc/classes/XRPose.xml` and
+        // `servers/xr/xr_pose.h`, not derived:
+        //
+        // ⚠️ the bool getter is `get_has_tracking_data`, NOT `is_...` — Godot
+        //    uses the `is_` prefix for plenty of bool getters and not this one;
+        // ⚠️ `tracking_confidence` has NO `default=` in the XML. `xr_pose.h:52`
+        //    initialises it to `XR_TRACKING_CONFIDENCE_NONE`, i.e. 0.
+        ClassRegistration::new("XRPose")
+            .parent("RefCounted")
+            .property(
+                PropertyInfo::new("name", Variant::String(String::new()))
+                    .with_accessors("get_name", "set_name"),
+            )
+            .property(
+                PropertyInfo::new("has_tracking_data", Variant::Bool(false))
+                    .with_accessors("get_has_tracking_data", "set_has_tracking_data"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "transform",
+                    Variant::Transform3D(gdcore::math3d::Transform3D::IDENTITY),
+                )
+                .with_accessors("get_transform", "set_transform"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "linear_velocity",
+                    Variant::Vector3(gdcore::math::Vector3::ZERO),
+                )
+                .with_accessors("get_linear_velocity", "set_linear_velocity"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "angular_velocity",
+                    Variant::Vector3(gdcore::math::Vector3::ZERO),
+                )
+                .with_accessors("get_angular_velocity", "set_angular_velocity"),
+            )
+            .property(
+                PropertyInfo::new("tracking_confidence", Variant::Int(0))
+                    .with_accessors("get_tracking_confidence", "set_tracking_confidence"),
+            )
+            .method(MethodInfo::new("get_adjusted_transform", 0).const_method())
+            .constant("XR_TRACKING_CONFIDENCE_NONE", 0)
+            .constant("XR_TRACKING_CONFIDENCE_LOW", 1)
+            .constant("XR_TRACKING_CONFIDENCE_HIGH", 2),
+    );
+    register_class(
         ClassRegistration::new("XRInterface")
             .signal(SignalInfo::new("play_area_changed").arg("mode"))
             .parent("RefCounted")
@@ -10495,6 +10579,72 @@ pub fn register_3d_classes() {
             .constant("XR_VRS_TEXTURE_FORMAT_UNIFIED", 0)
             .constant("XR_VRS_TEXTURE_FORMAT_FRAGMENT_SHADING_RATE", 1)
             .constant("XR_VRS_TEXTURE_FORMAT_FRAGMENT_DENSITY_MAP", 2),
+    );
+    // WebXRInterface (pat-s3rrv.218). Godot ships WebXR in its web export
+    // (modules/webxr/config.py:1-2), so the class exists on the target Patina
+    // targets; it was the only XR interface with no registration at all, which
+    // made `ClassDB.class_exists("WebXRInterface")` false. Members and signal
+    // argument names are transcribed from
+    // upstream/godot/modules/webxr/doc_classes/WebXRInterface.xml.
+    //
+    // ⚠️ The signal names are Godot's and are deliberately inconsistent:
+    // `selectstart`/`selectend`/`squeezestart`/`squeezeend` have NO underscore
+    // while `display_refresh_rate_changed` does. A script connects by exact
+    // string, so "fixing" the spelling would break every connection.
+    register_class(
+        ClassRegistration::new("WebXRInterface")
+            .parent("XRInterface")
+            .signal(
+                SignalInfo::new("session_supported")
+                    .arg("session_mode")
+                    .arg("supported"),
+            )
+            .signal(SignalInfo::new("session_started"))
+            .signal(SignalInfo::new("session_ended"))
+            .signal(SignalInfo::new("session_failed").arg("message"))
+            .signal(SignalInfo::new("selectstart").arg("input_source_id"))
+            .signal(SignalInfo::new("select").arg("input_source_id"))
+            .signal(SignalInfo::new("selectend").arg("input_source_id"))
+            .signal(SignalInfo::new("squeezestart").arg("input_source_id"))
+            .signal(SignalInfo::new("squeeze").arg("input_source_id"))
+            .signal(SignalInfo::new("squeezeend").arg("input_source_id"))
+            .signal(SignalInfo::new("visibility_state_changed"))
+            .signal(SignalInfo::new("reference_space_reset"))
+            .signal(SignalInfo::new("display_refresh_rate_changed"))
+            .property(
+                PropertyInfo::new("session_mode", Variant::String(String::new()))
+                    .with_accessors("get_session_mode", "set_session_mode"),
+            )
+            .property(
+                PropertyInfo::new("required_features", Variant::String(String::new()))
+                    .with_accessors("get_required_features", "set_required_features"),
+            )
+            .property(
+                PropertyInfo::new("optional_features", Variant::String(String::new()))
+                    .with_accessors("get_optional_features", "set_optional_features"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "requested_reference_space_types",
+                    Variant::String(String::new()),
+                )
+                .with_accessors(
+                    "get_requested_reference_space_types",
+                    "set_requested_reference_space_types",
+                ),
+            )
+            .property(
+                PropertyInfo::new("reference_space_type", Variant::String(String::new()))
+                    .with_accessors("get_reference_space_type", "set_reference_space_type"),
+            )
+            .property(
+                PropertyInfo::new("enabled_features", Variant::String(String::new()))
+                    .with_accessors("get_enabled_features", "set_enabled_features"),
+            )
+            .property(
+                PropertyInfo::new("visibility_state", Variant::String(String::new()))
+                    .with_accessors("get_visibility_state", "set_visibility_state"),
+            ),
     );
     register_class(
         ClassRegistration::new("XRHandTracker")
@@ -13848,6 +13998,161 @@ pub fn register_2d_classes() {
                         .with_arguments(vec![PropertyInfo::new("bone_idx", Variant::Int(0))]),
                 )
                 .method(MethodInfo::new("get_joint_two_bone_idx", 0).returns(Variant::Int(0))),
+        );
+    }
+    // The six remaining SkeletonModification2D subclasses (pat-s3rrv.221).
+    // `SkeletonModification2DTwoBoneIK` above and the base/stack were registered
+    // by pat-s3rrv.185; these were never registered at all, so
+    // `class_exists("SkeletonModification2DLookAt")` was false and a rig naming
+    // one had no class behind it.
+    //
+    // ⚠️ Accessor names are TRANSCRIBED from each class's doc XML, never derived
+    // from the member name. `target_nodepath` is served by
+    // `get_target_node`/`set_target_node` in four of these six — deriving would
+    // have been wrong every time, which is the same trap the TwoBoneIK block
+    // above documents.
+    //
+    // ⚠️ Only `LookAt` and `TwoBoneIK` have solvers in
+    // `gdscene::skeleton2d::execute_modifications`. The rest are registered so a
+    // scene loads and the class exists; the modification pass declines them
+    // rather than moving a pose it cannot compute.
+    if !class_exists("SkeletonModification2DCCDIK") {
+        register_class(
+            ClassRegistration::new("SkeletonModification2DCCDIK")
+                .parent("SkeletonModification2D")
+                .property(
+                    PropertyInfo::new("ccdik_data_chain_length", Variant::Int(0)).with_accessors(
+                        "get_ccdik_data_chain_length",
+                        "set_ccdik_data_chain_length",
+                    ),
+                )
+                .property(
+                    PropertyInfo::new(
+                        "target_nodepath",
+                        Variant::NodePath(gdcore::node_path::NodePath::empty()),
+                    )
+                    .with_accessors("get_target_node", "set_target_node"),
+                )
+                .property(
+                    PropertyInfo::new(
+                        "tip_nodepath",
+                        Variant::NodePath(gdcore::node_path::NodePath::empty()),
+                    )
+                    .with_accessors("get_tip_node", "set_tip_node"),
+                ),
+        );
+    }
+    if !class_exists("SkeletonModification2DFABRIK") {
+        register_class(
+            ClassRegistration::new("SkeletonModification2DFABRIK")
+                .parent("SkeletonModification2D")
+                .property(
+                    PropertyInfo::new("fabrik_data_chain_length", Variant::Int(0)).with_accessors(
+                        "get_fabrik_data_chain_length",
+                        "set_fabrik_data_chain_length",
+                    ),
+                )
+                .property(
+                    PropertyInfo::new(
+                        "target_nodepath",
+                        Variant::NodePath(gdcore::node_path::NodePath::empty()),
+                    )
+                    .with_accessors("get_target_node", "set_target_node"),
+                ),
+        );
+    }
+    if !class_exists("SkeletonModification2DJiggle") {
+        register_class(
+            ClassRegistration::new("SkeletonModification2DJiggle")
+                .parent("SkeletonModification2D")
+                .property(
+                    PropertyInfo::new("damping", Variant::Float(0.75))
+                        .with_accessors("get_damping", "set_damping"),
+                )
+                .property(
+                    PropertyInfo::new(
+                        "gravity",
+                        Variant::Vector2(gdcore::math::Vector2::new(0.0, 6.0)),
+                    )
+                    .with_accessors("get_gravity", "set_gravity"),
+                )
+                .property(
+                    PropertyInfo::new("jiggle_data_chain_length", Variant::Int(0)).with_accessors(
+                        "get_jiggle_data_chain_length",
+                        "set_jiggle_data_chain_length",
+                    ),
+                )
+                .property(
+                    PropertyInfo::new("mass", Variant::Float(0.75))
+                        .with_accessors("get_mass", "set_mass"),
+                )
+                .property(
+                    PropertyInfo::new("stiffness", Variant::Float(3.0))
+                        .with_accessors("get_stiffness", "set_stiffness"),
+                )
+                .property(
+                    PropertyInfo::new(
+                        "target_nodepath",
+                        Variant::NodePath(gdcore::node_path::NodePath::empty()),
+                    )
+                    .with_accessors("get_target_node", "set_target_node"),
+                )
+                .property(
+                    PropertyInfo::new("use_gravity", Variant::Bool(false))
+                        .with_accessors("get_use_gravity", "set_use_gravity"),
+                ),
+        );
+    }
+    if !class_exists("SkeletonModification2DLookAt") {
+        register_class(
+            ClassRegistration::new("SkeletonModification2DLookAt")
+                .parent("SkeletonModification2D")
+                .property(
+                    PropertyInfo::new(
+                        "bone2d_node",
+                        Variant::NodePath(gdcore::node_path::NodePath::empty()),
+                    )
+                    .with_accessors("get_bone2d_node", "set_bone2d_node"),
+                )
+                .property(
+                    PropertyInfo::new("bone_index", Variant::Int(-1))
+                        .with_accessors("get_bone_index", "set_bone_index"),
+                )
+                .property(
+                    PropertyInfo::new(
+                        "target_nodepath",
+                        Variant::NodePath(gdcore::node_path::NodePath::empty()),
+                    )
+                    .with_accessors("get_target_node", "set_target_node"),
+                ),
+        );
+    }
+    if !class_exists("SkeletonModification2DPhysicalBones") {
+        register_class(
+            ClassRegistration::new("SkeletonModification2DPhysicalBones")
+                .parent("SkeletonModification2D")
+                .property(
+                    PropertyInfo::new("physical_bone_chain_length", Variant::Int(0))
+                        .with_accessors(
+                            "get_physical_bone_chain_length",
+                            "set_physical_bone_chain_length",
+                        ),
+                ),
+        );
+    }
+    if !class_exists("SkeletonModification2DStackHolder") {
+        register_class(
+            ClassRegistration::new("SkeletonModification2DStackHolder")
+                .parent("SkeletonModification2D")
+                .method(
+                    MethodInfo::new("set_held_modification_stack", 1).with_arguments(vec![
+                        PropertyInfo::new("held_modification_stack", Variant::Nil),
+                    ]),
+                )
+                .method(
+                    MethodInfo::new("get_held_modification_stack", 0)
+                        .returns_of(Variant::Nil, "SkeletonModificationStack2D"),
+                ),
         );
     }
     if !class_exists("Path2D") {
@@ -28447,6 +28752,48 @@ fn register_editor_filesystem_classes() {
                 .method(MethodInfo::new("get_project_settings_dir", 0).const_method())
                 .method(MethodInfo::new("get_self_contained_file", 0).const_method())
                 .method(MethodInfo::new("is_self_contained", 0).const_method()),
+        );
+    }
+    // EditorFeatureProfile (pat-s3rrv.225). Registered so
+    // `ClassDB.class_exists("EditorFeatureProfile")` is true and a script or the
+    // Manage-Profiles dialog can reach the surface.
+    //
+    // ⚠️ ELEVEN Feature constants, not the nine the bead lists. `SIGNALS_DOCK`
+    // and `GROUPS_DOCK` exist in 4.6.1, and `NODE_DOCK` — deprecated upstream —
+    // still occupies its ordinal. Dropping the deprecated one would renumber
+    // every constant after it, so a script's `FEATURE_GAME` would silently
+    // select a different feature.
+    if !class_exists("EditorFeatureProfile") {
+        register_class(
+            ClassRegistration::new("EditorFeatureProfile")
+                .parent("RefCounted")
+                .method(MethodInfo::new("set_disabled_class", 2))
+                .method(MethodInfo::new("is_disabled_class", 1).returns(Variant::Bool(false)))
+                .method(MethodInfo::new("set_disabled_class_editor", 2))
+                .method(
+                    MethodInfo::new("is_disabled_class_editor", 1).returns(Variant::Bool(false)),
+                )
+                .method(MethodInfo::new("set_disabled_property", 2))
+                .method(MethodInfo::new("is_disabled_property", 1).returns(Variant::Bool(false)))
+                .method(MethodInfo::new("set_disabled_feature", 2))
+                .method(MethodInfo::new("is_disabled_feature", 1).returns(Variant::Bool(false)))
+                .method(
+                    MethodInfo::new("get_feature_name", 1).returns(Variant::String(String::new())),
+                )
+                .method(MethodInfo::new("save_to_file", 1).returns(Variant::Int(0)))
+                .method(MethodInfo::new("load_from_file", 1).returns(Variant::Int(0)))
+                .constant("FEATURE_3D", 0)
+                .constant("FEATURE_SCRIPT", 1)
+                .constant("FEATURE_ASSET_LIB", 2)
+                .constant("FEATURE_SCENE_TREE", 3)
+                .constant("FEATURE_NODE_DOCK", 4)
+                .constant("FEATURE_FILESYSTEM_DOCK", 5)
+                .constant("FEATURE_IMPORT_DOCK", 6)
+                .constant("FEATURE_HISTORY_DOCK", 7)
+                .constant("FEATURE_GAME", 8)
+                .constant("FEATURE_SIGNALS_DOCK", 9)
+                .constant("FEATURE_GROUPS_DOCK", 10)
+                .constant("FEATURE_MAX", 11),
         );
     }
 

@@ -277,6 +277,72 @@ fn two_bone_ik(tree: &mut SceneTree, skeleton: NodeId, i: usize) {
     aim_bone(tree, two, solution.joint, solution.tip);
 }
 
+/// Runs one `SkeletonModification2DLookAt` entry (pat-s3rrv.221).
+///
+/// Godot's LookAt has exactly three members — `bone2d_node`, `bone_index` and
+/// `target_nodepath` (`doc/classes/SkeletonModification2DLookAt.xml`) — so the
+/// whole modification is "point this bone at that node". `bone_index` is an
+/// alternative way to name the same bone and is ignored while the path is
+/// present, which is the case Godot's own editor writes.
+fn look_at(tree: &mut SceneTree, skeleton: NodeId, i: usize) {
+    let Some(bone_path) = mod_string(tree, skeleton, i, "bone2d_node") else {
+        return;
+    };
+    let Some(target_path) = mod_string(tree, skeleton, i, "target_nodepath") else {
+        return;
+    };
+    let (Some(bone), Some(target)) = (
+        resolve_from_skeleton(tree, skeleton, &bone_path),
+        resolve_from_skeleton(tree, skeleton, &target_path),
+    ) else {
+        return;
+    };
+
+    let from = crate::node2d::get_global_position(tree, bone);
+    let goal = crate::node2d::get_global_position(tree, target);
+    aim_bone(tree, bone, from, goal);
+}
+
+/// Puts every bone back on its authored `rest` rotation.
+///
+/// What a disabled stack means: Godot stops running the modifications, and the
+/// bones fall back to the rest pose the rig was authored in. Without this a
+/// disabled stack would simply freeze the last solved pose, which looks like
+/// the stack is still on.
+fn restore_rest_pose(tree: &mut SceneTree, skeleton: NodeId) {
+    for bone in gather_bones(tree, skeleton) {
+        let Some(rest) = bone_rest(tree, bone) else {
+            continue;
+        };
+        // The rest basis's X column is the bone's rest direction.
+        crate::node2d::set_rotation(tree, bone, rest.x.y.atan2(rest.x.x));
+    }
+}
+
+/// Whether the skeleton's modification stack is enabled.
+///
+/// ⚠️ **Deliberate, documented divergence from Godot's default.**
+/// `SkeletonModificationStack2D.enabled` defaults to **false** in Godot
+/// (`doc/classes/SkeletonModificationStack2D.xml`, and our own ClassDB entry
+/// records that faithfully) — the opposite of `SkeletonModification2D.enabled`,
+/// which defaults to true.
+///
+/// Here only an explicit `false` disables. The reason is that the `.tscn`
+/// flattener does not emit `__skelmod_enabled__` at all, so an absent key means
+/// "nobody told us", not "the author set false". Taking Godot's default would
+/// make **every** existing rig's stack inert *and* rest-restore it every frame,
+/// silently killing the `TwoBoneIK` solver that already ships.
+///
+/// The real fix is for the flattener to carry the stack's `enabled` through
+/// (`packed_scene.rs`); once it does, this should flip to Godot's default.
+fn stack_enabled(tree: &SceneTree, skeleton: NodeId) -> bool {
+    !matches!(
+        tree.get_node(skeleton)
+            .map(|n| n.get_property("__skelmod_enabled__")),
+        Some(Variant::Bool(false))
+    )
+}
+
 /// Runs a skeleton's modification stack, in stack order.
 pub fn execute_modifications(tree: &mut SceneTree, skeleton: NodeId) {
     let count = match tree
@@ -286,6 +352,12 @@ pub fn execute_modifications(tree: &mut SceneTree, skeleton: NodeId) {
         Some(Variant::Int(c)) if c > 0 => c as usize,
         _ => return,
     };
+    // A disabled stack does not merely stop solving — it returns the rig to its
+    // rest pose (pat-s3rrv.221).
+    if !stack_enabled(tree, skeleton) {
+        restore_rest_pose(tree, skeleton);
+        return;
+    }
     for i in 0..count {
         // An entry explicitly disabled is skipped; an absent `enabled` key means
         // the rig never wrote one, which Godot treats as enabled.
@@ -298,6 +370,7 @@ pub fn execute_modifications(tree: &mut SceneTree, skeleton: NodeId) {
         }
         match mod_string(tree, skeleton, i, "class").as_deref() {
             Some("SkeletonModification2DTwoBoneIK") => two_bone_ik(tree, skeleton, i),
+            Some("SkeletonModification2DLookAt") => look_at(tree, skeleton, i),
             // Other modification classes are registered but not executed yet;
             // declining is what keeps an unknown entry from silently corrupting
             // a pose it does not understand.

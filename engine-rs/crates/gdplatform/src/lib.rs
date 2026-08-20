@@ -46,6 +46,10 @@ pub mod websocket_multiplayer;
 pub mod websocket_peer;
 pub mod window;
 pub mod xr;
+/// Real `navigator.xr` bindings for [`xr`] (pat-s3rrv.218). wasm32 only — the
+/// native build has no browser to bind to.
+#[cfg(target_arch = "wasm32")]
+pub mod xr_web;
 
 // Platform-specific modules (always compiled, but may be stubs on unsupported targets).
 pub mod android;
@@ -111,5 +115,7 @@ pub use webrtc_peer::{
 // `WebXrInterface` was unreachable from any other crate and had zero consumers
 // workspace-wide. Exporting it is the precondition for wiring it to script.
 pub use xr::{
-    WebXrInterface, WebXrSessionMode, WebXrSessionState, WebXrSignal, WebXrStub, XrPose, XrServer,
+    clear_default_backend, default_backend, set_default_backend, TargetRayMode, WebXrBackend,
+    WebXrFrameEvent, WebXrInputEvent, WebXrInterface, WebXrSessionMode, WebXrSessionState,
+    WebXrSignal, WebXrStub, XrPose, XrServer,
 };

@@ -1148,6 +1148,23 @@ pub fn import_font(path: &Path) -> EngineResult<Arc<Resource>> {
     // (pat-p0s82.19). We store length + a SHA-free presence flag; full TTF
     // parsing is optional beyond having the payload available.
     let bytes = std::fs::read(path).map_err(EngineError::Io)?;
+
+    // pat-s3rrv.214: a WOFF file is an SFNT whose tables are individually
+    // zlib-compressed. Reconstruct it here so everything downstream — the
+    // `ttf_parser` metrics below, and the rasterizer that re-reads the payload —
+    // sees an ordinary TTF/OTF and needs to know nothing about WOFF.
+    //
+    // ⚠️ Detection is by SIGNATURE, not by extension. A `.woff` served or saved
+    // under a `.ttf` name is common, and the reverse costs nothing to tolerate;
+    // sniffing also means a mislabelled file fails with a real message instead
+    // of handing `ttf_parser` compressed bytes and reporting `parsed=false`.
+    let is_woff = crate::woff::is_woff1(&bytes) || crate::woff::is_woff2(&bytes);
+    let sfnt = if is_woff {
+        crate::woff::woff_to_sfnt(&bytes)?
+    } else {
+        bytes.clone()
+    };
+
     let mut res = Resource::new("FontFile");
     res.path = format!(
         "res://{}",
@@ -1157,11 +1174,19 @@ pub fn import_font(path: &Path) -> EngineResult<Arc<Resource>> {
     res.set_property("size", Variant::Int(16));
     res.set_property("byte_length", Variant::Int(bytes.len() as i64));
     res.set_property("has_font_data", Variant::Bool(!bytes.is_empty()));
+    // The on-disk container vs. what the rasterizer actually consumes. These
+    // differ only for WOFF, and a consumer that wants the glyph bytes wants
+    // `sfnt_byte_length`, not the compressed `byte_length`.
+    res.set_property(
+        "font_format",
+        Variant::String(if is_woff { "woff" } else { "sfnt" }.to_string()),
+    );
+    res.set_property("sfnt_byte_length", Variant::Int(sfnt.len() as i64));
 
     // Parse the outline font to validate it and expose real metrics (pat-u3l8c.69).
     // Kept lenient: unparseable data still yields a resource with `parsed=false`
     // rather than an error, so bitmap/placeholder fonts continue to load.
-    match ttf_parser::Face::parse(&bytes, 0) {
+    match ttf_parser::Face::parse(&sfnt, 0) {
         Ok(face) => {
             res.set_property("parsed", Variant::Bool(true));
             res.set_property("units_per_em", Variant::Int(face.units_per_em() as i64));
@@ -1748,6 +1773,14 @@ impl ResourceFormatLoader {
         // (pat-s3rrv.137).
         rfl.register(".ttf", import_font);
         rfl.register(".otf", import_font);
+        // pat-s3rrv.214. `.woff2` is registered DELIBERATELY even though this
+        // build cannot decode it: the format needs Brotli and no decoder exists
+        // here, so `woff_to_sfnt` returns a specific "convert the font" error.
+        // Leaving the extension unregistered instead would surface as a generic
+        // "no importer", and the Label would silently draw the built-in fallback
+        // — a wrong font on screen and no clue why.
+        rfl.register(".woff", import_font);
+        rfl.register(".woff2", import_font);
         rfl.register_with_params(".ttf", import_font_with_params);
         rfl.register_with_params(".otf", import_font_with_params);
         rfl.register(".tres", load_text_or_binary);

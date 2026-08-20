@@ -21,7 +21,7 @@
 //! Everything here is `u32` arithmetic with explicit wrapping, because the C++
 //! relies on unsigned overflow throughout.
 
-use crate::variant::Variant;
+use crate::variant::{CallableRef, Variant};
 
 /// `HASH_MURMUR3_SEED` (`hashfuncs.h:108`).
 pub const HASH_MURMUR3_SEED: u32 = 0x7F07_C65;
@@ -371,13 +371,127 @@ fn recursive_hash(v: &Variant, depth: u32) -> u32 {
             }
             hash_fmix32(h)
         }
-        // ⚠️ Everything else falls back to 0 rather than to a made-up number.
-        // Godot hashes these types too; returning a *plausible* value that
-        // disagrees with Godot would be worse than an obvious one, because a
-        // parity bug in a hash surfaces as a dictionary lookup that silently
-        // misses. See the completion report for what is not covered.
-        _ => 0,
+        // -- pat-s3rrv.223: the fourteen kinds that used to fall through --
+        //
+        // The `_ => 0` catch-all that stood here is deliberately GONE. A new
+        // Variant kind is now a non-exhaustive-match compile error instead of a
+        // silent zero, which is what let these fourteen sit unhashed: every one
+        // of them collapsed a Dictionary keyed by that type into a single bucket.
+        Variant::NodePath(np) => np.godot_hash(),
+        Variant::Rect2i(r) => {
+            let h = hash_murmur3_one_32(r.position.x as u32, HASH_MURMUR3_SEED);
+            let h = hash_murmur3_one_32(r.position.y as u32, h);
+            let h = hash_murmur3_one_32(r.size.x as u32, h);
+            hash_fmix32(hash_murmur3_one_32(r.size.y as u32, h))
+        }
+        Variant::Vector4(v) => {
+            let h = hash_murmur3_one_float(v.x, HASH_MURMUR3_SEED);
+            let h = hash_murmur3_one_float(v.y, h);
+            let h = hash_murmur3_one_float(v.z, h);
+            hash_fmix32(hash_murmur3_one_float(v.w, h))
+        }
+        Variant::Vector4i(v) => {
+            let h = hash_murmur3_one_32(v.x as u32, HASH_MURMUR3_SEED);
+            let h = hash_murmur3_one_32(v.y as u32, h);
+            let h = hash_murmur3_one_32(v.z as u32, h);
+            hash_fmix32(hash_murmur3_one_32(v.w as u32, h))
+        }
+        // `Transform2D::operator[]` returns COLUMNS
+        // (`core/math/transform_2d.h`), and Patina stores columns too, so this
+        // one maps across directly: t[0], t[1], t[2] = x, y, origin.
+        Variant::Transform2D(t) => {
+            let h = hash_murmur3_one_float(t.x.x, HASH_MURMUR3_SEED);
+            let h = hash_murmur3_one_float(t.x.y, h);
+            let h = hash_murmur3_one_float(t.y.x, h);
+            let h = hash_murmur3_one_float(t.y.y, h);
+            let h = hash_murmur3_one_float(t.origin.x, h);
+            hash_fmix32(hash_murmur3_one_float(t.origin.y, h))
+        }
+        // ⚠️ **Transposed on purpose.** `Basis::operator[](int p_row)` returns a
+        // ROW (`core/math/basis.h:47`), while Patina's `Basis { x, y, z }` holds
+        // COLUMNS. Godot hashes `b[0].x, b[0].y, b[0].z` — row 0 — which is
+        // `(x.x, y.x, z.x)` here. Feeding our columns straight through would
+        // hash the transpose and disagree with Godot on every non-symmetric
+        // matrix, while still passing any test built on the identity.
+        Variant::Basis(b) => hash_fmix32(basis_rows_hash(b, HASH_MURMUR3_SEED)),
+        Variant::Transform3D(t) => {
+            let h = basis_rows_hash(&t.basis, HASH_MURMUR3_SEED);
+            let h = hash_murmur3_one_float(t.origin.x, h);
+            let h = hash_murmur3_one_float(t.origin.y, h);
+            hash_fmix32(hash_murmur3_one_float(t.origin.z, h))
+        }
+        // ⓘ `Projection` is the exception: variant.cpp hashes `t.columns[i]`
+        // explicitly, so there is no transpose here.
+        Variant::Projection(p) => {
+            let mut h = HASH_MURMUR3_SEED;
+            for col in 0..4 {
+                for row in 0..4 {
+                    h = hash_murmur3_one_float(p.m[col][row], h);
+                }
+            }
+            hash_fmix32(h)
+        }
+        Variant::Rid(r) => hash_one_uint64(r.id()),
+        // Godot hashes an OBJECT by its pointer; the handle is our equivalent
+        // stable identity.
+        Variant::ObjectId(o) => hash_one_uint64(o.raw()),
+        // ⓘ Godot has no Resource Variant kind — a resource travels as OBJECT
+        // and hashes by pointer. A pointer is not reproducible here, so the
+        // resource PATH is used: it is what identifies the same resource across
+        // loads, which is the property a hash needs.
+        Variant::Resource(r) => string_hash(&r.path),
+        // `Callable::hash()` (`core/variant/callable.cpp`): the method name's
+        // hash, then the object id, then fmix.
+        Variant::Callable(c) => match c.as_ref() {
+            CallableRef::Method { target_id, method } => {
+                hash_fmix32(hash_murmur3_one_64(*target_id, string_hash(method)))
+            }
+            // Godot routes a lambda through `custom->hash()`, which has no
+            // cross-engine definition. Hashing the parameter list keeps distinct
+            // lambdas in distinct buckets without inventing a parity claim.
+            CallableRef::Lambda { params, .. } => {
+                let mut h = HASH_MURMUR3_SEED;
+                for p in params {
+                    h = hash_murmur3_one_32(string_hash(p), h);
+                }
+                hash_fmix32(h)
+            }
+            other => hash_fmix32(string_hash(&format!("{other:?}"))),
+        },
+        // `SIGNAL` in variant.cpp: the name's hash seeds the object id.
+        Variant::Signal { object_id, name } => hash_murmur3_one_64(*object_id, string_hash(name)),
+        Variant::PackedVector4Array(a) => {
+            let mut h = HASH_MURMUR3_SEED;
+            if a.is_empty() {
+                return h;
+            }
+            for p in a {
+                h = hash_murmur3_one_float(p.x, h);
+                h = hash_murmur3_one_float(p.y, h);
+                h = hash_murmur3_one_float(p.z, h);
+                h = hash_murmur3_one_float(p.w, h);
+            }
+            hash_fmix32(h)
+        }
     }
+}
+
+/// Hashes a `Basis` in Godot's ROW order, returning the running hash.
+///
+/// Shared by the `Basis` and `Transform3D` arms because `variant.cpp` hashes
+/// the identical nine values in both. See the transpose note at the `Basis` arm.
+fn basis_rows_hash(b: &gdcore::math3d::Basis, seed: u32) -> u32 {
+    let mut h = seed;
+    for row in [
+        [b.x.x, b.y.x, b.z.x],
+        [b.x.y, b.y.y, b.z.y],
+        [b.x.z, b.y.z, b.z.z],
+    ] {
+        for v in row {
+            h = hash_murmur3_one_float(v, h);
+        }
+    }
+    h
 }
 
 #[cfg(test)]

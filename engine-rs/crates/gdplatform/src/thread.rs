@@ -285,6 +285,10 @@ struct TaskEntry {
 pub struct WorkerThreadPool {
     tasks: StdMutex<std::collections::HashMap<u64, TaskEntry>>,
     next_id: StdMutex<u64>,
+    /// Group tasks and their queued elements (pat-s3rrv.217).
+    group_tasks: StdMutex<std::collections::HashMap<u64, GroupEntry>>,
+    /// Whether work runs on OS threads or is drained cooperatively.
+    pool_mode: PoolMode,
 }
 
 impl WorkerThreadPool {
@@ -293,6 +297,8 @@ impl WorkerThreadPool {
         Self {
             tasks: StdMutex::new(std::collections::HashMap::new()),
             next_id: StdMutex::new(1),
+            group_tasks: StdMutex::new(std::collections::HashMap::new()),
+            pool_mode: PoolMode::Threaded,
         }
     }
 
@@ -612,4 +618,223 @@ mod tests {
         let pool = WorkerThreadPool::new();
         assert!(pool.is_task_completed(TaskId(999)));
     }
+}
+
+// ===========================================================================
+// Group tasks and the cooperative fallback (pat-s3rrv.217)
+// ===========================================================================
+
+/// Identifies a group task submitted to [`WorkerThreadPool`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GroupTaskId(pub u64);
+
+/// A group task's queued work and progress.
+struct GroupEntry {
+    /// Elements not yet run. Empty once the group has completed.
+    pending: Vec<Box<dyn FnOnce() + Send + 'static>>,
+    /// How many elements have run, which is Godot's
+    /// `get_group_processed_element_count`.
+    processed: usize,
+    /// Total elements the group was created with.
+    total: usize,
+}
+
+/// How a [`WorkerThreadPool`] runs its work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolMode {
+    /// Each task gets an OS thread. The native default.
+    Threaded,
+    /// Work is queued and drained on the caller's thread — the only option on a
+    /// web build without cross-origin isolation, where the browser gives the
+    /// engine no worker it can share memory with.
+    Cooperative,
+}
+
+/// A group of `elements` work items, submitted together.
+///
+/// Mirrors Godot's `WorkerThreadPool.add_group_task(callable, elements, ...)`.
+impl WorkerThreadPool {
+    /// Creates a pool that runs work cooperatively rather than on OS threads.
+    ///
+    /// This is the web-without-isolation path: the browser gives the engine no
+    /// worker it can share memory with, so the work is queued and drained on
+    /// the frame tick instead.
+    pub fn new_cooperative() -> Self {
+        Self {
+            pool_mode: PoolMode::Cooperative,
+            ..Self::new()
+        }
+    }
+
+    /// Creates the pool this platform can actually back.
+    ///
+    /// 🔑 Keyed on `has_feature("threads")` rather than on the target, because
+    /// the same wasm bundle is threaded or not depending on the headers the
+    /// server sent. On native this is always the threaded pool.
+    pub fn for_current_platform() -> Self {
+        if crate::os::has_feature("threads") {
+            Self::new()
+        } else {
+            Self::new_cooperative()
+        }
+    }
+
+    /// How this pool runs its work.
+    pub fn mode(&self) -> PoolMode {
+        self.pool_mode
+    }
+
+    fn groups(&self) -> &StdMutex<std::collections::HashMap<u64, GroupEntry>> {
+        &self.group_tasks
+    }
+
+    /// Submits `elements` copies of `f`, each receiving its element index.
+    ///
+    /// In [`PoolMode::Threaded`] the elements run immediately on OS threads. In
+    /// [`PoolMode::Cooperative`] they are QUEUED and run when
+    /// [`drain_pending`](Self::drain_pending) is called on the frame tick, or
+    /// when [`wait_for_group_task_completion`](Self::wait_for_group_task_completion)
+    /// is called — see that method for why the second is not optional.
+    pub fn add_group_task<F>(&self, elements: usize, f: F) -> GroupTaskId
+    where
+        F: Fn(usize) + Send + Sync + 'static,
+    {
+        let id = {
+            let mut next = self.next_id.lock().unwrap();
+            let id = *next;
+            *next += 1;
+            id
+        };
+
+        let shared = Arc::new(f);
+        let pending: Vec<Box<dyn FnOnce() + Send + 'static>> = (0..elements)
+            .map(|index| {
+                let f = Arc::clone(&shared);
+                Box::new(move || f(index)) as Box<dyn FnOnce() + Send + 'static>
+            })
+            .collect();
+
+        self.groups().lock().unwrap().insert(
+            id,
+            GroupEntry {
+                pending,
+                processed: 0,
+                total: elements,
+            },
+        );
+
+        if self.mode() == PoolMode::Threaded {
+            self.run_group_now(id);
+        }
+        GroupTaskId(id)
+    }
+
+    /// Runs every queued element of `id` on the calling thread.
+    ///
+    /// Elements are taken out of the map before running so the pool's lock is
+    /// not held across user code — a task that touches the pool would otherwise
+    /// deadlock against itself.
+    fn run_group_now(&self, id: u64) {
+        loop {
+            let next = {
+                let mut groups = self.groups().lock().unwrap();
+                match groups.get_mut(&id) {
+                    Some(entry) if !entry.pending.is_empty() => Some(entry.pending.remove(0)),
+                    _ => None,
+                }
+            };
+            match next {
+                Some(work) => {
+                    work();
+                    if let Some(entry) = self.groups().lock().unwrap().get_mut(&id) {
+                        entry.processed += 1;
+                    }
+                }
+                None => break,
+            }
+        }
+    }
+
+    /// Runs everything queued by every group — the frame-tick drain.
+    ///
+    /// A no-op in [`PoolMode::Threaded`], where nothing is ever left queued.
+    pub fn drain_pending(&self) {
+        let ids: Vec<u64> = self.groups().lock().unwrap().keys().copied().collect();
+        for id in ids {
+            self.run_group_now(id);
+        }
+    }
+
+    /// Blocks until every element of the group has run.
+    ///
+    /// 🔑 In [`PoolMode::Cooperative`] this DRAINS rather than waits. There is
+    /// no other thread that could make progress, so a wait loop would spin
+    /// forever on the very build that needs this path — a hang rather than a
+    /// slow frame. Draining inline is what makes the same script work on both
+    /// the isolated and non-isolated web exports.
+    pub fn wait_for_group_task_completion(&self, group: GroupTaskId) {
+        self.run_group_now(group.0);
+    }
+
+    /// Whether every element of the group has run.
+    pub fn is_group_task_completed(&self, group: GroupTaskId) -> bool {
+        match self.groups().lock().unwrap().get(&group.0) {
+            Some(entry) => entry.pending.is_empty(),
+            // An unknown group is treated as done, matching `get_task_status`.
+            None => true,
+        }
+    }
+
+    /// How many of the group's elements have run
+    /// (`WorkerThreadPool.get_group_processed_element_count`).
+    pub fn get_group_processed_element_count(&self, group: GroupTaskId) -> usize {
+        match self.groups().lock().unwrap().get(&group.0) {
+            Some(entry) => entry.processed,
+            None => 0,
+        }
+    }
+
+    /// How many elements the group was submitted with.
+    pub fn group_element_count(&self, group: GroupTaskId) -> usize {
+        match self.groups().lock().unwrap().get(&group.0) {
+            Some(entry) => entry.total,
+            None => 0,
+        }
+    }
+}
+
+// ===========================================================================
+// Thread-safety checks (pat-s3rrv.217)
+// ===========================================================================
+
+std::thread_local! {
+    /// Whether the engine's conservative thread-safety checks run on THIS
+    /// thread (`Thread.set_thread_safety_checks_enabled`).
+    ///
+    /// ⚠️ **Thread-local, not global, and that is the whole semantic.** Godot's
+    /// documentation says the setting applies "on the current thread" and that
+    /// "the default, for every thread, is that they are enabled". A process-wide
+    /// flag would let one worker disabling its own checks silently disable them
+    /// for the main thread too — turning a deliberate, locally-scoped escape
+    /// hatch into an engine-wide one, which is the opposite of what a caller
+    /// reaching for this is asking for.
+    static THREAD_SAFETY_CHECKS: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Sets whether the engine's thread-safety checks run on the calling thread.
+///
+/// Godot's checks are conservative: they only permit a call when safety can be
+/// guaranteed, so a caller who knows better — and who is taking on the
+/// synchronisation themselves, typically with a [`GodotMutex`] — can switch
+/// them off for their own thread.
+pub fn set_thread_safety_checks_enabled(enabled: bool) {
+    THREAD_SAFETY_CHECKS.with(|c| c.set(enabled));
+}
+
+/// Whether the engine's thread-safety checks run on the calling thread.
+///
+/// Defaults to `true` on every thread, including threads spawned after another
+/// thread disabled its own.
+pub fn is_thread_safety_checks_enabled() -> bool {
+    THREAD_SAFETY_CHECKS.with(|c| c.get())
 }

@@ -92,13 +92,16 @@ fn an_unknown_context_does_not_fall_back_to_the_bare_entry() {
 fn msgctxt_binds_to_the_following_message() {
     let t = parse_po("en", PO);
     assert_eq!(
-        t.get_message_with_context("menu", "FILE"),
+        t.get_message_with_context("menu", "FILE").as_deref(),
         Some("Menu File")
     );
-    assert_eq!(t.get_message("FILE"), Some("bare"));
+    assert_eq!(t.get_message("FILE").as_deref(), Some("bare"));
     // If the context had bound backwards, the bare entry would have been filed
     // under "menu" and this would be the bare string.
-    assert_ne!(t.get_message_with_context("menu", "FILE"), Some("bare"));
+    assert_ne!(
+        t.get_message_with_context("menu", "FILE").as_deref(),
+        Some("bare")
+    );
 }
 
 /// **The interpreter half.** `tr(msg, ctx)` from GDScript routes the context
