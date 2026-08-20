@@ -2077,6 +2077,10 @@ fn scene_env_effects(tree: &SceneTree) -> SceneEnvEffects3D {
             probe.size = env_vec3(node, "size", probe.size);
             probe.origin_offset = env_vec3(node, "origin_offset", probe.origin_offset);
             probe.intensity = env_f32(node, "intensity", probe.intensity);
+            // ⚠️ Registered in ClassDB and shown by the inspector long before it
+            // reached the renderer, so an authored `blend_distance` round-tripped
+            // through the .tscn and changed nothing (pat-s3rrv.206).
+            probe.blend_distance = env_f32(node, "blend_distance", probe.blend_distance);
             probe.max_distance = env_f32(node, "max_distance", probe.max_distance);
             probe.box_projection = env_bool(node, "box_projection", probe.box_projection);
             probe.interior = env_bool(node, "interior", probe.interior);

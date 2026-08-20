@@ -147,16 +147,31 @@ fn compositor_effect_runs_in_frame() {
         "both frames are the same size, so they compare pixel for pixel"
     );
 
-    // ⚠️ NOT "every pixel is the tint". The effect writes the whole colour
-    // buffer, and then `draw_editor_overlays_3d` paints the grid and gizmos
-    // over part of it — by design, because Godot's compositor operates on the
-    // game frame and tinting the editor furniture would be a parity bug. On a
-    // 64x64 frame the overlays cover a large minority of the pixels.
+    // ⚠️ NOT "every pixel is the tint", and NOT "every changed pixel is the
+    // tint" either. The effect writes the whole colour buffer, but the editor
+    // draws its overlays AFTER the 3D pass and blends them: the ground grid is
+    // anti-aliased and fades with distance (`viewport_3d_render.rs` —
+    // "Drawn faint; far lines fade", compositing through `Raster::blend`).
     //
-    // The exact statement that survives that: every pixel which CHANGED
-    // between the two frames must be the tint. Overlay pixels are identical in
-    // both renders, so they drop out of the comparison rather than having to be
-    // excluded by hand.
+    // A partially-covered overlay pixel is therefore a blend of the grid colour
+    // with whatever lay beneath it, so it lands on a DIFFERENT value in the two
+    // renders and is neither frame's tint. This assertion used to require every
+    // changed pixel to equal the tint exactly and failed on pixel 640 — row 10,
+    // column 0 of the 64x64 frame — which came out
+    // `(0.977, 0.035, 0.983)`: magenta pulled slightly toward the grid line.
+    // The giveaway is that the two channels that were both 1.0 in the tint came
+    // back DIFFERENT (0.977 vs 0.983), which no per-channel colour transform can
+    // do — only a blend with something else can.
+    //
+    // 🔑 The invariant that survives all of that, without needing to know where
+    // the grid drew: render the same frame with TWO different tints. A pixel the
+    // overlay never touched is written by the effect and nothing else, so it
+    // equals its own tint in each render. A blended pixel equals neither. So the
+    // set of pixels matching tint A must be EXACTLY the set matching tint B —
+    // and it must not be empty.
+    // Any pixel at all must have moved between the two renders. This is the
+    // coarsest possible statement of "the callback's buffer was not a copy",
+    // and it is kept because it fails loudly and early if the effect never ran.
     let changed: Vec<usize> = (0..plain.pixels.len())
         .filter(|&i| plain.pixels[i] != composited.pixels[i])
         .collect();
@@ -165,13 +180,43 @@ fn compositor_effect_runs_in_frame() {
         "the effect's write must reach the output — no pixel changed at all, \
          which is what a callback handed a copy of the buffer would produce"
     );
-    for i in changed {
-        let px = composited.pixels[i];
-        assert!(
-            px.r == tint.r && px.g == tint.g && px.b == tint.b,
-            "pixel {i} changed to {px:?}, which is not the tint the effect wrote"
-        );
-    }
+
+    let other = Color::new(0.0, 1.0, 0.0, 1.0);
+    let second = TintEffect::new(other);
+    let mut compositor2 = Compositor::new();
+    compositor2.add_effect(
+        CompositorEffect::new(EffectCallbackType::PostTransparent).with_callback(second.clone()),
+    );
+    let composited2 = render_editor_3d_frame_with_compositor(&vp, &tree, Some(compositor2));
+
+    let matches_tint = |frame: &[Color], c: Color| -> Vec<usize> {
+        (0..frame.len())
+            .filter(|&i| frame[i].r == c.r && frame[i].g == c.g && frame[i].b == c.b)
+            .collect()
+    };
+    let a = matches_tint(&composited.pixels, tint);
+    let b = matches_tint(&composited2.pixels, other);
+
+    assert!(
+        !a.is_empty(),
+        "no pixel came out exactly the tint, so the effect's write never \
+         reached the output unblended anywhere"
+    );
+    assert_eq!(
+        a, b,
+        "the pixels an effect owns must not depend on WHICH colour it wrote: \
+         every pixel the editor overlay did not touch is written by the effect \
+         and nothing else, so both renders must own exactly the same set"
+    );
+    // ...and that set must be most of the frame, or "the effect ran" would be
+    // satisfied by a write that reached a single stray pixel.
+    assert!(
+        a.len() * 2 > composited.pixels.len(),
+        "the effect writes the whole colour buffer, so most of the frame must \
+         come out exactly the tint; only {} of {} pixels did",
+        a.len(),
+        composited.pixels.len()
+    );
 }
 
 /// Removing the effect restores the untinted frame.

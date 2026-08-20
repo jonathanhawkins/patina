@@ -64,6 +64,22 @@ const H: u32 = 128;
 /// The wall sits at `(-2, 2, -2)`: high, and on the opposite side from the
 /// editor camera (which orbits to +X/+Z), so it is in the mirror's reflected
 /// hemisphere without standing between the camera and the mirror.
+///
+/// ⚠️ Its basis is a 180-degree turn about X — `diag(1, -1, -1)` — and that is
+/// load-bearing, not decoration (pat-s3rrv.206). `Mesh3D::plane` builds an XZ
+/// quad whose normal is `+Y`, so with the IDENTITY basis this "wall" was a
+/// horizontal panel facing UP, and the mirror below it could only ever see its
+/// underside. A single-sided plane is invisible from behind here exactly as it
+/// is in Godot, so the fixture could not produce a reflection for a reason that
+/// had nothing to do with reflection probes.
+///
+/// Turning it over points the normal at `-Y`, so the mirror sees its FRONT face
+/// while the camera above still sees its back and culls it — which is what keeps
+/// the wall out of the direct view while leaving it in the reflected hemisphere.
+///
+/// The basis is written as a diagonal on purpose: `diag(1, -1, -1)` reads the
+/// same whether the `.tscn` parser takes the nine floats row-major or
+/// column-major, so this fixture cannot be broken by that convention.
 fn scene_src(probe: &str, mirror_roughness: f32) -> String {
     format!(
         r#"[gd_scene load_steps=3 format=3]
@@ -84,7 +100,7 @@ mesh = "primitive:PlaneMesh"
 surface_material_override/0 = SubResource("Mirror_1")
 
 [node name="Wall" type="MeshInstance3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2, 2, -2)
+transform = Transform3D(1, 0, 0, 0, -1, 0, 0, 0, -1, -2, 2, -2)
 mesh = "primitive:PlaneMesh"
 surface_material_override/0 = SubResource("Wall_1")
 
@@ -180,8 +196,33 @@ fn a_rough_surface_takes_less_reflection_than_a_mirror() {
     let baseline_smooth = render(&scene_src("", 0.0));
     let baseline_rough = render(&scene_src("", 1.0));
 
-    let smooth = differing(&render(&scene_src(PROBE_PLAIN, 0.0)), &baseline_smooth).len();
-    let rough = differing(&render(&scene_src(PROBE_PLAIN, 1.0)), &baseline_rough).len();
+    // 🔑 Count only the RED pixels, exactly as the acceptance above does.
+    //
+    // ⚠️ A raw `differing(..).len()` does not measure the reflection at all.
+    // Adding `PROBE_PLAIN` adds a NODE, and the editor draws every mesh-less
+    // spatial node as a generic box marker (`viewport_3d_render.rs` — "a
+    // primitive marker (camera frustum, light icon, or a generic box) for" a
+    // node with no mesh). That gizmo differs between the with-probe and
+    // no-probe renders in BOTH runs and has nothing to do with roughness, so it
+    // contributed the same count to each: the assertion read `rough=64 vs
+    // smooth=64`, equal to the digit, which is the signature of a measurement
+    // that never saw the input it claims to vary.
+    //
+    // `red_dominant` is what separates the captured red wall from the probe's
+    // own grey marker, which is why the acceptance already filters by it. The
+    // intent here is unchanged — a rough surface must take less of the capture
+    // than a mirror — and a build that tinted every surface regardless of
+    // roughness still fails, because then `rough` would match `smooth` again.
+    let with_smooth = render(&scene_src(PROBE_PLAIN, 0.0));
+    let with_rough = render(&scene_src(PROBE_PLAIN, 1.0));
+    let smooth = differing(&with_smooth, &baseline_smooth)
+        .into_iter()
+        .filter(|&i| red_dominant(with_smooth[i]))
+        .count();
+    let rough = differing(&with_rough, &baseline_rough)
+        .into_iter()
+        .filter(|&i| red_dominant(with_rough[i]))
+        .count();
 
     assert!(
         smooth > 0,
@@ -244,6 +285,11 @@ fn box_projection_changes_the_sampled_direction() {
         origin: Vector3::ZERO,
         box_projection: false,
         intensity: 1.0,
+        // ⚠️ The boundary fade is switched OFF here on purpose. This case
+        // isolates box projection, and `world_pos` sits at y = 4 in a ±5 box —
+        // exactly where a default 1.0 blend band begins — so leaving it on would
+        // couple a parallax assertion to a falloff curve.
+        blend_distance: 0.0,
     };
     let projected = ProbeReflection {
         box_projection: true,
@@ -323,5 +369,94 @@ fn the_capture_origin_follows_origin_offset() {
     assert!(
         o.x >= min.x && o.x <= max.x && o.y >= min.y && o.y <= max.y,
         "the capture origin must lie inside the probe's own influence box"
+    );
+}
+
+/// pat-s3rrv.206 — `blend_distance` fades the probe out at its box boundary.
+///
+/// The property was registered in ClassDB (`class_db.rs:6010`, default 1.0) and
+/// listed by the inspector, but the render-side `ReflectionProbe` had no such
+/// field: an authored value was parsed, shown, and dropped. Every probe had a
+/// hard edge, so a reflection popped on and off as a surface crossed the box.
+///
+/// Ported from `scene_forward_lights_inc.glsl:931-938` — the weight is 1 until a
+/// fragment comes within `blend_distance` of a face, 0 exactly at the face, and
+/// squared.
+///
+/// ⚠️ Asserted as an ORDERING plus the two endpoints, not as a curve. The exact
+/// midpoint value is the reference's business and would pin an implementation
+/// detail; what a scene actually depends on is that the centre is unattenuated,
+/// the boundary is silent, and the band between them is monotonic.
+#[test]
+fn blend_distance_fades_the_probe_out_at_its_boundary() {
+    // ⚠️ Function-scoped, matching every other test in this file: `Vector3` and
+    // `CubeFace` are NOT among the file-level imports, so a test appended
+    // without them fails to compile (E0433) even though its neighbours use both
+    // freely a few lines above.
+    use gdcore::math::Vector3;
+    use gdserver3d::reflection_probe::CubeFace;
+
+    let white = Color::new(1.0, 1.0, 1.0, 1.0);
+    let mut cube = ReflectionCubemap::new(2, white);
+    for face in [
+        CubeFace::PosX,
+        CubeFace::NegX,
+        CubeFace::PosY,
+        CubeFace::NegY,
+        CubeFace::PosZ,
+        CubeFace::NegZ,
+    ] {
+        cube.set_face(face, vec![white; 4]);
+    }
+    let cube = Arc::new(cube);
+
+    // A ±5 box with a 2 m blend band: full strength inside |y| <= 3, fading to
+    // nothing at |y| = 5.
+    let probe = ProbeReflection {
+        cubemap: cube,
+        box_min: Vector3::new(-5.0, -5.0, -5.0),
+        box_max: Vector3::new(5.0, 5.0, 5.0),
+        origin: Vector3::ZERO,
+        box_projection: false,
+        intensity: 1.0,
+        blend_distance: 2.0,
+    };
+    let refl = Vector3::new(1.0, 0.0, 0.0);
+    let at = |y: f32| probe.sample(Vector3::new(0.0, y, 0.0), refl).r;
+
+    let centre = at(0.0);
+    let band_start = at(3.0);
+    let mid = at(4.0);
+    let boundary = at(5.0);
+
+    assert!(
+        (centre - 1.0).abs() < 1e-6,
+        "the box centre must be unattenuated, got {centre}"
+    );
+    assert!(
+        (band_start - 1.0).abs() < 1e-6,
+        "at exactly `blend_distance` from the face the fade has not started \
+         yet, got {band_start}"
+    );
+    assert!(
+        boundary.abs() < 1e-6,
+        "the reflection must reach zero at the box face, got {boundary}"
+    );
+    assert!(
+        mid > 0.0 && mid < band_start,
+        "inside the band the probe must be partly faded — strictly between the \
+         two endpoints, got {mid}"
+    );
+
+    // 🔑 The control. `0.0` is Godot's "no blending" value and must restore the
+    // hard edge exactly, or every existing probe silently changes behaviour.
+    let hard = ProbeReflection {
+        blend_distance: 0.0,
+        ..probe.clone()
+    };
+    assert!(
+        (hard.sample(Vector3::new(0.0, 5.0, 0.0), refl).r - 1.0).abs() < 1e-6,
+        "blend_distance = 0.0 must keep the probe at full strength right up to \
+         the face, which is how every probe behaved before this change"
     );
 }

@@ -266,3 +266,61 @@ func _ready():
          `None` means the method never dispatched at all"
     );
 }
+
+/// The mirror of clause (c): an AIRBORNE wheel reports `is_in_contact()` false.
+///
+/// ⚠️ Without this, `is_in_contact_reads_true_from_gdscript_while_grounded` passes
+/// against an implementation that returns `true` unconditionally — the clause only
+/// ever samples a grounded wheel, so "always in contact" and "correctly in
+/// contact" are indistinguishable. This is the only test in the file that can
+/// tell them apart.
+///
+/// ⚠️ The car is LIFTED rather than sampled before the first step, and that
+/// distinction is the whole design. 3D bodies register lazily inside
+/// `sync_to_physics`, which only runs from `MainLoop::step` — so reading a wheel
+/// before stepping would report false because no body exists yet, which is a
+/// vacuous negative: it would pass just as happily against a correct engine as
+/// against one whose raycast never fires.
+///
+/// Lifting to y = 5 makes the geometry unambiguous. Wheel origins sit at local
+/// y = -0.4, so 4.6 in world space, and a wheel reaches `wheel_radius` 0.5 plus
+/// `wheel_rest_length` 0.15 = 0.65 below itself — leaving the floor's top surface
+/// (y = 0) about 3.95 m out of reach. Two ticks of gravity move the car about
+/// 5 mm, so the margin survives the stepping needed to register the body.
+#[test]
+fn wheel_reports_not_in_contact_while_airborne() {
+    let high = CAR_TSCN.replace(
+        "position = Vector3(0, 1.2, 0)",
+        "position = Vector3(0, 5, 0)",
+    );
+    let mut ml = load(&high);
+    let car = node_of(&ml, "/root/Root/Car");
+
+    // Enough to register the body, nowhere near enough to fall 4 m.
+    run(&mut ml, 2);
+    let y = chassis_position(&ml, car).y;
+    assert!(
+        y > 3.0,
+        "fixture: the car must still be airborne when its wheels are asked, got          y = {y} — if it has already fallen this test would be asserting the          grounded case over again"
+    );
+
+    let src = "extends VehicleBody3D
+var grounded = true
+func _ready():
+    self.grounded = $FL.is_in_contact()
+";
+    let script = GDScriptNodeInstance::from_source(src, car).expect("script parses");
+    ml.tree_mut().attach_script(car, Box::new(script));
+    ml.tree_mut().process_script_ready(car);
+
+    let grounded = ml
+        .tree()
+        .get_script(car)
+        .expect("the car has a script")
+        .get_property("grounded");
+    assert_eq!(
+        grounded,
+        Some(Variant::Bool(false)),
+        "a wheel 4 m above the floor must report is_in_contact() == false;          `Some(Bool(true))` means the contact flag is not actually derived from          the suspension ray, and `None` means the method never dispatched"
+    );
+}

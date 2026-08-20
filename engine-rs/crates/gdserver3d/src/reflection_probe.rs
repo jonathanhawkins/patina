@@ -53,6 +53,14 @@ pub struct ReflectionProbe {
     pub max_distance: f32,
     /// Reflection intensity multiplier.
     pub intensity: f32,
+    /// Metres over which the probe fades out at its box boundary
+    /// (Godot `blend_distance`, default 1.0).
+    ///
+    /// ⚠️ Registered in ClassDB and shown by the inspector since before this
+    /// bead, but absent from this struct — so an authored value was parsed,
+    /// displayed, and silently dropped. `0.0` disables the fade, which is the
+    /// hard-edged behaviour every probe had until now (pat-s3rrv.206).
+    pub blend_distance: f32,
     /// How the cubemap updates.
     pub update_mode: ReflectionProbeUpdateMode,
     /// How the probe contributes ambient light.
@@ -86,6 +94,8 @@ impl ReflectionProbe {
             enable_shadows: false,
             max_distance: 0.0,
             intensity: 1.0,
+            // Godot's documented default (`ReflectionProbe.xml`).
+            blend_distance: 1.0,
             update_mode: ReflectionProbeUpdateMode::default(),
             ambient_mode: ReflectionProbeAmbientMode::default(),
             ambient_color: Color::BLACK,
@@ -286,12 +296,59 @@ pub struct ProbeReflection {
     pub box_projection: bool,
     /// Reflection strength multiplier.
     pub intensity: f32,
+    /// Metres of fade at the box boundary; `0.0` means a hard edge.
+    pub blend_distance: f32,
 }
 
 impl ProbeReflection {
     /// The reflected colour for a surface at `world_pos` reflecting along
     /// `reflection`.
     ///
+    /// How much of the reflection survives at `world_pos`, in `0..=1`.
+    ///
+    /// Ported from `scene_forward_lights_inc.glsl:931-938`:
+    ///
+    /// ```text
+    /// axis_blend_distance = min(blend_distance, box_extents)
+    /// blend_axes = (abs(local_pos) - box_extents + axis_blend_distance) / axis_blend_distance
+    /// blend_axes = clamp(1 - blend_axes, 0, 1)
+    /// blend      = (blend_axes.x * blend_axes.y * blend_axes.z) ^ 2
+    /// ```
+    ///
+    /// So the weight is 1 until a fragment comes within `blend_distance` of a
+    /// box face, then falls to 0 exactly at the face — squared, and multiplied
+    /// across the three axes so a corner fades faster than a face.
+    ///
+    /// ⚠️ `min(blend_distance, box_extents)` is not tidying: a blend distance
+    /// wider than the box would otherwise divide the fade by a band the box
+    /// cannot contain, leaving the probe dim at its own centre.
+    ///
+    /// ⚠️ `0.0` short-circuits to a hard edge. The reference gates the whole
+    /// computation on `!= 0.0`, and dividing by a zero band would be NaN — which
+    /// propagates into the pixel rather than failing.
+    fn blend_weight(&self, world_pos: Vector3) -> f32 {
+        if self.blend_distance <= 0.0 {
+            return 1.0;
+        }
+        let center = (self.box_min + self.box_max) * 0.5;
+        let extents = (self.box_max - self.box_min) * 0.5;
+        let local = world_pos - center;
+        let mut blend = 1.0_f32;
+        for (l, e) in [
+            (local.x, extents.x),
+            (local.y, extents.y),
+            (local.z, extents.z),
+        ] {
+            let band = self.blend_distance.min(e);
+            if band <= 0.0 {
+                continue;
+            }
+            let axis = (l.abs() - e + band) / band;
+            blend *= (1.0 - axis).clamp(0.0, 1.0);
+        }
+        blend * blend
+    }
+
     /// 🔑 The `box_projection` branch here is the first and only caller of
     /// [`crate::box_projection::box_project_reflection`]. That module has been
     /// present, complete and unit-tested with ZERO callers, so authoring
@@ -313,12 +370,8 @@ impl ProbeReflection {
             reflection
         };
         let c = self.cubemap.sample_direction(dir);
-        Color::new(
-            c.r * self.intensity,
-            c.g * self.intensity,
-            c.b * self.intensity,
-            1.0,
-        )
+        let strength = self.intensity * self.blend_weight(world_pos);
+        Color::new(c.r * strength, c.g * strength, c.b * strength, 1.0)
     }
 }
 
@@ -347,6 +400,7 @@ pub fn probe_reflection_at(
             origin: probe.capture_origin(),
             box_projection: probe.box_projection,
             intensity: probe.intensity,
+            blend_distance: probe.blend_distance,
         });
     }
     None

@@ -165,6 +165,7 @@ fn polygon_path_finder_reachable_from_gdscript_with_godot_signatures_routes_arou
         "extends Node\n\
          var count = 0\n\
          var crosses = 0\n\
+         var touches = 0\n\
          func run():\n\
          \x20   var f = PolygonPathFinder.new()\n\
          \x20   {SQUARE}\
@@ -172,7 +173,13 @@ fn polygon_path_finder_reachable_from_gdscript_with_godot_signatures_routes_arou
          \x20   var path = f.find_path(Vector2(0, 15), Vector2(30, 15))\n\
          \x20   self.count = path.size()\n\
          \x20   for i in range(path.size() - 1):\n\
-         \x20       self.crosses += f.get_intersections(path[i], path[i + 1]).size()\n"
+         \x20       var hits = f.get_intersections(path[i], path[i + 1])\n\
+         \x20       self.touches += hits.size()\n\
+         \x20       for j in range(hits.size()):\n\
+         \x20           var hit = hits[j]\n\
+         \x20           if hit.distance_to(path[i]) > 0.001:\n\
+         \x20               if hit.distance_to(path[i + 1]) > 0.001:\n\
+         \x20                   self.crosses += 1\n"
     );
     let (tree, node) = run(&src);
 
@@ -188,6 +195,41 @@ fn polygon_path_finder_reachable_from_gdscript_with_godot_signatures_routes_arou
     );
     // Stronger than the point count: no segment of the returned path may cross
     // a boundary edge. A detour that clips a corner still has > 2 points.
+    //
+    // ⚠️ **Interior intersections only — endpoint touches are not crossings.**
+    // `get_intersections` is endpoint-INCLUSIVE, faithfully to Godot: it is a
+    // direct port of `Geometry2D::segment_intersects_segment`
+    // (`geometry_2d.h:188`), and upstream's own `PolygonPathFinder::get_intersections`
+    // (`polygon_path_finder.cpp:506-520`) loops the edges calling exactly that.
+    // A visibility-graph path routes THROUGH the obstacle's corners, so every
+    // segment necessarily shares an endpoint with two edges.
+    //
+    // Counting raw hits therefore measured something no correct path can ever
+    // achieve: this fixture's shortest detour is
+    // `(0,15) -> (10,10) -> (20,10) -> (30,15)`, whose three segments touch two
+    // edges apiece — the exact 6 this assertion used to report. The segment
+    // along the bottom edge is collinear and is already rejected upstream, so it
+    // contributes nothing either way.
+    //
+    // Filtering to hits strictly inside the segment keeps the assertion's real
+    // intent — a path that CLIPS a corner or cuts the interior produces an
+    // intersection away from both endpoints and still fails here — while no
+    // longer failing a path for hugging the geometry it is supposed to hug.
+    // `polygon_path_finder.rs` says the same thing in its own words: "a path is
+    // allowed to travel along an obstacle edge or through a shared vertex".
+    // 🔑 The anti-vacuous guard. `crosses` is a count of things that must NOT
+    // happen, so it reads 0 both when the path is clean and when the loop never
+    // ran at all — a `get_intersections` that returned nothing, or an iteration
+    // form the interpreter silently ignored, would look like success. This
+    // fixture's corner-hugging path MUST touch edges at its shared vertices, so
+    // a non-zero raw count is the proof that the measurement happened.
+    let touches = script_var(&tree, node, "touches");
+    assert!(
+        matches!(touches, Variant::Int(n) if n > 0),
+        "the intersection query must have run and reported the endpoint touches \
+         a corner-routing path necessarily makes; got {touches:?}, which means \
+         the `crosses` assertion below would pass without measuring anything"
+    );
     assert_eq!(
         script_var(&tree, node, "crosses"),
         Variant::Int(0),

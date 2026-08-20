@@ -215,6 +215,21 @@ fn spring_bias(stiffness: f32, error: f32, dt: f32, inv_dt: f32) -> f32 {
 /// distinct parameter: a stiff spring with no damping is *supposed* to oscillate.
 /// Folding damping into the bias would make every spring critically damped and
 /// the parameter would be stored and unread.
+///
+/// 🔑 `damping` is a RATE, not the fraction of velocity to erase this step —
+/// hence the `* dt` (pat-s3rrv.192).
+///
+/// This ran immediately after the spring solve, which sets the relative velocity
+/// to exactly the corrective value the positional bias asks for. Erasing
+/// `damping` of THAT velocity means Godot's default of `1.0` erased **all** of
+/// it, every tick: the spring computed a perfect correction and the damper threw
+/// it away before it could move anything. The symptom is a body that neither
+/// drifts nor sags but sits at its authored position to the last digit — which
+/// is indistinguishable from the spring never having been read at all, and is
+/// why it survived a `stiffness` that was plainly reaching the solver.
+///
+/// With the `dt` factor a damping of 1.0 bleeds ~1.7% per 60 Hz step, so the
+/// spring dominates and a heavier damping still saturates safely at the clamp.
 fn damp_linear_axis(
     a: &mut JointBody,
     b: &mut JointBody,
@@ -222,6 +237,7 @@ fn damp_linear_axis(
     rb: Vector3,
     n: Vector3,
     damping: f32,
+    dt: f32,
 ) {
     if damping <= 0.0 {
         return;
@@ -231,15 +247,15 @@ fn damp_linear_axis(
         return;
     }
     let relative = (b.velocity_at(rb) - a.velocity_at(ra)).dot(n);
-    let lambda = (-relative / k) * damping.clamp(0.0, 1.0);
+    let lambda = (-relative / k) * (damping * dt).clamp(0.0, 1.0);
     if lambda == 0.0 {
         return;
     }
     apply_pair_impulse(a, b, ra, rb, n * lambda);
 }
 
-/// Angular twin of [`damp_linear_axis`].
-fn damp_angular_axis(a: &mut JointBody, b: &mut JointBody, n: Vector3, damping: f32) {
+/// Angular twin of [`damp_linear_axis`], including its `dt` rate scaling.
+fn damp_angular_axis(a: &mut JointBody, b: &mut JointBody, n: Vector3, damping: f32, dt: f32) {
     if damping <= 0.0 {
         return;
     }
@@ -248,7 +264,7 @@ fn damp_angular_axis(a: &mut JointBody, b: &mut JointBody, n: Vector3, damping: 
         return;
     }
     let relative = (b.angular_velocity - a.angular_velocity).dot(n);
-    let lambda = (-relative / k) * damping.clamp(0.0, 1.0);
+    let lambda = (-relative / k) * (damping * dt).clamp(0.0, 1.0);
     if lambda == 0.0 {
         return;
     }
@@ -1353,7 +1369,7 @@ impl PhysicsWorld3D {
                             f32::NEG_INFINITY,
                             f32::INFINITY,
                         );
-                        damp_linear_axis(&mut a, &mut b, ra, rb, n, sp.damping);
+                        damp_linear_axis(&mut a, &mut b, ra, rb, n, sp.damping, dt);
                     }
                     let sp = g.angular_springs[axis];
                     if sp.enabled && sp.stiffness > 0.0 {
@@ -1368,7 +1384,7 @@ impl PhysicsWorld3D {
                             f32::NEG_INFINITY,
                             f32::INFINITY,
                         );
-                        damp_angular_axis(&mut a, &mut b, n, sp.damping);
+                        damp_angular_axis(&mut a, &mut b, n, sp.damping, dt);
                     }
                 }
             }

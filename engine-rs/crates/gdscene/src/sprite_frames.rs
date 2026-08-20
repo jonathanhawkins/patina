@@ -458,7 +458,7 @@ mod tests {
         // 0.25s at 10fps = 2.5 frames -> frame index 2.
         let finished = pb.advance(0.25, &frames);
         assert_eq!(pb.frame, 2);
-        assert!(!finished);
+        assert!(!finished.finished);
     }
 
     #[test]
@@ -468,13 +468,13 @@ mod tests {
         let mut pb = AnimatedSpritePlayback::new("attack");
         // 1.0s is well past the 3 frames -> should finish, resting on last frame.
         let finished = pb.advance(1.0, &frames);
-        assert!(finished, "animation_finished should fire");
+        assert!(finished.finished, "animation_finished should fire");
         assert_eq!(pb.frame, 2, "rests on last frame");
         assert!(!pb.playing);
         assert!(pb.finished);
         // A further advance neither moves nor re-fires.
         let again = pb.advance(1.0, &frames);
-        assert!(!again);
+        assert!(!again.finished);
         assert_eq!(pb.frame, 2);
     }
 
@@ -485,7 +485,13 @@ mod tests {
         let mut pb = AnimatedSpritePlayback::new("idle");
         // 0.5s = 5 frames at 10fps; wraps 4->0->1.
         let finished = pb.advance(0.5, &frames);
-        assert!(!finished);
+        assert!(!finished.finished);
+        // ⚠️ The `wraps` half of this test's name was never asserted. pat-s3rrv.182
+        // widened `advance` from a bare bool to `AdvanceOutcome` precisely so a WRAP
+        // had somewhere to be reported — 0.5 s at 10 fps steps 0->1->2->3, wraps to
+        // 0 and lands on 1 — and nothing checked the new field. Without this, the
+        // struct's whole reason for existing is untested.
+        assert!(finished.looped, "a looping clip that wrapped must report it");
         assert!(pb.playing, "looping animation keeps playing");
         assert_eq!(pb.frame, 1);
     }
@@ -494,7 +500,7 @@ mod tests {
     fn missing_or_zero_fps_animation_is_noop() {
         let frames = SpriteFrames::new();
         let mut pb = AnimatedSpritePlayback::new("absent");
-        assert!(!pb.advance(1.0, &frames));
+        assert!(!pb.advance(1.0, &frames).finished);
         assert_eq!(pb.frame, 0);
     }
 }

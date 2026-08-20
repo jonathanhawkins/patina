@@ -40,6 +40,7 @@ pub mod collision;
 pub mod color_picker;
 pub mod control;
 pub mod control_render;
+pub mod curve2d_query;
 pub mod curve3d_query;
 pub mod file_dialog;
 pub mod frame_driver;

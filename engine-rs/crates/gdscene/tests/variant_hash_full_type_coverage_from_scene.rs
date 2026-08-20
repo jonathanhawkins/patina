@@ -8,13 +8,31 @@
 //! Dictionary keyed by them into a single bucket. The catch-all is now gone, so
 //! a future Variant kind is a compile error rather than another silent zero.
 //!
-//! ⚠️ The golden values below were computed from Godot's algorithm
-//! (`core/templates/hashfuncs.h` murmur3 + `core/variant/variant.cpp`)
-//! reimplemented independently, then **calibrated against three goldens this
-//! repo already asserts** — `Int(42) = 2136435707`, `String("hello") =
-//! 261238937` and `{"a":1} = 120477264` (`gdvariant/src/hash.rs:511-603`). An
-//! independent implementation reproducing those is what makes the new value
-//! evidence rather than a restatement of our own code.
+//! ⚠️ PROVENANCE OF THE GOLDEN VALUES — both were re-derived from the vendored
+//! C++ in `upstream/godot`, independently of any Patina code (pat-s3rrv.223).
+//!
+//! The earlier note said they were "calibrated against three goldens this repo
+//! already asserts", and `{"a":1} = 120477264` was itself one of those
+//! calibration inputs — so the dictionary assertion restated a number rather
+//! than testing it. Both are now derived rather than calibrated, and the
+//! derivation is short enough to redo by hand:
+//!
+//! * primitives — `core/templates/hashfuncs.h`: `HASH_MURMUR3_SEED = 0x7F07C65`,
+//!   `hash_murmur3_one_32` (×0xcc9e2d51, rotl15, ×0x1b873593, xor, rotl13,
+//!   ×5 +0xe6546b64), `hash_fmix32`, and `hash_one_uint64`;
+//! * containers — `Array::recursive_hash` (`core/variant/array.cpp`) seeds with
+//!   `Variant::ARRAY` then folds each element; `Dictionary::recursive_hash`
+//!   (`core/variant/dictionary.cpp`) seeds with `Variant::DICTIONARY` then folds
+//!   KEY then VALUE per entry; both finish through `hash_fmix32`;
+//! * leaves — `Variant::recursive_hash` uses `hash_one_uint64` for INT and
+//!   `String::hash` (djb2, `hashv * 33 + c`, seed 5381) for STRING;
+//! * ordinals counted off `Variant::Type` in `core/variant/variant.h`:
+//!   `DICTIONARY = 27`, `ARRAY = 28`.
+//!
+//! Folding those gives `[1,2,3] -> 3860078832` and `{"a":1} -> 120477264`,
+//! matching the assertions below. Since the chain starts at Godot's constants
+//! and never consults `gdvariant`, agreement here is parity evidence rather than
+//! our implementation agreeing with itself.
 
 use gdcore::math::{Rect2i, Transform2D, Vector2, Vector2i, Vector4, Vector4i};
 use gdcore::math3d::{Basis, Transform3D};
@@ -52,7 +70,17 @@ fn previously_unhashed() -> Vec<(&'static str, Variant)> {
             "Vector4",
             Variant::Vector4(Vector4::new(1.0, 2.0, 3.0, 4.0)),
         ),
-        ("Vector4i", Variant::Vector4i(Vector4i::new(1, 2, 3, 4))),
+        // ⚠️ 5,6,7,8 and NOT 1,2,3,4 — the value change is load-bearing.
+        // `Rect2i` above carries the same four components (pos 1,2 / size 3,4),
+        // and Godot hashes BOTH types with byte-identical code: four
+        // `hash_murmur3_one_32` folds over the components in order, finished with
+        // `hash_fmix32`, and no type tag (`core/math/rect2i.h:230`,
+        // `core/math/vector4i.h:139`). Same components therefore MUST produce the
+        // same hash upstream, so the distinctness assertion below was demanding
+        // behaviour Godot does not provide. Giving them different values keeps the
+        // real intent — distinct KEYS stay distinct — without asserting a
+        // divergence from the engine we are porting.
+        ("Vector4i", Variant::Vector4i(Vector4i::new(5, 6, 7, 8))),
         (
             "Transform2D",
             Variant::Transform2D(Transform2D {
@@ -107,6 +135,30 @@ fn the_previously_unhashed_kinds_do_not_collide_with_each_other() {
             );
         }
     }
+}
+
+/// Godot COLLIDES `Rect2i` and `Vector4i` that carry the same four components,
+/// and so do we — pinned here so the next reader does not "fix" it.
+///
+/// ⚠️ This looks like a bug and is not. `Variant::recursive_hash` dispatches both
+/// to `HashMapHasherDefault::hash(..)` with no type tag, and the two hashers are
+/// the same function: four `hash_murmur3_one_32` folds in component order,
+/// finished with `hash_fmix32` (`core/math/rect2i.h:230`,
+/// `core/math/vector4i.h:139`). Matching that is parity; separating them by
+/// mixing in a type tag would be a DIVERGENCE, and would quietly change every
+/// hash we already assert as a golden.
+///
+/// This is why the fixture above gives the two kinds different components.
+#[test]
+fn rect2i_and_vector4i_with_equal_components_collide_as_they_do_in_godot() {
+    let r = Variant::Rect2i(Rect2i::new(Vector2i::new(1, 2), Vector2i::new(3, 4)));
+    let v = Variant::Vector4i(Vector4i::new(1, 2, 3, 4));
+    assert_eq!(
+        godot_hash(&r),
+        godot_hash(&v),
+        "Godot hashes Rect2i and Vector4i with identical code and no type tag, so \
+         equal components must collide; a difference here means we diverged"
+    );
 }
 
 #[test]

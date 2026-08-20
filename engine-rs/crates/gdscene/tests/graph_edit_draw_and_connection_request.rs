@@ -63,6 +63,26 @@ fn graph_scene() -> (SceneTree, NodeId, NodeId, NodeId) {
     control::apply_anchor_preset(&mut tree, edit, AnchorPreset::TopLeft);
     control::set_offset_right(&mut tree, edit, 400.0);
     control::set_offset_bottom(&mut tree, edit, 240.0);
+    // ⚠️ The anchors and offsets above do NOT give the GraphEdit a size, and the
+    // port tests cannot work without one (pat-s3rrv.233). `control::get_size`
+    // reads the `size` PROPERTY only — it does not resolve anchors — and neither
+    // `apply_anchor_preset` nor `set_offset_*` writes it. So the GraphEdit's
+    // hit rect stayed (0, 0, 0, 0) and `control_at_point` could never land on it.
+    //
+    // That is fatal specifically for the PORTS. A port dot sits on a node's outer
+    // edge — A's output is at x = 20 + 120 = 140 — while a GraphNode's own hit
+    // rect is `position` + `size`, and these nodes set `position_offset` (graph
+    // space, used for DRAWING) and never `position`. So every node hit-tests at
+    // (0, 0)-(120, 60) regardless of where it is drawn, x = 140 falls outside all
+    // of them, and with the GraphEdit unsized `gui_input_stage` took its
+    // `let Some(hit) = hit else { return }` path and never reached the graph
+    // branch at all.
+    //
+    // ⚠️ The titlebar test passed throughout, by luck rather than correctness: its
+    // press at (50, 28) happens to land inside that misplaced (0, 0)-(120, 60)
+    // rect, so it acquired a hit and the walk up to the GraphEdit did the rest.
+    // One passing sibling therefore said nothing about whether hit-testing worked.
+    control::set_size(&mut tree, edit, Vector2::new(400.0, 240.0));
 
     let mut add = |tree: &mut SceneTree, name: &str, off: (f32, f32)| {
         let mut n = Node::new(name, "GraphNode");

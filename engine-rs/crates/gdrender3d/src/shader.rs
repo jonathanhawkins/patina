@@ -781,6 +781,52 @@ impl FragmentShader for LambertFragmentShader {
             diffuse_b += albedo.b * light.color.b * contrib;
         }
 
+        // Image-based specular from a captured ReflectionProbe (pat-s3rrv.206).
+        //
+        // 🔑 `uniforms.probe` was read in exactly ONE place in the renderer —
+        // inside `pbr_shade`, which only `PhongFragmentShader` reaches. But
+        // `ShadingMode::default()` is `Lambert` and `StandardMaterial3D` passes
+        // that straight through, so a `.tscn` mesh took THIS path and the probe
+        // could not reach a single pixel however perfect the capture was. The
+        // capture side and the sample side were each correct in isolation; the
+        // consumer simply sat in a branch the mesh never entered.
+        //
+        // ⚠️ The `sharpness > 0.0` guard is what makes this invisible to
+        // existing scenes, and it must stay. A DEFAULT material is
+        // `roughness = 1.0`, so `sharpness` is exactly 0 and this adds exactly
+        // nothing — every frame that does not author a shiny material is
+        // byte-identical. Only a smooth surface gains the reflection, which is
+        // the feature. Dropping the guard would nudge every rough surface in
+        // the engine and turn a targeted fix into a wide, confusing diff.
+        //
+        // ⚠️ Deliberately DUPLICATED from `pbr_shade` rather than extracted
+        // into a shared helper: this file's PBR path is currently green and
+        // reachable from `PhongFragmentShader`, and an additive change here
+        // cannot regress it, where a refactor of both could. If the two ever
+        // need to change together, extract then — and keep the F0 and
+        // `sharpness` terms identical to `pbr_shade`'s until someone does.
+        if let Some(probe) = uniforms.probe.as_ref() {
+            let n = normal;
+            let v = (uniforms.camera_position - input.world_position).normalized();
+            let n_dot_v = n.dot(v).max(1e-4);
+            let sharpness = 1.0 - m.roughness.clamp(0.0, 1.0);
+            if sharpness > 0.0 {
+                // F0: dielectric 0.04, metals use albedo — the same split
+                // `pbr_shade` makes.
+                let f0_d = 0.04;
+                let f0 = [
+                    lerp_f(f0_d, albedo.r, m.metallic),
+                    lerp_f(f0_d, albedo.g, m.metallic),
+                    lerp_f(f0_d, albedo.b, m.metallic),
+                ];
+                let reflection = n * (2.0 * n_dot_v) - v;
+                let env = probe.sample(input.world_position, reflection);
+                diffuse_r += env.r * f0[0] * sharpness;
+                diffuse_g += env.g * f0[1] * sharpness;
+                diffuse_b += env.b * f0[2] * sharpness;
+            }
+        }
+
         // Scene-referred linear HDR: no clamp (tonemapping clamps at the end).
         Color::new(
             diffuse_r + m.emission.r,

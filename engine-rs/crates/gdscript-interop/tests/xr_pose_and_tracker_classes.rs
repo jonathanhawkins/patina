@@ -44,6 +44,24 @@ fn call_check(src: &str) -> Variant {
     // ClassDB. `class_enum_constants_from_script.rs` opens its harness the same
     // way for the same reason; `xr_tracker.rs`, which this harness was copied
     // from, needs no class constant and so does not.
+    //
+    // ⚠️ A STALE BINARY REPRODUCES THIS SYMPTOM EXACTLY, and telling the two
+    // apart cost three agents an afternoon (pat-s3rrv.220). This seeding line
+    // landed in `735bb84` at 08-20 05:54; a binary built before that reports all
+    // four failures as `UndefinedVariable("XRPose")` — identical to a genuinely
+    // missing registration. Two of us "eliminated" a stale verdict by dating the
+    // SOURCE (`git log -S'XR_TRACKING_CONFIDENCE_HIGH' -- ...class_db.rs`, which
+    // predates the binary and looks current) and concluded the failure was real.
+    // It was not: nobody dated the TEST.
+    //
+    // Before diagnosing a failure here, date BOTH halves — a test binary is built
+    // from source AND fixture:
+    //
+    //   git log -S'<symbol>'            -- crates/gdobject/src/class_db.rs
+    //   git log -S'register_all_classes' -- <this file>
+    //
+    // Take the NEWER of the two. `git log -S` dates the change; a file mtime dates
+    // the file, and a later unrelated edit moves it and inverts the answer.
     gdobject::class_db::register_all_classes();
     let mut interp = Interpreter::new();
     let class_def = interp.run_class(src).expect("script parses");
