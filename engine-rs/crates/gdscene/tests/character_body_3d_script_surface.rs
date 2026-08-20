@@ -85,6 +85,273 @@ fn int_prop(ml: &MainLoop, node: NodeId, name: &str) -> i64 {
     }
 }
 
+/// A scripted `CharacterBody3D` RESTING on a floor with a wall to its right.
+///
+/// ⚠️ Different from [`walker_scene`] in the one way that matters here: the body
+/// genuinely rests on the floor rather than floating above it, because
+/// `is_on_floor_only()` is meaningless unless `is_on_floor()` is true. The
+/// sphere has radius 0.5 and the floor's top face is y = 0, so the body sits
+/// centred at y = 0.5 and the script lets gravity hold it there.
+fn floor_and_wall_scene(script: &str, slide_on_ceiling: Option<bool>) -> (MainLoop, NodeId) {
+    let mut tree = SceneTree::new();
+    let root_id = tree.root_id();
+    let root = tree
+        .add_child(root_id, Node::new("Root", "Node3D"))
+        .unwrap();
+
+    // Floor: 1.0 tall, centred at -0.5, so its top face is exactly y = 0.
+    let mut floor = Node::new("Floor", "StaticBody3D");
+    floor.set_property("position", Variant::Vector3(Vector3::new(0.0, -0.5, 0.0)));
+    let floor_id = tree.add_child(root, floor).unwrap();
+    let mut floor_shape = Node::new("FloorShape", "CollisionShape3D");
+    floor_shape.set_property("shape", Variant::String("BoxShape3D".to_string()));
+    floor_shape.set_property("size", Variant::Vector3(Vector3::new(200.0, 1.0, 200.0)));
+    tree.add_child(floor_id, floor_shape).unwrap();
+
+    // Wall: a slab at x = 2.5, so its -X face is at x = 2.0. A sphere of radius
+    // 0.5 walking right first touches it centred at x = 1.5.
+    let mut wall = Node::new("Wall", "StaticBody3D");
+    wall.set_property("position", Variant::Vector3(Vector3::new(2.5, 2.0, 0.0)));
+    let wall_id = tree.add_child(root, wall).unwrap();
+    let mut wall_shape = Node::new("WallShape", "CollisionShape3D");
+    wall_shape.set_property("shape", Variant::String("BoxShape3D".to_string()));
+    wall_shape.set_property("size", Variant::Vector3(Vector3::new(1.0, 8.0, 200.0)));
+    tree.add_child(wall_id, wall_shape).unwrap();
+
+    let player = tree
+        .add_child(root, Node::new("Player", "CharacterBody3D"))
+        .unwrap();
+    node3d::set_position(&mut tree, player, Vector3::new(0.0, 0.5, 0.0));
+    if let Some(flag) = slide_on_ceiling {
+        if let Some(n) = tree.get_node_mut(player) {
+            n.set_property("slide_on_ceiling", Variant::Bool(flag));
+        }
+    }
+    let mut shape = Node::new("CollisionShape", "CollisionShape3D");
+    shape.set_property("shape", Variant::String("SphereShape3D".to_string()));
+    shape.set_property("radius", Variant::Float(0.5));
+    tree.add_child(player, shape).unwrap();
+    tree.attach_script(
+        player,
+        Box::new(GDScriptNodeInstance::from_source(script, player).unwrap()),
+    );
+
+    (MainLoop::new(tree), player)
+}
+
+fn bool_prop_of(ml: &MainLoop, node: NodeId, name: &str) -> bool {
+    match prop(ml, node, name) {
+        Variant::Bool(b) => b,
+        other => panic!("`{name}` must be a bool, got {other:?}"),
+    }
+}
+
+fn vec3_prop_of(ml: &MainLoop, node: NodeId, name: &str) -> Vector3 {
+    match prop(ml, node, name) {
+        Variant::Vector3(v) => v,
+        other => panic!("`{name}` must be a Vector3, got {other:?}"),
+    }
+}
+
+/// **The bead's named acceptance.** Clauses (a)-(c): 3D-typed getters, the
+/// `_only` predicates distinguishing floor-and-wall from floor-alone, and a
+/// slide-collision report carrying the wall normal.
+#[test]
+fn character_body_3d_script_surface() {
+    // Walk right into the wall while gravity holds the body on the floor.
+    let script = "\
+extends CharacterBody3D
+var ticks = 0
+var rv_type = -1
+var pv_type = -1
+var rv = Vector3(-1, -1, -1)
+var on_floor = false
+var on_floor_only = true
+var on_wall = false
+var hits = -1
+var first_normal_x = 0.0
+func _physics_process(delta):
+    velocity = Vector3(6, -4, 0)
+    move_and_slide()
+    self.ticks = self.ticks + 1
+    self.rv_type = typeof(get_real_velocity())
+    self.pv_type = typeof(get_platform_velocity())
+    self.rv = get_real_velocity()
+    self.on_floor = is_on_floor()
+    self.on_floor_only = is_on_floor_only()
+    self.on_wall = is_on_wall()
+    self.hits = get_slide_collision_count()
+    if self.hits > 0:
+        var c0 = get_slide_collision(0)
+        var n0 = c0.get_normal()
+        self.first_normal_x = n0.x
+";
+    let (mut ml, player) = floor_and_wall_scene(script, None);
+    for _ in 0..90 {
+        ml.step(1.0 / 60.0);
+    }
+
+    // Guard the guard: with no ticks every value below is still its
+    // initialiser, and each assertion would fail for the wrong reason.
+    assert!(
+        int_prop(&ml, player, "ticks") > 0,
+        "`_physics_process` never ran, so nothing below is evidence"
+    );
+
+    // -- (a) the getters answer in 3D ---------------------------------------
+    assert_eq!(
+        int_prop(&ml, player, "rv_type"),
+        TYPE_VECTOR3,
+        "get_real_velocity() must be a Vector3 on a CharacterBody3D"
+    );
+    assert_eq!(
+        int_prop(&ml, player, "pv_type"),
+        TYPE_VECTOR3,
+        "get_platform_velocity() must be a Vector3 on a CharacterBody3D"
+    );
+
+    // -- (b) floor AND wall, so `_only` must be FALSE ------------------------
+    //
+    // ⚠️ The pair is asserted together. `is_on_floor_only()` returning false is
+    // only meaningful if the body is actually on the floor — otherwise an
+    // implementation that always answers false would pass.
+    assert!(
+        bool_prop_of(&ml, player, "on_floor"),
+        "the body must be resting on the floor"
+    );
+    assert!(
+        bool_prop_of(&ml, player, "on_wall"),
+        "…and pressed against the wall, or the _only predicate proves nothing"
+    );
+    assert!(
+        !bool_prop_of(&ml, player, "on_floor_only"),
+        "is_on_floor_only() must be FALSE while also touching a wall — it is a \
+         conjunction, not an alias for is_on_floor()"
+    );
+
+    // -- (c) the slide-collision report --------------------------------------
+    let hits = int_prop(&ml, player, "hits");
+    assert!(
+        hits >= 1,
+        "walking into a wall must record at least one slide collision, got {hits}"
+    );
+    // The wall's -X face points back toward the body, i.e. -X.
+    //
+    // ⚠️ Read as a scalar, and bound to a local in the script before the field
+    // access: `get_slide_collision(0).get_normal()` chained in one expression
+    // has no precedent in any passing test, whereas the two-step form is what
+    // `characterbody2d_slide_collision_script_api` already proves parses.
+    let nx = match prop(&ml, player, "first_normal_x") {
+        Variant::Float(f) => f,
+        other => panic!("first_normal_x must be a float, got {other:?}"),
+    };
+    assert!(
+        nx < -0.5,
+        "get_slide_collision(0).get_normal() must be the wall's surface normal, \
+         pointing back at the body along -X; got x = {nx}"
+    );
+    // Real velocity must reflect being stopped by the wall, not the input.
+    let rv = vec3_prop_of(&ml, player, "rv");
+    assert!(
+        rv.x < 1.0,
+        "the body is against a wall, so its REAL x velocity must be far below \
+         the requested 6; got {rv:?}"
+    );
+}
+
+/// **Clause (d).** `slide_on_ceiling = false` stops a body dead on ceiling
+/// contact instead of letting it slide along.
+///
+/// ⚠️ Run as a PAIR with the `true` case in the same test. The flag's whole
+/// meaning is the difference between the two, and asserting only the `false`
+/// side would pass against an engine that never slides on ceilings at all.
+#[test]
+fn character_body_3d_script_surface_slide_on_ceiling_stops_dead() {
+    // Jump straight up into the wall slab's underside. The slab spans
+    // y = -2..6 at x = 2.5, so a body launched upward at x = 2.2 meets it.
+    // ⚠️ The jump is IMPULSIVE — velocity is set once, on the first tick only.
+    //
+    // My first version re-assigned `velocity = Vector3(0, 8, 0)` at the top of
+    // every tick and then read `velocity.y` back after `move_and_slide()`. That
+    // can never observe the cancellation: the solver's post-move velocity is
+    // published by `process_character_movement`, which runs AFTER the script's
+    // tick, so the script's own assignment on the following tick overwrites the
+    // zero before anything can read it. It reported 8 forever — not because the
+    // engine failed to cancel, but because the fixture kept re-arming the jump.
+    //
+    // A real jump is an impulse, so this models one and lets the engine own the
+    // velocity from then on.
+    let script = "\
+extends CharacterBody3D
+var ticks = 0
+var hit_ceiling = false
+func _physics_process(delta):
+    if self.ticks == 0:
+        velocity = Vector3(0, 8, 0)
+    move_and_slide()
+    self.ticks = self.ticks + 1
+    if is_on_ceiling():
+        self.hit_ceiling = true
+";
+    // ⚠️ A DEDICATED ceiling, not the wall slab. My first attempt reused the
+    // wall by standing the body at x = 2.4 — which is INSIDE that slab
+    // (it spans x 2.0..3.0, y -2..6), so the body started overlapping it and
+    // never "rose into" anything. The guard below caught that; without it the
+    // `velocity.y == 0` assertion would have passed vacuously on a body that
+    // touched nothing.
+    let ceiling_scene = |flag: bool| {
+        let (mut ml, player) = floor_and_wall_scene(script, Some(flag));
+        let root = ml.tree().root_id();
+        let host = ml.tree().find_child(root, "Root", true).expect("Root");
+        let mut ceiling = Node::new("Ceiling", "StaticBody3D");
+        // 1.0 tall centred at y = 3.0, so its underside is exactly y = 2.5.
+        // The body's top is at y = 1.0, leaving 1.5 of clear rise.
+        ceiling.set_property("position", Variant::Vector3(Vector3::new(0.0, 3.0, 0.0)));
+        let cid = ml.tree_mut().add_child(host, ceiling).unwrap();
+        let mut cshape = Node::new("CeilingShape", "CollisionShape3D");
+        cshape.set_property("shape", Variant::String("BoxShape3D".to_string()));
+        cshape.set_property("size", Variant::Vector3(Vector3::new(200.0, 1.0, 200.0)));
+        ml.tree_mut().add_child(cid, cshape).unwrap();
+        // Well clear of the wall slab at x = 2.0..3.0.
+        node3d::set_position(ml.tree_mut(), player, Vector3::new(0.0, 0.5, 0.0));
+        for _ in 0..60 {
+            ml.step(1.0 / 60.0);
+        }
+        (ml, player)
+    };
+
+    let (ml_off, p_off) = ceiling_scene(false);
+    assert!(
+        int_prop(&ml_off, p_off, "ticks") > 0,
+        "`_physics_process` never ran"
+    );
+    assert!(
+        bool_prop_of(&ml_off, p_off, "hit_ceiling"),
+        "the body must actually reach the ceiling, or clause (d) is vacuous"
+    );
+    // ⚠️ Read from the NODE, not from a script variable. The solver publishes
+    // the post-move velocity in `process_character_movement`, which runs after
+    // the script's tick — so the node property is the only place the
+    // cancellation is observable at all.
+    let vy = vec3_prop_of(&ml_off, p_off, "velocity").y;
+    assert!(
+        vy <= 0.0,
+        "with slide_on_ceiling = false a jump into the ceiling must be \
+         cancelled — the body's upward velocity must not survive contact; got \
+         y = {vy}"
+    );
+
+    // The control: with the flag ON the body still reaches the ceiling. Without
+    // this, an engine that simply never moved anything upward would satisfy the
+    // assertion above.
+    let (ml_on, p_on) = ceiling_scene(true);
+    assert!(
+        bool_prop_of(&ml_on, p_on, "hit_ceiling"),
+        "the slide_on_ceiling = true body must reach the ceiling too, or the \
+         two cases are not comparable"
+    );
+}
+
 /// **The acceptance.** Both getters answer `Vector3` on a `CharacterBody3D`.
 #[test]
 fn character_body_3d_velocity_getters_are_vector3() {

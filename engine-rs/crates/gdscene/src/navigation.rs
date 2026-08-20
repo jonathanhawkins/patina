@@ -10,6 +10,44 @@ use gdcore::math::{Vector2, Vector3};
 
 use crate::node::NodeId;
 
+/// The polygon index lists of a baked navmesh, clamped to `vert_count`.
+///
+/// Godot stores a `NavigationPolygon` as a vertex pool plus a list of index
+/// arrays, one per convex polygon. A region baked from a single outline has no
+/// polygon list at all, which is why an absent `__navmesh_polygons__` with three
+/// or more vertices means "one polygon over every vertex" rather than "no
+/// polygons".
+///
+/// ⚠️ Out-of-range indices are DROPPED rather than clamped or treated as an
+/// error. A `.tscn` can name a vertex the pool does not have, and indexing the
+/// pool with it panics; dropping loses one corner of one polygon, which is the
+/// least destructive reading of a file that is already wrong.
+///
+/// Shared with `main_loop`, which held a byte-identical copy until pat-s3rrv.82.
+/// Two hand-maintained copies of one parser is the shape that drifts silently:
+/// the overlay and the runtime navmesh would disagree about which polygons
+/// exist, and nothing would say so.
+pub(crate) fn navmesh_polygon_indices(
+    node: &crate::node::Node,
+    vert_count: usize,
+) -> Vec<Vec<usize>> {
+    match node.get_property("__navmesh_polygons__") {
+        gdvariant::Variant::Array(entries) => entries
+            .iter()
+            .filter_map(|entry| match entry {
+                gdvariant::Variant::PackedInt32Array(ids) => Some(
+                    ids.iter()
+                        .filter_map(|&i| usize::try_from(i).ok())
+                        .filter(|&i| i < vert_count)
+                        .collect::<Vec<usize>>(),
+                ),
+                _ => None,
+            })
+            .collect(),
+        _ if vert_count >= 3 => vec![(0..vert_count).collect()],
+        _ => Vec::new(),
+    }
+}
 /// A baked `NavigationRegion2D`'s polygons, in **node-local** space.
 ///
 /// The canonical reader for the `__navmesh_vertices__` / `__navmesh_polygons__`
@@ -37,24 +75,7 @@ pub fn navmesh_polygons_local(node: &crate::node::Node) -> Vec<Vec<Vector2>> {
     else {
         return Vec::new();
     };
-    let vert_count = verts.len();
-    let indexed: Vec<Vec<usize>> = match node.get_property("__navmesh_polygons__") {
-        gdvariant::Variant::Array(entries) => entries
-            .iter()
-            .filter_map(|entry| match entry {
-                gdvariant::Variant::PackedInt32Array(ids) => Some(
-                    ids.iter()
-                        .filter_map(|&i| usize::try_from(i).ok())
-                        .filter(|&i| i < vert_count)
-                        .collect::<Vec<usize>>(),
-                ),
-                _ => None,
-            })
-            .collect(),
-        _ if vert_count >= 3 => vec![(0..vert_count).collect()],
-        _ => Vec::new(),
-    };
-    indexed
+    navmesh_polygon_indices(node, verts.len())
         .into_iter()
         .map(|ids| ids.iter().map(|&i| verts[i]).collect::<Vec<Vector2>>())
         .filter(|points| points.len() >= 3)

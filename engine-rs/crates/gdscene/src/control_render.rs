@@ -1323,6 +1323,13 @@ struct TextSpan {
     bold: bool,
     /// Whether `[i]` covers this run.
     italic: bool,
+    /// How many `[indent]` levels enclose this run's LINE (pat-s3rrv.74).
+    ///
+    /// ⚠️ Line-level, not run-level, and deliberately so: an indent moves a
+    /// line's left edge and narrows the width it wraps against, and a single
+    /// line cannot have two left edges. A run therefore reports the depth in
+    /// effect for its line rather than at its own character offset.
+    indent: usize,
     /// The `[url=…]` payload covering this run, if any — Godot's "meta".
     ///
     /// Carried per-run rather than as a separate region list so the text and its
@@ -1390,6 +1397,12 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                 strike,
                 bold,
                 italic,
+                // Backfilled by `apply_line_indents` once the whole string is
+                // parsed — `flush` already takes twelve positional arguments and
+                // has fourteen call sites, so threading a thirteenth through all
+                // of them to carry a value that is constant per line would be a
+                // lot of edits for no extra fidelity.
+                indent: 0,
                 line,
                 align,
             });
@@ -1397,6 +1410,11 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
     };
     // `[url=a][url=b]…[/url]…[/url]` nests like the colour stack does.
     let mut meta_stack: Vec<String> = Vec::new();
+    // `[indent]` nesting depth, plus a log of every change as `(line, depth)`.
+    // The log exists because the depth is resolved per LINE after parsing; see
+    // `apply_line_indents`.
+    let mut indent_depth: usize = 0;
+    let mut indent_log: Vec<(usize, usize)> = vec![(0, 0)];
     // Depth counters rather than booleans, so `[u]a[u]b[/u]c[/u]` keeps `c`
     // underlined instead of the inner closer clearing the outer tag.
     // `[bgcolor=…]` nests like the colour stack; `[fgcolor=…]` pushes onto the
@@ -1704,6 +1722,19 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                     "/i" => i_depth = i_depth.saturating_sub(1),
                     _ => s_depth = s_depth.saturating_sub(1),
                 }
+            } else if lower == "indent" || lower == "/indent" {
+                // Unlike `[u]`/`[b]` this does NOT flush the run. Those are run
+                // attributes and need a boundary at the tag; an indent is a
+                // property of the line, so splitting the run here would gain
+                // nothing and would restart an effect's glyph phase mid-word.
+                if lower == "indent" {
+                    indent_depth += 1;
+                } else {
+                    // Saturating, so a stray `[/indent]` is stripped rather than
+                    // underflowing.
+                    indent_depth = indent_depth.saturating_sub(1);
+                }
+                indent_log.push((line, indent_depth));
             } else if let Some(name) = lower.strip_prefix('/') {
                 // A closer: pop only if it matches the open effect.
                 if effect_stack.last().map(|(n, _, _)| n.as_str()) == Some(name) {
@@ -1806,8 +1837,45 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
         *align_stack.last().unwrap(),
         &mut spans,
     );
+    apply_line_indents(&mut spans, &indent_log);
     backfill_effect_ends(&mut spans);
     spans
+}
+
+/// Resolves each run's `[indent]` depth from the parse-time change log.
+///
+/// `log` holds `(line, depth)` for every `[indent]`/`[/indent]`, in order. A
+/// line's depth is the depth carried in from earlier lines, raised to the
+/// deepest level any tag reached *on* that line.
+///
+/// ⚠️ **Taking the last change at or before the line does not work**, which is
+/// worth stating because it is the obvious reading of a change log. The ordinary
+/// spelling `[indent]text[/indent]` opens and closes on the SAME line, so the
+/// closer is the last entry for that line and the line would resolve to zero —
+/// the tag would silently do nothing in exactly the case it is written for.
+///
+/// ⚠️ A depth change within a line therefore applies to the whole line,
+/// including text before the tag. That is a limitation of the model rather than
+/// an oversight: the depth becomes the line's left inset, and a line has one
+/// left edge. Godot's `[indent]` is a paragraph-level construct, so the common
+/// spelling is exact.
+fn apply_line_indents(spans: &mut [TextSpan], log: &[(usize, usize)]) {
+    for span in spans.iter_mut() {
+        // Depth carried in from lines strictly before this one.
+        let mut carried = 0;
+        // Deepest level any tag on THIS line reached.
+        let mut on_line: Option<usize> = None;
+        for (line, depth) in log {
+            if *line < span.line {
+                carried = *depth;
+            } else if *line == span.line {
+                on_line = Some(on_line.unwrap_or(0).max(*depth));
+            } else {
+                break;
+            }
+        }
+        span.indent = on_line.map_or(carried, |d| d.max(carried));
+    }
 }
 
 /// Fills in each effect application's `end` once all its runs are known.
@@ -2244,6 +2312,10 @@ fn richtext_placements(
     // is what makes a word-split line measure exactly the same as the
     // unsplit run it came from: "go to" == "go" + space + "to" == 58.
     let space_w = text_width(" ", scale) + 2.0 * gap;
+    // One `[indent]` level. Godot indents by a tab stop; four spaces at the
+    // current scale is this renderer's equivalent, and it scales with the font
+    // rather than being a fixed pixel count.
+    let indent_w = text_width("    ", scale);
     // Godot: AUTOWRAP_OFF 0, ARBITRARY 1, WORD 2, WORD_SMART 3. The ClassDB
     // default for RichTextLabel is 3, and class defaults are not written onto
     // nodes, so an authored label with no property still wraps.
@@ -2317,6 +2389,12 @@ fn richtext_placements(
 
         // The line's alignment, needed by both the fast path and the wrap path.
         let align = on_line[0].align;
+        // `[indent]` moves the line's left edge in and takes that width away
+        // from what it can wrap against — both halves matter: insetting without
+        // narrowing would push indented text off the right edge instead of
+        // wrapping it sooner. Constant per line, like `align`.
+        let inset = on_line[0].indent as f32 * indent_w;
+        let avail = (rect.size.x - inset).max(1.0);
         // ⚠️ A line that FITS is placed run-by-run, exactly as before wrapping
         // existed. The word path drops spaces (they become advance, not draw
         // items), which is right at a wrap point and wrong everywhere else: it
@@ -2327,12 +2405,13 @@ fn richtext_placements(
             .map(|s| text_width(&s.text, scale))
             .sum::<f32>()
             + gap * (on_line.len() as f32 - 1.0);
-        if autowrap == 0 || run_width <= rect.size.x {
+        if autowrap == 0 || run_width <= avail {
             let x0 = rect.position.x
+                + inset
                 + match align {
                     ParagraphAlign::Left | ParagraphAlign::Fill => 0.0,
-                    ParagraphAlign::Center => ((rect.size.x - run_width) * 0.5).max(0.0),
-                    ParagraphAlign::Right => (rect.size.x - run_width).max(0.0),
+                    ParagraphAlign::Center => ((avail - run_width) * 0.5).max(0.0),
+                    ParagraphAlign::Right => (avail - run_width).max(0.0),
                 };
             let y = rect.position.y + visual_line as f32 * line_h;
             visual_line += 1;
@@ -2356,17 +2435,18 @@ fn richtext_placements(
                 width: widths.iter().sum::<f32>() + space_w * (words.len() as f32 - 1.0),
             }]
         } else {
-            gdrender2d::text_layout::break_lines_word(&widths, space_w, rect.size.x)
+            gdrender2d::text_layout::break_lines_word(&widths, space_w, avail)
         };
 
         for range in ranges.iter() {
             let mut x = rect.position.x
+                + inset
                 + match align {
                     // `Fill` renders left-aligned: justification needs a word
                     // model with elastic spacing, which this does not have.
                     ParagraphAlign::Left | ParagraphAlign::Fill => 0.0,
-                    ParagraphAlign::Center => ((rect.size.x - range.width) * 0.5).max(0.0),
-                    ParagraphAlign::Right => (rect.size.x - range.width).max(0.0),
+                    ParagraphAlign::Center => ((avail - range.width) * 0.5).max(0.0),
+                    ParagraphAlign::Right => (avail - range.width).max(0.0),
                 };
             let y = rect.position.y + visual_line as f32 * line_h;
             visual_line += 1;

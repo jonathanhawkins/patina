@@ -35,6 +35,32 @@ use gdscene::{GDScriptNodeInstance, MainLoop};
 use gdscript_interop::bindings::ScriptInstance;
 use gdvariant::Variant;
 
+/// Serialises these tests against the process-global writer registry.
+///
+/// ⚠️ `gdobject::movie_writer` is process-global, matching Godot's own
+/// `MovieWriter::add_writer`. The nextest runner gives each test its **own
+/// process**, so they cannot interfere and the suite is green there — but the
+/// plain in-process runner, which CLAUDE.md lists as the fallback, runs them as
+/// threads in ONE process. There `clear_writers()` in a starting test wipes a
+/// running test's registration and `instance_writers()` returns every test's
+/// writers at once, which surfaces as `left: 4, right: 1`.
+///
+/// Green under one runner and flaky under the other is the worst shape a test
+/// can have, so these tests take this lock rather than trusting the runner to
+/// isolate them.
+static REGISTRY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Takes the registry lock for the duration of a test.
+///
+/// Poisoning is ignored deliberately: the guarded data is `()`, so a panicking
+/// test leaves nothing corrupt behind, and refusing the lock afterwards would
+/// turn one failure into a cascade of unrelated ones.
+fn lock_registry() -> std::sync::MutexGuard<'static, ()> {
+    REGISTRY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// The path the writer under test accepts.
 const OUT: &str = "user://capture.avi";
 
@@ -147,6 +173,7 @@ fn num(ml: &MainLoop, node: NodeId, prop: &str) -> i64 {
 /// exactly one `_write_frame` per frame with a real image, one `_write_end`.
 #[test]
 fn movie_writer_script_registry() {
+    let _registry = lock_registry();
     let (mut ml, ids) = scene(&[WRITER]);
     let writer = ids[0];
 
@@ -230,6 +257,7 @@ fn movie_writer_script_registry() {
 /// drives writers unconditionally.
 #[test]
 fn movie_writer_script_registry_inert_without_capture() {
+    let _registry = lock_registry();
     let (mut ml, ids) = scene(&[WRITER]);
     let writer = ids[0];
 
@@ -254,6 +282,7 @@ fn movie_writer_script_registry_inert_without_capture() {
 /// refuses is never driven.
 #[test]
 fn movie_writer_script_registry_selects_by_handles_file() {
+    let _registry = lock_registry();
     // The refuser registers FIRST, so a loop that simply took the first
     // registered writer would pick it and this would fail.
     let (mut ml, ids) = scene(&[REFUSER, WRITER]);
@@ -293,6 +322,7 @@ fn movie_writer_script_registry_selects_by_handles_file() {
 /// calls per frame while the virtual is specified as one.
 #[test]
 fn movie_writer_script_registry_ignores_duplicate_registration() {
+    let _registry = lock_registry();
     let (mut ml, ids) = scene(&[WRITER]);
     let writer = ids[0];
 

@@ -62,6 +62,19 @@ fn bool_prop(tree: &SceneTree, id: NodeId, key: &str, default: bool) -> bool {
     }
 }
 
+/// A float property, or `default` when absent (pat-s3rrv.103).
+///
+/// ⚠️ Accepts `Variant::Int` too: a `.tscn` writes a whole number without a
+/// decimal point, so an authored `safe_margin = 0` arrives as an Int and would
+/// otherwise silently fall back to the default it was written to override.
+fn float_prop(tree: &SceneTree, id: NodeId, key: &str, default: f64) -> f64 {
+    match tree.get_node(id).map(|n| n.get_property(key)) {
+        Some(Variant::Float(f)) => f,
+        Some(Variant::Int(i)) => i as f64,
+        _ => default,
+    }
+}
+
 fn u32_prop(tree: &SceneTree, id: NodeId, key: &str, default: u32) -> u32 {
     match tree.get_node(id).map(|n| n.get_property(key)) {
         Some(Variant::Int(i)) if i >= 0 => i as u32,
@@ -89,24 +102,63 @@ pub fn process_character_movement(tree: &mut SceneTree, physics: &PhysicsServer3
     }
 
     for node_id in characters {
+        // Godot's `apply_floor_snap()` — snap to the floor WITHOUT moving
+        // (pat-s3rrv.103). A script calls it after teleporting, or to stay glued
+        // while standing still.
+        //
+        // ⚠️ Read BEFORE the move gate below, and it is an INDEPENDENT reason to
+        // run this body's pass. A script that calls only `apply_floor_snap()`
+        // never sets `_move_and_slide_requested`, so the gate would `continue`
+        // past it and the snap would never be considered — the method would
+        // look wired and do nothing.
+        //
+        // One-shot like `_move_and_slide_requested`, and cleared for the same
+        // reason: a script that stops asking stops snapping.
+        let snap_requested = bool_prop(tree, node_id, "_apply_floor_snap_requested", false);
+        if snap_requested {
+            if let Some(node) = tree.get_node_mut(node_id) {
+                node.set_property("_apply_floor_snap_requested", Variant::Bool(false));
+            }
+        }
+
         // Godot only moves a CharacterBody3D when the script calls
         // `move_and_slide()`; the engine never auto-moves it. The gate applies
         // only to SCRIPTED bodies — one with no script has nothing that could
         // call it, and scenes/tests that drive `velocity` directly rely on
         // auto-movement. Mirrors the 2D pass exactly (pat-0q2kx.16).
         if tree.has_script(node_id) {
-            if !bool_prop(tree, node_id, "_move_and_slide_requested", false) {
+            let move_requested = bool_prop(tree, node_id, "_move_and_slide_requested", false);
+            if !move_requested && !snap_requested {
                 continue;
             }
             // One-shot: a script that stops calling move_and_slide stops moving.
-            if let Some(node) = tree.get_node_mut(node_id) {
-                node.set_property("_move_and_slide_requested", Variant::Bool(false));
+            // Cleared only when it was actually set, so a snap-only frame does
+            // not consume a move request the script has not made.
+            if move_requested {
+                if let Some(node) = tree.get_node_mut(node_id) {
+                    node.set_property("_move_and_slide_requested", Variant::Bool(false));
+                }
             }
         }
 
         let velocity = vec3_prop(tree, node_id, "velocity", Vector3::ZERO);
         let stored_platform = vec3_prop(tree, node_id, "platform_velocity", Vector3::ZERO);
-        if velocity.length_squared() < 1e-8 && stored_platform.length_squared() < 1e-8 {
+        // ⚠️ `snap_requested` deliberately defeats the idle skip. Snapping while
+        // STANDING STILL is the whole point of the standalone call — a body that
+        // is already moving gets snapped by `move_and_slide` itself
+        // (`character.rs`, the `grounded_mode` branch), so gating this on
+        // velocity would make the method a no-op in exactly the case it exists
+        // for.
+        //
+        // Nothing else is needed: the loop below runs its normal course with
+        // zero motion, `move_and_slide(ZERO)` moves the body nowhere and applies
+        // the snap internally, and the existing publish block reports the new
+        // position and `is_on_floor` — so this path cannot drift from the
+        // moving one.
+        if velocity.length_squared() < 1e-8
+            && stored_platform.length_squared() < 1e-8
+            && !snap_requested
+        {
             continue;
         }
 
@@ -147,6 +199,10 @@ pub fn process_character_movement(tree: &mut SceneTree, physics: &PhysicsServer3
         // Godot's default is TRUE — a body slides along a ceiling unless the
         // scene explicitly turns it off (`CharacterBody3D.xml:183`).
         character.slide_on_ceiling = bool_prop(tree, node_id, "slide_on_ceiling", true);
+        // Godot's default is 0.001, and 0 is a legal authored value meaning
+        // "resolve to exact contact" — so the default belongs here rather than
+        // being synthesised from a missing property (pat-s3rrv.103).
+        character.safe_margin = float_prop(tree, node_id, "safe_margin", 0.001) as f32;
         // Godot's default is EVERY layer (4294967295), so an unauthored scene
         // keeps the carry-everything behaviour it had before this existed
         // (`CharacterBody3D.xml:168`).
@@ -185,6 +241,18 @@ pub fn process_character_movement(tree: &mut SceneTree, physics: &PhysicsServer3
         // (gdphysics3d::character docs; its own tests pass raw distances), and
         // returns the motion left after sliding. Scale in and back out so the
         // node's `velocity` property stays a per-second value, as in Godot.
+        // pat-s3rrv.103 — the standalone `apply_floor_snap()`, applied BEFORE
+        // the move so the body is already grounded when it slides.
+        //
+        // ⚠️ Calls the MANUAL variant, not the one `move_and_slide` uses
+        // internally. That one refuses unless the body was already grounded or
+        // is descending, which is right mid-jump and wrong here: a body
+        // standing still is neither, so routing the request through it left the
+        // method silently doing nothing.
+        if snap_requested {
+            character.apply_floor_snap_manual(&obstacles);
+        }
+
         let motion = velocity * dt;
         let result_motion = character.move_and_slide(motion, &obstacles);
         let new_velocity = result_motion / dt;

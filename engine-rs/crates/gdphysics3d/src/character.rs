@@ -119,6 +119,15 @@ pub struct CharacterBody3D {
     /// a ceiling is stopped and the body falls vertically (Godot's
     /// `slide_on_ceiling`, default true).
     pub slide_on_ceiling: bool,
+    /// Extra separation kept between the body and a surface it resolves against
+    /// (Godot's `CharacterBody3D.safe_margin`, default **0.001**).
+    ///
+    /// ⚠️ Applied on top of the measured penetration depth, so a body ends a
+    /// resolve just clear of the surface rather than exactly touching it. Zero
+    /// is a legal authored value and reproduces the old exact-contact
+    /// behaviour, which is why the default lives here and not in the solver
+    /// (pat-s3rrv.103).
+    pub safe_margin: f32,
     /// Velocity of the floor body the character currently stands on.
     platform_velocity: Vector3,
     /// Angular velocity of that same floor body (Godot's
@@ -211,6 +220,8 @@ impl CharacterBody3D {
             wall_body: None,
             slide_collisions: Vec::new(),
             slide_on_ceiling: true,
+            // Godot CharacterBody3D.safe_margin default.
+            safe_margin: 0.001,
             platform_velocity: Vector3::ZERO,
             platform_angular_velocity: Vector3::ZERO,
             last_motion: Vector3::ZERO,
@@ -477,7 +488,12 @@ impl CharacterBody3D {
             self.classify_surface(surface_normal, deepest_idx.map(|i| bodies[i].id));
 
             // Separate from the surface.
-            self.position = target + surface_normal * result.depth;
+            // ⚠️ `+ safe_margin`, not just the measured depth: Godot keeps a
+            // small gap so the very next frame's overlap test does not start
+            // from an exact-touch state, where a float rounding the wrong way
+            // reads as a fresh penetration. Authoring `safe_margin = 0`
+            // reproduces the old exact-contact behaviour (pat-s3rrv.103).
+            self.position = target + surface_normal * (result.depth + self.safe_margin);
             self.last_motion = self.position - iter_start;
 
             // `slide_on_ceiling = false`: a jump into a ceiling stops dead and
@@ -591,7 +607,12 @@ impl CharacterBody3D {
             }
             Some(result) => {
                 let surface_normal = -result.normal;
-                self.position = target + surface_normal * result.depth;
+                // ⚠️ `+ safe_margin`, not just the measured depth: Godot keeps a
+            // small gap so the very next frame's overlap test does not start
+            // from an exact-touch state, where a float rounding the wrong way
+            // reads as a fresh penetration. Authoring `safe_margin = 0`
+            // reproduces the old exact-contact behaviour (pat-s3rrv.103).
+            self.position = target + surface_normal * (result.depth + self.safe_margin);
                 Some(collision::CollisionResult3D {
                     colliding: true,
                     normal: surface_normal,
@@ -660,7 +681,11 @@ impl CharacterBody3D {
 
     /// Casts the shape downward up to `floor_snap_length` to keep the character
     /// glued to slopes/stairs when it would otherwise leave the floor.
-    fn apply_floor_snap(
+    ///
+    /// ⚠️ `pub` because Godot exposes `apply_floor_snap()` as a script method a
+    /// body can call on demand, not only as an internal phase of
+    /// `move_and_slide` (pat-s3rrv.103).
+    pub fn apply_floor_snap(
         &mut self,
         was_on_floor: bool,
         velocity: Vector3,
@@ -680,6 +705,36 @@ impl CharacterBody3D {
             return;
         }
 
+        self.snap_probe(bodies);
+    }
+
+    /// Godot's **manual** `apply_floor_snap()` (pat-s3rrv.103).
+    ///
+    /// ⚠️ Deliberately does NOT share the velocity guards above.
+    /// `CharacterBody3D.xml` is explicit: *"Allows to manually apply a snap to
+    /// the floor **regardless of the body's velocity**. This function does
+    /// nothing when `is_on_floor()` returns true."*
+    ///
+    /// Those guards are right for the caller inside [`Self::move_and_slide`] —
+    /// yanking a rising body downward mid-jump would be wrong — but they make
+    /// the manual call a no-op in the case it exists for: a body standing
+    /// still, whose velocity is zero and which was not already grounded. Only
+    /// the `on_floor` and `floor_snap_length` conditions carry over, because
+    /// those are the two the documentation keeps.
+    pub fn apply_floor_snap_manual(&mut self, bodies: &[&PhysicsBody3D]) {
+        if self.floor_snap_length <= 0.0 || self.on_floor {
+            return;
+        }
+        self.snap_probe(bodies);
+    }
+
+    /// The downward probe both snap paths share.
+    ///
+    /// Walks outward from the body in `SNAP_SAMPLES` steps up to
+    /// `floor_snap_length` and stops at the first floor contact, placing the
+    /// body exactly on it. Extracted so the manual and automatic snaps cannot
+    /// drift into finding the floor at different distances.
+    fn snap_probe(&mut self, bodies: &[&PhysicsBody3D]) {
         for i in 1..=SNAP_SAMPLES {
             let t = self.floor_snap_length * (i as f32 / SNAP_SAMPLES as f32);
             let probe_pos = self.position - self.up_direction * t;

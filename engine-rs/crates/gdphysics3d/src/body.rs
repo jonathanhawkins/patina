@@ -77,6 +77,21 @@ pub struct PhysicsBody3D {
     /// When true, all rotation is locked (Godot `RigidBody3D.lock_rotation`):
     /// angular velocity is forced to zero and rotation is not integrated.
     pub lock_rotation: bool,
+    /// Per-axis linear freeze, `[x, y, z]` (Godot's
+    /// `PhysicsBody3D.axis_lock_linear_x/y/z`), default all false.
+    ///
+    /// ⚠️ A lock is applied to the VELOCITY, not to the position: zeroing the
+    /// component after integration would leave the body having already moved
+    /// that tick, so a "locked" axis would still creep under gravity
+    /// (pat-s3rrv.105).
+    pub axis_lock_linear: [bool; 3],
+    /// Per-axis angular freeze, `[x, y, z]` (Godot's
+    /// `axis_lock_angular_x/y/z`).
+    ///
+    /// ⚠️ Independent of [`lock_rotation`](Self::lock_rotation), which is the
+    /// all-or-nothing switch. Godot exposes both, and a body may lock a single
+    /// spin axis while still tumbling on the others.
+    pub axis_lock_angular: [bool; 3],
     /// Constant force applied every physics frame (Godot
     /// `RigidBody3D.constant_force`), on top of one-shot accumulated forces.
     pub constant_force: Vector3,
@@ -114,6 +129,22 @@ pub struct PhysicsBody3D {
     contacts: Vec<ContactPoint3D>,
 }
 
+/// Zeroes the components of `v` whose axis is locked (pat-s3rrv.105).
+///
+/// Indexed `[x, y, z]` to match Godot's `axis_lock_linear_x/y/z` naming, so the
+/// bridge can read the three properties into an array without a mapping table.
+fn apply_axis_lock(v: &mut Vector3, lock: [bool; 3]) {
+    if lock[0] {
+        v.x = 0.0;
+    }
+    if lock[1] {
+        v.y = 0.0;
+    }
+    if lock[2] {
+        v.z = 0.0;
+    }
+}
+
 impl PhysicsBody3D {
     /// Creates a new 3D physics body.
     pub fn new(
@@ -138,6 +169,8 @@ impl PhysicsBody3D {
             linear_damp: 0.0,
             angular_damp: 0.0,
             lock_rotation: false,
+            axis_lock_linear: [false; 3],
+            axis_lock_angular: [false; 3],
             constant_force: Vector3::ZERO,
             constant_torque: Vector3::ZERO,
             constant_linear_velocity: Vector3::ZERO,
@@ -264,6 +297,13 @@ impl PhysicsBody3D {
             self.linear_velocity = self.linear_velocity * damp;
         }
 
+        // ⚠️ BEFORE the position update, not after. Zeroing a locked component
+        // afterwards would leave the body having already travelled that tick,
+        // so a "locked" axis would creep one step per frame under gravity —
+        // slow enough to look like a solver tolerance rather than a bug
+        // (pat-s3rrv.105).
+        apply_axis_lock(&mut self.linear_velocity, self.axis_lock_linear);
+
         self.position = self.position + self.linear_velocity * dt;
 
         // Angular integration — skipped entirely when rotation is locked
@@ -282,6 +322,11 @@ impl PhysicsBody3D {
                 let damp = (1.0 - self.angular_damp * dt).max(0.0);
                 self.angular_velocity = self.angular_velocity * damp;
             }
+
+            // Per-axis angular freeze. Independent of `lock_rotation`, which is
+            // handled by the branch above — this is the partial form, where a
+            // body spins freely on the axes it did not lock.
+            apply_axis_lock(&mut self.angular_velocity, self.axis_lock_angular);
 
             // Integrate rotation (simplified: small-angle approximation)
             if self.angular_velocity.length_squared() > 1e-12 {

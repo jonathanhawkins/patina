@@ -58,6 +58,21 @@ fn resting_body_scene(monitor: bool) -> (MainLoop, NodeId, NodeId) {
     bs.set_property("radius", Variant::Float(0.5));
     tree.add_child(body_id, bs).unwrap();
 
+    // ⚠️ The script drives the body DOWNWARD itself (pat-s3rrv.105).
+    //
+    // It used to rely on engine gravity to keep the sphere pressed into the
+    // floor. That worked only because `custom_integrator` was not being
+    // honoured: Godot documents it as "the standard force integration (like
+    // gravity or damping) will be disabled for this body. Other than collision
+    // response, the body will only move as determined by `_integrate_forces`"
+    // (RigidBody3D.xml). Once that was implemented the solver pushed the
+    // overlapping sphere out on the first tick, nothing pulled it back, and the
+    // body reported zero contacts from tick two onward.
+    //
+    // Writing the velocity here is not a workaround — it is what a custom
+    // integrator IS. The body keeps re-entering the floor each tick, which is
+    // the state this test wants to observe, and it now holds for the reason
+    // Godot would hold it rather than by accident.
     let script = "\
 extends RigidBody3D
 var ticks = 0
@@ -68,6 +83,7 @@ func _integrate_forces(state):
     self.count = state.get_contact_count()
     if self.count > 0:
         self.normal = state.get_contact_local_normal(0)
+    state.linear_velocity = Vector3(0, -1, 0)
 ";
     tree.attach_script(
         body_id,

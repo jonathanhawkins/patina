@@ -1694,7 +1694,18 @@ pub fn register_3d_classes() {
     );
 
     // -- MultiMeshInstance3D --
-    register_class(ClassRegistration::new("MultiMeshInstance3D").parent("GeometryInstance3D"));
+    // pat-s3rrv.89: `MultiMeshInstance3D` was registered as a bare name, so the
+    // one member it documents — the `multimesh` that supplies BOTH the mesh and
+    // the per-instance transforms — was invisible to `class_get_property_list`,
+    // to `.tscn` default seeding and to script introspection.
+    register_class(
+        ClassRegistration::new("MultiMeshInstance3D")
+            .parent("GeometryInstance3D")
+            .property(
+                PropertyInfo::new("multimesh", Variant::Nil)
+                    .with_accessors("get_multimesh", "set_multimesh"),
+            ),
+    );
 
     // -- Import intermediates: ImporterMesh + ImporterMeshInstance3D
     //    (pat-0q2kx.258) --
@@ -1779,6 +1790,46 @@ pub fn register_3d_classes() {
                 PropertyInfo::new("buffer", Variant::PackedFloat32Array(Vec::new()))
                     .with_accessors("get_buffer", "set_buffer"),
             )
+            // 🔑 `mesh` is the one that matters: it is the geometry every
+            // instance draws. Without it a MultiMesh reported a full property
+            // list while the thing it exists to replicate was missing.
+            .property(
+                PropertyInfo::new("mesh", Variant::Nil).with_accessors("get_mesh", "set_mesh"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "custom_aabb",
+                    Variant::Aabb(gdcore::math3d::Aabb::new(
+                        gdcore::math::Vector3::ZERO,
+                        gdcore::math::Vector3::ZERO,
+                    )),
+                )
+                .with_accessors("get_custom_aabb", "set_custom_aabb"),
+            )
+            // ⚠️ These four carry UNDERSCORE-prefixed accessors in Godot
+            // (`_get_transform_array`, not `get_transform_array`) — they are the
+            // serialisation views the editor writes into a `.tscn`, and the
+            // leading underscore is part of the documented name. Spelling them
+            // without it would advertise getters that do not exist.
+            .property(
+                PropertyInfo::new("transform_array", Variant::PackedVector3Array(Vec::new()))
+                    .with_accessors("_get_transform_array", "_set_transform_array"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "transform_2d_array",
+                    Variant::PackedVector2Array(Vec::new()),
+                )
+                .with_accessors("_get_transform_2d_array", "_set_transform_2d_array"),
+            )
+            .property(
+                PropertyInfo::new("color_array", Variant::PackedColorArray(Vec::new()))
+                    .with_accessors("_get_color_array", "_set_color_array"),
+            )
+            .property(
+                PropertyInfo::new("custom_data_array", Variant::PackedColorArray(Vec::new()))
+                    .with_accessors("_get_custom_data_array", "_set_custom_data_array"),
+            )
             .method(MethodInfo::new("get_aabb", 0).const_method())
             .method(MethodInfo::new("get_instance_color", 1).const_method())
             .method(MethodInfo::new("get_instance_custom_data", 1).const_method())
@@ -1790,7 +1841,21 @@ pub fn register_3d_classes() {
             .method(MethodInfo::new("set_instance_color", 2))
             .method(MethodInfo::new("set_instance_custom_data", 2))
             .method(MethodInfo::new("set_instance_transform", 2))
-            .method(MethodInfo::new("set_instance_transform_2d", 2)),
+            .method(MethodInfo::new("set_instance_transform_2d", 2))
+            // ⚠️ `transform_format` defaults to 0 = TRANSFORM_2D. A 3D
+            // MultiMesh must set it to 1 explicitly; reading the default as
+            // "3D because this is a MultiMeshInstance3D" gets the buffer stride
+            // wrong (8 floats per instance against 12).
+            .enumeration(
+                EnumInfo::new("TransformFormat")
+                    .constant("TRANSFORM_2D", 0)
+                    .constant("TRANSFORM_3D", 1),
+            )
+            .enumeration(
+                EnumInfo::new("PhysicsInterpolationQuality")
+                    .constant("INTERP_QUALITY_FAST", 0)
+                    .constant("INTERP_QUALITY_HIGH", 1),
+            ),
     );
     register_class(
         ClassRegistration::new("BoneMap")
@@ -8096,6 +8161,14 @@ pub fn register_3d_classes() {
                         .with_accessors("get_margin", "set_margin"),
                 )
                 .property(
+                    PropertyInfo::new("shape", Variant::Nil)
+                        .with_accessors("get_shape", "set_shape"),
+                )
+                .property(
+                    PropertyInfo::new("exclude", Variant::Array(Vec::new()))
+                        .with_accessors("get_exclude", "set_exclude"),
+                )
+                .property(
                     PropertyInfo::new("shape_rid", Variant::Nil)
                         .with_accessors("get_shape_rid", "set_shape_rid"),
                 )
@@ -8476,6 +8549,14 @@ pub fn register_3d_classes() {
                 .property(
                     PropertyInfo::new("margin", Variant::Float(0.0))
                         .with_accessors("get_margin", "set_margin"),
+                )
+                .property(
+                    PropertyInfo::new("shape", Variant::Nil)
+                        .with_accessors("get_shape", "set_shape"),
+                )
+                .property(
+                    PropertyInfo::new("exclude", Variant::Array(Vec::new()))
+                        .with_accessors("get_exclude", "set_exclude"),
                 )
                 .property(
                     PropertyInfo::new("shape_rid", Variant::Nil)

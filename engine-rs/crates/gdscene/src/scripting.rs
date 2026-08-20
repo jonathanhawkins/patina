@@ -157,8 +157,17 @@ impl GDScriptNodeInstance {
     }
 
     /// Returns true if the class defines a method with the given name.
+    ///
+    /// ⚠️ A `__lambda_connection_N` name is **not** in `class_def.methods` and
+    /// never will be — it is the synthetic name a lambda parked in a signal
+    /// connection comes back under (pat-s3rrv.67). It has to answer `true` here
+    /// anyway, because `SceneTree::call_script_method` skips any method this
+    /// reports as undefined, and skipping it means a signal-connected lambda
+    /// never runs: the connect succeeds, the emit does nothing, and the symptom
+    /// looks like broken capture rather than a rejected name.
     pub fn has_method(&self, name: &str) -> bool {
         self.instance.class_def.methods.contains_key(name)
+            || gdscript_interop::interpreter::is_lambda_connection_name(name)
     }
 
     /// The `@rpc`-annotated methods, as `(method_name, annotation_args)`.
@@ -288,7 +297,10 @@ impl ScriptInstance for GDScriptNodeInstance {
     }
 
     fn has_method(&self, name: &str) -> bool {
+        // Same widening as the inherent `has_method` above, and for the same
+        // reason — this is the one `call_script_method` actually calls.
         self.instance.class_def.methods.contains_key(name)
+            || gdscript_interop::interpreter::is_lambda_connection_name(name)
     }
 
     fn resolve_onready(&mut self) -> Result<(), ScriptError> {
@@ -798,6 +810,18 @@ impl SceneTreeAccessor {
         // sibling of the tree, never inside it, so this borrow cannot alias the
         // tree pointer.
         Some(unsafe { &*(addr as *const crate::physics_server_3d::PhysicsServer3D) })
+    }
+
+    /// Mutable counterpart of [`Self::physics_3d`] (pat-s3rrv.105).
+    fn physics_3d_mut(&mut self) -> Option<&mut crate::physics_server_3d::PhysicsServer3D> {
+        let addr = self.tree().script_physics_3d_addr();
+        if addr == 0 {
+            return None;
+        }
+        // SAFETY: identical contract to `physics_3d`, plus: we hold `&mut self`,
+        // so no other accessor can hand out a second reference to the same
+        // server while this one is alive.
+        Some(unsafe { &mut *(addr as *mut crate::physics_server_3d::PhysicsServer3D) })
     }
 
     /// Maps a shape query's `exclude` list from NODE ids to `BodyId`s
@@ -3385,6 +3409,25 @@ impl SceneAccess for SceneTreeAccessor {
                 };
                 Some(Variant::Array(list))
             }
+            // `CharacterBody3D.apply_floor_snap()` (pat-s3rrv.103). Godot
+            // exposes the snap as its own method, not only as an internal phase
+            // of `move_and_slide`.
+            //
+            // Deferred through a node flag exactly like `move_and_slide` above,
+            // rather than reaching for the live world: the snap casts against
+            // every other body, and the physics server already owns that walk.
+            // A direct bridge would need a second copy of the obstacle
+            // gathering, which is the sort of duplicate that drifts.
+            //
+            // ⚠️ Answers `Nil` because Godot's `apply_floor_snap()` returns
+            // void. Inventing a bool would make `if body.apply_floor_snap():`
+            // a script that works here and breaks there.
+            "apply_floor_snap" => {
+                if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                    n.set_property("_apply_floor_snap_requested", Variant::Bool(true));
+                }
+                Some(Variant::Nil)
+            }
             "move_and_slide" => {
                 if let Some(n) = self.tree_mut().get_node_mut(nid) {
                     n.set_property("_move_and_slide_requested", Variant::Bool(true));
@@ -3488,10 +3531,32 @@ impl SceneAccess for SceneTreeAccessor {
                     Variant::ObjectId(id) => Some(id.raw()),
                     _ => None,
                 }) {
-                    if method == "add_collision_exception_with" {
-                        self.physics2d_node_add_collision_exception(node, other);
+                    let adding = method == "add_collision_exception_with";
+                    // 2D first, then 3D (pat-s3rrv.105). A node is registered
+                    // with exactly ONE server, so the first that resolves both
+                    // bodies is the right one and the other would be a no-op.
+                    //
+                    // ⚠️ Falling back on the 2D helper's `false` rather than
+                    // classifying the node: `PhysicsBody2D`/`3D` share this arm
+                    // and the class name is not in hand here, and a lookup that
+                    // resolves no body is exactly the signal we want anyway —
+                    // it also covers a script calling this before the first
+                    // sync has registered either body.
+                    let applied = if adding {
+                        self.physics2d_node_add_collision_exception(node, other)
                     } else {
-                        self.physics2d_node_remove_collision_exception(node, other);
+                        self.physics2d_node_remove_collision_exception(node, other)
+                    };
+                    if !applied {
+                        let a = NodeId::from_object_id(ObjectId::from_raw(node));
+                        let b = NodeId::from_object_id(ObjectId::from_raw(other));
+                        if let Some(p3) = self.physics_3d_mut() {
+                            if adding {
+                                p3.node_add_collision_exception(a, b);
+                            } else {
+                                p3.node_remove_collision_exception(a, b);
+                            }
+                        }
                     }
                 }
                 Some(Variant::Nil)

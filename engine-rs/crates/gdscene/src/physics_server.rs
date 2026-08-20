@@ -2541,11 +2541,27 @@ impl PhysicsServer {
         // surface itself stays put, and the carry path never reads it. Writing
         // the platform's motion there instead would leave a rider standing
         // still while the platform slid out from under it.
+        //
+        // ⚠️ The position is captured here and RESTORED after the solve below.
+        // `integrate_velocities_biased` advances a `BodyType::Kinematic` body by
+        // `linear_velocity * dt` (`gdphysics2d/src/body.rs:700`), so the very
+        // velocity written for riders to read also moved the platform a second
+        // time — on top of the authored motion `sync_to_physics` had just
+        // applied. The next tick's `scene_pos - body.position` was then ZERO,
+        // the platform reported no velocity, and the rider was carried on
+        // alternate ticks only: measured as [2, 0, 2, 0, …], i.e. exactly half
+        // rate (pat-s3rrv.93).
+        //
+        // 🔑 An AnimatableBody2D's transform is AUTHORED. Physics reads it and
+        // must never write it — the same rule `sync_from_physics` already
+        // follows when it skips these bodies on the way back out.
+        let mut authored: Vec<(BodyId, Vector2)> = Vec::new();
         if dt > 0.0 {
             let motions: Vec<(BodyId, Vector2)> = self.animatable_motion.drain().collect();
             for (body_id, delta) in motions {
                 if let Some(body) = self.world.get_body_mut(body_id) {
                     body.linear_velocity = delta / dt;
+                    authored.push((body_id, body.position));
                 }
             }
         }
@@ -2558,7 +2574,22 @@ impl PhysicsServer {
             let mut damp_overrides: HashMap<BodyId, f32> = HashMap::new();
             // The rotational twin of `damp_overrides` (pat-0q2kx.112).
             let mut angular_damp_overrides: HashMap<BodyId, f32> = HashMap::new();
-            for &body_id in self.node_to_body.values() {
+            // 🔑 EVERY rigid body in the space, not just the node-backed ones.
+            // `node_to_body` maps SCENE NODES to bodies, so a body created
+            // through the server API (`PhysicsServer2D.body_create()`) was never
+            // in this iteration and never received a gravity, linear-damp or
+            // angular-damp override — it fell at the world default inside any
+            // area, however that area was configured (pat-s3rrv.191).
+            //
+            // ⚠️ Ids are collected first so the `self.world` borrow ends before
+            // the loop body borrows `self.area_store`.
+            //
+            // ⚠️ Not a behaviour change for existing scenes: the `body_type !=
+            // Rigid` guard below already excludes static and kinematic bodies,
+            // and node-backed bodies were in `node_to_body` anyway — this only
+            // ADDS the bodies that were being skipped.
+            let body_ids: Vec<BodyId> = self.world.bodies().map(|b| b.id).collect();
+            for body_id in body_ids {
                 if let Some(body) = self.world.get_body(body_id) {
                     // Only dynamic bodies integrate under gravity/damping.
                     if body.body_type != BodyType::Rigid {
@@ -2583,6 +2614,20 @@ impl PhysicsServer {
             );
         } else {
             self.last_collision_events = self.world.step(dt);
+        }
+
+        // Restore each authored platform to where the scene put it, undoing the
+        // kinematic integration the solve just applied (pat-s3rrv.93).
+        //
+        // ⚠️ Deliberately AFTER the step, not instead of it: the platform must
+        // still take part in collision resolution during the step — a rider
+        // stands on it — and its `linear_velocity` must survive, because that
+        // is the value `CharacterBody2D`'s floor carry reads. Only the position
+        // is authored, and only the position is put back.
+        for (body_id, position) in authored {
+            if let Some(body) = self.world.get_body_mut(body_id) {
+                body.position = position;
+            }
         }
 
         // Detect area overlaps using the world's body storage.
@@ -3100,7 +3145,19 @@ impl PhysicsServer {
             }
 
             // Skip idle bodies unless a moving platform would still carry them.
-            if velocity.length_squared() < 1e-8 && stored_platform_vel.length_squared() < 1e-8 {
+            //
+            // ⚠️ A GROUNDED body is never idle in this sense, even with zero
+            // velocity and zero stored platform velocity (pat-s3rrv.93). The
+            // platform it is standing on can start moving at any frame, and the
+            // only thing that notices is `move_and_slide` re-acquiring the
+            // floor. Skipping it meant a rider had to already be moving to
+            // discover it was being carried — so the very first frame on a
+            // platform was always missed, and every frame that reported a zero
+            // platform velocity dropped the body back out of the carry chain.
+            if velocity.length_squared() < 1e-8
+                && stored_platform_vel.length_squared() < 1e-8
+                && !was_on_floor
+            {
                 continue;
             }
 

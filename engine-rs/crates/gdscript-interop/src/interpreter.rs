@@ -30264,6 +30264,25 @@ fn lambda_connection_name(callable: &CallableRef) -> String {
     })
 }
 
+/// Whether `name` is a synthetic lambda-connection method name (pat-s3rrv.67).
+///
+/// ⚠️ **A `has_method` that answers `false` here silently breaks every
+/// signal-connected lambda.** `SceneTree::call_script_method` skips any method
+/// the script does not define — right, because lifecycle dispatch calls
+/// `_ready`/`_process` on every node blindly — and a `__lambda_connection_N`
+/// name is deliberately *not* in `class_def.methods`. So the guard returned
+/// early and the lambda never reached [`Interpreter::call_instance_method`],
+/// which is the only place that can resolve it. The connection stored fine and
+/// the emit did nothing, which reads as "capture is broken" rather than "the
+/// dispatch gate rejected the name".
+///
+/// Kept public so the scene layer can widen that gate without knowing the
+/// prefix, which stays private here.
+pub fn is_lambda_connection_name(name: &str) -> bool {
+    name.strip_prefix(LAMBDA_CONNECTION_PREFIX)
+        .is_some_and(|id| id.parse::<u64>().is_ok())
+}
+
 /// The `Callable` a synthetic connection method name resolves to, or `None` for
 /// an ordinary script method name (pat-s3rrv.67).
 fn lambda_connection(method_name: &str) -> Option<CallableRef> {

@@ -663,6 +663,36 @@ impl PhysicsServer3D {
         &self.world
     }
 
+    /// Godot `PhysicsBody3D.add_collision_exception_with(body)` (pat-s3rrv.105).
+    ///
+    /// Returns whether the exception was actually registered. ⚠️ **Both nodes
+    /// must already be REGISTERED bodies.** A script calling this in `_ready` —
+    /// before the first sync has run — resolves no `BodyId3D`, and the exception
+    /// would be dropped; answering `false` lets the caller tell that apart from
+    /// success instead of assuming it worked.
+    ///
+    /// The 3D twin of the 2D path in `scripting.rs`, which is why it reports the
+    /// same bool.
+    pub fn node_add_collision_exception(&mut self, node: NodeId, other: NodeId) -> bool {
+        let (Some(a), Some(b)) = (self.body_for_node(node), self.body_for_node(other)) else {
+            return false;
+        };
+        self.world.add_collision_exception(a, b);
+        true
+    }
+
+    /// Godot `PhysicsBody3D.remove_collision_exception_with(body)`.
+    ///
+    /// Removing one that was never added is a no-op and still reports `true`:
+    /// the request was applied, and Godot draws no distinction.
+    pub fn node_remove_collision_exception(&mut self, node: NodeId, other: NodeId) -> bool {
+        let (Some(a), Some(b)) = (self.body_for_node(node), self.body_for_node(other)) else {
+            return false;
+        };
+        self.world.remove_collision_exception(a, b);
+        true
+    }
+
     /// Returns the physics body id registered for `node_id`, if any.
     pub fn body_for_node(&self, node_id: NodeId) -> Option<BodyId3D> {
         self.node_to_body.get(&node_id).copied()
@@ -727,6 +757,34 @@ impl PhysicsServer3D {
                         body.gravity_scale = float_prop_3d(tree, nid, "gravity_scale", 1.0) as f32;
                         body.linear_damp = float_prop_3d(tree, nid, "linear_damp", 0.0) as f32;
                         body.angular_damp = float_prop_3d(tree, nid, "angular_damp", 0.0) as f32;
+                        // pat-s3rrv.105 — Godot's `custom_integrator` hands
+                        // force integration to the script's
+                        // `_integrate_forces`. The engine then applies NO
+                        // gravity and no damping of its own; the body moves
+                        // only by whatever velocity the script leaves on the
+                        // state, which is the whole point of the callback.
+                        //
+                        // Until now the flag only GATED the callback, so a
+                        // script zeroing `state.linear_velocity` still fell —
+                        // by exactly one tick's worth of gravity per tick,
+                        // which reads as a solver tolerance rather than the
+                        // engine ignoring the flag.
+                        //
+                        // ⚠️ Overridden here rather than as a flag on
+                        // `PhysicsBody3D`: that struct has 18 literal
+                        // construction sites, and this is self-correcting —
+                        // the sync recomputes all three every tick, so clearing
+                        // `custom_integrator` restores the authored values on
+                        // the very next one.
+                        if matches!(
+                            tree.get_node(nid)
+                                .map(|n| n.get_property("custom_integrator")),
+                            Some(Variant::Bool(true))
+                        ) {
+                            body.gravity_scale = 0.0;
+                            body.linear_damp = 0.0;
+                            body.angular_damp = 0.0;
+                        }
                         body.friction = float_prop_3d(tree, nid, "friction", 0.5) as f32;
                         body.bounce = float_prop_3d(tree, nid, "bounce", 0.0) as f32;
                         // `physics_material_override`, which `PackedScene`
@@ -1504,7 +1562,37 @@ impl PhysicsServer3D {
         body.gravity_scale = gravity_scale;
         body.linear_damp = linear_damp;
         body.angular_damp = angular_damp;
+        // Same `custom_integrator` override as the per-tick sync above — a body
+        // registered while the flag is already set must not fall for the one
+        // tick before the next sync runs (pat-s3rrv.105).
+        if matches!(
+            tree.get_node(nid)
+                .map(|n| n.get_property("custom_integrator")),
+            Some(Variant::Bool(true))
+        ) {
+            body.gravity_scale = 0.0;
+            body.linear_damp = 0.0;
+            body.angular_damp = 0.0;
+        }
         body.lock_rotation = lock_rotation;
+        // Per-axis freezes (pat-s3rrv.105). Godot spells these as six separate
+        // booleans; the body stores them indexed [x, y, z] so the order here is
+        // the contract between the two.
+        //
+        // ⚠️ Read EVERY tick alongside the other authored properties, not once
+        // at registration: a script toggling `axis_lock_linear_y` mid-flight is
+        // the normal way these are used (freeze a body while a cutscene plays),
+        // and a registration-time read would ignore it forever.
+        body.axis_lock_linear = [
+            truthy_prop_3d(tree, nid, "axis_lock_linear_x", false),
+            truthy_prop_3d(tree, nid, "axis_lock_linear_y", false),
+            truthy_prop_3d(tree, nid, "axis_lock_linear_z", false),
+        ];
+        body.axis_lock_angular = [
+            truthy_prop_3d(tree, nid, "axis_lock_angular_x", false),
+            truthy_prop_3d(tree, nid, "axis_lock_angular_y", false),
+            truthy_prop_3d(tree, nid, "axis_lock_angular_z", false),
+        ];
         body.can_sleep = can_sleep;
         body.sleeping = sleeping;
         body.freeze_mode = freeze_mode;

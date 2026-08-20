@@ -119,6 +119,15 @@ const DEFAULT_FLOOR_MAX_ANGLE: f32 = std::f32::consts::FRAC_PI_4;
 /// as having no player input (px/s).
 const STOP_ON_SLOPE_LATERAL_EPS: f32 = 1e-3;
 
+/// How far down [`probe_resting_floor`] looks for the surface a body is already
+/// standing on (pat-s3rrv.93).
+///
+/// ⚠️ Deliberately tiny. This probe must find the floor a body is TOUCHING, not
+/// pull it down onto one it is merely near — that is `floor_snap_length`'s job,
+/// and it is opt-in. A large value here would silently ground a body hovering
+/// above a platform and start carrying it.
+const RESTING_FLOOR_PROBE: f32 = 1e-2;
+
 /// Deepest collision between `shape` at `tf` and **any** collider `other` owns
 /// (pat-s3rrv.25).
 ///
@@ -514,6 +523,14 @@ impl CharacterBody2D {
             self.snap_down_to_floor(up, floor_cos, bodies, &mut floor_platform_vel);
         }
 
+        // (3b) Still no floor contact, but the body was grounded and is not
+        // jumping? It is resting on something it never collided with this
+        // frame, because it barely moved. Re-acquire that contact so the
+        // platform under it is not forgotten (pat-s3rrv.93).
+        if !self.on_floor && was_on_floor && !vel_dir_facing_up {
+            self.probe_resting_floor(up, floor_cos, bodies, &mut floor_platform_vel);
+        }
+
         // (4) Remember the platform velocity for next frame's carry.
         self.platform_velocity = floor_platform_vel;
 
@@ -524,6 +541,64 @@ impl CharacterBody2D {
         }
 
         self.velocity
+    }
+
+    /// Re-acquires the floor a body is already RESTING on (pat-s3rrv.93).
+    ///
+    /// ⚠️ `floor_platform_vel` is otherwise only ever set from inside the slide
+    /// loop, i.e. as a side effect of *colliding* during this frame's motion. A
+    /// body standing still on a moving platform has (near-)zero motion of its
+    /// own, so it collides with nothing, and the platform under it is forgotten
+    /// even though contact never broke.
+    ///
+    /// That is what carried a rider on alternate frames only: the frame after a
+    /// successful carry reported `platform_velocity = 0`, which both cleared the
+    /// next carry and tripped the idle-body skip in
+    /// `PhysicsServer::process_character_movement`, giving 2,0,2,0 instead of a
+    /// uniform 1 — exactly half the platform's rate.
+    ///
+    /// Unlike [`snap_down_to_floor`](Self::snap_down_to_floor) this does NOT
+    /// move the body. It is a pure query at the body's current position, so it
+    /// is safe to run regardless of `floor_snap_length`, which is 0 by default
+    /// and would otherwise leave the common case unfixed.
+    fn probe_resting_floor(
+        &mut self,
+        up: Vector2,
+        floor_cos: f32,
+        bodies: &[&PhysicsBody2D],
+        floor_platform_vel: &mut Vector2,
+    ) {
+        // A hair of downward motion: resting contact is a touch, not an
+        // overlap, and a strictly-zero probe misses a body sitting exactly on
+        // the surface.
+        let probe = -up * RESTING_FLOOR_PROBE;
+        let tf = Transform2D::translated(self.position + probe);
+        let mut best: Option<(collision::CollisionResult, usize)> = None;
+
+        for (idx, body) in bodies.iter().enumerate() {
+            if (self.collision_mask & body.collision_layer) == 0 {
+                continue;
+            }
+            if let Some(result) = deepest_hit_against(&self.shape, &tf, body, probe) {
+                if !result.colliding || result.depth <= 0.0 {
+                    continue;
+                }
+                let surface_normal = -result.normal;
+                if surface_normal.dot(up) > floor_cos
+                    && (best.is_none() || result.depth > best.as_ref().unwrap().0.depth)
+                {
+                    best = Some((result, idx));
+                }
+            }
+        }
+
+        if let Some((result, idx)) = best {
+            // Contact state only — the position is left exactly where the slide
+            // loop put it.
+            self.on_floor = true;
+            self.floor_normal = -result.normal;
+            *floor_platform_vel = bodies[idx].linear_velocity;
+        }
     }
 
     /// Casts the body down by `floor_snap_length` and, if a floor is found,

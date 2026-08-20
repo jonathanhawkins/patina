@@ -20,8 +20,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::audio_server_bridge::AudioServerBridge;
 use crate::navigation::{
-    NavMesh2D, NavMesh3D, NavPolygon, NavPolygon3D, NavigationAgent2D, NavigationAgent3D,
-    NavigationServer2D, NavigationServer3D, OrcaAgent,
+    navmesh_polygon_indices, NavMesh2D, NavMesh3D, NavPolygon, NavPolygon3D, NavigationAgent2D,
+    NavigationAgent3D, NavigationServer2D, NavigationServer3D, OrcaAgent,
 };
 use crate::node::NodeId;
 use crate::particle::{ParticleEmitter, ParticleSimulator, SubEmitterMode};
@@ -802,25 +802,6 @@ fn region_enabled(node: &crate::node::Node) -> bool {
 /// polygon over all of them, which is what a hand-authored one-face mesh looks
 /// like. Out-of-range indices are dropped rather than panicking: a malformed
 /// `.tscn` should cost that polygon, not the frame.
-fn navmesh_polygon_indices(node: &crate::node::Node, vert_count: usize) -> Vec<Vec<usize>> {
-    match node.get_property("__navmesh_polygons__") {
-        Variant::Array(entries) => entries
-            .iter()
-            .filter_map(|entry| match entry {
-                Variant::PackedInt32Array(ids) => Some(
-                    ids.iter()
-                        .filter_map(|&i| usize::try_from(i).ok())
-                        .filter(|&i| i < vert_count)
-                        .collect::<Vec<usize>>(),
-                ),
-                _ => None,
-            })
-            .collect(),
-        _ if vert_count >= 3 => vec![(0..vert_count).collect()],
-        _ => Vec::new(),
-    }
-}
-
 impl MainLoop {
     /// Creates a new `MainLoop` that owns the given [`SceneTree`].
     pub fn new(tree: SceneTree) -> Self {

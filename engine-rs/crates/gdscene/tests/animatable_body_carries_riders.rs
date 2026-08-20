@@ -206,6 +206,81 @@ fn animatable_body_carries_riders() {
     );
 }
 
+/// **Diagnostic.** Prints the per-tick rider delta so the carry PATTERN is
+/// visible, not just the total (pat-s3rrv.93).
+///
+/// The total alone cannot distinguish two very different bugs that both land on
+/// 30 of 60 px:
+///
+/// * a **uniform half** — every tick carries 1px, i.e. the platform velocity
+///   reaching the rider is 60 px/s instead of 120, a scaling error; versus
+/// * an **alternating** 2,0,2,0 — every other tick carries nothing, i.e. the
+///   platform is being FORGOTTEN between ticks, a state error.
+///
+/// Those need opposite fixes, and a passing/failing total points at neither.
+/// The assertion below is written so its failure message carries the sequence.
+#[test]
+fn carry_is_uniform_per_tick() {
+    let mut ml = load(&scene_2d(true));
+    for _ in 0..30 {
+        arm_rider(&mut ml);
+        ml.step(STEP);
+    }
+
+    let mut deltas: Vec<f32> = Vec::new();
+    let mut stored: Vec<f32> = Vec::new();
+    let mut floors: Vec<bool> = Vec::new();
+    let mut steps: Vec<u32> = Vec::new();
+    let mut prev = pos_2d(&ml, "Rider").x;
+    for _ in 0..CARRY_TICKS {
+        arm_rider(&mut ml);
+        move_platform(&mut ml, PLATFORM_DX);
+        // ⚠️ How many FIXED physics ticks this one `step` ran. The fixture moves
+        // the platform ONCE per `step`, so if this is ever >1 the extra ticks
+        // see a stationary platform and derive a zero velocity from it.
+        steps.push(ml.step(STEP).physics_steps);
+        let now = pos_2d(&ml, "Rider").x;
+        deltas.push(now - prev);
+        prev = now;
+        // What the rider RECORDED as the platform under it. The carry reads
+        // this on the next tick, so if it alternates, so does the carry — and
+        // the question becomes why the floor lookup missed.
+        let root = ml.tree().root_id();
+        let rid = ml.tree().find_child(root, "Rider", true).expect("Rider");
+        let pv = match ml.tree().get_node(rid).map(|n| n.get_property("platform_velocity")) {
+            Some(Variant::Vector2(v)) => v.x,
+            _ => f32::NAN,
+        };
+        let on_floor = matches!(
+            ml.tree().get_node(rid).map(|n| n.get_property("is_on_floor")),
+            Some(Variant::Bool(true))
+        );
+        stored.push(pv);
+        floors.push(on_floor);
+    }
+
+    // Ignore the first tick: the carry reads the platform velocity recorded on
+    // the PREVIOUS tick, and the platform was stationary through the settle
+    // loop, so tick 1 legitimately carries nothing.
+    let steady = &deltas[1..];
+    let zeros = steady.iter().filter(|d| d.abs() < 0.5).count();
+    let full = steady.iter().filter(|d| (**d - PLATFORM_DX).abs() < 0.5).count();
+
+    assert_eq!(
+        zeros,
+        0,
+        "every steady-state tick must carry the rider. {zeros} of {} ticks \
+         carried ~0px and {full} carried the full {PLATFORM_DX}px. A run of \
+         alternating 2,0,2,0 means the platform is forgotten between ticks (a \
+         state bug); a uniform 1px means the velocity reaching the rider is \
+         halved (a scaling bug). Sequence: {steady:?}\n\
+         rider-recorded platform_velocity.x per tick: {stored:?}\n\
+         rider is_on_floor per tick: {floors:?}\n\
+         physics_steps per step() call: {steps:?}",
+        steady.len()
+    );
+}
+
 /// ⚠️ The control, and the reason the test above cannot pass by accident.
 ///
 /// With `sync_to_physics = false` an AnimatableBody2D is a plain static body:

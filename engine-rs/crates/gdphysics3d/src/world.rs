@@ -501,6 +501,17 @@ pub struct PhysicsWorld3D {
     /// Godot's default — adds its pair here, because a pin that holds two
     /// bodies coincident would otherwise fight the contact solver forever.
     collision_exceptions: HashSet<(BodyId3D, BodyId3D)>,
+    /// Pairs excluded by a script calling `add_collision_exception_with`
+    /// (pat-s3rrv.105).
+    ///
+    /// ⚠️ **Deliberately a second set rather than sharing `collision_exceptions`
+    /// above.** That one is owned by joints: `remove_joint` drops a pair's key
+    /// once no remaining joint wants it, and it has no way to know a script also
+    /// asked for the exception. Sharing the set would mean deleting a joint
+    /// silently re-enables a collision the script explicitly disabled — a bug
+    /// that surfaces frames later, somewhere else, as two bodies that suddenly
+    /// notice each other.
+    script_collision_exceptions: HashSet<(BodyId3D, BodyId3D)>,
 }
 
 impl PhysicsWorld3D {
@@ -514,6 +525,7 @@ impl PhysicsWorld3D {
             area_store: AreaStore3D::new(),
             joints: Vec::new(),
             collision_exceptions: HashSet::new(),
+            script_collision_exceptions: HashSet::new(),
         }
     }
 
@@ -574,10 +586,37 @@ impl PhysicsWorld3D {
         self.joints.iter_mut().find(|j| j.id() == id)
     }
 
+    /// Godot's `PhysicsBody3D.add_collision_exception_with` (pat-s3rrv.105).
+    ///
+    /// Idempotent, and symmetric: the pair is keyed by `exception_key`, so
+    /// `a.add_collision_exception_with(b)` also stops `b` colliding with `a`.
+    /// Godot stores the exception on one body and consults it from both sides,
+    /// which is the same observable behaviour.
+    pub fn add_collision_exception(&mut self, a: BodyId3D, b: BodyId3D) {
+        self.script_collision_exceptions.insert(exception_key(a, b));
+    }
+
+    /// Godot's `PhysicsBody3D.remove_collision_exception_with`.
+    ///
+    /// Removing a pair that was never excluded is a no-op, matching Godot.
+    ///
+    /// ⚠️ Only clears a SCRIPT-added exception. A pair held apart by a joint's
+    /// `exclude_nodes_from_collision` stays held apart — that exclusion belongs
+    /// to the joint, and letting a script delete it would leave a pin fighting
+    /// the contact solver.
+    pub fn remove_collision_exception(&mut self, a: BodyId3D, b: BodyId3D) {
+        self.script_collision_exceptions
+            .remove(&exception_key(a, b));
+    }
+
     /// Returns `true` when the two bodies are excluded from colliding with each
-    /// other by a joint.
+    /// other — by a joint, or by a script.
+    ///
+    /// The solver consults this one predicate, so a script exception and a joint
+    /// exclusion are indistinguishable at the point where it matters.
     pub fn has_collision_exception(&self, a: BodyId3D, b: BodyId3D) -> bool {
-        self.collision_exceptions.contains(&exception_key(a, b))
+        let key = exception_key(a, b);
+        self.collision_exceptions.contains(&key) || self.script_collision_exceptions.contains(&key)
     }
 
     // -- Area management ---------------------------------------------------
