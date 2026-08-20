@@ -5158,7 +5158,9 @@ impl SceneAccess for SceneTreeAccessor {
             // -- AudioEffectRecord ----------------------------------------
             "set_recording_active" => {
                 let active = matches!(args.first(), Some(Variant::Bool(true)));
-                audio.bus_record_mut(bus, slot)?.set_recording_active(active);
+                audio
+                    .bus_record_mut(bus, slot)?
+                    .set_recording_active(active);
                 Some(Variant::Nil)
             }
             "is_recording_active" => Some(Variant::Bool(
@@ -5190,10 +5192,8 @@ impl SceneAccess for SceneTreeAccessor {
                     .insert("data".to_string(), Variant::PackedByteArray(wav.data));
                 res.properties
                     .insert("format".to_string(), Variant::Int(wav.format));
-                res.properties.insert(
-                    "mix_rate".to_string(),
-                    Variant::Int(wav.mix_rate as i64),
-                );
+                res.properties
+                    .insert("mix_rate".to_string(), Variant::Int(wav.mix_rate as i64));
                 res.properties
                     .insert("stereo".to_string(), Variant::Bool(wav.stereo));
                 res.properties
@@ -7082,6 +7082,62 @@ impl SceneAccess for SceneTreeAccessor {
         })
     }
 
+    fn mesh_builder_new(&mut self, class_name: &str) -> Option<u64> {
+        MESH_BUILDER_REGISTRY.with(|r| {
+            let mut reg = r.borrow_mut();
+            let seq = reg.next_seq;
+            reg.next_seq += 1;
+            let raw = gdscript_interop::bindings::MESH_BUILDER_HANDLE_TAG | seq;
+            match class_name {
+                "ImmediateMesh" => {
+                    reg.immediate
+                        .insert(raw, gdserver3d::immediate_mesh::ImmediateMesh::new());
+                }
+                "SurfaceTool" => {
+                    reg.surface
+                        .insert(raw, gdserver3d::mesh::SurfaceTool::new());
+                }
+                _ => return None,
+            }
+            Some(raw)
+        })
+    }
+
+    fn mesh_builder_call(
+        &mut self,
+        handle: u64,
+        method: &str,
+        args: &[Variant],
+    ) -> Option<Variant> {
+        MESH_BUILDER_REGISTRY.with(|r| {
+            let mut reg = r.borrow_mut();
+            if let Some(m) = reg.immediate.get_mut(&handle) {
+                return immediate_mesh_call(m, method, args);
+            }
+            if let Some(t) = reg.surface.get_mut(&handle) {
+                // ⚠️ `commit` is answered HERE, not in `surface_tool_call`,
+                // because it must return the handle and only this scope has it
+                // (pat-s3rrv.201).
+                //
+                // Godot's `commit()` returns a fresh ArrayMesh. Here the tool's
+                // own handle IS the mesh reference: `resolve_mesh` reads the
+                // geometry back through `surface_tool_geometry`. The visible
+                // difference is that later edits to the tool keep affecting an
+                // already-committed mesh, where Godot's snapshot would not.
+                if method == "commit" {
+                    if t.vertex_count() == 0 {
+                        // Nothing built: Godot returns null, and handing back a
+                        // handle here would render an empty instance instead.
+                        return Some(Variant::Nil);
+                    }
+                    return Some(Variant::ObjectId(ObjectId::from_raw(handle)));
+                }
+                return surface_tool_call(t, method, args);
+            }
+            None
+        })
+    }
+
     fn astar_call(&mut self, handle: u64, method: &str, args: &[Variant]) -> Option<Variant> {
         ASTAR_REGISTRY.with(|r| {
             let mut reg = r.borrow_mut();
@@ -7100,6 +7156,27 @@ impl SceneAccess for SceneTreeAccessor {
 }
 
 /// Live AStar objects, keyed by the handle the interpreter carries.
+/// `ImmediateMesh` and `SurfaceTool` instances owned by the scene layer
+/// (pat-s3rrv.197), keyed by the tagged handle scripts hold.
+///
+/// Mirrors [`AStarRegistry`]: both classes are RefCounted in Godot and both live
+/// in `gdserver3d`, which `gdscript-interop` cannot name, so the scene layer
+/// owns them and the interpreter routes on the tag alone.
+#[derive(Default)]
+struct MeshBuilderRegistry {
+    immediate: std::collections::HashMap<u64, gdserver3d::immediate_mesh::ImmediateMesh>,
+    surface: std::collections::HashMap<u64, gdserver3d::mesh::SurfaceTool>,
+    next_seq: u64,
+}
+
+thread_local! {
+    static MESH_BUILDER_REGISTRY: std::cell::RefCell<MeshBuilderRegistry> =
+        std::cell::RefCell::new(MeshBuilderRegistry {
+            next_seq: 1,
+            ..Default::default()
+        });
+}
+
 #[derive(Default)]
 struct AStarRegistry {
     astar2d: std::collections::HashMap<u64, crate::astar::AStar2D>,
@@ -7114,6 +7191,240 @@ thread_local! {
             next_seq: 1,
             ..Default::default()
         });
+}
+
+/// The renderable geometry an `ImmediateMesh` handle currently holds
+/// (pat-s3rrv.197), or `None` when it has no finished surfaces.
+///
+/// ⚠️ This accessor exists because `MESH_BUILDER_REGISTRY` is a PRIVATE
+/// thread-local in this module, while the code that needs it —
+/// `RenderServer3DAdapter::resolve_mesh` — lives in `render_server_3d.rs`.
+/// Without it that resolver cannot see the geometry at all: `get_mesh_path`
+/// matches only `Variant::String`, so an `ObjectId` handle assigned to
+/// `MeshInstance3D.mesh` returns `None` and the node renders a DEFAULT CUBE.
+///
+/// That failure is deceptive rather than loud — the instance exists and carries
+/// exactly one surface, so a check that only counts surfaces passes against
+/// geometry that ignored the script entirely. Only the vertex count betrays it.
+///
+/// `None` for a cleared mesh is deliberate and is what makes
+/// `clear_surfaces()` mean "renders nothing" instead of handing the renderer an
+/// empty husk that still counts as a live instance.
+pub(crate) fn immediate_mesh_geometry(handle: u64) -> Option<gdserver3d::mesh::Mesh3D> {
+    MESH_BUILDER_REGISTRY.with(|r| r.borrow().immediate.get(&handle).and_then(|m| m.to_mesh()))
+}
+
+/// The mesh a `SurfaceTool` handle has accumulated so far (pat-s3rrv.197).
+///
+/// Godot's `SurfaceTool.commit()` returns an ArrayMesh; this is the same data
+/// for the same reason as [`immediate_mesh_geometry`] — the registry is private
+/// to this module. Returns `None` for a tool with no vertices, so an
+/// uncommitted builder does not render an empty instance.
+pub(crate) fn surface_tool_geometry(handle: u64) -> Option<gdserver3d::mesh::Mesh3D> {
+    MESH_BUILDER_REGISTRY.with(|r| {
+        let reg = r.borrow();
+        let tool = reg.surface.get(&handle)?;
+        if tool.vertex_count() == 0 {
+            return None;
+        }
+        Some(tool.commit())
+    })
+}
+
+/// Dispatches an `ImmediateMesh` method (pat-s3rrv.197).
+///
+/// ⚠️ Errors are reported as `Variant::Bool(false)`, never by silently doing
+/// nothing. Godot ERRORS when `surface_add_vertex` is called outside a
+/// begin/end pair, and a silent no-op would let a script build geometry it
+/// believes exists — the acceptance calls this out explicitly.
+fn immediate_mesh_call(
+    mesh: &mut gdserver3d::immediate_mesh::ImmediateMesh,
+    method: &str,
+    args: &[Variant],
+) -> Option<Variant> {
+    let vec3 = |i: usize| match args.get(i) {
+        Some(Variant::Vector3(v)) => *v,
+        _ => gdcore::math::Vector3::ZERO,
+    };
+    let ok = |r: Result<(), gdserver3d::immediate_mesh::ImmediateMeshError>| {
+        Some(Variant::Bool(r.is_ok()))
+    };
+    match method {
+        "surface_begin" => {
+            let primitive = match args.first() {
+                Some(Variant::Int(i)) => *i,
+                Some(Variant::Float(f)) => *f as i64,
+                // Godot's own default for `surface_begin` is PRIMITIVE_TRIANGLES
+                // (3), NOT 0 — 0 is PRIMITIVE_POINTS, so defaulting to zero
+                // would draw a point cloud for a call that omitted the argument.
+                _ => 3,
+            };
+            ok(mesh.surface_begin(primitive))
+        }
+        "surface_set_normal" => ok(mesh.surface_set_normal(vec3(0))),
+        "surface_set_uv" => {
+            let uv = match args.first() {
+                Some(Variant::Vector2(v)) => [v.x, v.y],
+                _ => [0.0, 0.0],
+            };
+            ok(mesh.surface_set_uv(uv))
+        }
+        "surface_set_color" => {
+            let c = match args.first() {
+                Some(Variant::Color(c)) => *c,
+                _ => gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0),
+            };
+            ok(mesh.surface_set_color(c))
+        }
+        "surface_add_vertex" => ok(mesh.surface_add_vertex(vec3(0))),
+        "surface_end" => ok(mesh.surface_end()),
+        "clear_surfaces" => {
+            mesh.clear_surfaces();
+            Some(Variant::Nil)
+        }
+        "get_surface_count" => Some(Variant::Int(mesh.surface_count() as i64)),
+        _ => None,
+    }
+}
+
+/// Dispatches a `SurfaceTool` method (pat-s3rrv.197).
+fn surface_tool_call(
+    tool: &mut gdserver3d::mesh::SurfaceTool,
+    method: &str,
+    args: &[Variant],
+) -> Option<Variant> {
+    let vec3 = |i: usize| match args.get(i) {
+        Some(Variant::Vector3(v)) => *v,
+        _ => gdcore::math::Vector3::ZERO,
+    };
+    match method {
+        "begin" => {
+            let primitive = match args.first() {
+                Some(Variant::Int(i)) => *i,
+                _ => 3,
+            };
+            // Same ordinal table as ImmediateMesh: TRIANGLES is 3, not 2.
+            match gdserver3d::immediate_mesh::primitive_from_godot_int(primitive) {
+                Some(p) => {
+                    tool.begin(p);
+                    Some(Variant::Bool(true))
+                }
+                None => Some(Variant::Bool(false)),
+            }
+        }
+        "set_normal" => {
+            tool.set_normal(vec3(0));
+            Some(Variant::Nil)
+        }
+        "set_uv" => {
+            let uv = match args.first() {
+                Some(Variant::Vector2(v)) => [v.x, v.y],
+                _ => [0.0, 0.0],
+            };
+            tool.set_uv(uv);
+            Some(Variant::Nil)
+        }
+        "add_vertex" => {
+            tool.add_vertex(vec3(0));
+            Some(Variant::Nil)
+        }
+        "add_index" => {
+            let i = match args.first() {
+                Some(Variant::Int(i)) => *i.max(&0) as u32,
+                _ => 0,
+            };
+            tool.add_index(i);
+            Some(Variant::Nil)
+        }
+        // ⚠️ `set_color` and `clear` were ClassDB-REGISTERED with no dispatch
+        // arm (pat-s3rrv.201). This dispatcher errors loudly on an unknown
+        // method rather than returning Nil, so they failed noisily — but they
+        // failed, and `has_method` answered true for both.
+        "set_color" => {
+            let Some(Variant::Color(c)) = args.first() else {
+                return Some(Variant::Bool(false));
+            };
+            tool.set_color(*c);
+            Some(Variant::Nil)
+        }
+        "clear" => {
+            tool.clear();
+            Some(Variant::Nil)
+        }
+        "commit_to_arrays" => {
+            // Packing lives in `script_mesh` beside its inverse
+            // (`mesh_from_mesh_array`) so the two can be round-trip tested
+            // against each other rather than only through a script.
+            Some(Variant::Array(crate::script_mesh::mesh_to_mesh_array(
+                &tool.commit(),
+                tool.colors(),
+            )))
+        }
+        "set_smooth_group" => {
+            let group = match args.first() {
+                Some(Variant::Int(i)) => *i as u32,
+                _ => return Some(Variant::Bool(false)),
+            };
+            tool.set_smooth_group(group);
+            Some(Variant::Nil)
+        }
+        "set_bones" => {
+            let bones: Vec<i32> = match args.first() {
+                Some(Variant::PackedInt32Array(v)) => v.clone(),
+                _ => return Some(Variant::Bool(false)),
+            };
+            tool.set_bones(&bones);
+            Some(Variant::Nil)
+        }
+        "set_weights" => {
+            let weights: Vec<f32> = match args.first() {
+                Some(Variant::PackedFloat32Array(v)) => v.clone(),
+                _ => return Some(Variant::Bool(false)),
+            };
+            tool.set_weights(&weights);
+            Some(Variant::Nil)
+        }
+        "add_triangle_fan" => {
+            // Godot's signature is (vertices, uvs, colors, uv2s, normals,
+            // tangents); uv2 and tangent have no channel in Mesh3D, so those
+            // two positions are accepted and ignored rather than rejected.
+            let verts = match args.first() {
+                Some(Variant::PackedVector3Array(v)) => v.clone(),
+                _ => return Some(Variant::Bool(false)),
+            };
+            let uvs: Vec<[f32; 2]> = match args.get(1) {
+                Some(Variant::PackedVector2Array(v)) => v.iter().map(|p| [p.x, p.y]).collect(),
+                _ => Vec::new(),
+            };
+            let colors: Vec<gdcore::math::Color> = match args.get(2) {
+                Some(Variant::PackedColorArray(v)) => v.clone(),
+                _ => Vec::new(),
+            };
+            let normals: Vec<gdcore::math::Vector3> = match args.get(4) {
+                Some(Variant::PackedVector3Array(v)) => v.clone(),
+                _ => Vec::new(),
+            };
+            Some(Variant::Bool(
+                tool.add_triangle_fan(&verts, &uvs, &colors, &normals),
+            ))
+        }
+        "index" => {
+            tool.index();
+            Some(Variant::Nil)
+        }
+        "deindex" => {
+            tool.deindex();
+            Some(Variant::Nil)
+        }
+        "generate_normals" => {
+            // Godot's parameter is `flip`, defaulting to false.
+            let flip = matches!(args.first(), Some(Variant::Bool(true)));
+            tool.generate_normals(flip);
+            Some(Variant::Nil)
+        }
+        "get_vertex_count" => Some(Variant::Int(tool.vertex_count() as i64)),
+        _ => None,
+    }
 }
 
 fn astar_int(args: &[Variant], i: usize) -> i64 {

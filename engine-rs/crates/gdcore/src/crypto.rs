@@ -1005,21 +1005,32 @@ mod tests {
     fn aes_encrypt_decrypt_roundtrip() {
         let key = [0x11u8; 32];
         let iv = [0x22u8; 16];
+        // 26 bytes — deliberately NOT a multiple of 16.
         let plain = b"Hello Patina AES-256-CBC!!";
+
+        // Godot's `update()` takes whole blocks and pads nothing
+        // (pat-s3rrv.195), so a caller with arbitrary-length data pads it
+        // itself. This mirrors exactly what `gdresource::config_file` now does,
+        // which is why the bytes it writes did not change when the padding
+        // moved out of `AesContext`.
+        let padded = pkcs7_pad(plain);
+
         let mut enc = AesContext::new();
         enc.start(AesMode::Encrypt, &key, &iv).unwrap();
-        let cipher = enc.update(plain).unwrap();
+        let cipher = enc.update(&padded).unwrap();
         assert!(!cipher.is_empty());
+
         let mut dec = AesContext::new();
         dec.start(AesMode::Decrypt, &key, &iv).unwrap();
-        let out = dec.update(&cipher).unwrap();
+        let out = pkcs7_unpad(&dec.update(&cipher).unwrap()).unwrap();
         assert_eq!(&out, plain.as_slice());
         enc.finish().unwrap();
     }
 
     #[test]
     fn aes_update_before_start_errors() {
-        let ctx = AesContext::new();
+        // `mut` since update() chains CBC state (pat-s3rrv.195).
+        let mut ctx = AesContext::new();
         assert!(ctx.update(b"data").is_err());
         assert!(ctx.finish().is_err());
     }

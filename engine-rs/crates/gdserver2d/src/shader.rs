@@ -1295,6 +1295,27 @@ fn contains_call(source: &str, name: &str) -> bool {
 /// The returned strings are human-readable and intended to be surfaced to the
 /// user (editor diagnostics, logs). An empty vector means the whole shader is
 /// within the supported subset. This is best-effort, not a full validator.
+/// Names of `uniform sampler2D` declarations carrying `: hint_screen_texture`
+/// (pat-s3rrv.202).
+///
+/// Godot has TWO spellings for reading the back buffer: the legacy built-in
+/// `SCREEN_TEXTURE`, and the modern `uniform sampler2D screen_tex :
+/// hint_screen_texture`. The renderer's sampler is handed the LITERAL name, so
+/// without this list a hint-declared uniform falls through to the item's own
+/// texture — a sprite sampling itself, which still produces plausible pixels and
+/// therefore looks like a working screen read.
+pub fn screen_texture_uniforms(source: &str) -> Vec<String> {
+    parse_uniforms(source)
+        .into_iter()
+        .filter(|u| {
+            u.hint
+                .as_deref()
+                .is_some_and(|h| h.trim() == "hint_screen_texture")
+        })
+        .map(|u| u.name)
+        .collect()
+}
+
 pub fn unsupported_features(source: &str, shader_type: ShaderType) -> Vec<String> {
     let mut out = Vec::new();
 
@@ -1329,11 +1350,20 @@ pub fn unsupported_features(source: &str, shader_type: ShaderType) -> Vec<String
     if contains_call(source, "light") {
         out.push("`light()` custom lighting processor".to_string());
     }
-    if source.contains("SCREEN_TEXTURE")
-        || source.contains("hint_screen_texture")
-        || source.contains("screen_texture")
-    {
-        out.push("`SCREEN_TEXTURE` / screen-buffer sampling".to_string());
+    // ⚠️ NOT reported as unsupported any more (pat-s3rrv.202). The CPU canvas
+    // path samples the back buffer end to end: a `BackBufferCopy` item
+    // snapshots the framebuffer during rasterization, the snapshot is handed to
+    // the shaded draw, and the sampler resolves both `SCREEN_TEXTURE` and any
+    // `hint_screen_texture` uniform against it.
+    //
+    // Leaving the entry here would be the inverse of the usual defect — a
+    // WORKING feature advertised as broken, which is just as misleading and
+    // sends the next reader to reimplement something that already runs.
+    //
+    // The WGSL/GPU translation still does not bind a screen sampler, so a
+    // shader relying on it renders unshaded on that path only.
+    if matches!(shader_type, ShaderType::CanvasItem) && source.contains("textureLod(SCREEN") {
+        out.push("`textureLod` mip sampling of the screen buffer".to_string());
     }
     if source.contains("discard") {
         out.push("`discard` statement".to_string());

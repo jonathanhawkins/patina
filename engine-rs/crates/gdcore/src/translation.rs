@@ -272,6 +272,14 @@ pub struct TranslationServer {
     translations: Vec<Translation>,
     locale: String,
     fallback: String,
+    /// Named translation namespaces (`TranslationDomain`, Godot 4.4).
+    ///
+    /// The unnamed `""` domain is NOT stored here — it is the `translations`
+    /// field above, kept in place so every existing caller and the interpreter's
+    /// `TranslationServer.*` dispatch keep working untouched.
+    domains: HashMap<String, TranslationDomain>,
+    /// Pseudolocalization for the default domain.
+    pseudolocalization: PseudolocalizationConfig,
 }
 
 impl TranslationServer {
@@ -281,6 +289,8 @@ impl TranslationServer {
             translations: Vec::new(),
             locale: "en".to_string(),
             fallback: "en".to_string(),
+            domains: HashMap::new(),
+            pseudolocalization: PseudolocalizationConfig::default(),
         }
     }
 
@@ -312,10 +322,29 @@ impl TranslationServer {
     pub fn translate(&self, key: &str) -> String {
         for candidate in self.locale_chain() {
             if let Some(text) = self.lookup(&candidate, key) {
-                return text.to_string();
+                return self.apply_pseudolocalization(text);
             }
         }
-        key.to_string()
+        // 🔑 A MISS is pseudolocalized too. Godot returns
+        // `pseudolocalize(p_message)` when nothing matched
+        // (translation_domain.cpp:365), so an untranslated string still shows
+        // as pseudolocalized — which is the whole point of the mode: it makes
+        // the strings that were never run through the catalog stand out.
+        self.apply_pseudolocalization(key)
+    }
+
+    /// Runs the pseudolocalization pipeline when it is enabled.
+    ///
+    /// This sits inside `translate` deliberately: the interpreter's `tr()` and
+    /// `tr_n()` builtins already route here, so toggling the mode changes what
+    /// a running script — and therefore a Label bound to it — renders, with no
+    /// change to the dispatch layer.
+    fn apply_pseudolocalization(&self, text: &str) -> String {
+        if self.pseudolocalization.enabled {
+            self.pseudolocalization.pseudolocalize(text)
+        } else {
+            text.to_string()
+        }
     }
 
     /// `TranslationServer.translate(message, context)` (pat-s3rrv.128).
@@ -531,5 +560,454 @@ impl TranslationServer {
         let mut t = Translation::new(locale);
         t.add_message(key, text);
         self.translations.push(t);
+    }
+}
+
+// ===========================================================================
+// TranslationDomain + pseudolocalization (pat-s3rrv.212)
+//
+// Ported from `upstream/godot/core/string/translation_domain.cpp`:
+// `pseudolocalize` (:480), `_double_vowels` (:111),
+// `_replace_with_accented_string`, `_wrap_with_fakebidi_characters`,
+// `_add_padding`, `_is_placeholder`, and the `_character_to_accented` table
+// (:42). Defaults are from `PseudolocalizationConfig` in the matching header.
+// ===========================================================================
+
+/// Godot's ASCII-to-accented substitution table (`translation_domain.cpp:42`).
+///
+/// ⚠️ **Transcribed, never derived.** There is no rule here: `B` becomes `ß`,
+/// `K` becomes `ĸ`, `N` becomes the CYRILLIC `й` and `n` the GREEK `ή`, while a
+/// dozen entries are a plain letter plus a combining mark (`F́`, `d́`, `h̀`, `m̀`,
+/// `q́`, `x́`) and so are two code points rather than one. Any "add an accent"
+/// heuristic disagrees with Godot on roughly half the alphabet.
+const CHARACTER_TO_ACCENTED: [(char, &str); 52] = [
+    ('A', "Å"),
+    ('B', "ß"),
+    ('C', "Ç"),
+    ('D', "Ð"),
+    ('E', "É"),
+    ('F', "F́"),
+    ('G', "Ĝ"),
+    ('H', "Ĥ"),
+    ('I', "Ĩ"),
+    ('J', "Ĵ"),
+    ('K', "ĸ"),
+    ('L', "Ł"),
+    ('M', "Ḿ"),
+    ('N', "й"),
+    ('O', "Ö"),
+    ('P', "Ṕ"),
+    ('Q', "Q́"),
+    ('R', "Ř"),
+    ('S', "Ŝ"),
+    ('T', "Ŧ"),
+    ('U', "Ũ"),
+    ('V', "Ṽ"),
+    ('W', "Ŵ"),
+    ('X', "X́"),
+    ('Y', "Ÿ"),
+    ('Z', "Ž"),
+    ('a', "á"),
+    ('b', "ḅ"),
+    ('c', "ć"),
+    ('d', "d́"),
+    ('e', "é"),
+    ('f', "f́"),
+    ('g', "ǵ"),
+    ('h', "h̀"),
+    ('i', "í"),
+    ('j', "ǰ"),
+    ('k', "ḱ"),
+    ('l', "ł"),
+    ('m', "m̀"),
+    ('n', "ή"),
+    ('o', "ô"),
+    ('p', "ṕ"),
+    ('q', "q́"),
+    ('r', "ŕ"),
+    ('s', "š"),
+    ('t', "ŧ"),
+    ('u', "ü"),
+    ('v', "ṽ"),
+    ('w', "ŵ"),
+    ('x', "x́"),
+    ('y', "ý"),
+    ('z', "ź"),
+];
+
+/// Unicode RIGHT-TO-LEFT OVERRIDE, opened around fake-bidi text.
+const FAKE_BIDI_PREFIX: char = '\u{202e}';
+/// Unicode POP DIRECTIONAL FORMATTING, closing a fake-bidi run.
+const FAKE_BIDI_SUFFIX: char = '\u{202c}';
+
+/// Pseudolocalization knobs, mirroring Godot's `PseudolocalizationConfig`.
+///
+/// Every default is that struct's, and two of them matter more than they look:
+/// `accents_enabled` is **true** while everything else is off, and
+/// `expansion_ratio` is **0.0**, so switching pseudolocalization on with no
+/// further configuration accents the text and adds `[`/`]` but does NOT
+/// lengthen it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PseudolocalizationConfig {
+    /// Whether pseudolocalization is applied at all.
+    pub enabled: bool,
+    /// Replace ASCII letters with accented look-alikes.
+    pub accents_enabled: bool,
+    /// Double every vowel, to simulate a longer translation.
+    pub double_vowels_enabled: bool,
+    /// Wrap the text in RTL override characters.
+    pub fake_bidi_enabled: bool,
+    /// Replace the message body with `*` padding instead of translating it.
+    pub override_enabled: bool,
+    /// Leave `%s`-style placeholders untouched by every transform.
+    pub skip_placeholders_enabled: bool,
+    /// How much to lengthen the string, as a fraction of its ORIGINAL length.
+    pub expansion_ratio: f32,
+    /// Written before the message (and before the expansion underscores).
+    pub prefix: String,
+    /// Written after the message (and after the expansion underscores).
+    pub suffix: String,
+}
+
+impl Default for PseudolocalizationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            accents_enabled: true,
+            double_vowels_enabled: false,
+            fake_bidi_enabled: false,
+            override_enabled: false,
+            skip_placeholders_enabled: true,
+            expansion_ratio: 0.0,
+            prefix: "[".to_string(),
+            suffix: "]".to_string(),
+        }
+    }
+}
+
+/// True when `chars[index]` begins a `%`-placeholder Godot leaves alone.
+///
+/// Mirrors `_is_placeholder`: a `%` followed by one of `scdoxXf`, and never at
+/// the final position.
+fn is_placeholder(chars: &[char], index: usize) -> bool {
+    index + 1 < chars.len()
+        && chars[index] == '%'
+        && matches!(chars[index + 1], 's' | 'c' | 'd' | 'o' | 'x' | 'X' | 'f')
+}
+
+/// Applies `f` to each character, copying `%`-placeholders through untouched
+/// when `skip` is set.
+///
+/// The three per-character transforms differ only in `f`, and each one has to
+/// repeat the same placeholder-skipping dance; sharing it keeps them from
+/// drifting apart, which is the way this kind of code usually breaks.
+fn map_skipping_placeholders(
+    message: &str,
+    skip: bool,
+    mut f: impl FnMut(char, &mut String),
+) -> String {
+    let chars: Vec<char> = message.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if skip && is_placeholder(&chars, i) {
+            out.push(chars[i]);
+            out.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        f(chars[i], &mut out);
+        i += 1;
+    }
+    out
+}
+
+impl PseudolocalizationConfig {
+    fn double_vowels(&self, message: &str) -> String {
+        map_skipping_placeholders(message, self.skip_placeholders_enabled, |c, out| {
+            out.push(c);
+            if matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'A' | 'E' | 'I' | 'O' | 'U') {
+                out.push(c);
+            }
+        })
+    }
+
+    fn replace_with_accents(&self, message: &str) -> String {
+        map_skipping_placeholders(message, self.skip_placeholders_enabled, |c, out| {
+            match CHARACTER_TO_ACCENTED.iter().find(|(k, _)| *k == c) {
+                Some((_, accented)) => out.push_str(accented),
+                None => out.push(c),
+            }
+        })
+    }
+
+    fn override_string(&self, message: &str) -> String {
+        map_skipping_placeholders(message, self.skip_placeholders_enabled, |_, out| {
+            out.push('*');
+        })
+    }
+
+    /// ⚠️ The RTL override is re-opened after every newline AND around every
+    /// skipped placeholder, because the override is popped by both.
+    fn wrap_fake_bidi(&self, message: &str) -> String {
+        let chars: Vec<char> = message.chars().collect();
+        let mut out = String::new();
+        out.push(FAKE_BIDI_PREFIX);
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '\n' {
+                out.push(FAKE_BIDI_SUFFIX);
+                out.push(chars[i]);
+                out.push(FAKE_BIDI_PREFIX);
+                i += 1;
+            } else if self.skip_placeholders_enabled && is_placeholder(&chars, i) {
+                out.push(FAKE_BIDI_SUFFIX);
+                out.push(chars[i]);
+                out.push(chars[i + 1]);
+                out.push(FAKE_BIDI_PREFIX);
+                i += 2;
+            } else {
+                out.push(chars[i]);
+                i += 1;
+            }
+        }
+        out.push(FAKE_BIDI_SUFFIX);
+        out
+    }
+
+    /// 🔑 `length` is the ORIGINAL message's length, not the transformed one.
+    /// Godot captures it before any substitution runs, so doubling the vowels
+    /// does not also double the padding.
+    fn add_padding(&self, message: &str, length: usize) -> String {
+        let count = ((length as f32) * self.expansion_ratio / 2.0) as usize;
+        let underscores = "_".repeat(count);
+        format!(
+            "{}{}{}{}{}",
+            self.prefix, underscores, message, underscores, self.suffix
+        )
+    }
+
+    /// The full pipeline, in Godot's order: override, double vowels, accents,
+    /// fake bidi, then padding computed from the ORIGINAL length.
+    ///
+    /// An empty message is returned untouched — Godot returns early, so an
+    /// empty string does NOT come back as just the prefix and suffix.
+    pub fn pseudolocalize(&self, message: &str) -> String {
+        if message.is_empty() {
+            return String::new();
+        }
+        let length = message.chars().count();
+        let mut out = message.to_string();
+        if self.override_enabled {
+            out = self.override_string(&out);
+        }
+        if self.double_vowels_enabled {
+            out = self.double_vowels(&out);
+        }
+        if self.accents_enabled {
+            out = self.replace_with_accents(&out);
+        }
+        if self.fake_bidi_enabled {
+            out = self.wrap_fake_bidi(&out);
+        }
+        self.add_padding(&out, length)
+    }
+}
+
+/// A named translation namespace with its own catalogs and its own
+/// pseudolocalization settings (Godot 4.4 `TranslationDomain`, RefCounted).
+///
+/// Godot keeps the unnamed domain and the named ones in one map; here the
+/// unnamed one stays on [`TranslationServer`] itself so that every existing
+/// caller — including the interpreter's `TranslationServer.*` dispatch — is
+/// untouched by this addition.
+#[derive(Debug, Clone, Default)]
+pub struct TranslationDomain {
+    translations: Vec<Translation>,
+    /// This domain's own pseudolocalization settings, independent of the
+    /// server's. Godot gives each domain its own config, so a debug overlay can
+    /// be pseudolocalized while the game's UI is not.
+    pub pseudolocalization: PseudolocalizationConfig,
+    /// When empty, the domain follows the server's locale; otherwise it pins
+    /// its own (`TranslationDomain.locale_override`).
+    pub locale_override: String,
+}
+
+impl TranslationDomain {
+    /// An empty domain.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds a catalog to this domain.
+    pub fn add_translation(&mut self, translation: Translation) {
+        self.translations.push(translation);
+    }
+
+    /// Drops every catalog whose locale matches.
+    pub fn remove_translation(&mut self, locale: &str) {
+        self.translations.retain(|t| t.locale() != locale);
+    }
+
+    /// Drops all catalogs.
+    pub fn clear(&mut self) {
+        self.translations.clear();
+    }
+
+    /// How many catalogs this domain holds.
+    pub fn len(&self) -> usize {
+        self.translations.len()
+    }
+
+    /// Whether the domain holds no catalogs.
+    pub fn is_empty(&self) -> bool {
+        self.translations.is_empty()
+    }
+
+    /// The locales this domain has catalogs for.
+    pub fn get_loaded_locales(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .translations
+            .iter()
+            .map(|t| t.locale().to_string())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Translates `key` against `locale`, then `fallback`, then returns the key.
+    ///
+    /// The resolution mirrors `TranslationDomain::translate`: the active locale
+    /// (or this domain's override) first, then the fallback, and a miss returns
+    /// the message itself. Pseudolocalization applies to BOTH outcomes.
+    pub fn translate(&self, key: &str, locale: &str, fallback: &str) -> String {
+        let active = if self.locale_override.is_empty() {
+            locale
+        } else {
+            self.locale_override.as_str()
+        };
+        for candidate in locale_chain_for(active, fallback) {
+            if let Some(text) = self.lookup(&candidate, key) {
+                return self.finish(text);
+            }
+        }
+        self.finish(key)
+    }
+
+    fn finish(&self, text: &str) -> String {
+        if self.pseudolocalization.enabled {
+            self.pseudolocalization.pseudolocalize(text)
+        } else {
+            text.to_string()
+        }
+    }
+
+    fn lookup(&self, locale: &str, key: &str) -> Option<&str> {
+        self.translations.iter().find_map(|t| {
+            let matches =
+                t.locale() == locale || t.locale().split(['_', '-']).next() == Some(locale);
+            if matches {
+                t.get_message(key)
+            } else {
+                None
+            }
+        })
+    }
+}
+
+/// The locale resolution order: the exact locale, its language part, then the
+/// fallback and ITS language part.
+///
+/// ⚠️ `fr_FR` must try `fr` before giving up — a catalog shipped as `fr` has to
+/// serve a `fr_FR` user, which is the case that makes region-tagged locales
+/// usable at all.
+fn locale_chain_for(locale: &str, fallback: &str) -> Vec<String> {
+    let mut chain = Vec::new();
+    let mut push = |s: &str| {
+        if !s.is_empty() && !chain.iter().any(|c| c == s) {
+            chain.push(s.to_string());
+        }
+    };
+    push(locale);
+    if let Some(lang) = locale.split(['_', '-']).next() {
+        push(lang);
+    }
+    push(fallback);
+    if let Some(lang) = fallback.split(['_', '-']).next() {
+        push(lang);
+    }
+    chain
+}
+
+impl TranslationServer {
+    /// Whether a named domain exists (`TranslationServer.has_domain`).
+    ///
+    /// The unnamed `""` domain always exists, matching Godot.
+    pub fn has_domain(&self, name: &str) -> bool {
+        name.is_empty() || self.domains.contains_key(name)
+    }
+
+    /// Returns the named domain, creating it when absent
+    /// (`TranslationServer.get_or_add_domain`).
+    pub fn get_or_add_domain(&mut self, name: &str) -> &mut TranslationDomain {
+        self.domains.entry(name.to_string()).or_default()
+    }
+
+    /// Reads a named domain without creating it.
+    pub fn get_domain(&self, name: &str) -> Option<&TranslationDomain> {
+        self.domains.get(name)
+    }
+
+    /// Removes a named domain (`TranslationServer.remove_domain`).
+    ///
+    /// ⚠️ Removing the unnamed domain is a no-op: Godot's default domain cannot
+    /// be removed, and silently clearing every default catalog here would be a
+    /// far worse outcome than ignoring the call.
+    pub fn remove_domain(&mut self, name: &str) {
+        if !name.is_empty() {
+            self.domains.remove(name);
+        }
+    }
+
+    /// The names of the loaded named domains, sorted for determinism.
+    pub fn get_loaded_domains(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.domains.keys().cloned().collect();
+        out.sort();
+        out
+    }
+
+    /// Translates `key` through a named domain, falling back to the default
+    /// domain when the name is empty or unknown.
+    pub fn translate_in_domain(&self, domain: &str, key: &str) -> String {
+        match self.domains.get(domain) {
+            Some(d) => d.translate(key, &self.locale, &self.fallback),
+            None => self.translate(key),
+        }
+    }
+
+    /// Whether pseudolocalization is on for the default domain.
+    pub fn is_pseudolocalization_enabled(&self) -> bool {
+        self.pseudolocalization.enabled
+    }
+
+    /// Turns pseudolocalization on or off for the default domain
+    /// (`TranslationServer.pseudolocalization_enabled`).
+    pub fn set_pseudolocalization_enabled(&mut self, enabled: bool) {
+        self.pseudolocalization.enabled = enabled;
+    }
+
+    /// The default domain's pseudolocalization settings, for configuring the
+    /// individual knobs.
+    pub fn pseudolocalization(&self) -> &PseudolocalizationConfig {
+        &self.pseudolocalization
+    }
+
+    /// Mutable access to the default domain's pseudolocalization settings.
+    ///
+    /// Godot exposes each knob as its own setter; one accessor to the config is
+    /// the same surface with far fewer places to get a name wrong.
+    pub fn pseudolocalization_mut(&mut self) -> &mut PseudolocalizationConfig {
+        &mut self.pseudolocalization
     }
 }

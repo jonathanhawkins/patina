@@ -592,7 +592,7 @@ impl RenderServer3DAdapter {
                                 .or_else(|| self.instance_map.node_to_base_mesh.get(&nid));
                             base.filter(|m| m.is_skinned()).map(|base| {
                                 let poses = skeleton3d::bone_pose_array(tree, skeleton);
-                                let skin = Self::resolve_skin(tree, skeleton);
+                                let skin = Self::resolve_skin(tree, skeleton, nid);
                                 gdserver3d::skin::skin_mesh(base, &skin, &poses)
                             })
                         };
@@ -704,18 +704,31 @@ impl RenderServer3DAdapter {
         }
     }
 
-    /// Builds the [`Skin`] used to deform a mesh bound to `skeleton`
-    /// (pat-0q2kx.3).
+    /// Builds the [`Skin`] used to deform the mesh on `mesh_node`, bound to
+    /// `skeleton` (pat-0q2kx.3, pat-s3rrv.200).
     ///
-    /// Godot's MeshInstance3D registers its `skin` with the skeleton, and when
-    /// none is set the skeleton supplies the default from its rest pose
-    /// (`Skeleton3D.create_skin_from_rest_transforms()`): one bind per bone whose
-    /// inverse bind matrix is that bone's global rest inverted. At rest each
-    /// per-bind matrix is then the identity, so an un-posed rig renders
-    /// undeformed.
+    /// Godot's MeshInstance3D registers **its own** `skin` with the skeleton,
+    /// and only when that property is null does the skeleton supply the default
+    /// built from its rest pose (`Skeleton3D.create_skin_from_rest_transforms()`):
+    /// one bind per bone whose inverse bind matrix is that bone's global rest
+    /// inverted. At rest each per-bind matrix is then the identity, so an
+    /// un-posed rig renders undeformed.
+    ///
+    /// ⚠️ `mesh_node` is not decoration. Without it the authored binds are not
+    /// merely unread — there is no parameter through which they *could* be
+    /// read, and the rest fallback is a **plausible** wrong answer: the mesh
+    /// still follows the bones, just not the way the rig was authored. It is
+    /// only visibly wrong where the bind poses differ from the rest inverses.
     ///
     /// [`Skin`]: gdserver3d::skin::Skin
-    fn resolve_skin(tree: &SceneTree, skeleton: NodeId) -> gdserver3d::skin::Skin {
+    fn resolve_skin(
+        tree: &SceneTree,
+        skeleton: NodeId,
+        mesh_node: NodeId,
+    ) -> gdserver3d::skin::Skin {
+        if let Some(skin) = Self::authored_skin(tree, skeleton, mesh_node) {
+            return skin;
+        }
         let mut skin = gdserver3d::skin::Skin::new();
         for (bone, rest) in skeleton3d::bone_rest_array(tree, skeleton)
             .into_iter()
@@ -724,6 +737,60 @@ impl RenderServer3DAdapter {
             skin.add_bind_from_rest(bone, rest);
         }
         skin
+    }
+
+    /// Reads the `skin` resource `packed_scene` flattened onto `mesh_node` as
+    /// `__skin__*` companions, mirroring Godot's `Skin::_set` property names
+    /// (`bind_count`, `bind/<i>/bone`, `bind/<i>/name`, `bind/<i>/pose`).
+    ///
+    /// `None` means the node carries no skin at all and the caller must fall
+    /// back to the rest-derived one. A `bind_count` of `0` is a different
+    /// thing — an authored skin that happens to be empty — and is returned as
+    /// such.
+    ///
+    /// 🔑 **Every bind resolves to some bone; none is ever dropped.** A mesh's
+    /// `bone_indices` select binds *by position*, so skipping an unresolvable
+    /// entry would silently renumber every bind after it and deform the model
+    /// by the wrong limb. Godot handles this the same way — an unknown name, an
+    /// out-of-range index, and a bind with neither all fall back to bone 0 (see
+    /// `upstream/godot/scene/3d/skeleton_3d.cpp:363-393`) — so this keeps the
+    /// positional contract rather than inventing a sparser one.
+    fn authored_skin(
+        tree: &SceneTree,
+        skeleton: NodeId,
+        mesh_node: NodeId,
+    ) -> Option<gdserver3d::skin::Skin> {
+        let node = tree.get_node(mesh_node)?;
+        let count = match node.get_property("__skin__bind_count") {
+            Variant::Int(n) if n >= 0 => n as usize,
+            _ => return None,
+        };
+        let bone_count = skeleton3d::get_bone_count(tree, skeleton);
+
+        let mut skin = gdserver3d::skin::Skin::new();
+        for i in 0..count {
+            // A non-empty name wins outright and does NOT fall back to the
+            // index: Godot's default for `bind/<i>/bone` is -1 precisely so a
+            // named bind can leave it unset, and a name that fails to resolve
+            // is an authoring error rather than a request to use the index.
+            let bone = match node.get_property(&format!("__skin__bind/{i}/name")) {
+                Variant::String(name) if !name.is_empty() => {
+                    skeleton3d::find_bone(tree, skeleton, &name).unwrap_or(0)
+                }
+                _ => match node.get_property(&format!("__skin__bind/{i}/bone")) {
+                    Variant::Int(b) if b >= 0 && (b as usize) < bone_count => b as usize,
+                    _ => 0,
+                },
+            };
+            // Godot's `Skin::get_bind_pose` defaults to the identity, which
+            // makes the bind a pass-through rather than a dropped influence.
+            let pose = match node.get_property(&format!("__skin__bind/{i}/pose")) {
+                Variant::Transform3D(t) => t,
+                _ => Transform3D::IDENTITY,
+            };
+            skin.add_bind(bone, pose);
+        }
+        Some(skin)
     }
 
     /// Syncs MultiMeshInstance3D nodes from the scene tree to the render server.
@@ -1143,13 +1210,63 @@ impl RenderServer3DAdapter {
     }
 
     /// Maps a mesh type name string to its default [`Mesh3D`] geometry.
+    ///
+    /// Delegates to the shared resolver so this list cannot drift from the
+    /// editor viewport's again (pat-s3rrv.199); it also gains TorusMesh,
+    /// PrismMesh and PointMesh, which had no arm here.
     fn mesh_from_type_name(name: &str) -> Option<Mesh3D> {
-        match name {
-            "BoxMesh" => Some(gdserver3d::BoxMesh::default().generate()),
-            "SphereMesh" => Some(gdserver3d::SphereMesh::default().generate()),
-            "CapsuleMesh" => Some(gdserver3d::CapsuleMesh::default().generate()),
-            "CylinderMesh" => Some(gdserver3d::CylinderMesh::default().generate()),
-            "PlaneMesh" | "QuadMesh" => Some(gdserver3d::PlaneMesh::default().generate()),
+        gdserver3d::primitive_mesh::build_primitive(name, &|_| None)
+    }
+
+    /// Reads an authored primitive-mesh property off the node.
+    ///
+    /// A `mesh = SubResource("id")` reference has its sub-resource flattened
+    /// onto the node under `__mesh__<key>`, the same way a CollisionShape's
+    /// geometry arrives as `__shape__<key>` — by render time the sub-resource
+    /// itself is gone.
+    fn authored_mesh_prop(tree: &SceneTree, nid: NodeId, key: &str) -> Option<f32> {
+        use gdvariant::Variant;
+        let node = tree.get_node(nid)?;
+
+        // A vector property is stored whole (`__mesh__size`) while the resolver
+        // addresses it component-wise (`size.x`). Splitting here is what keeps
+        // `packed_scene` copying sub-resource properties verbatim, with no
+        // per-mesh-type knowledge on the producing side.
+        if let Some((base, component)) = key.split_once('.') {
+            return match node.get_property(&format!("__mesh__{base}")) {
+                Variant::Vector3(v) => match component {
+                    "x" => Some(v.x),
+                    "y" => Some(v.y),
+                    "z" => Some(v.z),
+                    _ => None,
+                },
+                Variant::Vector2(v) => match component {
+                    "x" => Some(v.x),
+                    "y" => Some(v.y),
+                    _ => None,
+                },
+                _ => None,
+            };
+        }
+
+        match node.get_property(&format!("__mesh__{key}")) {
+            Variant::Float(f) => Some(f as f32),
+            Variant::Int(i) => Some(i as f32),
+            // TubeTrailMesh's cap_top/cap_bottom are bools; the numeric lookup
+            // carries them as 0/1, matching how the scene marker encodes them.
+            Variant::Bool(b) => Some(if b { 1.0 } else { 0.0 }),
+            _ => None,
+        }
+    }
+
+    /// Reads an authored string-valued primitive-mesh property off the node.
+    ///
+    /// Only `TextMesh` has any (`text`, `font`). The runner reads the typed
+    /// `__mesh__*` companion directly, so unlike the editor's marker channel it
+    /// needs no escaping — the value never passes through a delimited string.
+    fn authored_mesh_str(tree: &SceneTree, nid: NodeId, key: &str) -> Option<String> {
+        match tree.get_node(nid)?.get_property(&format!("__mesh__{key}")) {
+            gdvariant::Variant::String(s) => Some(s),
             _ => None,
         }
     }
@@ -1163,6 +1280,61 @@ impl RenderServer3DAdapter {
     /// - Paths containing "plane" or "quad" → XZ plane
     /// - Everything else (or no path) → default cube
     pub fn resolve_mesh(tree: &SceneTree, nid: NodeId) -> Mesh3D {
+        // An `ImmediateMesh` or `SurfaceTool` assigned from GDScript arrives as
+        // a tagged handle, not a path (pat-s3rrv.197).
+        //
+        // ⚠️ This branch MUST come first. `get_mesh_path` below matches only
+        // `Variant::String`, so a handle falls straight through to the
+        // path-sniffing chain and lands on its `Mesh3D::cube(1.0)` fallback —
+        // and that failure is deceptive rather than loud: the instance exists,
+        // it has geometry, and it reports exactly ONE surface, so anything
+        // checking only "a mesh was produced" passes against a cube that
+        // ignored the script entirely. Only the vertex count betrays it.
+        if let Some(node) = tree.get_node(nid) {
+            if let Variant::ObjectId(oid) = node.get_property("mesh") {
+                let raw = oid.raw();
+                if gdscript_interop::bindings::is_mesh_builder_handle(raw) {
+                    if let Some(mesh) = crate::scripting::immediate_mesh_geometry(raw)
+                        .or_else(|| crate::scripting::surface_tool_geometry(raw))
+                    {
+                        return mesh;
+                    }
+                    // A live handle with nothing in it — a cleared ImmediateMesh
+                    // or an uncommitted SurfaceTool. Godot draws nothing for
+                    // that, so an EMPTY mesh is the honest answer; falling
+                    // through would substitute a cube for geometry the script
+                    // deliberately emptied.
+                    return Mesh3D::default();
+                }
+            }
+        }
+
+        // -- script-built meshes (pat-s3rrv.201) --
+        // A GDScript that builds geometry with `SurfaceTool` or `ImmediateMesh`
+        // assigns the builder's HANDLE to `MeshInstance3D.mesh`, so the value is
+        // a `Variant::ObjectId`, not a path.
+        //
+        // ⚠️ `get_mesh_path` matches only `Variant::String`, so before this the
+        // handle resolved to `None` and the node fell through to the default
+        // CUBE. `pat-s3rrv.197` anticipated exactly that and left
+        // `surface_tool_geometry` / `immediate_mesh_geometry` here for this
+        // call site — **and nothing ever called them**. Both accessors had zero
+        // callers workspace-wide, so every script-built mesh drew a cube.
+        //
+        // The failure is deceptive rather than loud: the instance exists and
+        // carries one surface, so any check that merely counts surfaces passes
+        // against geometry that ignored the script entirely.
+        if let Some(node) = tree.get_node(nid) {
+            if let gdvariant::Variant::ObjectId(oid) = node.get_property("mesh") {
+                let raw = oid.raw();
+                if let Some(mesh) = crate::scripting::surface_tool_geometry(raw)
+                    .or_else(|| crate::scripting::immediate_mesh_geometry(raw))
+                {
+                    return mesh;
+                }
+            }
+        }
+
         if let Some(path) = node3d::get_mesh_path(tree, nid) {
             let lower = path.to_lowercase();
 
@@ -1175,6 +1347,30 @@ impl RenderServer3DAdapter {
                     }
                 }
                 // Fall through to default cube if loading fails.
+            }
+
+            // A resolved `primitive:<Class>` marker names its class exactly.
+            // ⚠️ It must be consulted BEFORE the substring guesses below, which
+            // predate it and are wrong for several types: "primitive:TorusMesh"
+            // matches none of them and fell through to a default CUBE, and
+            // "primitive:PlaneMesh" reached `Mesh3D::plane(1.0)` rather than
+            // PlaneMesh's authored 2x2 default.
+            if let Some(marker) = path.strip_prefix("primitive:") {
+                // Strip any encoded property suffix (`|a,b` positional or
+                // `?k=v` named) so only the class name is matched.
+                let class = marker
+                    .split(|c| c == '|' || c == '?')
+                    .next()
+                    .unwrap_or(marker);
+                let authored = |key: &str| Self::authored_mesh_prop(tree, nid, key);
+                let authored_str = |key: &str| Self::authored_mesh_str(tree, nid, key);
+                if let Some(mesh) = gdserver3d::primitive_mesh::build_primitive_with_text(
+                    class,
+                    &authored,
+                    &authored_str,
+                ) {
+                    return mesh;
+                }
             }
 
             if lower.contains("capsule") {
@@ -1748,6 +1944,7 @@ pub fn mesh3d_from_gltf_resource(resource: &gdresource::Resource) -> Option<Mesh
             uvs: s_uvs,
             indices: s_indices,
             primitive_type: PrimitiveType::Triangles,
+            lods: Vec::new(),
         });
     }
 
@@ -1924,7 +2121,7 @@ pub fn deformed_mesh_for_node(tree: &SceneTree, nid: NodeId, base: &Mesh3D) -> O
             return None;
         }
         let poses = skeleton3d::bone_pose_array(tree, skeleton);
-        let skin = RenderServer3DAdapter::resolve_skin(tree, skeleton);
+        let skin = RenderServer3DAdapter::resolve_skin(tree, skeleton, nid);
         Some(gdserver3d::skin::skin_mesh(source, &skin, &poses))
     });
     // Skinned wins because it already folded the morph in; morph alone is the

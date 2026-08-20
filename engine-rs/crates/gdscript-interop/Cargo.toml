@@ -18,6 +18,11 @@ gdserver2d = { path = "../gdserver2d" }
 # 6455 implementation lives in the platform layer (pat-0q2kx.96). gdplatform does
 # not depend on gdscript-interop, so this edge is acyclic.
 gdplatform = { path = "../gdplatform" }
+# TextServerManager's interface registry is backed by the real text shaper
+# (pat-s3rrv.211). gdrender2d depends only on gdcore/gdserver2d/gdvariant --
+# all three already in this crate's graph -- and does NOT depend on
+# gdscript-interop, so this edge is acyclic and adds exactly one crate.
+gdrender2d = { path = "../gdrender2d" }
 serde_json = { workspace = true }
 stacker = "0.1"
 thiserror.workspace = true

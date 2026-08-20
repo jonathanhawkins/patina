@@ -226,6 +226,7 @@ impl ImmediateMesh {
                 uvs: extra.uvs.clone(),
                 indices: (0..extra.vertices.len() as u32).collect(),
                 primitive_type: extra.primitive_type,
+                lods: Vec::new(),
             });
         }
         Some(mesh)

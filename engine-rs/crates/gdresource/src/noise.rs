@@ -890,3 +890,97 @@ mod tests {
         );
     }
 }
+
+// ===========================================================================
+// Godot enum bridge (pat-s3rrv.208)
+// ===========================================================================
+
+/// Maps a Godot `FastNoiseLite.noise_type` enum VALUE onto the noise this
+/// module implements, and reports whether the match is exact.
+///
+/// ⚠️ **The two enums do not share an ordering and must never be cast across.**
+/// Godot's is `SIMPLEX=0, SIMPLEX_SMOOTH=1, CELLULAR=2, PERLIN=3,
+/// VALUE_CUBIC=4, VALUE=5`, while [`NoiseType`] here is `Value, Perlin` — so an
+/// `as` cast would turn Godot's PERLIN into an out-of-range index and its
+/// SIMPLEX_SMOOTH into Perlin, silently. The property's DEFAULT is 1
+/// (SIMPLEX_SMOOTH), so the wrong-by-default case is the common one.
+///
+/// The `bool` is `false` when the requested type is not implemented here and a
+/// substitute was returned. Callers that can surface that (an importer warning,
+/// an editor badge) should; the substitute is chosen to be the nearest
+/// available family so a scene still renders recognisable noise rather than a
+/// flat field.
+pub fn noise_type_from_godot(value: i64) -> (NoiseType, bool) {
+    match value {
+        // Implemented exactly.
+        3 => (NoiseType::Perlin, true),
+        5 => (NoiseType::Value, true),
+        // Gradient noises we do not have: Perlin is the nearest in character.
+        0 | 1 => (NoiseType::Perlin, false),
+        // Cellular and value-cubic both derive from the lattice-value family.
+        2 | 4 => (NoiseType::Value, false),
+        // Out of range: Godot would clamp to its own default (SIMPLEX_SMOOTH),
+        // which we do not have, so this lands on the same substitute as 1.
+        _ => (NoiseType::Perlin, false),
+    }
+}
+
+/// Maps a Godot `FastNoiseLite.fractal_type` enum value onto [`FractalType`].
+///
+/// The two orderings DO coincide here (`NONE=0, FBM=1, RIDGED=2, PING_PONG=3`),
+/// but this is written out rather than cast so that the agreement is checked
+/// once and stays checked — the sibling `noise_type` enums look equally
+/// castable and are not.
+pub fn fractal_type_from_godot(value: i64) -> FractalType {
+    match value {
+        0 => FractalType::None,
+        2 => FractalType::Ridged,
+        3 => FractalType::PingPong,
+        // 1 is FBM and is also Godot's default for this property.
+        _ => FractalType::Fbm,
+    }
+}
+
+#[cfg(test)]
+mod godot_bridge_tests {
+    use super::*;
+
+    /// 🔑 The exact pairs, pinned by VALUE rather than by position.
+    #[test]
+    fn godot_noise_type_values_map_to_the_right_family() {
+        assert_eq!(noise_type_from_godot(3), (NoiseType::Perlin, true));
+        assert_eq!(noise_type_from_godot(5), (NoiseType::Value, true));
+    }
+
+    /// ⚠️ The regression this guards: casting Godot's value straight to this
+    /// module's enum. Under a cast, 1 (SIMPLEX_SMOOTH) becomes Perlin and
+    /// claims to be exact; here it is Perlin and is reported as a SUBSTITUTE.
+    /// The difference is invisible in the pixels and is the whole point.
+    #[test]
+    fn unimplemented_types_are_reported_as_substitutes() {
+        for value in [0, 1, 2, 4] {
+            let (_, exact) = noise_type_from_godot(value);
+            assert!(
+                !exact,
+                "Godot noise_type {value} is not implemented here and must be \
+                 reported as a substitute, not silently accepted"
+            );
+        }
+    }
+
+    /// Godot's default is 1 = SIMPLEX_SMOOTH, so an unconfigured resource is
+    /// exactly the substituted case — worth pinning so nobody "fixes" the
+    /// default to 0 on the assumption that the first variant is the default.
+    #[test]
+    fn the_godot_default_noise_type_is_a_substitute() {
+        assert_eq!(noise_type_from_godot(1), (NoiseType::Perlin, false));
+    }
+
+    #[test]
+    fn fractal_values_match_godots_ordering() {
+        assert_eq!(fractal_type_from_godot(0), FractalType::None);
+        assert_eq!(fractal_type_from_godot(1), FractalType::Fbm);
+        assert_eq!(fractal_type_from_godot(2), FractalType::Ridged);
+        assert_eq!(fractal_type_from_godot(3), FractalType::PingPong);
+    }
+}

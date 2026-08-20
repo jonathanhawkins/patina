@@ -316,6 +316,32 @@ impl InputEventSpec {
 /// E1-EF FA, plus FF as the mask itself.
 pub const ASTAR_HANDLE_TAG: u64 = 0xA7_00_0000_0000_0000;
 
+/// Tag bits marking an `ObjectId` minted by [`SceneAccess::mesh_builder_new`]
+/// (pat-s3rrv.197) — an `ImmediateMesh` or `SurfaceTool` owned by the scene
+/// layer.
+///
+/// Both are RefCounted in Godot and both live in `gdserver3d`, which this crate
+/// cannot name — gdscene depends on gdscript-interop, not the reverse — so the
+/// scene layer owns the instance and hands back a tagged handle, exactly as
+/// AStar does.
+///
+/// ⚠️ **A tag byte is a workspace-wide namespace and nothing enforces it.** The
+/// comment above records what happens when one collides: `ASTAR_HANDLE_TAG` was
+/// `0xA1`, which is `gdcore::xml_parser`'s `XML_HANDLE_TAG`, and every AStar
+/// method died as `MethodNotFound("XMLParser.<method>")` while the constructor
+/// and registry were both correct.
+///
+/// `0x33` was checked against every tag-shaped constant in the workspace — in
+/// BOTH spellings, `0xNN_00_...` and `0xNN00_...`, which are written
+/// inconsistently and do not both turn up in one grep — and against the
+/// historical list in the comment above. It appears nowhere.
+pub const MESH_BUILDER_HANDLE_TAG: u64 = 0x3300_0000_0000_0000;
+
+/// Returns `true` when `raw` is an `ImmediateMesh`/`SurfaceTool` handle.
+pub fn is_mesh_builder_handle(raw: u64) -> bool {
+    raw & 0xFF00_0000_0000_0000 == MESH_BUILDER_HANDLE_TAG
+}
+
 /// Returns `true` when `raw` is an AStar handle (see [`ASTAR_HANDLE_TAG`]).
 pub fn is_astar_handle(raw: u64) -> bool {
     raw & 0xFF00_0000_0000_0000 == ASTAR_HANDLE_TAG
@@ -857,6 +883,29 @@ pub trait SceneAccess {
     /// Returns `None` when `handle` names no live AStar object, so the caller
     /// falls through to ordinary node semantics.
     fn astar_call(&mut self, _handle: u64, _method: &str, _args: &[Variant]) -> Option<Variant> {
+        None
+    }
+
+    /// Creates an `ImmediateMesh` or `SurfaceTool` and returns its tagged
+    /// handle (pat-s3rrv.197), or `None` for any other class name.
+    fn mesh_builder_new(&mut self, _class_name: &str) -> Option<u64> {
+        None
+    }
+
+    /// Dispatches a method on a handle minted by [`Self::mesh_builder_new`].
+    ///
+    /// ⚠️ Every class name accepted by `mesh_builder_new` needs a matching arm
+    /// here, and vice versa. A name constructible with no dispatch arm yields an
+    /// object that exists and answers nothing; an arm for a name that cannot be
+    /// constructed is unreachable. The same two-sided rule is documented for the
+    /// shape handles in `interpreter.rs`, where six classes shipped in the
+    /// second state — registered and representable, but unreachable from script.
+    fn mesh_builder_call(
+        &mut self,
+        _handle: u64,
+        _method: &str,
+        _args: &[Variant],
+    ) -> Option<Variant> {
         None
     }
 

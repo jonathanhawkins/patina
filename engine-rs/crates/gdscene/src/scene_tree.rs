@@ -4736,19 +4736,58 @@ impl SceneTree {
     /// either a `String` array (Godot's `PackedStringArray`) or a single
     /// `String`; empty strings are ignored.
     pub fn node_configuration_warnings(&mut self, node_id: NodeId) -> Vec<String> {
+        // ⚠️ Built-in warnings are collected FIRST, and deliberately not inside
+        // the script branch below: that branch returns early for a node with no
+        // script, and a `ShaderGlobalsOverride` placed from the editor has none.
+        // A native warning hung off the script path could therefore never fire.
+        let mut warnings = self.native_configuration_warnings(node_id);
+
         let script = match self.scripts.get_mut(&node_id) {
             Some(s) => s,
-            None => return Vec::new(),
+            None => return warnings,
         };
         match script.call_method("_get_configuration_warnings", &[]) {
-            Ok(Variant::Array(items)) => items
-                .into_iter()
-                .filter_map(|v| match v {
+            Ok(Variant::Array(items)) => {
+                warnings.extend(items.into_iter().filter_map(|v| match v {
                     Variant::String(s) if !s.is_empty() => Some(s),
                     _ => None,
-                })
-                .collect(),
-            Ok(Variant::String(s)) if !s.is_empty() => vec![s],
+                }))
+            }
+            Ok(Variant::String(s)) if !s.is_empty() => warnings.push(s),
+            _ => {}
+        }
+        warnings
+    }
+
+    /// Configuration warnings a built-in class reports about itself, the way
+    /// Godot's C++ nodes override `_get_configuration_warnings`
+    /// (pat-s3rrv.209).
+    fn native_configuration_warnings(&self, node_id: NodeId) -> Vec<String> {
+        let is_override = self
+            .get_node(node_id)
+            .map(|n| n.is_class("ShaderGlobalsOverride"))
+            .unwrap_or(false);
+        if !is_override {
+            return Vec::new();
+        }
+
+        // Only one override can be active; the FIRST in the tree wins, so any
+        // node that is not that one is inert and says so.
+        let mut all = Vec::new();
+        self.collect_subtree_top_down(self.root_id(), &mut all);
+        let first_active = all.into_iter().find(|&id| {
+            self.get_node(id)
+                .map(|n| n.is_class("ShaderGlobalsOverride") && n.is_inside_tree())
+                .unwrap_or(false)
+        });
+
+        match first_active {
+            Some(active) if active != node_id => vec![
+                "ShaderGlobalsOverride is ignored: another ShaderGlobalsOverride \
+                 is already active in this scene. Only one can override the \
+                 project's global shader parameters at a time."
+                    .to_string(),
+            ],
             _ => Vec::new(),
         }
     }

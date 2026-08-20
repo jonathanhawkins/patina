@@ -329,7 +329,16 @@ fn collision_shape_for(shape: &str) -> (CollisionShapeKind, Vector3) {
 /// `pub(crate)` so the Mesh toolbar's collision generator can read the same
 /// geometry the viewport draws (pat-0q2kx.169) — a collision shape built from
 /// different geometry than the rendered mesh would be a silent mismatch.
-pub(crate) fn mesh_for_primitive(path: &str) -> Mesh3D {
+/// ⚠️ `pub` rather than `pub(crate)` so the editor's geometry is observable
+/// from outside the crate (pat-s3rrv.199). The bead's wiring requirement is
+/// that one resolver serve both views and that the same sub-resource "produce
+/// the same geometry in both" — which cannot be asserted through
+/// `editor_3d_render_inputs` (its `Render3DKind::Mesh` carries a path, not
+/// vertices) or `render_editor_3d_frame` (pixels, not counts). This is the
+/// editor's real resolution entry point, used at both of its own call sites,
+/// so a cross-view test through it exercises the editor's route rather than a
+/// lookalike.
+pub fn mesh_for_primitive(path: &str) -> Mesh3D {
     use std::cell::RefCell;
     use std::collections::HashMap;
     thread_local! {
@@ -360,95 +369,36 @@ pub(crate) fn mesh_for_primitive(path: &str) -> Mesh3D {
 /// properties fall back to each generator's `Default`, which already matches
 /// Godot's documented defaults.
 fn build_mesh_for_primitive(path: &str) -> Mesh3D {
-    use gdserver3d::extra_meshes::PrismMesh;
-    use gdserver3d::primitive_mesh::{BoxMesh, CapsuleMesh, CylinderMesh, PlaneMesh, SphereMesh};
+    use gdserver3d::primitive_mesh::BoxMesh;
 
-    let (marker, props) = split_mesh_marker(path);
+    let (marker, (props, text_props)) = split_mesh_marker(path);
     // A file-backed mesh (.obj, or a .glb/.gltf model since pat-s3rrv.31)
     // renders its own geometry rather than the placeholder marker below.
     if let Some(mesh) = mesh_from_file(marker) {
         return mesh;
     }
 
-    let num = |key: &str, default: f32| props.get(key).copied().unwrap_or(default);
-    let count = |key: &str, default: u32| props.get(key).map(|v| *v as u32).unwrap_or(default);
-    let size3 = |default: Vector3| {
-        Vector3::new(
-            num("size.x", default.x),
-            num("size.y", default.y),
-            num("size.z", default.z),
-        )
-    };
+    // ⚠️ One resolver, shared with the runtime renderer (pat-s3rrv.199).
+    // This used to be a private match with its own fallback numbers, which is
+    // exactly how the editor came to draw a torus of 0.22/0.45/24/12 where
+    // Godot documents 0.5/1.0/64/32 — and where the runner drew a default cube.
+    // Godot's defaults now live in `build_primitive` and nowhere else, so the
+    // two views cannot drift apart again.
+    let class = marker.strip_prefix("primitive:").unwrap_or("");
+    let authored = |key: &str| props.get(key).copied();
 
-    match marker.strip_prefix("primitive:").unwrap_or("") {
-        "SphereMesh" => {
-            let d = SphereMesh::default();
-            SphereMesh {
-                radius: num("radius", d.radius),
-                height: num("height", d.height),
-                radial_segments: count("radial_segments", d.radial_segments),
-                rings: count("rings", d.rings),
-            }
-            .generate()
-        }
-        "BoxMesh" | "CubeMesh" => BoxMesh {
-            size: size3(BoxMesh::default().size),
-        }
-        .generate(),
-        "CylinderMesh" => {
-            let d = CylinderMesh::default();
-            CylinderMesh {
-                top_radius: num("top_radius", d.top_radius),
-                bottom_radius: num("bottom_radius", d.bottom_radius),
-                height: num("height", d.height),
-                radial_segments: count("radial_segments", d.radial_segments),
-                rings: count("rings", d.rings),
-            }
-            .generate()
-        }
-        // A real prism, not the cone the old code stood in for it with.
-        "PrismMesh" => {
-            let d = PrismMesh::default();
-            PrismMesh {
-                size: size3(d.size),
-                left_to_right: num("left_to_right", d.left_to_right),
-            }
-            .generate()
-        }
-        "PlaneMesh" | "QuadMesh" => {
-            let d = PlaneMesh::default();
-            PlaneMesh {
-                size: [num("size.x", d.size[0]), num("size.y", d.size[1])],
-            }
-            .generate()
-        }
-        "CapsuleMesh" => {
-            let d = CapsuleMesh::default();
-            CapsuleMesh {
-                radius: num("radius", d.radius),
-                height: num("height", d.height),
-                radial_segments: count("radial_segments", d.radial_segments),
-                rings: count("rings", d.rings),
-            }
-            .generate()
-        }
-        // No generator for these yet; keep the previous stand-in geometry.
-        "TorusMesh" => Mesh3D::torus(
-            num("inner_radius", 0.22),
-            num("outer_radius", 0.45),
-            count("rings", 24),
-            count("ring_segments", 12),
-        ),
-        // Unknown or unloadable mesh paths fall back to the default box — the same
-        // geometry `primitive:BoxMesh` yields, so "we could not load this" and "a
-        // plain box" are one placeholder rather than two subtly different ones.
-        _ => BoxMesh::default().generate(),
-    }
+    // Unknown or unloadable mesh paths fall back to the default box — the same
+    // geometry `primitive:BoxMesh` yields, so "we could not load this" and "a
+    // plain box" are one placeholder rather than two subtly different ones.
+    let authored_str = |key: &str| text_props.get(key).cloned();
+
+    gdserver3d::primitive_mesh::build_primitive_with_text(class, &authored, &authored_str)
+        .unwrap_or_else(|| BoxMesh::default().generate())
 }
 
 /// The mesh properties a `.tscn` sub-resource can carry, copied onto the node as
 /// `__mesh__*` companions the way shapes use `__shape__*` (pat-0q2kx.43).
-const MESH_PROP_KEYS: [&str; 10] = [
+const MESH_PROP_KEYS: [&str; 17] = [
     "radius",
     "height",
     "radial_segments",
@@ -459,6 +409,19 @@ const MESH_PROP_KEYS: [&str; 10] = [
     "inner_radius",
     "outer_radius",
     "ring_segments",
+    // PlaneMesh/QuadMesh, pat-s3rrv.198. Without `orientation` here an authored
+    // FACE_X/FACE_Z plane silently fell back to its class default, so the two
+    // classes were distinguishable only by their defaults and never by what the
+    // scene actually said.
+    "orientation",
+    "subdivide_width",
+    "subdivide_depth",
+    // RibbonTrailMesh, pat-s3rrv.198. `curve` is a resource reference, not a
+    // number, so it cannot travel through this numeric bag.
+    "sections",
+    "section_length",
+    "section_segments",
+    "shape",
 ];
 
 /// Appends a mesh node's authored sub-resource properties to its marker path as a
@@ -507,6 +470,15 @@ fn mesh_marker_with_props(tree: &SceneTree, node_id: u64, path: String) -> Strin
         }
         _ => {}
     }
+    // `center_offset` (PlaneMesh) is a Vector3 and flattens the same way
+    // (pat-s3rrv.198). ⚠️ It is NOT in MESH_PROP_KEYS: that loop only reads
+    // scalars, and a Vector3 there would be skipped silently rather than
+    // failing — the exact shape of bug that leaves a property looking wired.
+    if let gdvariant::Variant::Vector3(v) = node.get_property("__mesh__center_offset") {
+        query.push(format!("center_offset.x={}", v.x));
+        query.push(format!("center_offset.y={}", v.y));
+        query.push(format!("center_offset.z={}", v.z));
+    }
     for key in MESH_PROP_KEYS {
         match node.get_property(&format!("__mesh__{key}")) {
             gdvariant::Variant::Float(f) => query.push(format!("{key}={f}")),
@@ -530,8 +502,22 @@ fn mesh_marker_with_props(tree: &SceneTree, node_id: u64, path: String) -> Strin
 ///   [`mesh_marker_with_props`] from `__mesh__*` companions on the node.
 ///
 /// Malformed or non-numeric entries are skipped rather than poisoning the mesh.
-fn split_mesh_marker(path: &str) -> (&str, std::collections::HashMap<String, f32>) {
+/// Splits a `primitive:<Class>` marker into its class and authored properties.
+///
+/// Returns numeric properties and string properties separately: a `TextMesh`'s
+/// `text` and `font` cannot be parsed as `f32`, and the editor resolves a mesh
+/// from this string alone (pat-s3rrv.199). String values are percent-encoded by
+/// the scene loader, since `?`, `&`, `=` and spaces would otherwise split the
+/// marker in the wrong place.
+type MarkerProps = (
+    std::collections::HashMap<String, f32>,
+    std::collections::HashMap<String, String>,
+);
+
+fn split_mesh_marker(path: &str) -> (&str, MarkerProps) {
     let mut props = std::collections::HashMap::new();
+    let mut text_props: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
     // Named form first: it cannot be confused with the positional one.
     if let Some((marker, query)) = path.split_once('?') {
@@ -539,14 +525,20 @@ fn split_mesh_marker(path: &str) -> (&str, std::collections::HashMap<String, f32
             if let Some((key, value)) = pair.split_once('=') {
                 if let Ok(parsed) = value.parse::<f32>() {
                     props.insert(key.to_string(), parsed);
+                } else {
+                    // Not a number: a string property, percent-decoded.
+                    text_props.insert(
+                        key.to_string(),
+                        gdscene::packed_scene::percent_decode_marker_value(value),
+                    );
                 }
             }
         }
-        return (marker, props);
+        return (marker, (props, text_props));
     }
 
     let Some((marker, dims)) = path.split_once('|') else {
-        return (path, props);
+        return (path, (props, text_props));
     };
     let nums: Vec<f32> = dims
         .split(',')
@@ -570,7 +562,7 @@ fn split_mesh_marker(path: &str) -> (&str, std::collections::HashMap<String, f32
     for (key, value) in keys.iter().zip(nums) {
         props.insert((*key).to_string(), value);
     }
-    (marker, props)
+    (marker, (props, text_props))
 }
 
 /// Loads geometry for a mesh path that names a file rather than a primitive.
@@ -1895,6 +1887,28 @@ fn env_bool(node: &gdscene::node::Node, key: &str, default: bool) -> bool {
     }
 }
 
+/// Decodes a decal texture path to pixels, memoised for the process
+/// (pat-s3rrv.204).
+///
+/// ⚠️ A thread-local cache rather than a local one: `scene_env_effects` runs
+/// per frame and takes only a `&SceneTree`, so a cache created inside it would
+/// re-decode every decal texture on every frame. Threading a cache through the
+/// signature would touch each caller for no behavioural gain.
+fn decal_texture_image(
+    path: Option<&str>,
+) -> Option<std::sync::Arc<gdserver3d::material::TextureImage>> {
+    let path = path?;
+    if path.is_empty() {
+        return None;
+    }
+    DECAL_TEXTURES.with(|c| c.borrow_mut().get_or_load(path))
+}
+
+thread_local! {
+    static DECAL_TEXTURES: std::cell::RefCell<gdscene::render_server_3d::MaterialTextureCache> =
+        std::cell::RefCell::new(gdscene::render_server_3d::MaterialTextureCache::new());
+}
+
 /// Reads a texture-resource path off a node.
 ///
 /// A `.tscn` writes `texture_albedo = ExtResource("1_abc")`, which the loader
@@ -1988,6 +2002,14 @@ fn scene_env_effects(tree: &SceneTree) -> SceneEnvEffects3D {
             decal.texture_normal = env_texture_path(node, "texture_normal");
             decal.texture_orm = env_texture_path(node, "texture_orm");
             decal.texture_emission = env_texture_path(node, "texture_emission");
+            // ⚠️ Resolve the paths to PIXELS here (pat-s3rrv.204). Carrying the
+            // path alone is what the previous bead did, and the projection had
+            // nothing to sample — every decal rendered as one flat `modulate`
+            // colour regardless of the art assigned.
+            decal.albedo_image = decal_texture_image(decal.texture_albedo.as_deref());
+            decal.normal_image = decal_texture_image(decal.texture_normal.as_deref());
+            decal.orm_image = decal_texture_image(decal.texture_orm.as_deref());
+            decal.emission_image = decal_texture_image(decal.texture_emission.as_deref());
             out.decals.push(decal);
         } else if is_probe {
             let mut probe = ReflectionProbe::new(ReflectionProbeId(next_probe_id));
@@ -2609,6 +2631,13 @@ pub fn render_editor_3d_frame(viewport: &Viewport3D, tree: &SceneTree) -> FrameB
     render_editor_3d_frame_from_inputs(viewport, &inputs)
 }
 
+/// Edge length of each reflection-probe cubemap face, in texels.
+///
+/// Small on purpose: a probe re-renders the whole scene once per face, six
+/// faces per capture, so this is the term that decides whether
+/// `update_mode = Always` is affordable at all.
+const REFLECTION_PROBE_CAPTURE_RESOLUTION: u32 = 32;
+
 /// Core software render from a pre-built [`Editor3DRenderInputs`] snapshot — the
 /// no-tree-read body shared by [`render_editor_3d_frame`] and the GPU path's
 /// software fallback, so neither touches the scene tree while rendering.
@@ -2634,6 +2663,16 @@ fn render_editor_3d_frame_from_inputs(
     //     ground) when on, and a flat editor backdrop when off. ---
     let mut rv = editor_render_viewport(viewport, width, height);
     rv.environment = Some(editor_render_environment(viewport));
+    // Capture each probe's surroundings into a cubemap BEFORE shading, so a
+    // reflective surface has something to sample (pat-s3rrv.206). Gated by
+    // `needs_capture()`, which is where `update_mode` finally does something:
+    // an `Once` probe pays for its six face renders exactly once, an `Always`
+    // probe re-captures every frame.
+    //
+    // With no probes in the scene this returns immediately, so an ordinary
+    // frame costs nothing extra.
+    renderer.capture_reflection_probes(&rv, REFLECTION_PROBE_CAPTURE_RESOLUTION);
+
     let frame = renderer.render_frame(&rv);
 
     // --- FrameData3D -> editor FrameBuffer (both are row-major RGBA Color). ---

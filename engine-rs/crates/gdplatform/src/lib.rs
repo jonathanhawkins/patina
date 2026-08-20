@@ -19,6 +19,7 @@ pub mod http_client;
 pub mod http_client_handle;
 pub mod http_request;
 pub mod input;
+pub mod ip;
 /// Real `JavaScriptBridge` backend — browser bindings on wasm32, Godot's dummy
 /// semantics elsewhere (pat-u3l8c.115). Distinct from [`web::JsBridge`], which
 /// stays as the call-recording stub the export tooling asserts against.

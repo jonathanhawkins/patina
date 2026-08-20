@@ -245,6 +245,70 @@ impl GeometryInstanceSettings {
     /// stateless per frame and passes `false` (the cold-start answer, matching
     /// an instance that has not been drawn yet). With the default margins of
     /// `0.0` the distinction disappears entirely.
+    /// Fade alpha for this instance at `distance`, in `0.0..=1.0`.
+    ///
+    /// Ported from `RendererSceneCull::_update_instance`
+    /// (`renderer_scene_cull.cpp:1483-1490`), which builds the fade band as:
+    ///
+    /// ```text
+    /// begin_min = visibility_range_begin - visibility_range_begin_margin
+    /// begin_max = visibility_range_begin + visibility_range_begin_margin
+    /// end_min   = visibility_range_end   - visibility_range_end_margin
+    /// end_max   = visibility_range_end   + visibility_range_end_margin
+    /// ```
+    ///
+    /// ⚠️ The margin extends **both ways** — the band is centred on the range
+    /// value and spans ±margin. It is not `[end - margin, end]`. With
+    /// `end = 10, margin = 5` the instance fades across **5..15**, and is only
+    /// fully hidden past 15. Reading the band as one-sided halves the fade
+    /// distance and makes the instance vanish while still half-opaque.
+    ///
+    /// ⚠️ Only `SelfFade` fades. Godot calls `set_fade_range(false, ..)` for
+    /// every other mode, so `Disabled` hard-cuts (with the hysteresis
+    /// [`visibility_at_distance`] already implements) and `Dependencies` keeps
+    /// this instance opaque — it is the *children* that fade, which this
+    /// function cannot express and must not fake.
+    pub fn visibility_fade_alpha(&self, distance: f32) -> f32 {
+        if self.visibility_range_fade_mode != VisibilityRangeFadeMode::SelfFade {
+            // Not a fading mode: fully opaque wherever it is drawn at all.
+            return 1.0;
+        }
+
+        let mut alpha: f32 = 1.0;
+
+        if self.visibility_range_begin > 0.0 {
+            let begin_min = self.visibility_range_begin - self.visibility_range_begin_margin;
+            let begin_max = self.visibility_range_begin + self.visibility_range_begin_margin;
+            if distance <= begin_min {
+                return 0.0;
+            }
+            if distance < begin_max {
+                // Ramping IN as the camera pulls back past the near limit.
+                let span = begin_max - begin_min;
+                if span > f32::EPSILON {
+                    alpha = alpha.min((distance - begin_min) / span);
+                }
+            }
+        }
+
+        if self.visibility_range_end > 0.0 {
+            let end_min = self.visibility_range_end - self.visibility_range_end_margin;
+            let end_max = self.visibility_range_end + self.visibility_range_end_margin;
+            if distance >= end_max {
+                return 0.0;
+            }
+            if distance > end_min {
+                // Ramping OUT as the camera recedes past the far limit.
+                let span = end_max - end_min;
+                if span > f32::EPSILON {
+                    alpha = alpha.min((end_max - distance) / span);
+                }
+            }
+        }
+
+        alpha.clamp(0.0, 1.0)
+    }
+
     pub fn visibility_at_distance(&self, distance: f32, was_visible: bool) -> VisibilityRangeState {
         let mut begin_offset = -self.visibility_range_begin_margin;
         let mut end_offset = self.visibility_range_end_margin;

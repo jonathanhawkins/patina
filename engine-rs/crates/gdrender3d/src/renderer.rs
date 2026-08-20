@@ -17,7 +17,10 @@ use gdserver3d::material::Material3D;
 use gdserver3d::mesh::Mesh3D;
 use gdserver3d::occluder::OccluderInstance3D;
 use gdserver3d::projection::perspective_projection_matrix;
-use gdserver3d::reflection_probe::{sample_probes_at, ReflectionProbe, ReflectionProbeId};
+use gdserver3d::reflection_probe::{
+    probe_reflection_at, sample_probes_at, CubeFace, ReflectionCubemap, ReflectionProbe,
+    ReflectionProbeId,
+};
 use gdserver3d::server::{FrameData3D, RenderingServer3D};
 use gdserver3d::shader::ShaderMaterial3D;
 use gdserver3d::sky::{PhysicalSkyMaterial, ProceduralSkyMaterial, SkyMaterial};
@@ -316,6 +319,130 @@ impl SoftwareRenderer3D {
     /// [`gdserver3d::reflection_probe::sample_probes_at`] for the parity rule.
     pub fn sample_reflection_probes(&self, world_pos: Vector3) -> Color {
         sample_probes_at(&self.reflection_probes, world_pos)
+    }
+
+    /// Renders each probe's surroundings into a cubemap (pat-s3rrv.206).
+    ///
+    /// Call once per frame BEFORE the main frame render. Probes are gated by
+    /// `needs_capture()`, which is where `update_mode` finally does something:
+    /// `Once` captures on the first pass and keeps that cubemap while the scene
+    /// changes around it; `Always` re-renders every frame.
+    ///
+    /// Each face is a 90 degree perspective render from the probe's capture
+    /// origin, reusing the ordinary solid path — so a probe sees exactly what a
+    /// camera in its place would see.
+    ///
+    /// ⚠️ Every probe's existing capture is taken out for the duration of the
+    /// pass and restored afterwards, so a capture can never sample a cubemap:
+    /// neither its own from last frame nor another probe's. Without that, an
+    /// `Always` probe feeds its own output back in and the reflection
+    /// compounds every frame.
+    pub fn capture_reflection_probes(&mut self, base: &Viewport3D, resolution: u32) {
+        // Camera bases for the six faces. A camera looks down its own -Z, so
+        // `z` is the NEGATED view direction; `x` is `y` cross `z` in each case.
+        // `+Y`/`-Y` cannot use the world up as their up vector (it is parallel
+        // to the view), so they take `+Z`/`-Z` the way cubemap convention does.
+        const FACES: [(CubeFace, gdcore::math3d::Basis); 6] = [
+            (
+                CubeFace::PosX,
+                gdcore::math3d::Basis {
+                    x: Vector3::new(0.0, 0.0, 1.0),
+                    y: Vector3::new(0.0, 1.0, 0.0),
+                    z: Vector3::new(-1.0, 0.0, 0.0),
+                },
+            ),
+            (
+                CubeFace::NegX,
+                gdcore::math3d::Basis {
+                    x: Vector3::new(0.0, 0.0, -1.0),
+                    y: Vector3::new(0.0, 1.0, 0.0),
+                    z: Vector3::new(1.0, 0.0, 0.0),
+                },
+            ),
+            (
+                CubeFace::PosY,
+                gdcore::math3d::Basis {
+                    x: Vector3::new(1.0, 0.0, 0.0),
+                    y: Vector3::new(0.0, 0.0, 1.0),
+                    z: Vector3::new(0.0, -1.0, 0.0),
+                },
+            ),
+            (
+                CubeFace::NegY,
+                gdcore::math3d::Basis {
+                    x: Vector3::new(1.0, 0.0, 0.0),
+                    y: Vector3::new(0.0, 0.0, -1.0),
+                    z: Vector3::new(0.0, 1.0, 0.0),
+                },
+            ),
+            (
+                CubeFace::PosZ,
+                gdcore::math3d::Basis {
+                    x: Vector3::new(-1.0, 0.0, 0.0),
+                    y: Vector3::new(0.0, 1.0, 0.0),
+                    z: Vector3::new(0.0, 0.0, -1.0),
+                },
+            ),
+            (
+                CubeFace::NegZ,
+                gdcore::math3d::Basis {
+                    x: Vector3::new(1.0, 0.0, 0.0),
+                    y: Vector3::new(0.0, 1.0, 0.0),
+                    z: Vector3::new(0.0, 0.0, 1.0),
+                },
+            ),
+        ];
+
+        let resolution = resolution.max(1);
+        let pending: Vec<usize> = self
+            .reflection_probes
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.needs_capture())
+            .map(|(i, _)| i)
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+
+        let saved: Vec<Option<std::sync::Arc<ReflectionCubemap>>> = self
+            .reflection_probes
+            .iter_mut()
+            .map(|p| p.captured.take())
+            .collect();
+
+        let mut captured: Vec<(usize, ReflectionCubemap)> = Vec::new();
+        for i in pending {
+            let origin = self.reflection_probes[i].capture_origin();
+            let max_distance = self.reflection_probes[i].max_distance;
+            let mut cube = ReflectionCubemap::new(resolution, Color::new(0.0, 0.0, 0.0, 1.0));
+            for (face, basis) in FACES {
+                let face_view = Viewport3D {
+                    width: resolution,
+                    height: resolution,
+                    camera_transform: Transform3D { basis, origin },
+                    fov: std::f32::consts::FRAC_PI_2,
+                    near: base.near,
+                    // Godot treats `max_distance = 0` as "no limit".
+                    far: if max_distance > 0.0 {
+                        max_distance
+                    } else {
+                        base.far
+                    },
+                    environment: base.environment.clone(),
+                };
+                let frame = self.render_frame_solid(&face_view);
+                cube.set_face(face, frame.pixels);
+            }
+            captured.push((i, cube));
+        }
+
+        for (probe, previous) in self.reflection_probes.iter_mut().zip(saved) {
+            probe.captured = previous;
+        }
+        for (i, cube) in captured {
+            self.reflection_probes[i].captured = Some(std::sync::Arc::new(cube));
+        }
     }
 
     /// Sets the elapsed seconds custom shaders read as `TIME` (pat-s3rrv.122).
@@ -967,6 +1094,10 @@ impl SoftwareRenderer3D {
                     roughness: entry.material.roughness,
                     metallic: entry.material.metallic,
                     camera_position: viewport.camera_transform.origin,
+                    // The probe covering this instance, resolved at the same
+                    // point as its ambient term above and sampled per fragment
+                    // in the specular stage (pat-s3rrv.206).
+                    probe: probe_reflection_at(&self.reflection_probes, entry.transform.origin),
                     // The half of `light_cull_mask` the shading loop was
                     // missing: WHICH instance it is shading.
                     layers: inst.geometry.layers,
@@ -1246,10 +1377,13 @@ impl SoftwareRenderer3D {
     /// Godot projects decals onto geometry inside an oriented box, modulating
     /// the surface albedo. This screen-space pass reconstructs each fragment's
     /// world position from depth (the same reconstruction [`apply_fog_pass`]
-    /// uses) and asks each decal for its coverage there via
-    /// [`Decal3D::sample_alpha`], which already folds in the box test, the
-    /// upper/lower vertical fades, distance fade and `albedo_mix`. The
-    /// decal's `modulate` colour is blended over the fragment by that alpha.
+    /// uses) and asks each decal for its channels there via
+    /// [`Decal3D::sample`], which folds in the box test, the upper/lower
+    /// vertical fades and distance fade, and returns the projected albedo
+    /// (times `modulate`), normal, ORM and emission texels at that point.
+    /// Albedo is blended over the fragment by `fade * albedo_mix`; emission is
+    /// ADDED, scaled by `emission_energy` and the fade but deliberately not by
+    /// `albedo_mix` (pat-s3rrv.204).
     ///
     /// Distance fade measures the camera-to-decal distance (as Godot does),
     /// so it is computed once per decal rather than per pixel.
@@ -1291,16 +1425,45 @@ impl SoftwareRenderer3D {
                 let world_pos = camera_transform.xform(view_pos);
 
                 for (decal, camera_distance) in decals.iter().zip(camera_distances.iter()) {
-                    let alpha = match decal.sample_alpha(world_pos, *camera_distance) {
-                        Some(a) if a > 0.0 => a.clamp(0.0, 1.0) as f32,
+                    // ⚠️ `sample`, not `sample_alpha` (pat-s3rrv.204). The old
+                    // call returned a scalar and this blended the decal's flat
+                    // `modulate` by it, so the four texture channels were read
+                    // off the node, carried all the way here, and never
+                    // sampled — every decal projected one uniform colour.
+                    let sample = match decal.sample(world_pos, *camera_distance) {
+                        Some(s) if s.fade > 0.0 => s,
                         _ => continue,
                     };
-                    pixels[i] = Color::new(
-                        lerp(pixels[i].r, decal.modulate.r, alpha),
-                        lerp(pixels[i].g, decal.modulate.g, alpha),
-                        lerp(pixels[i].b, decal.modulate.b, alpha),
-                        pixels[i].a,
-                    );
+
+                    let alpha = sample.albedo_alpha as f32;
+                    if alpha > 0.0 {
+                        pixels[i] = Color::new(
+                            lerp(pixels[i].r, sample.albedo.r, alpha),
+                            lerp(pixels[i].g, sample.albedo.g, alpha),
+                            lerp(pixels[i].b, sample.albedo.b, alpha),
+                            pixels[i].a,
+                        );
+                    }
+
+                    // Emission ADDS rather than blending, and is scaled by
+                    // `emission_energy` and the fade only.
+                    //
+                    // ⚠️ Deliberately NOT scaled by `albedo_mix`: that knob
+                    // controls how much the albedo replaces the surface, and
+                    // letting it dim emission would make an
+                    // `albedo_mix = 0` decal — a pure light stamp, which is a
+                    // real Godot idiom — emit nothing.
+                    if let Some(e) = sample.emission {
+                        let k = (sample.fade * decal.emission_energy) as f32;
+                        if k > 0.0 {
+                            pixels[i] = Color::new(
+                                (pixels[i].r + e.r * k).min(1.0),
+                                (pixels[i].g + e.g * k).min(1.0),
+                                (pixels[i].b + e.b * k).min(1.0),
+                                pixels[i].a,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -4257,8 +4420,8 @@ mod tests {
     // Same identity setup as the fog-volume tests: a fragment's world position
     // is exactly its NDC, i.e. (+/-0.5, +/-0.5, depth) for this 2x2 frame.
 
-    /// A decal with an exact alpha: no vertical gradient, so
-    /// `sample_alpha` reduces to `albedo_mix` inside the box.
+    /// A decal with an exact alpha: no vertical gradient, so the sampled
+    /// `albedo_alpha` reduces to `albedo_mix` inside the box.
     fn exact_decal(size: f32, modulate: Color) -> Decal3D {
         let mut d = Decal3D::new();
         d.size = Vector3::new(size, size, size);

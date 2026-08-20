@@ -85,6 +85,12 @@ fn apply_common_light_props(node: &crate::node::Node, light: &mut Light2D) {
         _ => ShadowFilter::None,
     };
     light.shadow_filter_smooth = prop_f32(node, "shadow_filter_smooth", 0.0);
+    // `height` is declared separately on PointLight2D and DirectionalLight2D
+    // rather than on the Light2D base, but both carry it, so it is common in
+    // practice. Godot's default is 0.0, which lays the light flat in the canvas
+    // plane; it only becomes observable once a normal map gives `N·L` something
+    // to vary against (pat-s3rrv.203).
+    light.height = prop_f32(node, "height", 0.0);
 }
 
 pub fn collect_lights_2d(tree: &SceneTree) -> Vec<Light2D> {

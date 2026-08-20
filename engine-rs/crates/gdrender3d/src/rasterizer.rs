@@ -352,6 +352,7 @@ mod tests {
             roughness: 0.5,
             metallic: 0.0,
             camera_position: Vector3::ZERO,
+            probe: None,
             lights: vec![],
             directional_shadow_maps: vec![],
             layers: 1,

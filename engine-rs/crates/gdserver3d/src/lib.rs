@@ -18,6 +18,15 @@ pub mod immediate_mesh;
 pub mod instance;
 pub mod label3d;
 pub mod light;
+/// Level-of-detail selection and visibility-range fading (pat-s3rrv.205).
+///
+/// ⚠️ Moved here from `gdscene::lod`, where it had been committed but **never
+/// declared in any `lib.rs`** — so its 621 lines had never compiled and its 26
+/// tests had never run. It also sat in the wrong crate to be usable:
+/// `gdrender3d` depends on `gdserver3d`, not on `gdscene`, so the renderer that
+/// needs LOD selection could not name these types at all. That is the real
+/// reason it had zero consumers.
+pub mod lod;
 pub mod material;
 pub mod material_math;
 pub mod mesh;

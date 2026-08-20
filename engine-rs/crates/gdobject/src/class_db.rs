@@ -1734,6 +1734,18 @@ pub fn register_3d_classes() {
             .method(MethodInfo::new("set_bind_name", 2))
             .method(MethodInfo::new("set_bind_pose", 2)),
     );
+    // `Skeleton3D.register_skin(skin)` hands back one of these; it holds the
+    // resolved bone indices and the live bind matrices (pat-s3rrv.200).
+    //
+    // ⚠️ `Skin` above was ALREADY registered with all 11 methods — the bead
+    // reports both as missing, but only this one actually is. RefCounted, and
+    // exactly two const methods per doc/classes/SkinReference.xml.
+    register_class(
+        ClassRegistration::new("SkinReference")
+            .parent("RefCounted")
+            .method(MethodInfo::new("get_skeleton", 0).const_method())
+            .method(MethodInfo::new("get_skin", 0).const_method()),
+    );
     register_class(
         ClassRegistration::new("MultiMesh")
             .parent("Resource")
@@ -8369,6 +8381,226 @@ pub fn register_3d_classes() {
                 ),
         );
     }
+    // The translation family (pat-s3rrv.212). `gdcore/src/translation.rs` has
+    // had a real catalog layer for a long time and the interpreter already
+    // routes `TranslationServer.*` to it, but none of these three classes was
+    // registered — so `[sub_resource type="Translation"]` in a .tres,
+    // `ClassDB.instantiate("Translation")` and the inspector all failed on a
+    // subsystem that otherwise worked.
+    //
+    // Members and accessors are transcribed from
+    // `upstream/godot/doc/classes/{Translation,TranslationServer,TranslationDomain}.xml`.
+    if !class_exists("Translation") {
+        register_class(
+            ClassRegistration::new("Translation")
+                .parent("Resource")
+                .property(
+                    PropertyInfo::new("locale", Variant::String("en".to_string()))
+                        .with_accessors("get_locale", "set_locale"),
+                )
+                .property(
+                    PropertyInfo::new("plural_rules_override", Variant::String(String::new()))
+                        .with_accessors("get_plural_rules_override", "set_plural_rules_override"),
+                )
+                .method(MethodInfo::new("set_locale", 1))
+                .method(MethodInfo::new("get_locale", 0).const_method())
+                .method(MethodInfo::new("add_message", 3))
+                .method(MethodInfo::new("add_plural_message", 3))
+                .method(MethodInfo::new("get_message", 2).const_method())
+                .method(MethodInfo::new("get_plural_message", 4).const_method())
+                .method(MethodInfo::new("erase_message", 2))
+                .method(MethodInfo::new("get_message_count", 0).const_method())
+                .method(MethodInfo::new("get_message_list", 0).const_method())
+                .method(MethodInfo::new("get_translated_message_list", 0).const_method()),
+        );
+    }
+
+    if !class_exists("TranslationServer") {
+        register_class(
+            // ⚠️ Godot's TranslationServer declares exactly ONE member —
+            // `pseudolocalization_enabled`. Every other pseudolocalization knob
+            // lives on TranslationDomain, not here; the server forwards to its
+            // default domain. Putting the knobs on the server would invent a
+            // surface Godot does not have.
+            ClassRegistration::new("TranslationServer")
+                .parent("Object")
+                .property(
+                    PropertyInfo::new("pseudolocalization_enabled", Variant::Bool(false))
+                        .with_accessors(
+                            "is_pseudolocalization_enabled",
+                            "set_pseudolocalization_enabled",
+                        ),
+                )
+                .method(MethodInfo::new("set_locale", 1))
+                .method(MethodInfo::new("get_locale", 0).const_method())
+                .method(MethodInfo::new("get_tool_locale", 0))
+                .method(MethodInfo::new("compare_locales", 2).const_method())
+                .method(MethodInfo::new("standardize_locale", 2).const_method())
+                .method(MethodInfo::new("get_all_languages", 0).const_method())
+                .method(MethodInfo::new("get_language_name", 1).const_method())
+                .method(MethodInfo::new("get_all_scripts", 0).const_method())
+                .method(MethodInfo::new("get_script_name", 1).const_method())
+                .method(MethodInfo::new("get_all_countries", 0).const_method())
+                .method(MethodInfo::new("get_country_name", 1).const_method())
+                .method(MethodInfo::new("get_locale_name", 1).const_method())
+                .method(MethodInfo::new("translate", 2).const_method())
+                .method(MethodInfo::new("translate_plural", 4).const_method())
+                .method(MethodInfo::new("add_translation", 1))
+                .method(MethodInfo::new("remove_translation", 1))
+                .method(MethodInfo::new("get_translation_object", 1))
+                .method(MethodInfo::new("has_domain", 1).const_method())
+                .method(MethodInfo::new("get_or_add_domain", 1))
+                .method(MethodInfo::new("remove_domain", 1))
+                .method(MethodInfo::new("clear", 0))
+                .method(MethodInfo::new("get_loaded_locales", 0).const_method())
+                .method(MethodInfo::new("get_translations", 0).const_method())
+                .method(MethodInfo::new("has_translation", 1).const_method())
+                .method(MethodInfo::new("has_translation_for_locale", 2).const_method())
+                .method(MethodInfo::new("find_translations", 2).const_method())
+                .method(MethodInfo::new("pseudolocalize", 1).const_method())
+                .method(MethodInfo::new("reload_pseudolocalization", 0))
+                .method(MethodInfo::new("get_plural_rules", 1).const_method())
+                .method(MethodInfo::new("format_number", 2).const_method())
+                .method(MethodInfo::new("parse_number", 2).const_method())
+                .method(MethodInfo::new("get_percent_sign", 1).const_method()),
+        );
+    }
+
+    if !class_exists("TranslationDomain") {
+        register_class(
+            // ⚠️ RefCounted, not Resource — a domain is a runtime namespace, not
+            // an authorable asset, so it never appears in a .tres.
+            //
+            // Its ten members carry the whole pseudolocalization surface, and
+            // every default here matches `PseudolocalizationConfig` in
+            // `translation_domain.h`: accents ON, everything else off, ratio
+            // 0.0, prefix "[" and suffix "]". Turning the mode on therefore
+            // accents and brackets the text WITHOUT lengthening it.
+            ClassRegistration::new("TranslationDomain")
+                .parent("RefCounted")
+                .property(
+                    PropertyInfo::new("enabled", Variant::Bool(true))
+                        .with_accessors("is_enabled", "set_enabled"),
+                )
+                .property(
+                    PropertyInfo::new("pseudolocalization_enabled", Variant::Bool(false))
+                        .with_accessors(
+                            "is_pseudolocalization_enabled",
+                            "set_pseudolocalization_enabled",
+                        ),
+                )
+                .property(
+                    PropertyInfo::new("pseudolocalization_accents_enabled", Variant::Bool(true))
+                        .with_accessors(
+                            "is_pseudolocalization_accents_enabled",
+                            "set_pseudolocalization_accents_enabled",
+                        ),
+                )
+                .property(
+                    PropertyInfo::new(
+                        "pseudolocalization_double_vowels_enabled",
+                        Variant::Bool(false),
+                    )
+                    .with_accessors(
+                        "is_pseudolocalization_double_vowels_enabled",
+                        "set_pseudolocalization_double_vowels_enabled",
+                    ),
+                )
+                .property(
+                    PropertyInfo::new("pseudolocalization_fake_bidi_enabled", Variant::Bool(false))
+                        .with_accessors(
+                            "is_pseudolocalization_fake_bidi_enabled",
+                            "set_pseudolocalization_fake_bidi_enabled",
+                        ),
+                )
+                .property(
+                    PropertyInfo::new("pseudolocalization_override_enabled", Variant::Bool(false))
+                        .with_accessors(
+                            "is_pseudolocalization_override_enabled",
+                            "set_pseudolocalization_override_enabled",
+                        ),
+                )
+                .property(
+                    PropertyInfo::new(
+                        "pseudolocalization_skip_placeholders_enabled",
+                        Variant::Bool(true),
+                    )
+                    .with_accessors(
+                        "is_pseudolocalization_skip_placeholders_enabled",
+                        "set_pseudolocalization_skip_placeholders_enabled",
+                    ),
+                )
+                .property(
+                    PropertyInfo::new("pseudolocalization_expansion_ratio", Variant::Float(0.0))
+                        .with_accessors(
+                            "get_pseudolocalization_expansion_ratio",
+                            "set_pseudolocalization_expansion_ratio",
+                        ),
+                )
+                .property(
+                    PropertyInfo::new(
+                        "pseudolocalization_prefix",
+                        Variant::String("[".to_string()),
+                    )
+                    .with_accessors(
+                        "get_pseudolocalization_prefix",
+                        "set_pseudolocalization_prefix",
+                    ),
+                )
+                .property(
+                    PropertyInfo::new(
+                        "pseudolocalization_suffix",
+                        Variant::String("]".to_string()),
+                    )
+                    .with_accessors(
+                        "get_pseudolocalization_suffix",
+                        "set_pseudolocalization_suffix",
+                    ),
+                )
+                .method(MethodInfo::new("add_translation", 1))
+                .method(MethodInfo::new("remove_translation", 1))
+                .method(MethodInfo::new("clear", 0))
+                .method(MethodInfo::new("get_translations", 0).const_method())
+                .method(MethodInfo::new("has_translation", 1).const_method())
+                .method(MethodInfo::new("has_translation_for_locale", 2).const_method())
+                .method(MethodInfo::new("find_translations", 2).const_method())
+                .method(MethodInfo::new("get_translation_object", 1).const_method())
+                .method(MethodInfo::new("translate", 2).const_method())
+                .method(MethodInfo::new("translate_plural", 4).const_method())
+                .method(MethodInfo::new("pseudolocalize", 1).const_method())
+                .method(MethodInfo::new("get_locale_override", 0).const_method())
+                .method(MethodInfo::new("set_locale_override", 1)),
+        );
+    }
+
+    if !class_exists("MissingResource") {
+        register_class(
+            // The resource half of the pair above (pat-s3rrv.207). Registering
+            // only MissingNode left ClassDB and the editor disagreeing:
+            // `inspector_schema_generated.rs` already lists
+            // ("MissingResource","Resource") while `class_exists` said no.
+            //
+            // Like MissingNode, MissingResource.xml declares its members with NO
+            // `default=`, so the type-correct zero is used rather than a guess.
+            // ⚠️ `recording_properties`'s getter is `is_recording_properties`,
+            // not `get_…` — transcribed from the XML, because the property name
+            // does not recover it.
+            ClassRegistration::new("MissingResource")
+                .parent("Resource")
+                .property(
+                    PropertyInfo::new("original_class", Variant::String(String::new()))
+                        .with_accessors("get_original_class", "set_original_class"),
+                )
+                .property(
+                    PropertyInfo::new("recording_properties", Variant::Bool(false))
+                        .with_accessors("is_recording_properties", "set_recording_properties"),
+                )
+                .method(MethodInfo::new("set_original_class", 1))
+                .method(MethodInfo::new("get_original_class", 0).const_method())
+                .method(MethodInfo::new("set_recording_properties", 1))
+                .method(MethodInfo::new("is_recording_properties", 0).const_method()),
+        );
+    }
     if !class_exists("ResourcePreloader") {
         register_class(
             // `gdscene/src/resource_preloader.rs` already implements all six of
@@ -8658,8 +8890,13 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("cap_top", Variant::Bool(true)))
             .property(PropertyInfo::new("cap_bottom", Variant::Bool(true))),
     );
-    // ⚠️ `size` is (2, 2) and `orientation` is **1** (Z-facing), not 0. A zero
-    // size renders nothing and a zero orientation faces the wrong axis.
+    // ⚠️ `size` is (2, 2) and `orientation` is **1**, not 0. A zero size renders
+    // nothing and a zero orientation faces the wrong axis.
+    //
+    // 🔑 Orientation 1 is **FACE_Y** — the plane lies in XZ with its normal up.
+    // (An earlier note here called it "Z-facing", which is FACE_Z = 2, i.e. the
+    // QuadMesh override registered directly below. The enum is FACE_X 0 /
+    // FACE_Y 1 / FACE_Z 2, per PlaneMesh.xml:30-36.)
     register_class(
         ClassRegistration::new("PlaneMesh")
             .parent("PrimitiveMesh")
@@ -8674,6 +8911,102 @@ pub fn register_3d_classes() {
                 Variant::Vector3(gdcore::math::Vector3::ZERO),
             ))
             .property(PropertyInfo::new("orientation", Variant::Int(1))),
+    );
+    // QuadMesh inherits **PlaneMesh**, not PrimitiveMesh (QuadMesh.xml:2), and
+    // exists purely to override two of its defaults: `size` to Vector2(1, 1)
+    // and `orientation` to FACE_Z = 2 (QuadMesh.xml:14-15). Both are re-declared
+    // here because `get_property_list` takes the DERIVED value for a
+    // re-declared name — registering the parent alone would report 2x2/FACE_Y
+    // for a QuadMesh, which is exactly the aliasing bug pat-s3rrv.198 fixes.
+    register_class(
+        ClassRegistration::new("QuadMesh")
+            .parent("PlaneMesh")
+            .property(PropertyInfo::new(
+                "size",
+                Variant::Vector2(gdcore::math::Vector2::new(1.0, 1.0)),
+            ))
+            .property(PropertyInfo::new("orientation", Variant::Int(2))),
+    );
+    // PointMesh has NO members of its own (PointMesh.xml has zero <member>
+    // entries) — it is a single billboarded point, configured entirely through
+    // its material. The registration is what makes the geometry in
+    // `gdserver3d::extra_meshes::PointMesh` reachable from a scene at all.
+    register_class(ClassRegistration::new("PointMesh").parent("PrimitiveMesh"));
+    // RibbonTrailMesh (RibbonTrailMesh.xml). ⚠️ `shape` defaults to
+    // SHAPE_CROSS = 1, not to the first constant SHAPE_FLAT = 0 — a default of
+    // 0 gives a ribbon that vanishes edge-on. `curve` is a Curve resource
+    // reference and so has no default value, matching how the doc XML omits one.
+    register_class(
+        ClassRegistration::new("RibbonTrailMesh")
+            .parent("PrimitiveMesh")
+            .property(PropertyInfo::new("size", Variant::Float(1.0)))
+            .property(PropertyInfo::new("sections", Variant::Int(5)))
+            .property(PropertyInfo::new("section_length", Variant::Float(0.2)))
+            .property(PropertyInfo::new("section_segments", Variant::Int(3)))
+            .property(PropertyInfo::new("shape", Variant::Int(1)))
+            .property(PropertyInfo::new("curve", Variant::Nil)),
+    );
+    // pat-s3rrv.199. Placed beside RibbonTrailMesh deliberately: `class_db.rs`
+    // has several guarded `if !class_exists` registration blocks and only the
+    // first by call order runs, so a new class added to a later one would be a
+    // silent no-op. Sitting next to a registration that demonstrably takes
+    // effect is the cheap way to be in the live block.
+    //
+    // Every default below is transcribed from `doc/classes/<Class>.xml`, not
+    // derived — `justification_flags = 163` in particular is not guessable.
+    register_class(
+        ClassRegistration::new("TorusMesh")
+            .parent("PrimitiveMesh")
+            .property(PropertyInfo::new("inner_radius", Variant::Float(0.5)))
+            .property(PropertyInfo::new("outer_radius", Variant::Float(1.0)))
+            .property(PropertyInfo::new("rings", Variant::Int(64)))
+            .property(PropertyInfo::new("ring_segments", Variant::Int(32))),
+    );
+    register_class(
+        ClassRegistration::new("TubeTrailMesh")
+            .parent("PrimitiveMesh")
+            .property(PropertyInfo::new("radius", Variant::Float(0.5)))
+            .property(PropertyInfo::new("radial_steps", Variant::Int(8)))
+            .property(PropertyInfo::new("sections", Variant::Int(5)))
+            .property(PropertyInfo::new("section_length", Variant::Float(0.2)))
+            .property(PropertyInfo::new("section_rings", Variant::Int(3)))
+            .property(PropertyInfo::new("cap_top", Variant::Bool(true)))
+            .property(PropertyInfo::new("cap_bottom", Variant::Bool(true)))
+            .property(PropertyInfo::new("curve", Variant::Nil)),
+    );
+    register_class(
+        ClassRegistration::new("TextMesh")
+            .parent("PrimitiveMesh")
+            .property(PropertyInfo::new("text", Variant::String(String::new())))
+            .property(PropertyInfo::new("font", Variant::Nil))
+            .property(PropertyInfo::new("font_size", Variant::Int(16)))
+            .property(PropertyInfo::new("depth", Variant::Float(0.05)))
+            .property(PropertyInfo::new("pixel_size", Variant::Float(0.01)))
+            .property(PropertyInfo::new("curve_step", Variant::Float(0.5)))
+            .property(PropertyInfo::new("horizontal_alignment", Variant::Int(1)))
+            .property(PropertyInfo::new("vertical_alignment", Variant::Int(1)))
+            .property(PropertyInfo::new("uppercase", Variant::Bool(false)))
+            .property(PropertyInfo::new("line_spacing", Variant::Float(0.0)))
+            .property(PropertyInfo::new("autowrap_mode", Variant::Int(0)))
+            .property(PropertyInfo::new("justification_flags", Variant::Int(163)))
+            .property(PropertyInfo::new("width", Variant::Float(500.0)))
+            .property(PropertyInfo::new(
+                "offset",
+                Variant::Vector2(gdcore::math::Vector2::new(0.0, 0.0)),
+            ))
+            .property(PropertyInfo::new(
+                "language",
+                Variant::String(String::new()),
+            ))
+            .property(PropertyInfo::new("text_direction", Variant::Int(0)))
+            .property(PropertyInfo::new(
+                "structured_text_bidi_override",
+                Variant::Int(0),
+            ))
+            .property(PropertyInfo::new(
+                "structured_text_bidi_override_options",
+                Variant::Array(Vec::new()),
+            )),
     );
     register_class(
         ClassRegistration::new("PrismMesh")
@@ -8704,6 +9037,125 @@ pub fn register_3d_classes() {
                 )
                 .with_accessors("get_custom_aabb", "set_custom_aabb"),
             ),
+    );
+    // -- mesh authoring resources (pat-s3rrv.197) ---------------------------
+    //
+    // ⚠️ The parents are NOT uniform, and a wrong one fails silently.
+    // `ImmediateMesh` inherits **Mesh** (so it reaches Resource and can be
+    // assigned to `MeshInstance3D.mesh`), `MeshTexture` inherits **Texture2D**
+    // (it draws), and only the three tools are bare `RefCounted`. Registering
+    // ImmediateMesh as RefCounted would leave it unassignable to a
+    // MeshInstance3D while still existing and answering methods — which reads
+    // as a scene bug rather than a registration one.
+    //
+    // ⚠️ Registration alone does not make any of these constructible from
+    // GDScript: `Interpreter::classdb_instantiate` delegates every non-Node
+    // class to a bespoke `.new()` arm. ImmediateMesh and SurfaceTool have theirs
+    // (`mesh_builder_new`); the other three are introspection-only for now, the
+    // same state the NavigationPathQuery classes shipped in (pat-s3rrv.181).
+    register_class(
+        ClassRegistration::new("ImmediateMesh")
+            .parent("Mesh")
+            .method(MethodInfo::new("surface_begin", 2))
+            .method(MethodInfo::new("surface_set_color", 1))
+            .method(MethodInfo::new("surface_set_normal", 1))
+            .method(MethodInfo::new("surface_set_uv", 1))
+            .method(MethodInfo::new("surface_add_vertex", 1))
+            .method(MethodInfo::new("surface_end", 0))
+            .method(MethodInfo::new("clear_surfaces", 0)),
+    );
+    register_class(
+        ClassRegistration::new("SurfaceTool")
+            .parent("RefCounted")
+            .method(MethodInfo::new("begin", 1))
+            .method(MethodInfo::new("set_normal", 1))
+            .method(MethodInfo::new("set_uv", 1))
+            .method(MethodInfo::new("set_color", 1))
+            .method(MethodInfo::new("add_vertex", 1))
+            .method(MethodInfo::new("add_index", 1))
+            .method(MethodInfo::new("get_vertex_count", 0).const_method())
+            .method(MethodInfo::new("clear", 0))
+            // ⚠️ The inverse of the gap this bead started with: `set_color`,
+            // `clear` and `commit` were registered here with NO dispatch arm,
+            // while `generate_normals` now has an arm and was missing from this
+            // list — so `has_method("generate_normals")` answered false for a
+            // method that works (pat-s3rrv.201). Both directions have to agree.
+            .method(MethodInfo::new("generate_normals", 1))
+            .method(MethodInfo::new("commit_to_arrays", 0).const_method())
+            .method(MethodInfo::new("set_smooth_group", 1))
+            .method(MethodInfo::new("set_bones", 1))
+            .method(MethodInfo::new("set_weights", 1))
+            .method(MethodInfo::new("add_triangle_fan", 6))
+            .method(MethodInfo::new("index", 0))
+            .method(MethodInfo::new("deindex", 0))
+            .method(MethodInfo::new("commit", 2)),
+    );
+    register_class(
+        ClassRegistration::new("MeshDataTool")
+            .parent("RefCounted")
+            .method(MethodInfo::new("clear", 0))
+            .method(MethodInfo::new("create_from_surface", 2))
+            .method(MethodInfo::new("commit_to_surface", 2))
+            .method(MethodInfo::new("get_vertex_count", 0).const_method())
+            .method(MethodInfo::new("get_edge_count", 0).const_method())
+            .method(MethodInfo::new("get_face_count", 0).const_method())
+            .method(MethodInfo::new("get_vertex", 1).const_method())
+            .method(MethodInfo::new("set_vertex", 2)),
+    );
+    register_class(
+        ClassRegistration::new("MeshTexture")
+            .parent("Texture2D")
+            .property(PropertyInfo::new("base_texture", Variant::Nil))
+            .property(PropertyInfo::new(
+                "image_size",
+                Variant::Vector2(gdcore::math::Vector2::ZERO),
+            ))
+            .property(PropertyInfo::new("mesh", Variant::Nil)),
+    );
+    register_class(
+        ClassRegistration::new("MeshConvexDecompositionSettings")
+            .parent("RefCounted")
+            // ⚠️ Every default here is transcribed from
+            // `MeshConvexDecompositionSettings.xml`. Several fail SILENTLY if
+            // guessed: `max_convex_hulls` of 0 decomposes into nothing,
+            // `resolution` of 0 samples nothing, and `min_volume_per_convex_hull`
+            // is 0.0001 — a small number that rounds to zero if assumed to be a
+            // plain 0.0. The three bools also disagree: two default true and
+            // `normalize_mesh` false, so one shared assumption is wrong twice.
+            .property(PropertyInfo::new("max_concavity", Variant::Float(1.0)))
+            .property(PropertyInfo::new(
+                "symmetry_planes_clipping_bias",
+                Variant::Float(0.05),
+            ))
+            .property(PropertyInfo::new(
+                "revolution_axes_clipping_bias",
+                Variant::Float(0.05),
+            ))
+            .property(PropertyInfo::new(
+                "min_volume_per_convex_hull",
+                Variant::Float(0.0001),
+            ))
+            .property(PropertyInfo::new("resolution", Variant::Int(10000)))
+            .property(PropertyInfo::new(
+                "max_num_vertices_per_convex_hull",
+                Variant::Int(32),
+            ))
+            .property(PropertyInfo::new("plane_downsampling", Variant::Int(4)))
+            .property(PropertyInfo::new(
+                "convex_hull_downsampling",
+                Variant::Int(4),
+            ))
+            .property(PropertyInfo::new("normalize_mesh", Variant::Bool(false)))
+            .property(PropertyInfo::new("mode", Variant::Int(0)))
+            .property(PropertyInfo::new(
+                "convex_hull_approximation",
+                Variant::Bool(true),
+            ))
+            .property(PropertyInfo::new("max_convex_hulls", Variant::Int(1)))
+            .property(PropertyInfo::new(
+                "project_hull_vertices",
+                Variant::Bool(true),
+            )),
     );
     register_class(
         ClassRegistration::new("Shader")
@@ -9043,6 +9495,95 @@ pub fn register_3d_classes() {
                     .with_accessors("get_constant", "set_constant"),
             ),
     );
+    // The Vec2/Vec4 siblings of the constant above, and the Vec2/3/4 parameter
+    // leaves (pat-s3rrv.210). Only Vec3Constant was registered, so a
+    // VisualShader `.tres` could name the other eight and ClassDB could not
+    // describe them — `gdscene/src/visual_shader_load.rs` already special-cases
+    // the literal "VisualShaderNodeVec4Constant" when loading one, so the
+    // loader consumed a class the create dialog and inspector could not show.
+    //
+    // ⚠️ Vec4Constant's constant is a **Quaternion**, while Vec4Parameter's
+    // default_value is a **Vector4**. The two are not interchangeable and
+    // pattern-matching "Vec4 means Quaternion" gets one of them wrong; both are
+    // transcribed from their doc XML.
+    register_class(
+        ClassRegistration::new("VisualShaderNodeVec2Constant")
+            .parent("VisualShaderNodeConstant")
+            .property(
+                PropertyInfo::new("constant", Variant::Vector2(gdcore::math::Vector2::ZERO))
+                    .with_accessors("get_constant", "set_constant"),
+            ),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeVec4Constant")
+            .parent("VisualShaderNodeConstant")
+            .property(
+                PropertyInfo::new(
+                    "constant",
+                    Variant::Quaternion(gdcore::math3d::Quaternion::IDENTITY),
+                )
+                .with_accessors("get_constant", "set_constant"),
+            ),
+    );
+    // ⚠️ `default_value_enabled` reads through `is_default_value_enabled`, not
+    // `get_…`, while `default_value` beside it uses `get_`. Transcribed.
+    register_class(
+        ClassRegistration::new("VisualShaderNodeVec2Parameter")
+            .parent("VisualShaderNodeParameter")
+            .property(
+                PropertyInfo::new("default_value_enabled", Variant::Bool(false))
+                    .with_accessors("is_default_value_enabled", "set_default_value_enabled"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "default_value",
+                    Variant::Vector2(gdcore::math::Vector2::ZERO),
+                )
+                .with_accessors("get_default_value", "set_default_value"),
+            ),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeVec3Parameter")
+            .parent("VisualShaderNodeParameter")
+            .property(
+                PropertyInfo::new("default_value_enabled", Variant::Bool(false))
+                    .with_accessors("is_default_value_enabled", "set_default_value_enabled"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "default_value",
+                    Variant::Vector3(gdcore::math::Vector3::ZERO),
+                )
+                .with_accessors("get_default_value", "set_default_value"),
+            ),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeVec4Parameter")
+            .parent("VisualShaderNodeParameter")
+            .property(
+                PropertyInfo::new("default_value_enabled", Variant::Bool(false))
+                    .with_accessors("is_default_value_enabled", "set_default_value_enabled"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "default_value",
+                    Variant::Vector4(gdcore::math::Vector4::ZERO),
+                )
+                .with_accessors("get_default_value", "set_default_value"),
+            ),
+    );
+    // 🔑 These three declare NO members of their own — `op_type` reaches them
+    // from VisualShaderNodeVectorBase. Re-declaring it here would put it in
+    // `get_property_list` TWICE, since that walk does not dedupe the chain
+    // (the defect behind pat-0q2kx.148). Same shape as the TextureParameter and
+    // CompressedTexture leaves elsewhere in this file.
+    for leaf in [
+        "VisualShaderNodeVectorCompose",
+        "VisualShaderNodeVectorDecompose",
+        "VisualShaderNodeVectorDistance",
+    ] {
+        register_class(ClassRegistration::new(leaf).parent("VisualShaderNodeVectorBase"));
+    }
     // Math operators and functions (pat-nzgdu.169).
     //
     // The workhorse nodes of every graph. Schemas and every enum value are
@@ -20877,6 +21418,341 @@ pub fn register_viewport_classes() {
                 .method(MethodInfo::new("set_size", 1))
                 .method(MethodInfo::new("get_external_texture_id", 0).const_method())
                 .method(MethodInfo::new("set_external_buffer_id", 1)),
+        );
+    }
+
+    // CanvasTexture bundles a diffuse, normal and specular map so any CanvasItem
+    // can be normal-mapped and take a specular highlight from a 2D light
+    // (pat-s3rrv.203).
+    //
+    // ⚠️ Every member name, default and accessor here is transcribed from
+    // `upstream/godot/doc/classes/CanvasTexture.xml`, not derived. The class
+    // declares NO <method> elements of its own — its whole API is the seven
+    // members' setter/getter attributes — so the accessor names below are the
+    // only source of truth for them.
+    // The Noise resource family (pat-s3rrv.208). `gdresource/src/noise.rs` has
+    // had a working FastNoiseLite core since pat-nzgdu.219 with no consumer:
+    // none of these four classes was registered, so nothing could construct one
+    // — while the editor's Texture2D picker (editor_ui.rs) already offered the
+    // user "NoiseTexture2D".
+    //
+    // ⚠️ Every default and accessor below is transcribed from
+    // `upstream/godot/modules/noise/doc_classes/*.xml`. Two families of trap
+    // make that non-negotiable here:
+    //
+    // 1. The boolean getters follow NO rule. `as_normal_map` reads through
+    //    `is_normal_map` (not `is_as_normal_map`), `generate_mipmaps` through
+    //    `is_generating_mipmaps` (a different WORD), `normalize` through
+    //    `is_normalized` — and yet `invert` and `seamless` use plain `get_`.
+    // 2. Four enum defaults are NOT zero: `fractal_type`, `cellular_return_type`
+    //    and `domain_warp_fractal_type` default to 1, and so does `noise_type`,
+    //    whose 1 is SIMPLEX_SMOOTH rather than the first variant.
+    if !class_exists("Noise") {
+        register_class(
+            // Abstract in Godot (`extension_api.json` marks it not
+            // instantiable): it is the sampler interface NoiseTexture2D/3D read
+            // through, and it declares no members of its own.
+            ClassRegistration::new("Noise")
+                .parent("Resource")
+                .method(MethodInfo::new("get_noise_1d", 1).const_method())
+                .method(MethodInfo::new("get_noise_2d", 2).const_method())
+                .method(MethodInfo::new("get_noise_2dv", 1).const_method())
+                .method(MethodInfo::new("get_noise_3d", 3).const_method())
+                .method(MethodInfo::new("get_noise_3dv", 1).const_method())
+                .method(MethodInfo::new("get_image", 5).const_method())
+                .method(MethodInfo::new("get_image_3d", 5).const_method())
+                .method(MethodInfo::new("get_seamless_image", 6).const_method())
+                .method(MethodInfo::new("get_seamless_image_3d", 6).const_method()),
+        );
+    }
+
+    if !class_exists("FastNoiseLite") {
+        register_class(
+            ClassRegistration::new("FastNoiseLite")
+                .parent("Noise")
+                // ⚠️ 1 is TYPE_SIMPLEX_SMOOTH, not the first variant: Godot's
+                // order is SIMPLEX=0, SIMPLEX_SMOOTH=1, CELLULAR=2, PERLIN=3,
+                // VALUE_CUBIC=4, VALUE=5. Patina's own `NoiseType` enum has only
+                // Value and Perlin and does NOT share this numbering, so the two
+                // must be mapped explicitly rather than cast across.
+                .property(
+                    PropertyInfo::new("noise_type", Variant::Int(1))
+                        .with_accessors("get_noise_type", "set_noise_type"),
+                )
+                .property(
+                    PropertyInfo::new("seed", Variant::Int(0))
+                        .with_accessors("get_seed", "set_seed"),
+                )
+                .property(
+                    PropertyInfo::new("frequency", Variant::Float(0.01))
+                        .with_accessors("get_frequency", "set_frequency"),
+                )
+                .property(
+                    PropertyInfo::new(
+                        "offset",
+                        Variant::Vector3(gdcore::math::Vector3::new(0.0, 0.0, 0.0)),
+                    )
+                    .with_accessors("get_offset", "set_offset"),
+                )
+                // 1 is FRACTAL_FBM — a fresh FastNoiseLite is already fractal.
+                .property(
+                    PropertyInfo::new("fractal_type", Variant::Int(1))
+                        .with_accessors("get_fractal_type", "set_fractal_type"),
+                )
+                .property(
+                    PropertyInfo::new("fractal_octaves", Variant::Int(5))
+                        .with_accessors("get_fractal_octaves", "set_fractal_octaves"),
+                )
+                .property(
+                    PropertyInfo::new("fractal_lacunarity", Variant::Float(2.0))
+                        .with_accessors("get_fractal_lacunarity", "set_fractal_lacunarity"),
+                )
+                .property(
+                    PropertyInfo::new("fractal_gain", Variant::Float(0.5))
+                        .with_accessors("get_fractal_gain", "set_fractal_gain"),
+                )
+                .property(
+                    PropertyInfo::new("fractal_weighted_strength", Variant::Float(0.0))
+                        .with_accessors(
+                            "get_fractal_weighted_strength",
+                            "set_fractal_weighted_strength",
+                        ),
+                )
+                .property(
+                    PropertyInfo::new("fractal_ping_pong_strength", Variant::Float(2.0))
+                        .with_accessors(
+                            "get_fractal_ping_pong_strength",
+                            "set_fractal_ping_pong_strength",
+                        ),
+                )
+                .property(
+                    PropertyInfo::new("cellular_distance_function", Variant::Int(0))
+                        .with_accessors(
+                            "get_cellular_distance_function",
+                            "set_cellular_distance_function",
+                        ),
+                )
+                .property(
+                    PropertyInfo::new("cellular_jitter", Variant::Float(1.0))
+                        .with_accessors("get_cellular_jitter", "set_cellular_jitter"),
+                )
+                // 1, not 0 — CELLULAR_RETURN_TYPE_DISTANCE.
+                .property(
+                    PropertyInfo::new("cellular_return_type", Variant::Int(1))
+                        .with_accessors("get_cellular_return_type", "set_cellular_return_type"),
+                )
+                .property(
+                    PropertyInfo::new("domain_warp_enabled", Variant::Bool(false))
+                        .with_accessors("is_domain_warp_enabled", "set_domain_warp_enabled"),
+                )
+                .property(
+                    PropertyInfo::new("domain_warp_type", Variant::Int(0))
+                        .with_accessors("get_domain_warp_type", "set_domain_warp_type"),
+                )
+                .property(
+                    PropertyInfo::new("domain_warp_amplitude", Variant::Float(30.0))
+                        .with_accessors("get_domain_warp_amplitude", "set_domain_warp_amplitude"),
+                )
+                .property(
+                    PropertyInfo::new("domain_warp_frequency", Variant::Float(0.05))
+                        .with_accessors("get_domain_warp_frequency", "set_domain_warp_frequency"),
+                )
+                .property(
+                    PropertyInfo::new("domain_warp_fractal_type", Variant::Int(1)).with_accessors(
+                        "get_domain_warp_fractal_type",
+                        "set_domain_warp_fractal_type",
+                    ),
+                )
+                .property(
+                    PropertyInfo::new("domain_warp_fractal_octaves", Variant::Int(5))
+                        .with_accessors(
+                            "get_domain_warp_fractal_octaves",
+                            "set_domain_warp_fractal_octaves",
+                        ),
+                )
+                // ⚠️ 6.0, not the 2.0 the non-warp lacunarity uses.
+                .property(
+                    PropertyInfo::new("domain_warp_fractal_lacunarity", Variant::Float(6.0))
+                        .with_accessors(
+                            "get_domain_warp_fractal_lacunarity",
+                            "set_domain_warp_fractal_lacunarity",
+                        ),
+                )
+                .property(
+                    PropertyInfo::new("domain_warp_fractal_gain", Variant::Float(0.5))
+                        .with_accessors(
+                            "get_domain_warp_fractal_gain",
+                            "set_domain_warp_fractal_gain",
+                        ),
+                ),
+        );
+    }
+
+    if !class_exists("NoiseTexture2D") {
+        register_class(
+            ClassRegistration::new("NoiseTexture2D")
+                .parent("Texture2D")
+                .property(
+                    PropertyInfo::new("width", Variant::Int(512))
+                        .with_accessors("get_width", "set_width"),
+                )
+                .property(
+                    PropertyInfo::new("height", Variant::Int(512))
+                        .with_accessors("get_height", "set_height"),
+                )
+                // ⚠️ `get_invert`, NOT `is_invert` — and `get_seamless` below,
+                // while the other three booleans here use `is_`.
+                .property(
+                    PropertyInfo::new("invert", Variant::Bool(false))
+                        .with_accessors("get_invert", "set_invert"),
+                )
+                .property(
+                    PropertyInfo::new("in_3d_space", Variant::Bool(false))
+                        .with_accessors("is_in_3d_space", "set_in_3d_space"),
+                )
+                .property(
+                    PropertyInfo::new("generate_mipmaps", Variant::Bool(true))
+                        .with_accessors("is_generating_mipmaps", "set_generate_mipmaps"),
+                )
+                .property(
+                    PropertyInfo::new("seamless", Variant::Bool(false))
+                        .with_accessors("get_seamless", "set_seamless"),
+                )
+                .property(
+                    PropertyInfo::new("seamless_blend_skirt", Variant::Float(0.1))
+                        .with_accessors("get_seamless_blend_skirt", "set_seamless_blend_skirt"),
+                )
+                .property(
+                    PropertyInfo::new("as_normal_map", Variant::Bool(false))
+                        .with_accessors("is_normal_map", "set_as_normal_map"),
+                )
+                .property(
+                    PropertyInfo::new("bump_strength", Variant::Float(8.0))
+                        .with_accessors("get_bump_strength", "set_bump_strength"),
+                )
+                .property(
+                    PropertyInfo::new("normalize", Variant::Bool(true))
+                        .with_accessors("is_normalized", "set_normalize"),
+                )
+                .property(
+                    PropertyInfo::new("color_ramp", Variant::Nil)
+                        .with_accessors("get_color_ramp", "set_color_ramp"),
+                )
+                .property(
+                    PropertyInfo::new("noise", Variant::Nil)
+                        .with_accessors("get_noise", "set_noise"),
+                )
+                .property(PropertyInfo::new(
+                    "resource_local_to_scene",
+                    Variant::Bool(false),
+                )),
+        );
+    }
+
+    if !class_exists("NoiseTexture3D") {
+        register_class(
+            // ⚠️ 64, not the 512 NoiseTexture2D uses — a volume at 512³ would be
+            // 134M texels, so the 3D default is deliberately much smaller.
+            ClassRegistration::new("NoiseTexture3D")
+                .parent("Texture3D")
+                .property(
+                    PropertyInfo::new("width", Variant::Int(64))
+                        .with_accessors("get_width", "set_width"),
+                )
+                .property(
+                    PropertyInfo::new("height", Variant::Int(64))
+                        .with_accessors("get_height", "set_height"),
+                )
+                .property(
+                    PropertyInfo::new("depth", Variant::Int(64))
+                        .with_accessors("get_depth", "set_depth"),
+                )
+                .property(
+                    PropertyInfo::new("invert", Variant::Bool(false))
+                        .with_accessors("get_invert", "set_invert"),
+                )
+                .property(
+                    PropertyInfo::new("seamless", Variant::Bool(false))
+                        .with_accessors("get_seamless", "set_seamless"),
+                )
+                .property(
+                    PropertyInfo::new("seamless_blend_skirt", Variant::Float(0.1))
+                        .with_accessors("get_seamless_blend_skirt", "set_seamless_blend_skirt"),
+                )
+                .property(
+                    PropertyInfo::new("normalize", Variant::Bool(true))
+                        .with_accessors("is_normalized", "set_normalize"),
+                )
+                .property(
+                    PropertyInfo::new("color_ramp", Variant::Nil)
+                        .with_accessors("get_color_ramp", "set_color_ramp"),
+                )
+                .property(
+                    PropertyInfo::new("noise", Variant::Nil)
+                        .with_accessors("get_noise", "set_noise"),
+                ),
+        );
+    }
+
+    if !class_exists("CanvasTexture") {
+        register_class(
+            ClassRegistration::new("CanvasTexture")
+                .parent("Texture2D")
+                .property(PropertyInfo::new(
+                    "resource_local_to_scene",
+                    Variant::Bool(false),
+                ))
+                // The three channels have NO documented default: an unset
+                // channel is a null resource, which is exactly what makes the
+                // normal-mapped path opt-in.
+                .property(
+                    PropertyInfo::new("diffuse_texture", Variant::Nil)
+                        .with_accessors("get_diffuse_texture", "set_diffuse_texture"),
+                )
+                .property(
+                    PropertyInfo::new("normal_texture", Variant::Nil)
+                        .with_accessors("get_normal_texture", "set_normal_texture"),
+                )
+                .property(
+                    PropertyInfo::new("specular_texture", Variant::Nil)
+                        .with_accessors("get_specular_texture", "set_specular_texture"),
+                )
+                .property(
+                    PropertyInfo::new(
+                        "specular_color",
+                        Variant::Color(gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0)),
+                    )
+                    .with_accessors("get_specular_color", "set_specular_color"),
+                )
+                // ⚠️ 1.0, and it is NOT an exponent. The shader turns it into
+                // one — `exp2(15 * s + 1) * 0.25` (canvas.glsl:432) — so this
+                // default lands on 16384, a very tight highlight.
+                .property(
+                    PropertyInfo::new("specular_shininess", Variant::Float(1.0))
+                        .with_accessors("get_specular_shininess", "set_specular_shininess"),
+                )
+                .property(
+                    PropertyInfo::new("texture_filter", Variant::Int(0))
+                        .with_accessors("get_texture_filter", "set_texture_filter"),
+                )
+                .property(
+                    PropertyInfo::new("texture_repeat", Variant::Int(0))
+                        .with_accessors("get_texture_repeat", "set_texture_repeat"),
+                )
+                .method(MethodInfo::new("set_diffuse_texture", 1))
+                .method(MethodInfo::new("get_diffuse_texture", 0).const_method())
+                .method(MethodInfo::new("set_normal_texture", 1))
+                .method(MethodInfo::new("get_normal_texture", 0).const_method())
+                .method(MethodInfo::new("set_specular_texture", 1))
+                .method(MethodInfo::new("get_specular_texture", 0).const_method())
+                .method(MethodInfo::new("set_specular_color", 1))
+                .method(MethodInfo::new("get_specular_color", 0).const_method())
+                .method(MethodInfo::new("set_specular_shininess", 1))
+                .method(MethodInfo::new("get_specular_shininess", 0).const_method())
+                .method(MethodInfo::new("set_texture_filter", 1))
+                .method(MethodInfo::new("get_texture_filter", 0).const_method())
+                .method(MethodInfo::new("set_texture_repeat", 1))
+                .method(MethodInfo::new("get_texture_repeat", 0).const_method()),
         );
     }
 

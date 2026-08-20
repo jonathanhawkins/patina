@@ -1496,8 +1496,32 @@ fn collect_sub_resource_bodies(
             let Some((_class, id)) = meta.rsplit_once("::") else {
                 continue;
             };
-            let Some(prefix) = companion_prefix_for(property) else {
-                continue;
+            // A specialised companion still wins where one exists, so every
+            // path that worked before this behaves identically (pat-s3rrv.207).
+            //
+            // ⚠️ That precedence is deliberate and was nearly the other way
+            // round. The specialised companions are LIVE: the editor edits
+            // `__material__*` in place, so they carry the user's changes, while
+            // `__subres__*` is a snapshot of what the file said at load.
+            // Preferring the snapshot would have written stale values back and
+            // silently discarded every edit to a material or a shape.
+            //
+            // 🔑 The fallback is what preserves an UNKNOWN class:
+            // `companion_prefix_for` is an allowlist of four property names, so
+            // before this every other sub-resource was written as a section
+            // header with an empty body and its data dropped silently.
+            let prefix = match companion_prefix_for(property) {
+                Some(prefix) => prefix,
+                None => {
+                    let verbatim = format!("__subres__{property}__");
+                    if !node
+                        .properties()
+                        .any(|(ck, _)| ck.starts_with(verbatim.as_str()))
+                    {
+                        continue;
+                    }
+                    verbatim
+                }
             };
             let mut props: Vec<(String, Variant)> = node
                 .properties()
@@ -1632,6 +1656,34 @@ fn is_internal_prop(key: &str) -> bool {
         // that round-trips; emitting the cache too would invent properties Godot
         // has never heard of, exactly as for `__shape__*` above.
         || key.starts_with("__surfmat")
+        // ⚠️ FOUR MORE that were never filtered, found while auditing this list
+        // for pat-s3rrv.207 — the same omission its own comments record for
+        // `__tile_physics_*` and `__tile_occluder_*`, twice. Every one of these
+        // is a sub-resource body flattened onto the node so a render or layout
+        // path can reach it, and every one was being written back into the
+        // `[node]` section as a literal property Godot cannot parse:
+        //
+        //   `__multimesh__*`      MultiMesh body          (pat-s3rrv.112)
+        //   `__ls__*`             LabelSettings body      (pat-0q2kx.*)
+        //   `__click_mask__*`     TextureButton BitMap    (pat-0q2kx.257)
+        //   `__skin__*`           Skin binds              (pat-s3rrv.200)
+        //   `__canvas_texture__*` CanvasTexture channels  (pat-s3rrv.203)
+        //
+        // In each case the node's own property still carries the `SubResource`
+        // reference that round-trips, so the cache is pure engine plumbing —
+        // exactly the argument made for `__shape__*` above.
+        || key.starts_with("__multimesh__")
+        || key.starts_with("__ls__")
+        || key.starts_with("__label_settings__")
+        || key.starts_with("__click_mask__")
+        || key.starts_with("__skin__")
+        || key.starts_with("__canvas_texture__")
+        // `__subres__<prop>__<key>` is the verbatim body of ANY inline
+        // sub-resource, kept so the saver can write it back under its original
+        // class even when the engine has no idea what that class is
+        // (pat-s3rrv.207). It is rebuilt into a `[sub_resource]` section, so
+        // emitting it as a node property too would duplicate the data.
+        || key.starts_with("__subres__")
 }
 
 /// The `type=` an external resource is declared as in a `[ext_resource]` header,

@@ -36,7 +36,18 @@ pub struct Surface3D {
     pub indices: Vec<u32>,
     /// How to interpret the vertex data.
     pub primitive_type: PrimitiveType,
+    /// Coarser index buffers, ordered from finest to coarsest.
+    ///
+    /// Empty means "no LOD" — draw `indices` always, which is what every
+    /// surface did before pat-s3rrv.205.
+    pub lods: Vec<SurfaceLod>,
 }
+
+/// Smoothing-group value meaning "do not smooth" — Godot's `UINT32_MAX`.
+///
+/// ⚠️ NOT the default. Godot defaults `last_smooth_group` to 0, a real group,
+/// so meshes smooth unless a script opts out.
+pub const NO_SMOOTH_GROUP: u32 = u32::MAX;
 
 /// Procedural mesh builder mirroring Godot's `SurfaceTool`.
 ///
@@ -54,6 +65,34 @@ pub struct SurfaceTool {
     indices: Vec<u32>,
     current_normal: Vector3,
     current_uv: [f32; 2],
+    /// Per-vertex colours staged by `set_color` (pat-s3rrv.201).
+    ///
+    /// ⚠️ Kept on the tool but NOT carried into [`Mesh3D`], which has no colour
+    /// channel. Storing them is still right: `set_color` is ClassDB-registered,
+    /// so a script may call it, and dropping the value at the setter would lose
+    /// it before anything could ever use it. Wiring colours through to the
+    /// renderer needs a `colors` field on `Mesh3D`, which is a workspace-wide
+    /// change (73 struct literals, many without `..Default`).
+    colors: Vec<gdcore::math::Color>,
+    current_color: gdcore::math::Color,
+    /// Per-vertex skin influences, staged like every other attribute.
+    bone_indices: Vec<[u32; 4]>,
+    bone_weights: Vec<[f32; 4]>,
+    current_bones: [u32; 4],
+    current_weights: [f32; 4],
+    /// Per-vertex smoothing group. `NO_SMOOTH_GROUP` means flat-shade.
+    smooth_groups: Vec<u32>,
+    current_smooth_group: u32,
+    /// Whether the script ever called `set_bones`/`set_weights`.
+    ///
+    /// ⚠️ Load-bearing. [`Mesh3D::is_skinned`] is true whenever the bone arrays
+    /// merely MATCH the vertex count, and `render_server_3d` gates skinning on
+    /// it. Emitting default bone data for every vertex would therefore make
+    /// every procedural mesh report itself skinned, and the render path would
+    /// deform it against whatever skeleton resolved — with all-zero weights,
+    /// collapsing it to the origin. Godot avoids this with its
+    /// `ARRAY_FORMAT_BONES` flag; this is that flag.
+    has_skin: bool,
 }
 
 impl SurfaceTool {
@@ -67,6 +106,20 @@ impl SurfaceTool {
             indices: Vec::new(),
             current_normal: Vector3::ZERO,
             current_uv: [0.0, 0.0],
+            colors: Vec::new(),
+            bone_indices: Vec::new(),
+            bone_weights: Vec::new(),
+            current_bones: [0; 4],
+            current_weights: [0.0; 4],
+            smooth_groups: Vec::new(),
+            // ⚠️ Godot's default is 0 — a REAL group — so `generate_normals()`
+            // smooths by default. Defaulting to NO_SMOOTH_GROUP here would
+            // flat-shade every mesh and silently diverge from the engine.
+            current_smooth_group: 0,
+            has_skin: false,
+            // Godot stages white until `set_color` says otherwise, so an
+            // uncoloured vertex is opaque white rather than transparent black.
+            current_color: gdcore::math::Color::WHITE,
         }
     }
 
@@ -98,16 +151,395 @@ impl SurfaceTool {
         self.vertices.push(position);
         self.normals.push(self.current_normal);
         self.uvs.push(self.current_uv);
+        // ⚠️ Pushed here, not in `set_color`. These arrays are read BY INDEX
+        // alongside `vertices`, so one that advances on a different event
+        // desynchronises the moment a script sets a colour twice, or none at
+        // all, before a vertex.
+        self.colors.push(self.current_color);
+        // Pushed unconditionally to stay in lockstep with `vertices`; whether
+        // they are EMITTED is decided by `has_skin` at commit time.
+        self.bone_indices.push(self.current_bones);
+        self.bone_weights.push(self.current_weights);
+        self.smooth_groups.push(self.current_smooth_group);
     }
 
     /// Adds an explicit index into the vertex array (`SurfaceTool.add_index`).
+    /// Number of vertices staged so far.
+    ///
+    /// Restored after the same bad splice that removed `add_index`. ⚠️ A name
+    /// grep said `vertex_count` still existed — but the survivor belongs to
+    /// `impl Mesh3D`, a different type. Only impl attribution shows the loss.
+    pub fn vertex_count(&self) -> usize {
+        self.vertices.len()
+    }
+
+    /// Adds an explicit index into the vertex array.
+    ///
+    /// Restored after a bad splice removed it (pat-s3rrv.201); `scripting.rs`
+    /// dispatches `add_index` and would not have compiled without it.
     pub fn add_index(&mut self, index: u32) {
         self.indices.push(index);
     }
 
-    /// Number of vertices staged so far.
-    pub fn vertex_count(&self) -> usize {
-        self.vertices.len()
+    /// Stages the bone influences applied to subsequent vertices.
+    ///
+    /// Godot takes a `PackedInt32Array`; entries past the fourth are ignored,
+    /// and a short array leaves the remaining slots at zero.
+    pub fn set_bones(&mut self, bones: &[i32]) {
+        self.current_bones = [0; 4];
+        for (slot, &b) in self.current_bones.iter_mut().zip(bones) {
+            *slot = b.max(0) as u32;
+        }
+        self.has_skin = true;
+    }
+
+    /// Stages the bone weights applied to subsequent vertices.
+    pub fn set_weights(&mut self, weights: &[f32]) {
+        self.current_weights = [0.0; 4];
+        for (slot, &w) in self.current_weights.iter_mut().zip(weights) {
+            *slot = w;
+        }
+        self.has_skin = true;
+    }
+
+    /// Stages the colour applied to subsequent vertices, as Godot's
+    /// `SurfaceTool.set_color` does.
+    pub fn set_color(&mut self, color: gdcore::math::Color) {
+        self.current_color = color;
+    }
+
+    /// Colours staged so far, one per vertex added since `begin`.
+    pub fn colors(&self) -> &[gdcore::math::Color] {
+        &self.colors
+    }
+
+    /// Discards everything, returning the tool to its pre-`begin` state.
+    ///
+    /// Godot's `clear()` also resets the staged attributes, not just the
+    /// accumulated arrays — a colour set before `clear` must not leak onto the
+    /// first vertex of the next surface.
+    pub fn clear(&mut self) {
+        self.vertices.clear();
+        self.normals.clear();
+        self.uvs.clear();
+        self.colors.clear();
+        self.indices.clear();
+        self.current_normal = Vector3::ZERO;
+        self.current_uv = [0.0, 0.0];
+        self.current_color = gdcore::math::Color::WHITE;
+        self.bone_indices.clear();
+        self.bone_weights.clear();
+        self.smooth_groups.clear();
+        self.current_smooth_group = 0;
+        self.current_bones = [0; 4];
+        self.current_weights = [0.0; 4];
+        self.has_skin = false;
+    }
+
+    /// Emits a triangle fan as individual triangles.
+    ///
+    /// Ported from `SurfaceTool::add_triangle_fan`. Godot expands the fan on the
+    /// spot rather than storing a fan primitive: for `n` points it emits `n - 2`
+    /// triangles, each `(0, i+1, i+2)`.
+    ///
+    /// ⚠️ Vertex 0 is therefore re-emitted for **every** triangle — the fan's
+    /// hub is duplicated `n - 2` times, so `n` points produce `(n - 2) * 3`
+    /// vertices, not `n`. Expecting `n` is the natural guess and it is wrong.
+    ///
+    /// Per-point attributes are indexed by the same index as the vertex, so the
+    /// hub's colour and UV are re-applied on each repeat. Shorter attribute
+    /// slices simply leave the staged value in place, exactly as upstream's
+    /// `if (p_colors.size() > n)` guards do.
+    ///
+    /// Returns false without emitting anything when the surface is not
+    /// TRIANGLES or there are fewer than three points, mirroring Godot's
+    /// `ERR_FAIL_COND`s — a partial fan would be worse than none.
+    pub fn add_triangle_fan(
+        &mut self,
+        vertices: &[Vector3],
+        uvs: &[[f32; 2]],
+        colors: &[gdcore::math::Color],
+        normals: &[Vector3],
+    ) -> bool {
+        if self.primitive_type != PrimitiveType::Triangles || vertices.len() < 3 {
+            return false;
+        }
+
+        for i in 0..vertices.len() - 2 {
+            for n in [0usize, i + 1, i + 2] {
+                if let Some(&c) = colors.get(n) {
+                    self.set_color(c);
+                }
+                if let Some(&uv) = uvs.get(n) {
+                    self.set_uv(uv);
+                }
+                if let Some(&nm) = normals.get(n) {
+                    self.set_normal(nm);
+                }
+                self.add_vertex(vertices[n]);
+            }
+        }
+        true
+    }
+
+    /// Appends another mesh's geometry, transformed.
+    ///
+    /// Ported from `SurfaceTool::append_from`. Three details matter and only
+    /// one is obvious:
+    ///
+    /// 1. Vertices take the **full** transform.
+    /// 2. ⚠️ Normals take the **basis only** — `p_xform.basis.xform(v.normal)`
+    ///    upstream. A normal is a direction; putting it through the full
+    ///    transform adds the translation, so any appended mesh at a non-zero
+    ///    offset would light as though its surface faced the world origin.
+    /// 3. Indices are offset by the vertex count already accumulated,
+    ///    otherwise the appended triangles index into the FIRST mesh's vertices.
+    ///
+    /// An empty tool adopts the source's primitive type, as Godot does.
+    ///
+    /// ⚠️ Matching upstream: if this tool already holds vertices but no index
+    /// buffer, those first vertices' implicit indices are not materialised, so
+    /// the resulting index array covers only the appended part. Godot has the
+    /// same edge (it warns "Index array not a multiple of 3"). Kept identical
+    /// rather than quietly improved, so behaviour matches the engine we port.
+    pub fn append_from(&mut self, mesh: &Mesh3D, xform: gdcore::math3d::Transform3D) {
+        if self.vertices.is_empty() {
+            self.primitive_type = mesh.primitive_type;
+        }
+        let vfrom = self.vertices.len() as u32;
+
+        for (i, &v) in mesh.vertices.iter().enumerate() {
+            self.vertices.push(xform.xform(v));
+            let n = mesh.normals.get(i).copied().unwrap_or(Vector3::ZERO);
+            // A zero normal carries no direction; rotating it is meaningless
+            // and a scaled basis would leave it zero anyway.
+            self.normals.push(if n == Vector3::ZERO {
+                n
+            } else {
+                xform.basis.xform(n)
+            });
+            self.uvs
+                .push(mesh.uvs.get(i).copied().unwrap_or([0.0, 0.0]));
+            self.colors.push(gdcore::math::Color::WHITE);
+        }
+
+        let source: Vec<u32> = if mesh.indices.is_empty() {
+            (0..mesh.vertices.len() as u32).collect()
+        } else {
+            mesh.indices.clone()
+        };
+        for i in source {
+            self.indices.push(i + vfrom);
+        }
+    }
+
+    /// Replaces this tool's contents with another mesh's geometry.
+    ///
+    /// Godot's `create_from(mesh, surface)` — a clear followed by an untransformed
+    /// append, which is exactly how upstream implements it.
+    pub fn create_from(&mut self, mesh: &Mesh3D) {
+        self.clear();
+        self.append_from(mesh, gdcore::math3d::Transform3D::IDENTITY);
+    }
+
+    /// Collapses identical vertices and builds an index buffer.
+    ///
+    /// Ported from `SurfaceTool::index` in
+    /// `upstream/godot/scene/resources/surface_tool.cpp`.
+    ///
+    /// ⚠️ Two vertices merge only when **every** attribute matches — position,
+    /// normal, UV and colour. Deduping on position alone would weld the seam of
+    /// any UV-unwrapped mesh, where the same corner legitimately carries two
+    /// different UVs, and the texture would tear there.
+    ///
+    /// Godot returns early if the surface is already indexed, so calling this
+    /// twice is not an error and does not re-index an existing buffer.
+    pub fn index(&mut self) {
+        if !self.indices.is_empty() {
+            return;
+        }
+
+        // Bit patterns rather than float equality: this is Godot's "identical
+        // vertex" test, not a weld with a tolerance, so 0.1 + 0.2 must not
+        // match 0.3.
+        type Key = ([u32; 3], [u32; 3], [u32; 2], [u32; 4]);
+        let mut seen: std::collections::HashMap<Key, u32> = std::collections::HashMap::new();
+        let mut unique_v: Vec<Vector3> = Vec::new();
+        let mut unique_n: Vec<Vector3> = Vec::new();
+        let mut unique_uv: Vec<[f32; 2]> = Vec::new();
+        let mut unique_c: Vec<gdcore::math::Color> = Vec::new();
+        let mut indices: Vec<u32> = Vec::with_capacity(self.vertices.len());
+
+        for i in 0..self.vertices.len() {
+            let v = self.vertices[i];
+            let n = self.normals.get(i).copied().unwrap_or(Vector3::ZERO);
+            let uv = self.uvs.get(i).copied().unwrap_or([0.0, 0.0]);
+            let c = self
+                .colors
+                .get(i)
+                .copied()
+                .unwrap_or(gdcore::math::Color::WHITE);
+            let key: Key = (
+                [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()],
+                [n.x.to_bits(), n.y.to_bits(), n.z.to_bits()],
+                [uv[0].to_bits(), uv[1].to_bits()],
+                [c.r.to_bits(), c.g.to_bits(), c.b.to_bits(), c.a.to_bits()],
+            );
+
+            let idx = match seen.get(&key) {
+                Some(&existing) => existing,
+                None => {
+                    let fresh = unique_v.len() as u32;
+                    seen.insert(key, fresh);
+                    unique_v.push(v);
+                    unique_n.push(n);
+                    unique_uv.push(uv);
+                    unique_c.push(c);
+                    fresh
+                }
+            };
+            indices.push(idx);
+        }
+
+        self.vertices = unique_v;
+        self.normals = unique_n;
+        self.uvs = unique_uv;
+        self.colors = unique_c;
+        self.indices = indices;
+    }
+
+    /// Expands an indexed surface back into a flat vertex list.
+    ///
+    /// Ported from `SurfaceTool::deindex`. Godot returns early when there is no
+    /// index buffer — "nothing to deindex" — rather than clearing the vertices,
+    /// which is what a naive implementation does and which silently empties a
+    /// perfectly good non-indexed surface.
+    pub fn deindex(&mut self) {
+        if self.indices.is_empty() {
+            return;
+        }
+
+        let old_v = std::mem::take(&mut self.vertices);
+        let old_n = std::mem::take(&mut self.normals);
+        let old_uv = std::mem::take(&mut self.uvs);
+        let old_c = std::mem::take(&mut self.colors);
+        let old_bi = std::mem::take(&mut self.bone_indices);
+        let old_bw = std::mem::take(&mut self.bone_weights);
+        let old_sg = std::mem::take(&mut self.smooth_groups);
+
+        for &i in &self.indices {
+            let i = i as usize;
+            // An out-of-range index is malformed input; Godot ERR_FAIL_CONDs the
+            // whole call. Skipping the entry keeps the parallel arrays the same
+            // length as each other, which a partial push would not.
+            let (Some(&v), Some(&n)) = (old_v.get(i), old_n.get(i)) else {
+                continue;
+            };
+            self.vertices.push(v);
+            self.normals.push(n);
+            self.uvs.push(old_uv.get(i).copied().unwrap_or([0.0, 0.0]));
+            self.colors
+                .push(old_c.get(i).copied().unwrap_or(gdcore::math::Color::WHITE));
+            self.bone_indices
+                .push(old_bi.get(i).copied().unwrap_or([0; 4]));
+            self.bone_weights
+                .push(old_bw.get(i).copied().unwrap_or([0.0; 4]));
+            self.smooth_groups.push(old_sg.get(i).copied().unwrap_or(0));
+        }
+        self.indices.clear();
+    }
+
+    /// Stages the smoothing group for subsequent vertices.
+    ///
+    /// [`NO_SMOOTH_GROUP`] flat-shades. Any other value groups vertices that
+    /// share a position, so `generate_normals` averages the faces meeting there.
+    pub fn set_smooth_group(&mut self, group: u32) {
+        self.current_smooth_group = group;
+    }
+
+    /// Recomputes vertex normals, honouring smoothing groups.
+    ///
+    /// Ported from `SurfaceTool::generate_normals`. Three things upstream does
+    /// that a from-the-docs reading misses:
+    ///
+    /// 1. ⚠️ **It deindexes first.** Without that, a vertex shared by two
+    ///    triangles is written twice and the LAST triangle silently wins,
+    ///    instead of each face getting its own copy.
+    /// 2. ⚠️ **The default smoothing group is 0, a real group** — so the
+    ///    default behaviour is to SMOOTH: face normals are accumulated per
+    ///    (position, group) and normalised. Flat shading is the opt-in, via
+    ///    [`NO_SMOOTH_GROUP`]. Defaulting to flat looks reasonable and diverges
+    ///    from Godot on every mesh whose faces meet at an angle.
+    /// 3. `flip` reverses the triangle's winding rather than negating the
+    ///    result — equivalent for a plane normal, and this keeps the shape of
+    ///    the upstream code.
+    ///
+    /// A non-TRIANGLES surface, or a vertex count that is not a multiple of
+    /// three, is refused as upstream `ERR_FAIL_COND`s.
+    pub fn generate_normals(&mut self, flip: bool) {
+        if self.primitive_type != PrimitiveType::Triangles {
+            return;
+        }
+        self.deindex();
+        if self.vertices.is_empty() || self.vertices.len() % 3 != 0 {
+            return;
+        }
+
+        self.normals = vec![Vector3::ZERO; self.vertices.len()];
+        // Keyed on the quantised position plus the group, matching Godot's
+        // SmoothGroupVertex hash: two vertices smooth together only if they
+        // coincide AND share a group.
+        let mut smooth: std::collections::HashMap<([u32; 3], u32), Vector3> =
+            std::collections::HashMap::new();
+
+        for tri in 0..self.vertices.len() / 3 {
+            let (a, b, c) = (tri * 3, tri * 3 + 1, tri * 3 + 2);
+            let (pa, pb, pc) = (self.vertices[a], self.vertices[b], self.vertices[c]);
+            let raw = if flip {
+                (pb - pc).cross(pa - pc)
+            } else {
+                (pb - pa).cross(pc - pa)
+            };
+            let len = raw.length();
+            // A degenerate triangle has no defined normal; normalising it would
+            // write NaN, which propagates and blackens the surface.
+            let normal = if len <= f32::EPSILON {
+                Vector3::ZERO
+            } else {
+                raw / len
+            };
+
+            for i in [a, b, c] {
+                let group = self.smooth_groups.get(i).copied().unwrap_or(0);
+                if group == NO_SMOOTH_GROUP {
+                    self.normals[i] = normal;
+                } else {
+                    let p = self.vertices[i];
+                    let key = ([p.x.to_bits(), p.y.to_bits(), p.z.to_bits()], group);
+                    // ⚠️ `entry()` holds a mutable borrow; reading `smooth`
+                    // again in the same expression is a second borrow and
+                    // does not compile. Bind the slot, then add through it.
+                    let slot = smooth.entry(key).or_insert(Vector3::ZERO);
+                    *slot = *slot + normal;
+                }
+            }
+        }
+
+        for i in 0..self.vertices.len() {
+            let group = self.smooth_groups.get(i).copied().unwrap_or(0);
+            if group == NO_SMOOTH_GROUP {
+                continue;
+            }
+            let p = self.vertices[i];
+            let key = ([p.x.to_bits(), p.y.to_bits(), p.z.to_bits()], group);
+            let sum = smooth.get(&key).copied().unwrap_or(Vector3::ZERO);
+            let len = sum.length();
+            self.normals[i] = if len <= f32::EPSILON {
+                Vector3::ZERO
+            } else {
+                sum / len
+            };
+        }
     }
 
     /// Builds a [`Mesh3D`] from the staged geometry. When no explicit indices
@@ -118,6 +550,11 @@ impl SurfaceTool {
         mesh.vertices = self.vertices.clone();
         mesh.normals = self.normals.clone();
         mesh.uvs = self.uvs.clone();
+        // ⚠️ Only when the script actually set skin data. See `has_skin`.
+        if self.has_skin {
+            mesh.bone_indices = self.bone_indices.clone();
+            mesh.bone_weights = self.bone_weights.clone();
+        }
         mesh.indices = if self.indices.is_empty() {
             (0..self.vertices.len() as u32).collect()
         } else {
@@ -130,6 +567,55 @@ impl SurfaceTool {
 impl Default for SurfaceTool {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// One level of detail for a surface: a coarser index buffer plus the
+/// screen-space error at which it becomes acceptable (pat-s3rrv.205).
+///
+/// Godot stores LOD index arrays per surface and picks the coarsest level whose
+/// error is still under `Viewport.mesh_lod_threshold`, scaled by the instance's
+/// `lod_bias`.
+///
+/// ⚠️ `error` is a **screen-space** quantity in pixels, not a world-space
+/// distance — the same units as `mesh_lod_threshold`. Comparing it against a
+/// camera distance would be wrong at every field of view, and the mistake is
+/// invisible at the one FOV a fixture happens to use.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SurfaceLod {
+    /// Screen-space error, in pixels, this level introduces.
+    pub error: f32,
+    /// The index buffer to draw when this level is selected.
+    pub indices: Vec<u32>,
+}
+
+impl Surface3D {
+    /// Chooses the index buffer to draw for a given screen-space error budget.
+    ///
+    /// Mirrors Godot: take the **coarsest** level whose error still fits the
+    /// budget. `threshold` is `Viewport.mesh_lod_threshold` already scaled by
+    /// the instance's `lod_bias`, in pixels.
+    ///
+    /// ⚠️ Returns the full-detail `indices` when nothing qualifies — including
+    /// when `lods` is empty, which is every surface that predates LOD support.
+    /// Returning an empty slice there would make existing meshes vanish rather
+    /// than merely stop switching.
+    ///
+    /// ⚠️ A threshold of 0 (or negative) means "never degrade": no level can
+    /// have an error below it, so full detail is correct. That is also what a
+    /// caller gets if it forgets to set the viewport threshold, which should
+    /// look like today's behaviour rather than like maximum degradation.
+    pub fn select_lod(&self, threshold: f32) -> &[u32] {
+        let mut chosen: Option<&SurfaceLod> = None;
+        for lod in &self.lods {
+            if lod.error <= threshold && !lod.indices.is_empty() {
+                // Coarsest wins, so keep the largest error that still fits.
+                if chosen.map_or(true, |c| lod.error > c.error) {
+                    chosen = Some(lod);
+                }
+            }
+        }
+        chosen.map_or(self.indices.as_slice(), |l| l.indices.as_slice())
     }
 }
 
@@ -1271,6 +1757,7 @@ mod tests {
             uvs: vec![[0.0, 0.0]],
             indices: vec![0],
             primitive_type: PrimitiveType::Points,
+            lods: Vec::new(),
         });
         mesh.surfaces.push(Surface3D {
             vertices: vec![Vector3::new(1.0, 0.0, 0.0)],
@@ -1278,6 +1765,7 @@ mod tests {
             uvs: vec![[1.0, 0.0]],
             indices: vec![0],
             primitive_type: PrimitiveType::Points,
+            lods: Vec::new(),
         });
         assert_eq!(mesh.surface_count(), 3);
     }

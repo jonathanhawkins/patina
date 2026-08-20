@@ -43,6 +43,46 @@ pub enum DecalTexture {
 // Decal3D
 // ---------------------------------------------------------------------------
 
+/// One decal channel set sampled at a projected point (pat-s3rrv.204).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DecalSample {
+    /// Projection-plane coordinate the channels were read at.
+    pub uv: (f64, f64),
+    /// `vertical_fade * distance_fade`, WITHOUT `albedo_mix`.
+    ///
+    /// ⚠️ Kept separate from [`Self::albedo_alpha`] because emission and ORM
+    /// must fade with distance but must NOT be scaled by the albedo blend.
+    pub fade: f64,
+    /// Projected albedo texel, already multiplied by `modulate`.
+    pub albedo: Color,
+    /// How strongly the albedo replaces the surface: `fade * albedo_mix * a`.
+    pub albedo_alpha: f64,
+    /// Tangent-space normal texel, when a normal map is assigned.
+    pub normal: Option<Color>,
+    /// AO / roughness / metallic in R / G / B, when an ORM map is assigned.
+    pub orm: Option<Color>,
+    /// Emission texel, before `emission_energy`.
+    pub emission: Option<Color>,
+}
+
+/// Nearest-texel lookup with the projected UV clamped to the image.
+///
+/// ⚠️ Clamped, not wrapped. A decal projects a single stamp; wrapping would tile
+/// the art across the footprint whenever a UV landed a hair outside [0,1] from
+/// float error at the box edge.
+fn sample_image(img: &crate::material::TextureImage, u: f64, v: f64) -> Color {
+    if img.width == 0 || img.height == 0 || img.pixels.is_empty() {
+        return Color::new(1.0, 1.0, 1.0, 1.0);
+    }
+    let x = ((u.clamp(0.0, 1.0) * img.width as f64) as u32).min(img.width - 1);
+    let y = ((v.clamp(0.0, 1.0) * img.height as f64) as u32).min(img.height - 1);
+    let i = (y * img.width + x) as usize;
+    img.pixels
+        .get(i)
+        .copied()
+        .unwrap_or(Color::new(1.0, 1.0, 1.0, 1.0))
+}
+
 /// A projected-texture decal node (Godot `Decal`).
 ///
 /// The decal projects along its local −Y axis. The [`size`](Self::size)
@@ -59,6 +99,19 @@ pub struct Decal3D {
     pub texture_normal: Option<String>,
     pub texture_orm: Option<String>,
     pub texture_emission: Option<String>,
+    /// Decoded `texture_albedo` pixels (pat-s3rrv.204).
+    ///
+    /// ⚠️ The `texture_*` fields above are PATHS. They were read off the node
+    /// and carried this far and nothing ever resolved them to texels, so a
+    /// decal projected a flat `modulate` colour no matter what art was
+    /// assigned. These four are the resolved images the projection samples.
+    pub albedo_image: Option<std::sync::Arc<crate::material::TextureImage>>,
+    /// Decoded `texture_normal` pixels.
+    pub normal_image: Option<std::sync::Arc<crate::material::TextureImage>>,
+    /// Decoded `texture_orm` pixels (AO / roughness / metallic in R/G/B).
+    pub orm_image: Option<std::sync::Arc<crate::material::TextureImage>>,
+    /// Decoded `texture_emission` pixels.
+    pub emission_image: Option<std::sync::Arc<crate::material::TextureImage>>,
 
     /// Multiplier for the emissive channel.
     pub emission_energy: f64,
@@ -107,6 +160,10 @@ impl Default for Decal3D {
             texture_normal: None,
             texture_orm: None,
             texture_emission: None,
+            albedo_image: None,
+            normal_image: None,
+            orm_image: None,
+            emission_image: None,
             emission_energy: 1.0,
             modulate: Color::WHITE,
             albedo_mix: 1.0,
@@ -257,6 +314,58 @@ impl Decal3D {
     ///
     /// Returns `Some(alpha)` in `[0.0, 1.0]` if the point is inside
     /// the decal box, or `None` if outside.
+    /// Projects `world_point` and samples every decal channel there
+    /// (pat-s3rrv.204).
+    ///
+    /// ⚠️ `project_point` has always returned the projected `(u, v)` and
+    /// [`Self::sample_alpha`] has always thrown them away — `let (_, _, w) =`.
+    /// The coordinate the texture lookup needs was being computed and discarded
+    /// one line before it was wanted, which is why the footprint came out a
+    /// single flat colour.
+    pub fn sample(&self, world_point: Vector3, camera_distance: f64) -> Option<DecalSample> {
+        if !self.visible {
+            return None;
+        }
+        let (u, v, w) = self.project_point(world_point)?;
+        let fade = self.vertical_fade(w) * self.distance_fade(camera_distance);
+        if fade <= 0.0 {
+            return None;
+        }
+
+        // ⚠️ `albedo_mix` scales the ALBEDO blend only — it is not part of the
+        // fade. Folding it into a single alpha (as `sample_alpha` does) means
+        // emission and ORM inherit it too, so turning the albedo blend down
+        // would dim the emissive texels as well, which Godot does not do.
+        let albedo_texel = self
+            .albedo_image
+            .as_ref()
+            .map(|img| sample_image(img, u, v))
+            .unwrap_or(self.modulate);
+        // Godot multiplies the projected albedo by `modulate`.
+        let albedo = Color::new(
+            albedo_texel.r * self.modulate.r,
+            albedo_texel.g * self.modulate.g,
+            albedo_texel.b * self.modulate.b,
+            albedo_texel.a * self.modulate.a,
+        );
+
+        Some(DecalSample {
+            uv: (u, v),
+            fade,
+            albedo,
+            albedo_alpha: (fade * self.albedo_mix * albedo.a as f64).clamp(0.0, 1.0),
+            normal: self
+                .normal_image
+                .as_ref()
+                .map(|img| sample_image(img, u, v)),
+            orm: self.orm_image.as_ref().map(|img| sample_image(img, u, v)),
+            emission: self
+                .emission_image
+                .as_ref()
+                .map(|img| sample_image(img, u, v)),
+        })
+    }
+
     pub fn sample_alpha(&self, world_point: Vector3, camera_distance: f64) -> Option<f64> {
         if !self.visible {
             return None;

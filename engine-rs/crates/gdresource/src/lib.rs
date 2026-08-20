@@ -28,6 +28,7 @@ pub mod ctex;
 pub mod dpi_texture;
 pub mod fbx_import;
 pub mod fuzz_res;
+pub mod glyph_outline;
 pub mod gltf_import;
 pub mod image;
 pub mod image_svg;

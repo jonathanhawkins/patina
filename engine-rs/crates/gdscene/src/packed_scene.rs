@@ -130,6 +130,115 @@ pub struct PackedScene {
     editable_instances: Vec<String>,
 }
 
+/// Percent-encodes a marker property value.
+///
+/// String properties (a `TextMesh`'s `text`, a font path) travel in the
+/// `primitive:<Class>?k=v` marker, whose separators are `?`, `&` and `=`. Any
+/// of those inside a value would split the marker at the wrong place, and a
+/// space would break a path.
+///
+/// ⚠️ Deliberately a **single pass** over the bytes. Escaping with chained
+/// `.replace()` calls double-escapes: replacing `%` after `&` turns an already
+/// emitted `%26` into `%2526`. One pass cannot make that mistake.
+pub fn percent_encode_marker_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        let c = *byte;
+        // RFC 3986 unreserved set; everything else is escaped, which is more
+        // than strictly needed and cheaper to be sure of.
+        if c.is_ascii_alphanumeric() || matches!(c, b'-' | b'.' | b'_' | b'~' | b'/') {
+            out.push(c as char);
+        } else {
+            out.push('%');
+            out.push(char::from_digit((c >> 4) as u32, 16).unwrap_or('0'));
+            out.push(char::from_digit((c & 0x0f) as u32, 16).unwrap_or('0'));
+        }
+    }
+    out
+}
+
+/// Reverses [`percent_encode_marker_value`].
+///
+/// A malformed escape is passed through literally rather than dropped: a marker
+/// that was never encoded (or was hand-written) still reads back as itself.
+pub fn percent_decode_marker_value(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    // Invalid UTF-8 can only come from a hand-edited marker; keep the lossy
+    // reading rather than losing the whole value.
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Encodes a primitive mesh sub-resource's numeric properties into the
+/// `?key=value` suffix of a `primitive:<Class>` marker.
+///
+/// The editor viewport resolves a mesh from the marker string alone and
+/// **caches by that string**, so the properties have to travel in it: two tori
+/// differing only in radius would otherwise share a cache key and the second
+/// would draw as the first. `split_mesh_marker` already parses this form.
+///
+/// Vectors flatten component-wise (`size.x`) because that is how the shared
+/// resolver addresses them, and this stays free of per-mesh-type knowledge:
+/// anything numeric comes along, anything else is skipped.
+///
+/// ⚠️ Keys are sorted. Property maps have no stable iteration order, so an
+/// unsorted marker would differ run to run — thrashing the editor's cache and
+/// making saved scenes and test expectations non-deterministic.
+fn primitive_marker_query(props: Option<&HashMap<String, Variant>>) -> String {
+    let Some(props) = props else {
+        return String::new();
+    };
+
+    let mut pairs: Vec<(String, f32)> = Vec::new();
+    let mut strings: Vec<(String, String)> = Vec::new();
+    for (key, value) in props {
+        match value {
+            Variant::Float(f) => pairs.push((key.clone(), *f as f32)),
+            Variant::Int(i) => pairs.push((key.clone(), *i as f32)),
+            Variant::Bool(b) => pairs.push((key.clone(), if *b { 1.0 } else { 0.0 })),
+            Variant::Vector2(v) => {
+                pairs.push((format!("{key}.x"), v.x));
+                pairs.push((format!("{key}.y"), v.y));
+            }
+            Variant::Vector3(v) => {
+                pairs.push((format!("{key}.x"), v.x));
+                pairs.push((format!("{key}.y"), v.y));
+                pairs.push((format!("{key}.z"), v.z));
+            }
+            // A TextMesh's `text` and `font` are the only string-valued
+            // primitive properties, and the editor resolves from the marker
+            // alone, so they have to travel in it too (pat-s3rrv.199).
+            Variant::String(text) => {
+                strings.push((key.clone(), percent_encode_marker_value(text)));
+            }
+            _ => {}
+        }
+    }
+    if pairs.is_empty() && strings.is_empty() {
+        return String::new();
+    }
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    strings.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut body: Vec<String> = pairs.into_iter().map(|(k, v)| format!("{k}={v}")).collect();
+    body.extend(strings.into_iter().map(|(k, v)| format!("{k}={v}")));
+    format!("?{}", body.join("&"))
+}
+
 impl PackedScene {
     /// Parses a `.tscn` string into a `PackedScene`.
     pub fn from_tscn(source: &str) -> EngineResult<Self> {
@@ -444,6 +553,39 @@ impl PackedScene {
                 })
                 .collect();
             for (prop, meta) in refs {
+                // The sub-resource's body, copied VERBATIM under
+                // `__subres__<prop>__<key>` so a save can write it back
+                // (pat-s3rrv.207).
+                //
+                // 🔑 This is what makes an unknown resource survive a round
+                // trip. `__resref__` already records `class::id`, so the saver
+                // writes the right `[sub_resource type=...]` header for any
+                // class — but the BODY was recovered through
+                // `companion_prefix_for`, a four-entry allowlist keyed on the
+                // PROPERTY name. Anything outside it (a plugin's custom
+                // Resource, but equally a MultiMesh or a Skin) got a section
+                // header with no properties, so the data was dropped silently
+                // on save. Godot's answer is MissingResource: record everything
+                // verbatim and hand it back untouched.
+                //
+                // ⚠️ Verbatim, and deliberately SEPARATE from the specialised
+                // companions beside it. Those hold values the engine has
+                // resolved for its own use — `__canvas_texture__diffuse_texture`
+                // is a filesystem path where the file said `ExtResource("1_d")`
+                // — so writing them back would silently rewrite the author's
+                // scene. This copy is never read by a render path.
+                if let Some(sub_id) = meta.rsplit_once("::").map(|(_, id)| id) {
+                    if let Some(body) = sub_resource_props.get(sub_id) {
+                        let copied: Vec<(String, Variant)> = body
+                            .iter()
+                            .map(|(k, v)| (format!("__subres__{prop}__{k}"), v.clone()))
+                            .collect();
+                        for (key, value) in copied {
+                            tmpl.properties.insert(key, value);
+                        }
+                    }
+                }
+
                 // A scripted resource's script path, carried to the node as
                 // `__resscript__<prop>` (pat-s3rrv.160).
                 //
@@ -1404,15 +1546,37 @@ impl PackedScene {
         // its `SubResource:<id>` value (correct scene round-trip + inspector).
         for tmpl in &mut templates {
             let resolved = match tmpl.properties.get("mesh") {
-                Some(Variant::String(s)) => s
-                    .strip_prefix("SubResource:")
-                    .and_then(|id| sub_resources.get(id))
-                    .map(|ty| format!("primitive:{ty}")),
+                Some(Variant::String(s)) => s.strip_prefix("SubResource:").and_then(|id| {
+                    sub_resources.get(id).map(|ty| {
+                        let query = primitive_marker_query(sub_resource_props.get(id));
+                        (id.to_string(), ty.clone(), format!("primitive:{ty}{query}"))
+                    })
+                }),
                 _ => None,
             };
-            if let Some(p) = resolved {
+            if let Some((mesh_id, mesh_class, p)) = resolved {
                 tmpl.properties
                     .insert("__viewport_mesh__".into(), Variant::String(p));
+                // The marker carries only the TYPE, so an authored
+                // `inner_radius`/`size`/`rings` on the sub-resource was dropped
+                // and every primitive rendered at its default size
+                // (pat-s3rrv.199). Copy the sub-resource's class and typed
+                // properties onto the node under `__mesh__*`, exactly as the
+                // `__shape__*` pass below does for collision geometry — by
+                // render time the sub-resource itself is gone.
+                //
+                // Verbatim, with no per-mesh knowledge here: `radius`, `size`,
+                // `rings`, `ring_segments`, `left_to_right` all come along, and
+                // a resolver that wants `size.x` splits the stored vector on its
+                // own side.
+                tmpl.properties
+                    .insert("__mesh__class".into(), Variant::String(mesh_class));
+                if let Some(mesh_props) = sub_resource_props.get(&mesh_id) {
+                    for (key, value) in mesh_props {
+                        tmpl.properties
+                            .insert(format!("__mesh__{key}"), value.clone());
+                    }
+                }
             }
         }
 
@@ -1541,6 +1705,143 @@ impl PackedScene {
                     for (key, value) in mm_props {
                         tmpl.properties
                             .insert(format!("__multimesh__{key}"), value.clone());
+                    }
+                }
+            }
+        }
+
+        // Resolve `skin = SubResource("id")` on MeshInstance3D by copying the
+        // Skin body onto the node under `__skin__*`, exactly as the MultiMesh
+        // pass above does (pat-s3rrv.200).
+        //
+        // 🔑 A `SubResource:<id>` string names a class and an id and carries no
+        // bind data at all, so before this the runtime had nothing to read even
+        // in principle and `resolve_skin` fell back to the skeleton's rest pose
+        // for every rigged model. That fallback still animates, which is why
+        // the gap survived: it is wrong only where the authored bind poses
+        // differ from the rest inverses.
+        //
+        // Copying every property verbatim keeps this free of per-field
+        // knowledge — `bind_count` and each `bind/<i>/bone`, `bind/<i>/name`,
+        // `bind/<i>/pose` come along — and the real `skin` property keeps its
+        // `SubResource:<id>` value so the scene still round-trips.
+        for tmpl in &mut templates {
+            let resolved = match tmpl.properties.get("skin") {
+                Some(Variant::String(s)) => s.strip_prefix("SubResource:").and_then(|id| {
+                    let ty = sub_resources.get(id)?;
+                    Some((id.to_string(), ty.clone()))
+                }),
+                _ => None,
+            };
+            if let Some((skin_id, skin_class)) = resolved {
+                tmpl.properties
+                    .insert("__skin__class".into(), Variant::String(skin_class));
+                if let Some(skin_props) = sub_resource_props.get(&skin_id) {
+                    for (key, value) in skin_props {
+                        tmpl.properties
+                            .insert(format!("__skin__{key}"), value.clone());
+                    }
+                }
+            }
+        }
+
+        // Resolve a `texture = SubResource("id")` that names a **NoiseTexture2D**
+        // by copying its body onto the node under `__noise_tex__*`, and the
+        // FastNoiseLite it points at under `__noise__*` (pat-s3rrv.208).
+        //
+        // 🔑 This is a TWO-HOP resolution and that is the whole difficulty: the
+        // Sprite2D names a NoiseTexture2D, whose own `noise` property names a
+        // FastNoiseLite in a *separate* `[sub_resource]` section. Flattening
+        // only the first hop yields a texture with no generator — a blank
+        // image, which is exactly the "renders a placeholder" symptom the bead
+        // describes.
+        //
+        // Unlike a CanvasTexture there is no file behind this: the pixels are
+        // generated, so the render path bakes them rather than loading them.
+        for tmpl in &mut templates {
+            let resolved = match tmpl.properties.get("texture") {
+                Some(Variant::String(s)) => s.strip_prefix("SubResource:").and_then(|id| {
+                    let ty = sub_resources.get(id)?;
+                    (ty == "NoiseTexture2D").then(|| id.to_string())
+                }),
+                _ => None,
+            };
+            let Some(tex_id) = resolved else { continue };
+            tmpl.properties.insert(
+                "__noise_tex__class".into(),
+                Variant::String("NoiseTexture2D".into()),
+            );
+            let Some(tex_props) = sub_resource_props.get(&tex_id) else {
+                continue;
+            };
+            for (key, value) in tex_props {
+                tmpl.properties
+                    .insert(format!("__noise_tex__{key}"), value.clone());
+            }
+            // Second hop: the generator itself.
+            let noise_id = match tex_props.get("noise") {
+                Some(Variant::String(s)) => s.strip_prefix("SubResource:").map(|i| i.to_string()),
+                _ => None,
+            };
+            let Some(noise_id) = noise_id else { continue };
+            if let Some(class) = sub_resources.get(&noise_id) {
+                tmpl.properties
+                    .insert("__noise__class".into(), Variant::String(class.clone()));
+            }
+            if let Some(noise_props) = sub_resource_props.get(&noise_id) {
+                for (key, value) in noise_props {
+                    tmpl.properties
+                        .insert(format!("__noise__{key}"), value.clone());
+                }
+            }
+        }
+
+        // Resolve a `texture = SubResource("id")` that names a **CanvasTexture**
+        // by copying its body onto the node under `__canvas_texture__*`
+        // (pat-s3rrv.203).
+        //
+        // ⚠️ Unlike the MultiMesh and Skin passes above, this one is CONDITIONAL
+        // on the sub-resource's class. `texture` on a Sprite2D almost always
+        // names an ImageTexture or AtlasTexture; stamping one of those under a
+        // CanvasTexture prefix would tell the light pass that a normal map
+        // exists when none does, and normal-mapped shading of a surface whose
+        // "normals" are really albedo produces plausible-looking nonsense
+        // rather than an error.
+        //
+        // A CanvasTexture's three channels are themselves resource references
+        // (`diffuse_texture = ExtResource("1_x")`), so any `ExtResource:<id>`
+        // value is resolved to its path on the way through: render time has the
+        // tree but not the PackedScene, so an unresolved id is a dead end.
+        // Everything else — `specular_color`, `specular_shininess`,
+        // `texture_filter`, `texture_repeat` — is copied verbatim, which keeps
+        // this free of per-field knowledge.
+        for tmpl in &mut templates {
+            let resolved = match tmpl.properties.get("texture") {
+                Some(Variant::String(s)) => s.strip_prefix("SubResource:").and_then(|id| {
+                    let ty = sub_resources.get(id)?;
+                    (ty == "CanvasTexture").then(|| id.to_string())
+                }),
+                _ => None,
+            };
+            if let Some(ct_id) = resolved {
+                tmpl.properties.insert(
+                    "__canvas_texture__class".into(),
+                    Variant::String("CanvasTexture".into()),
+                );
+                if let Some(ct_props) = sub_resource_props.get(&ct_id) {
+                    for (key, value) in ct_props {
+                        let resolved_value = match value {
+                            Variant::String(s) => match s
+                                .strip_prefix("ExtResource:")
+                                .and_then(|ext_id| ext_resources.get(ext_id))
+                            {
+                                Some(entry) => Variant::String(entry.path.clone()),
+                                None => value.clone(),
+                            },
+                            _ => value.clone(),
+                        };
+                        tmpl.properties
+                            .insert(format!("__canvas_texture__{key}"), resolved_value);
                     }
                 }
             }

@@ -392,6 +392,13 @@ pub fn set_texture_path(tree: &mut SceneTree, node_id: NodeId, path: &str) {
 }
 
 /// Reads the `"texture"` property as a path string, if present.
+/// Cache-key scheme for a generated (baked) texture that has no file behind it.
+///
+/// Deliberately not a `res://` path: nothing on disk backs it, and a loader that
+/// tried would fail and cache the failure. The renderer's texture cache is
+/// pre-populated with these entries before a frame is rasterized.
+pub const NOISE_TEXTURE_SCHEME: &str = "noise://";
+
 pub fn get_texture_path(tree: &SceneTree, node_id: NodeId) -> Option<String> {
     let node = tree.get_node(node_id)?;
     // ⚠️ A `.tscn` writes `texture = ExtResource("1_icon")` and the loader leaves
@@ -404,6 +411,29 @@ pub fn get_texture_path(tree: &SceneTree, node_id: NodeId) -> Option<String> {
     // failed to load, and fell back to the placeholder. Every sprite that got
     // its texture from a scene file or from the picker rendered untextured
     // (pat-0q2kx.13).
+    // A NoiseTexture2D has no file behind it — its pixels are GENERATED — so
+    // it resolves to a synthetic cache key rather than a path (pat-s3rrv.208).
+    //
+    // 🔑 Returning `None` here would be the quiet failure: the sprite would
+    // simply draw nothing, which is indistinguishable from a texture that has
+    // not finished loading. The key is stable per node so the bake is cached
+    // across frames instead of being recomputed for every draw.
+    if let Variant::String(class) = node.get_property("__noise_tex__class") {
+        if class == "NoiseTexture2D" {
+            return Some(format!("{NOISE_TEXTURE_SCHEME}{}", node_id.raw()));
+        }
+    }
+
+    // A CanvasTexture bundles three channels, and the one that gets DRAWN is
+    // `diffuse_texture` (pat-s3rrv.203). It is checked before `__extres__` so a
+    // Sprite2D whose `texture` is a CanvasTexture draws its diffuse map rather
+    // than nothing: the `texture` property itself holds `SubResource:<id>`,
+    // which names a resource and not a file.
+    if let Variant::String(path) = node.get_property("__canvas_texture__diffuse_texture") {
+        if !path.is_empty() {
+            return Some(path);
+        }
+    }
     if let Variant::String(path) = node.get_property("__extres__texture") {
         if !path.is_empty() {
             return Some(path);

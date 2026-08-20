@@ -1035,6 +1035,7 @@ dependencies = [
  "gdcore",
  "gdobject",
  "gdplatform",
+ "gdrender2d",
  "gdresource",
  "gdserver2d",
  "gdvariant",

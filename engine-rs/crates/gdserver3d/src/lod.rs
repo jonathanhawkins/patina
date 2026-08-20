@@ -16,24 +16,16 @@
 //! draw, draw at full opacity, or draw with a fade alpha.
 
 use gdcore::math::Vector3;
+// ⚠️ ONE fade-mode enum for the crate. This module used to declare its own,
+// which was harmless only because the module had never been compiled; moving it
+// into `gdserver3d` (pat-s3rrv.205) put two identical-but-differently-spelled
+// enums in one crate. `instance`'s is the live one — it is consumed by
+// `GeometryInstanceSettings` and carries `from_godot_int` — so it wins.
+use crate::instance::VisibilityRangeFadeMode;
 
 // ---------------------------------------------------------------------------
 // Fade mode
 // ---------------------------------------------------------------------------
-
-/// Controls how transitions between LOD levels appear.
-///
-/// Maps to Godot's `GeometryInstance3D.VisibilityRangeFadeMode`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum VisibilityRangeFadeMode {
-    /// Hard switch — the instance pops in/out instantly.
-    #[default]
-    Disabled = 0,
-    /// The instance fades itself (alpha ramps at range edges).
-    FadeSelf = 1,
-    /// Dependencies mode — cross-fade with the next LOD level.
-    FadeDependencies = 2,
-}
 
 // ---------------------------------------------------------------------------
 // LOD configuration per instance
@@ -390,7 +382,7 @@ mod tests {
         let eval = cam_at(0.0, 0.0, 0.0);
         let range = LodRange::new(10.0, 100.0)
             .with_margins(5.0, 5.0)
-            .with_fade_mode(VisibilityRangeFadeMode::FadeSelf);
+            .with_fade_mode(VisibilityRangeFadeMode::SelfFade);
         // Instance at 7.5m — in the begin fade zone [5, 10]
         let vis = eval.evaluate(Vector3::new(7.5, 0.0, 0.0), &range);
         match vis {
@@ -406,7 +398,7 @@ mod tests {
         let eval = cam_at(0.0, 0.0, 0.0);
         let range = LodRange::new(10.0, 100.0)
             .with_margins(5.0, 10.0)
-            .with_fade_mode(VisibilityRangeFadeMode::FadeSelf);
+            .with_fade_mode(VisibilityRangeFadeMode::SelfFade);
         // Instance at 105m — in the end fade zone [100, 110]
         let vis = eval.evaluate(Vector3::new(105.0, 0.0, 0.0), &range);
         match vis {
@@ -422,7 +414,7 @@ mod tests {
         let eval = cam_at(0.0, 0.0, 0.0);
         let range = LodRange::new(10.0, 100.0)
             .with_margins(5.0, 5.0)
-            .with_fade_mode(VisibilityRangeFadeMode::FadeSelf);
+            .with_fade_mode(VisibilityRangeFadeMode::SelfFade);
         // Instance at 50m — well within range
         let vis = eval.evaluate(Vector3::new(50.0, 0.0, 0.0), &range);
         assert_eq!(vis, LodVisibility::Visible);
@@ -433,7 +425,7 @@ mod tests {
         let eval = cam_at(0.0, 0.0, 0.0);
         let range = LodRange::new(10.0, 100.0)
             .with_margins(5.0, 5.0)
-            .with_fade_mode(VisibilityRangeFadeMode::FadeSelf);
+            .with_fade_mode(VisibilityRangeFadeMode::SelfFade);
         // Instance at 110m — beyond end + margin
         let vis = eval.evaluate(Vector3::new(110.0, 0.0, 0.0), &range);
         assert_eq!(vis, LodVisibility::Hidden);
@@ -482,12 +474,12 @@ mod tests {
     fn lod_range_builder() {
         let r = LodRange::new(5.0, 100.0)
             .with_margins(2.0, 3.0)
-            .with_fade_mode(VisibilityRangeFadeMode::FadeDependencies);
+            .with_fade_mode(VisibilityRangeFadeMode::Dependencies);
         assert_eq!(r.begin, 5.0);
         assert_eq!(r.end, 100.0);
         assert_eq!(r.begin_margin, 2.0);
         assert_eq!(r.end_margin, 3.0);
-        assert_eq!(r.fade_mode, VisibilityRangeFadeMode::FadeDependencies);
+        assert_eq!(r.fade_mode, VisibilityRangeFadeMode::Dependencies);
     }
 
     #[test]
@@ -524,22 +516,28 @@ mod tests {
     #[test]
     fn lod_group_selects_correct_level() {
         let mut group = LodGroup::new();
-        group.add_level("LOD0", LodRange::new(0.0, 20.0));  // near
-        group.add_level("LOD1", LodRange::new(20.0, 50.0));  // mid
-        group.add_level("LOD2", LodRange::new(50.0, 0.0));   // far (no limit)
+        group.add_level("LOD0", LodRange::new(0.0, 20.0)); // near
+        group.add_level("LOD1", LodRange::new(20.0, 50.0)); // mid
+        group.add_level("LOD2", LodRange::new(50.0, 0.0)); // far (no limit)
 
         let eval = cam_at(0.0, 0.0, 0.0);
 
         // Close (10m) → LOD0
-        let (idx, _) = group.active_level(&eval, Vector3::new(10.0, 0.0, 0.0)).unwrap();
+        let (idx, _) = group
+            .active_level(&eval, Vector3::new(10.0, 0.0, 0.0))
+            .unwrap();
         assert_eq!(idx, 0);
 
         // Medium (30m) → LOD1
-        let (idx, _) = group.active_level(&eval, Vector3::new(30.0, 0.0, 0.0)).unwrap();
+        let (idx, _) = group
+            .active_level(&eval, Vector3::new(30.0, 0.0, 0.0))
+            .unwrap();
         assert_eq!(idx, 1);
 
         // Far (100m) → LOD2
-        let (idx, _) = group.active_level(&eval, Vector3::new(100.0, 0.0, 0.0)).unwrap();
+        let (idx, _) = group
+            .active_level(&eval, Vector3::new(100.0, 0.0, 0.0))
+            .unwrap();
         assert_eq!(idx, 2);
     }
 
@@ -550,13 +548,13 @@ mod tests {
             "LOD0",
             LodRange::new(0.0, 20.0)
                 .with_margins(0.0, 5.0)
-                .with_fade_mode(VisibilityRangeFadeMode::FadeSelf),
+                .with_fade_mode(VisibilityRangeFadeMode::SelfFade),
         );
         group.add_level(
             "LOD1",
             LodRange::new(20.0, 100.0)
                 .with_margins(5.0, 0.0)
-                .with_fade_mode(VisibilityRangeFadeMode::FadeSelf),
+                .with_fade_mode(VisibilityRangeFadeMode::SelfFade),
         );
 
         let eval = cam_at(0.0, 0.0, 0.0);
@@ -591,8 +589,8 @@ mod tests {
     #[test]
     fn fade_mode_enum_values() {
         assert_eq!(VisibilityRangeFadeMode::Disabled as u32, 0);
-        assert_eq!(VisibilityRangeFadeMode::FadeSelf as u32, 1);
-        assert_eq!(VisibilityRangeFadeMode::FadeDependencies as u32, 2);
+        assert_eq!(VisibilityRangeFadeMode::SelfFade as u32, 1);
+        assert_eq!(VisibilityRangeFadeMode::Dependencies as u32, 2);
     }
 
     #[test]

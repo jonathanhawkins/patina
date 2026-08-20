@@ -11,7 +11,7 @@
 //! Shading is applied as a post-pass over a [`FrameBuffer`]: each pixel's RGB
 //! is multiplied by the accumulated light (plus ambient).
 
-use gdcore::math::{Color, Vector2};
+use gdcore::math::{Color, Vector2, Vector3};
 
 use crate::renderer::FrameBuffer;
 
@@ -114,6 +114,17 @@ pub struct Light2D {
     /// Godot `PointLight2D.texture` path, when one is authored. The footprint
     /// falls back to the built-in radial gradient when absent.
     pub texture_path: Option<String>,
+    /// Godot `PointLight2D.height` / `DirectionalLight2D.height` — how far the
+    /// light sits *off* the canvas plane, in pixels.
+    ///
+    /// This is the third component of the light vector and it does nothing
+    /// without a normal map: with a flat surface every normal is `(0, 0, 1)`
+    /// and `N·L` reduces to a constant. The doc's own calibration is the useful
+    /// one — "if the height is 100, then it will illuminate an object 100
+    /// pixels away at a 45° angle to the plane" — so height and pixel distance
+    /// are the two legs of the same right triangle. Godot's default is 0.0,
+    /// which puts the light *in* the plane and grazes every surface.
+    pub height: f32,
 }
 
 /// Shadow edge filtering (Godot `Light2D.ShadowFilter`).
@@ -202,6 +213,7 @@ impl Light2D {
             offset,
             texture_scale,
             texture_path: None,
+            height: 0.0,
         }
     }
 
@@ -243,6 +255,7 @@ impl Light2D {
             offset,
             texture_scale,
             texture_path: None,
+            height: 0.0,
         }
     }
 }
@@ -787,5 +800,233 @@ mod tests {
         assert!(LIGHT2D_CLASS_NAMES.contains(&"PointLight2D"));
         assert!(LIGHT2D_CLASS_NAMES.contains(&"DirectionalLight2D"));
         assert!(LIGHT2D_CLASS_NAMES.contains(&"LightOccluder2D"));
+    }
+}
+
+// ===========================================================================
+// Normal-mapped / specular canvas shading (pat-s3rrv.203)
+//
+// Ported from `upstream/godot/drivers/gles3/shaders/canvas.glsl` —
+// `light_normal_compute` at :420, the normal decode at :646, and the two
+// light-vector constructions at :735 (directional) and :810 (positional).
+// Transcribed rather than re-derived: the shininess curve and the `0.75`
+// denominator clamp are not values anything else would suggest.
+// ===========================================================================
+
+/// Godot `CanvasTexture.specular_color` + `specular_shininess`, the pair that
+/// drives the Blinn-Phong highlight.
+///
+/// Godot packs these into one `vec4` (`specular_shininess.rgb` is the colour,
+/// `.a` the shininess); they are separate fields here because that is how the
+/// resource authors them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpecularShininess {
+    /// `CanvasTexture.specular_color` — doc default `Color(1, 1, 1, 1)`.
+    pub color: Color,
+    /// `CanvasTexture.specular_shininess` — doc default `1.0`.
+    pub shininess: f32,
+}
+
+impl Default for SpecularShininess {
+    fn default() -> Self {
+        Self {
+            color: Color::new(1.0, 1.0, 1.0, 1.0),
+            shininess: 1.0,
+        }
+    }
+}
+
+/// Decodes a canvas normal-map texel into a unit surface normal.
+///
+/// ⚠️ **The green channel is inverted**, and this is the detail a test is most
+/// likely to miss. Godot's decode is
+/// `normal.xy = texel.xy * vec2(2, -2) - vec2(1, -1)` (canvas.glsl:646), i.e.
+/// `y = 1 - 2g`, not `2g - 1`, because canvas Y points *down* while the normal
+/// map is authored in OpenGL (Y-up) convention. A fixture that varies only
+/// along X cannot tell the two apart — `g = 0.5` gives `y = 0` under either
+/// sign — so the flip needs a vertical case to pin it.
+///
+/// `z` is reconstructed rather than read, so a normal map's blue channel is
+/// ignored exactly as Godot ignores it.
+pub fn decode_normal_map(texel: Color) -> Vector3 {
+    let x = texel.r * 2.0 - 1.0;
+    let y = 1.0 - texel.g * 2.0;
+    let z = (1.0 - (x * x + y * y)).max(0.0).sqrt();
+    Vector3::new(x, y, z)
+}
+
+/// The unit vector from a canvas pixel at `world` toward `light`.
+///
+/// For a point light this is `normalize(vec3(light.position, light.height) -
+/// vec3(world, 0))` (canvas.glsl:810) — the height is what lifts the light off
+/// the plane and gives `N·L` something to vary against. For a directional light
+/// Godot instead *mixes* the flat direction toward straight-down-the-viewer by
+/// the height (canvas.glsl:735), so `height = 1` points a directional light
+/// squarely at the canvas.
+pub fn light_vector_to(light: &Light2D, world: Vector2) -> Vector3 {
+    match light.kind {
+        Light2DKind::Point => Vector3::new(
+            light.position.x - world.x,
+            light.position.y - world.y,
+            light.height,
+        )
+        .normalized(),
+        Light2DKind::Directional => {
+            let h = light.height;
+            Vector3::new(
+                light.direction.x * (1.0 - h),
+                light.direction.y * (1.0 - h),
+                h,
+            )
+            .normalized()
+        }
+    }
+}
+
+/// One light's contribution to a normal-mapped pixel — Godot's
+/// `light_normal_compute` (canvas.glsl:420).
+///
+/// With `specular` absent this is plain Lambert (`light * base * N·L`), which
+/// is what Godot falls back to when the item has no specular map. With it
+/// present the Blinn-Phong term is added on top.
+pub fn light_normal_compute(
+    light_vec: Vector3,
+    normal: Vector3,
+    base_color: Color,
+    light_color: Color,
+    specular: Option<SpecularShininess>,
+) -> Color {
+    let n_dot_l = normal.dot(light_vec).max(0.0);
+
+    let Some(spec) = specular else {
+        return Color::new(
+            light_color.r * base_color.r * n_dot_l,
+            light_color.g * base_color.g * n_dot_l,
+            light_color.b * base_color.b * n_dot_l,
+            base_color.a,
+        );
+    };
+
+    // "not great but good enough" is Godot's own comment: canvas lighting has
+    // no real camera, so the viewer is pinned straight down the +Z axis.
+    let view = Vector3::new(0.0, 0.0, 1.0);
+    let half_vec = (view + light_vec).normalized();
+    let n_dot_v = normal.dot(view).max(0.0);
+    let n_dot_h = normal.dot(half_vec).max(0.0);
+
+    // Transcribed exactly. `shininess = 1.0` (the resource default) lands on
+    // exp2(16) * 0.25 = 16384, a very tight highlight — surprising, but it is
+    // what Godot does, and deriving a "reasonable" exponent here would put
+    // every specular pixel off by orders of magnitude.
+    let shininess = (15.0 * spec.shininess + 1.0).exp2() * 0.25;
+    let mut blinn = n_dot_h.powf(shininess);
+    blinn *= (shininess + 8.0) * (1.0 / (8.0 * std::f32::consts::PI));
+    // The 0.75 floor is what keeps a grazing pixel (N·L or N·V near zero) from
+    // dividing the highlight up to infinity.
+    let s = blinn / (4.0 * n_dot_v * n_dot_l).max(0.75);
+
+    Color::new(
+        spec.color.r * light_color.r * s + light_color.r * base_color.r * n_dot_l,
+        spec.color.g * light_color.g * s + light_color.g * base_color.g * n_dot_l,
+        spec.color.b * light_color.b * s + light_color.b * base_color.b * n_dot_l,
+        base_color.a,
+    )
+}
+
+/// Per-pixel surface data sampled from a `CanvasTexture` (pat-s3rrv.203).
+///
+/// ⚠️ One struct rather than parallel `normals` / `speculars` buffers on
+/// purpose. Per-sample arrays read by index are coupled through their length,
+/// and any filter applied to one silently misaligns the other — a bug that
+/// shows up as *shading the wrong pixel*, which looks like a maths error rather
+/// than a bookkeeping one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurfaceSample {
+    /// Unit surface normal, already decoded by [`decode_normal_map`].
+    pub normal: Vector3,
+    /// The item's specular parameters, when it carries a specular map.
+    pub specular: Option<SpecularShininess>,
+}
+
+/// Shades one pixel whose surface normal is known — the normal-mapped
+/// counterpart of [`shade_pixel`].
+///
+/// The per-light `contribution` is unchanged (colour, energy, falloff, shadow);
+/// what differs is the step that lands it on the albedo. [`shade_pixel`]
+/// multiplies the two directly, which is correct only for a surface facing the
+/// viewer; here Godot's `light_normal_compute` folds in `N·L` and the Blinn
+/// term instead.
+pub fn shade_pixel_with_normal(
+    base: Color,
+    world: Vector2,
+    item_mask: u32,
+    surface: SurfaceSample,
+    lights: &[Light2D],
+    occluders: &[LightOccluder2D],
+    ambient: CanvasAmbient,
+) -> Color {
+    let mut out = Color::new(
+        base.r * ambient.color.r,
+        base.g * ambient.color.g,
+        base.b * ambient.color.b,
+        base.a,
+    );
+    for light in lights {
+        let Some(contribution) = light_contribution_at(world, item_mask, light, occluders) else {
+            continue;
+        };
+        let scaled = light_normal_compute(
+            light_vector_to(light, world),
+            surface.normal,
+            base,
+            contribution,
+            surface.specular,
+        );
+        out = composite_light(out, scaled, light.blend_mode);
+    }
+    out
+}
+
+/// Shades `fb` with per-pixel item masks and per-pixel surface normals.
+///
+/// `surfaces` is one entry per pixel, row-major and the same length as
+/// `item_masks`. A `None` entry means "no normal map here", and that pixel
+/// takes the ordinary [`shade_pixel`] path — so a scene mixing normal-mapped
+/// and plain sprites shades each correctly in one pass.
+///
+/// 🔑 The `None` fallback is not merely a convenience. Substituting a flat
+/// `(0, 0, 1)` normal for an unmapped pixel is **not** equivalent: it would
+/// route that pixel through `N·L`, and a light at Godot's default `height` of 0
+/// lies in the canvas plane, so every plain sprite in a scene with a default
+/// light would go black.
+pub fn apply_lights_with_surfaces(
+    fb: &mut FrameBuffer,
+    item_masks: &[u32],
+    surfaces: &[Option<SurfaceSample>],
+    lights: &[Light2D],
+    occluders: &[LightOccluder2D],
+    ambient: CanvasAmbient,
+) {
+    for y in 0..fb.height {
+        for x in 0..fb.width {
+            let idx = (y * fb.width + x) as usize;
+            let mask = item_masks.get(idx).copied().unwrap_or(0);
+            if mask == 0 {
+                continue;
+            }
+            let world = Vector2::new(x as f32 + 0.5, y as f32 + 0.5);
+            fb.pixels[idx] = match surfaces.get(idx).copied().flatten() {
+                Some(surface) => shade_pixel_with_normal(
+                    fb.pixels[idx],
+                    world,
+                    mask,
+                    surface,
+                    lights,
+                    occluders,
+                    ambient,
+                ),
+                None => shade_pixel(fb.pixels[idx], world, mask, lights, occluders, ambient),
+            };
+        }
     }
 }

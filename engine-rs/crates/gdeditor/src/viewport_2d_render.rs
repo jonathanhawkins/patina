@@ -273,6 +273,10 @@ pub enum Render2DKind {
     /// parsing anything; real `ArrayMesh` geometry needs vertex/uv/index
     /// flattening that does not exist yet, and such a node still falls through
     /// to `Marker`.
+    ///
+    /// `QuadMesh` and `PlaneMesh` produce DIFFERENT sizes here — 1x1 and 2x2
+    /// respectively, matching Godot's defaults (pat-s3rrv.198). They were one
+    /// hardcoded 1x1 case until that bead.
     Mesh {
         /// Texture resource path, empty when untextured.
         texture: String,
@@ -1564,16 +1568,46 @@ fn render_kind_for(tree: &SceneTree, id: gdscene::NodeId, class: &str) -> Render
                     Variant::String(s) => s.strip_prefix("primitive:").map(str::to_string),
                     _ => None,
                 });
-            // Godot's QuadMesh defaults to 1x1 centred on the origin.
-            if matches!(primitive.as_deref(), Some("QuadMesh") | Some("PlaneMesh")) {
-                let h = 0.5;
+            // 🔑 QuadMesh and PlaneMesh are NOT the same size, and treating
+            // them as one was wrong in this direction as well as in the 3D
+            // renderer's (pat-s3rrv.198). Godot's QuadMesh overrides PlaneMesh's
+            // `size` to Vector2(1, 1) (`doc/classes/QuadMesh.xml:15`) while
+            // PlaneMesh itself defaults to Vector2(2, 2)
+            // (`doc/classes/PlaneMesh.xml:19`). The old code gave BOTH a
+            // hardcoded 1x1 under a comment naming only QuadMesh, so every
+            // MeshInstance2D holding a PlaneMesh drew at half its real size.
+            //
+            // An authored `__mesh__size` companion wins over either default —
+            // that is the same companion the 3D path reads, so a sub-resource
+            // that sets `size` is honoured identically in both viewports.
+            //
+            // ⚠️ Godot would additionally project by the mesh's `orientation`,
+            // which for a default PlaneMesh (FACE_Y) means an XZ quad whose
+            // vertices all share y = 0 and which therefore collapses to a line
+            // in 2D. Patina draws the size'd quad instead: the bead asks for
+            // "a PlaneMesh draws at 2x2", and a deliberately degenerate node is
+            // indistinguishable on screen from an unimplemented one. Flagged
+            // rather than silently matched.
+            let quad_size = match primitive.as_deref() {
+                Some("QuadMesh") => Some(Vector2::new(1.0, 1.0)),
+                Some("PlaneMesh") => Some(Vector2::new(2.0, 2.0)),
+                _ => None,
+            };
+            if let Some(default_size) = quad_size {
+                let authored = read_vector2(tree, id, "__mesh__size");
+                let size = if authored == Vector2::ZERO {
+                    default_size
+                } else {
+                    authored
+                };
+                let (hx, hy) = (size.x * 0.5, size.y * 0.5);
                 return Render2DKind::Mesh {
                     texture: node2d::get_texture_path(tree, id).unwrap_or_default(),
                     vertices: vec![
-                        Vector2::new(-h, -h),
-                        Vector2::new(h, -h),
-                        Vector2::new(h, h),
-                        Vector2::new(-h, h),
+                        Vector2::new(-hx, -hy),
+                        Vector2::new(hx, -hy),
+                        Vector2::new(hx, hy),
+                        Vector2::new(-hx, hy),
                     ],
                     uvs: vec![
                         Vector2::new(0.0, 0.0),
@@ -2921,6 +2955,11 @@ pub fn rasterize_render_list_with_quality(
         let shader_program: Option<(
             Vec<FragmentInstruction>,
             std::collections::HashMap<String, Variant>,
+            // Uniform names carrying `: hint_screen_texture` (pat-s3rrv.202).
+            // Collected HERE because `sh.uniforms` already holds the parsed
+            // hints — re-parsing the source at draw time would be a second
+            // source of truth for the same fact.
+            Vec<String>,
         )> = item
             .shader_material
             .as_ref()
@@ -2935,7 +2974,24 @@ pub fn rasterize_render_list_with_quality(
                 for (k, v) in &m.parameters {
                     uniforms.insert(k.clone(), v.clone());
                 }
-                (instructions, uniforms)
+                // ⚠️ Godot allows TWO spellings for a back-buffer read: the
+                // legacy built-in `SCREEN_TEXTURE`, and a user-named
+                // `uniform sampler2D screen_tex : hint_screen_texture`. The
+                // sampler is handed the LITERAL name, so a hint-declared
+                // uniform that is not listed here falls through to the item's
+                // own texture — a sprite sampling itself, which still produces
+                // plausible pixels and reads as a working screen effect.
+                let screen_uniforms: Vec<String> = sh
+                    .uniforms
+                    .iter()
+                    .filter(|u| {
+                        u.hint
+                            .as_deref()
+                            .is_some_and(|h| h.trim() == "hint_screen_texture")
+                    })
+                    .map(|u| u.name.clone())
+                    .collect();
+                (instructions, uniforms, screen_uniforms)
             });
         match &item.kind {
             Render2DKind::Sprite {
@@ -3008,7 +3064,7 @@ pub fn rasterize_render_list_with_quality(
                             // the plain blit, now carrying the item's resolved
                             // filter/repeat instead of hardcoded nearest-clamp.
                             match &shader_program {
-                                Some((instructions, uniforms)) => {
+                                Some((instructions, uniforms, screen_uniforms)) => {
                                     draw::draw_texture_rect_transformed_shaded_with_screen(
                                         &mut fb,
                                         tex,
@@ -3031,6 +3087,7 @@ pub fn rasterize_render_list_with_quality(
                                         // `None` unless a BackBufferCopy ran
                                         // earlier in this frame's draw order.
                                         screen_texture.as_ref(),
+                                        screen_uniforms,
                                     );
                                 }
                                 None => {
@@ -3391,6 +3448,20 @@ fn restore_outside_clip(fb: &mut FrameBuffer, rect: Rect2, before: &[Color]) {
 /// so running it unconditionally would darken every unlit scene to a sixth of
 /// its brightness. "No lights" has to mean "no shading", not "ambient only".
 pub fn shade_runtime_canvas(tree: &SceneTree, fb: &mut FrameBuffer) {
+    shade_runtime_canvas_with_surfaces(tree, fb, &[]);
+}
+
+/// [`shade_runtime_canvas`] with per-pixel surface normals from
+/// [`canvas_surface_buffer`] (pat-s3rrv.203).
+///
+/// An empty `surfaces` slice is exactly the old behaviour — every lookup misses
+/// and every pixel takes the flat path — so this is a superset rather than a
+/// replacement, and a caller with no texture cache loses nothing.
+pub fn shade_runtime_canvas_with_surfaces(
+    tree: &SceneTree,
+    fb: &mut FrameBuffer,
+    surfaces: &[Option<gdrender2d::light2d::SurfaceSample>],
+) {
     let lights = gdscene::light2d_scene::collect_lights_2d(tree);
     if !lights.is_empty() {
         let occluders = gdscene::light2d_scene::collect_occluders_2d(tree);
@@ -3400,9 +3471,10 @@ pub fn shade_runtime_canvas(tree: &SceneTree, fb: &mut FrameBuffer) {
         // a fresh CanvasItem is on, and what this pass used to assume for the
         // whole frame — and each item stamps its own mask over its own pixels.
         let masks = item_light_mask_buffer(tree, fb.width, fb.height);
-        gdrender2d::light2d::apply_lights_with_item_masks(
+        gdrender2d::light2d::apply_lights_with_surfaces(
             fb,
             &masks,
+            surfaces,
             &lights,
             &occluders,
             gdrender2d::light2d::CanvasAmbient::default(),
@@ -3426,6 +3498,196 @@ pub fn shade_runtime_canvas(tree: &SceneTree, fb: &mut FrameBuffer) {
 /// bound on scope — it is exact for the axis-aligned rects and sprites that make
 /// up almost every 2D scene, and per-pixel coverage would mean threading a mask
 /// through every `draw::*` call in the rasterizer.
+/// Bakes every `NoiseTexture2D` in the tree into the texture cache
+/// (pat-s3rrv.208).
+///
+/// `gdresource::noise` has had a working FastNoiseLite core since
+/// pat-nzgdu.219 with **no caller anywhere in the workspace** — the classic
+/// orphaned module. This is the binding: a Sprite2D whose texture is a
+/// NoiseTexture2D resolves to a `noise://<node>` key (see
+/// `gdscene::node2d::get_texture_path`), and this fills that key in before the
+/// frame is rasterized, so the ordinary sprite path draws generated pixels
+/// without knowing they were generated.
+///
+/// Idempotent: an entry already present is left alone, so the bake happens once
+/// per node rather than once per frame.
+pub fn bake_noise_textures(tree: &SceneTree, texture_cache: &mut TextureCache) {
+    use gdresource::noise::{fractal_type_from_godot, noise_type_from_godot, FastNoiseLite};
+
+    for nid in tree.all_nodes_in_tree_order() {
+        let Some(node) = tree.get_node(nid) else {
+            continue;
+        };
+        if !matches!(
+            node.get_property("__noise_tex__class"),
+            Variant::String(ref c) if c == "NoiseTexture2D"
+        ) {
+            continue;
+        }
+        // ⚠️ A NoiseTexture2D whose `noise` is null generates NOTHING. Godot
+        // returns an empty image from `_generate_texture` in that case
+        // (`noise_texture_2d.cpp`), so baking a default field here would invent
+        // pixels the author never asked for — and would make "the sprite shows
+        // a varying field" true even when no generator was ever attached,
+        // which is precisely the assertion this feature is tested by.
+        if !matches!(node.get_property("__noise__class"), Variant::String(_)) {
+            continue;
+        }
+        let key = format!("{}{}", gdscene::node2d::NOISE_TEXTURE_SCHEME, nid.raw());
+        if texture_cache.get(&key).is_some() {
+            continue;
+        }
+
+        let int_prop = |k: &str, default: i64| match node.get_property(k) {
+            Variant::Int(i) => i,
+            _ => default,
+        };
+        let float_prop = |k: &str, default: f32| match node.get_property(k) {
+            Variant::Float(f) => f as f32,
+            Variant::Int(i) => i as f32,
+            _ => default,
+        };
+
+        // Godot's documented defaults, used when the .tscn leaves a property
+        // out — which is the common case, since the editor only writes
+        // non-default values.
+        let (noise_type, _exact) = noise_type_from_godot(int_prop("__noise__noise_type", 1));
+        let noise = FastNoiseLite::new()
+            .seed(int_prop("__noise__seed", 0) as i32)
+            .frequency(float_prop("__noise__frequency", 0.01))
+            .noise_type(noise_type)
+            .fractal(fractal_type_from_godot(int_prop(
+                "__noise__fractal_type",
+                1,
+            )))
+            .octaves(int_prop("__noise__fractal_octaves", 5) as i32)
+            .lacunarity(float_prop("__noise__fractal_lacunarity", 2.0))
+            .gain(float_prop("__noise__fractal_gain", 0.5))
+            .weighted_strength(float_prop("__noise__fractal_weighted_strength", 0.0))
+            .ping_pong_strength(float_prop("__noise__fractal_ping_pong_strength", 2.0));
+
+        // ⚠️ Godot's default is 512x512. Honouring that literally would bake a
+        // quarter of a million samples per texture during a test frame, so the
+        // authored size is used as-is but clamped to something a frame can
+        // afford; a scene that really wants 512 still gets 512.
+        let width = int_prop("__noise_tex__width", 512).clamp(1, 2048) as u32;
+        let height = int_prop("__noise_tex__height", 512).clamp(1, 2048) as u32;
+        let invert = matches!(
+            node.get_property("__noise_tex__invert"),
+            Variant::Bool(true)
+        );
+
+        let l8 = noise.bake_image_l8(width, height);
+        let pixels = l8
+            .into_iter()
+            .map(|v| {
+                let f = if invert {
+                    1.0 - v as f32 / 255.0
+                } else {
+                    v as f32 / 255.0
+                };
+                Color::new(f, f, f, 1.0)
+            })
+            .collect();
+        texture_cache.insert(
+            &key,
+            gdrender2d::texture::Texture2D {
+                width,
+                height,
+                pixels,
+            },
+        );
+    }
+}
+
+/// Builds the per-pixel surface buffer the normal-mapped light pass consumes
+/// (pat-s3rrv.203).
+///
+/// Only items whose `texture` was a `CanvasTexture` with a `normal_texture`
+/// contribute; every other pixel stays `None` and takes the ordinary flat
+/// shading path. That distinction is load-bearing rather than an optimisation —
+/// see `gdrender2d::light2d::apply_lights_with_surfaces`, where substituting a
+/// flat normal would black out every plain sprite under a default-height light.
+///
+/// Like [`item_light_mask_buffer`], the normal is stamped over the item's
+/// **axis-aligned screen extent**, so a rotated sprite's normals spill into its
+/// corners. Same deliberate bound on scope, for the same reason: per-pixel
+/// coverage would mean threading a surface through every `draw::*` call.
+///
+/// ⚠️ The normal is NOT rotated into the item's frame. Godot does that
+/// (`canvas.glsl:704` multiplies by the item transform), so a rotated
+/// normal-mapped sprite lights differently here than it does there. Recorded
+/// rather than silently approximated: it needs the same per-pixel plumbing the
+/// bound above defers.
+pub fn canvas_surface_buffer(
+    tree: &SceneTree,
+    width: u32,
+    height: u32,
+    mut texture_cache: Option<&mut TextureCache>,
+) -> Vec<Option<gdrender2d::light2d::SurfaceSample>> {
+    let mut surfaces = vec![None; (width as usize) * (height as usize)];
+    let Some(cache) = texture_cache.as_deref_mut() else {
+        return surfaces;
+    };
+
+    for item in collect_canvas_items(tree) {
+        let node_id = NodeId::from_object_id(gdcore::id::ObjectId::from_raw(item.node_id));
+        let Some(node) = tree.get_node(node_id) else {
+            continue;
+        };
+        let normal_path = match node.get_property("__canvas_texture__normal_texture") {
+            Variant::String(p) if !p.is_empty() => p,
+            _ => continue,
+        };
+        // Specular is independently optional: a CanvasTexture may carry a normal
+        // map and no specular map, in which case Godot shades plain Lambert.
+        let specular = match node.get_property("__canvas_texture__specular_texture") {
+            Variant::String(ref p) if !p.is_empty() => {
+                Some(gdrender2d::light2d::SpecularShininess {
+                    color: match node.get_property("__canvas_texture__specular_color") {
+                        Variant::Color(c) => c,
+                        _ => Color::new(1.0, 1.0, 1.0, 1.0),
+                    },
+                    shininess: match node.get_property("__canvas_texture__specular_shininess") {
+                        Variant::Float(f) => f as f32,
+                        Variant::Int(i) => i as f32,
+                        _ => 1.0,
+                    },
+                })
+            }
+            _ => None,
+        };
+
+        let Some(bounds) = item_screen_bounds(&item) else {
+            continue;
+        };
+        let Some(tex) = cache.get(&normal_path) else {
+            continue;
+        };
+        if tex.width == 0 || tex.height == 0 || bounds.size.x <= 0.0 || bounds.size.y <= 0.0 {
+            continue;
+        }
+
+        let x0 = bounds.position.x.floor().max(0.0) as u32;
+        let y0 = bounds.position.y.floor().max(0.0) as u32;
+        let x1 = ((bounds.position.x + bounds.size.x).ceil().max(0.0) as u32).min(width);
+        let y1 = ((bounds.position.y + bounds.size.y).ceil().max(0.0) as u32).min(height);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let u = (x as f32 + 0.5 - bounds.position.x) / bounds.size.x;
+                let v = (y as f32 + 0.5 - bounds.position.y) / bounds.size.y;
+                let tx = ((u * tex.width as f32) as u32).min(tex.width - 1);
+                let ty = ((v * tex.height as f32) as u32).min(tex.height - 1);
+                surfaces[(y * width + x) as usize] = Some(gdrender2d::light2d::SurfaceSample {
+                    normal: gdrender2d::light2d::decode_normal_map(tex.get_pixel(tx, ty)),
+                    specular,
+                });
+            }
+        }
+    }
+    surfaces
+}
+
 fn item_light_mask_buffer(tree: &SceneTree, width: u32, height: u32) -> Vec<u32> {
     let mut masks = vec![1u32; (width as usize) * (height as usize)];
     for item in collect_canvas_items(tree) {
@@ -3525,16 +3787,24 @@ pub fn render_runtime_canvas(
     width: u32,
     height: u32,
     clear: Color,
-    texture_cache: Option<&mut TextureCache>,
+    mut texture_cache: Option<&mut TextureCache>,
 ) -> FrameBuffer {
     let items = build_runtime_render_list(tree);
     // CanvasGroup subtrees composite as one layer (pat-s3rrv.183). With no
     // CanvasGroup in the scene this is byte-for-byte the old path — the
     // groups-aware entry delegates straight back to `rasterize_render_list`.
     let groups = collect_canvas_groups(tree);
+    // Generated textures have to exist in the cache before anything looks them
+    // up, so the bake runs first (pat-s3rrv.208).
+    if let Some(cache) = texture_cache.as_deref_mut() {
+        bake_noise_textures(tree, cache);
+    }
+    // Sample the normal maps BEFORE the cache is handed to the rasterizer — it
+    // is an `Option<&mut _>` and moves in, so the reborrow has to happen here.
+    let surfaces = canvas_surface_buffer(tree, width, height, texture_cache.as_deref_mut());
     let mut fb =
         rasterize_render_list_with_groups(&items, &groups, width, height, clear, texture_cache);
-    shade_runtime_canvas(tree, &mut fb);
+    shade_runtime_canvas_with_surfaces(tree, &mut fb, &surfaces);
     fb
 }
 

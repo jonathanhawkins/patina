@@ -3384,6 +3384,39 @@ impl Interpreter {
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "ResourceUID") {
                             return call_resourceuid_static(member, &evaluated_args);
                         }
+                        // The eight remaining Godot 4.6.1 singletons
+                        // (pat-s3rrv.211). Each name must also appear in
+                        // BUILTIN_SINGLETONS, and `builtin_singletons_all_have_a_dispatch_arm`
+                        // greps this file for these exact arms.
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "IP") {
+                            return call_ip_static(member, &evaluated_args);
+                        }
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "TextServerManager") {
+                            return call_textservermanager_static(member, &evaluated_args);
+                        }
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "NativeMenu") {
+                            return call_nativemenu_static(member, &evaluated_args);
+                        }
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "NavigationMeshGenerator")
+                        {
+                            return call_navigationmeshgenerator_static(member, &evaluated_args);
+                        }
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "PhysicsServer2DManager")
+                        {
+                            return call_physicsserver2dmanager_static(member, &evaluated_args);
+                        }
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "PhysicsServer3DManager")
+                        {
+                            return call_physicsserver3dmanager_static(member, &evaluated_args);
+                        }
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "NavigationServer2DManager")
+                        {
+                            return call_navigationserver2dmanager_static(member, &evaluated_args);
+                        }
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "NavigationServer3DManager")
+                        {
+                            return call_navigationserver3dmanager_static(member, &evaluated_args);
+                        }
                         // TranslationServer singleton (pat-nzgdu.92).
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "TranslationServer") {
                             return call_translationserver_static(member, &evaluated_args);
@@ -3653,6 +3686,29 @@ impl Interpreter {
                                 ) {
                                     if let Some(access) = self.scene_access.as_mut() {
                                         if let Some(raw) = access.astar_new(class_name.as_str()) {
+                                            return Ok(Variant::ObjectId(
+                                                gdcore::id::ObjectId::from_raw(raw),
+                                            ));
+                                        }
+                                    }
+                                }
+                                // ImmediateMesh and SurfaceTool, same shape
+                                // (pat-s3rrv.197): both RefCounted in Godot,
+                                // both implemented in `gdserver3d`, which this
+                                // crate cannot name.
+                                //
+                                // ⚠️ ClassDB registration alone does NOT make a
+                                // non-Node class constructible — this dispatch
+                                // is what does. A class registered with no arm
+                                // here returns nothing from `.new()` while
+                                // introspecting perfectly, which is how the
+                                // NavigationPathQuery classes shipped
+                                // (pat-s3rrv.181).
+                                if matches!(class_name.as_str(), "ImmediateMesh" | "SurfaceTool") {
+                                    if let Some(access) = self.scene_access.as_mut() {
+                                        if let Some(raw) =
+                                            access.mesh_builder_new(class_name.as_str())
+                                        {
                                             return Ok(Variant::ObjectId(
                                                 gdcore::id::ObjectId::from_raw(raw),
                                             ));
@@ -10027,6 +10083,47 @@ impl Interpreter {
                         format!(
                             "AStar.{method}: no such method on handle {:#018x} \
                              (scene access {})",
+                            oid.raw(),
+                            if had_access { "present" } else { "MISSING" }
+                        ),
+                    )));
+                }
+            }
+            // ImmediateMesh / SurfaceTool live in the scene layer for the same
+            // reason AStar does — they are `gdserver3d` types this crate cannot
+            // name (pat-s3rrv.197). Forward on the handle tag.
+            if crate::bindings::is_mesh_builder_handle(oid.raw()) {
+                let had_access = self.scene_access.is_some();
+                if let Some(access) = self.scene_access.as_mut() {
+                    if let Some(v) = access.mesh_builder_call(oid.raw(), method, args) {
+                        return Ok(v);
+                    }
+                }
+                // ⚠️ Error rather than fall through, for the reason the AStar
+                // arm above records: a handle that reaches here did NOT match a
+                // method, and falling through reports it as an unknown *node*
+                // method — naming neither the class nor the handle. That
+                // mis-attribution made the AStar bead undiagnosable for four
+                // passes, because every failure looked like a broken
+                // constructor. The same allowlist applies: these are Object
+                // methods the general table owns, and this arm must not claim
+                // them.
+                if !matches!(
+                    method,
+                    "get_class"
+                        | "is_class"
+                        | "free"
+                        | "get_instance_id"
+                        | "has_method"
+                        | "call"
+                        | "callv"
+                        | "get"
+                        | "set"
+                ) {
+                    return Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                        format!(
+                            "ImmediateMesh/SurfaceTool.{method}: no such method on \
+                             handle {:#018x} (scene access {})",
                             oid.raw(),
                             if had_access { "present" } else { "MISSING" }
                         ),
@@ -17718,7 +17815,44 @@ fn try_static_member(type_name: &str, member: &str) -> Option<Variant> {
             // may only answer where the two above are silent. Returning `None` for
             // an unknown member is what preserves the UndefinedVariable error —
             // answering 0 would turn every typo into a silent zero.
-            .or_else(|| gdobject::class_get_integer_constant(type_name, member).map(Variant::Int)),
+            .or_else(|| gdobject::class_get_integer_constant(type_name, member).map(Variant::Int))
+            // pat-s3rrv.211: the enums of the eight singletons added with this
+            // bead. Deliberately after ClassDB, so registering them there later
+            // supersedes this table rather than colliding with it.
+            .or_else(|| singleton_class_constant(type_name, member).map(Variant::Int)),
+    }
+}
+
+/// Class-scoped integer constants for the singletons added by pat-s3rrv.211.
+///
+/// `IP`'s values are read from [`gdplatform::ip`] rather than retyped, so the
+/// script-visible constant and the implementation can never disagree.
+/// `NativeMenu`'s are transcribed from `servers/display/native_menu.h`, where
+/// both enums are unvalued and therefore sequential from zero.
+fn singleton_class_constant(class_name: &str, member: &str) -> Option<i64> {
+    match (class_name, member) {
+        ("IP", "RESOLVER_STATUS_NONE") => Some(gdplatform::ip::RESOLVER_STATUS_NONE),
+        ("IP", "RESOLVER_STATUS_WAITING") => Some(gdplatform::ip::RESOLVER_STATUS_WAITING),
+        ("IP", "RESOLVER_STATUS_DONE") => Some(gdplatform::ip::RESOLVER_STATUS_DONE),
+        ("IP", "RESOLVER_STATUS_ERROR") => Some(gdplatform::ip::RESOLVER_STATUS_ERROR),
+        ("IP", "RESOLVER_MAX_QUERIES") => Some(gdplatform::ip::RESOLVER_MAX_QUERIES),
+        ("IP", "RESOLVER_INVALID_ID") => Some(gdplatform::ip::RESOLVER_INVALID_ID),
+        ("IP", "TYPE_NONE") => Some(gdplatform::ip::TYPE_NONE),
+        ("IP", "TYPE_IPV4") => Some(gdplatform::ip::TYPE_IPV4),
+        ("IP", "TYPE_IPV6") => Some(gdplatform::ip::TYPE_IPV6),
+        ("IP", "TYPE_ANY") => Some(gdplatform::ip::TYPE_ANY),
+        ("NativeMenu", "FEATURE_GLOBAL_MENU") => Some(0),
+        ("NativeMenu", "FEATURE_POPUP_MENU") => Some(1),
+        ("NativeMenu", "FEATURE_OPEN_CLOSE_CALLBACK") => Some(2),
+        ("NativeMenu", "FEATURE_HOVER_CALLBACK") => Some(3),
+        ("NativeMenu", "FEATURE_KEY_CALLBACK") => Some(4),
+        ("NativeMenu", "INVALID_MENU_ID") => Some(0),
+        ("NativeMenu", "MAIN_MENU_ID") => Some(1),
+        ("NativeMenu", "APPLICATION_MENU_ID") => Some(2),
+        ("NativeMenu", "WINDOW_MENU_ID") => Some(3),
+        ("NativeMenu", "HELP_MENU_ID") => Some(4),
+        ("NativeMenu", "DOCK_MENU_ID") => Some(5),
+        _ => None,
     }
 }
 
@@ -18085,16 +18219,24 @@ const BUILTIN_SINGLETONS: &[&str] = &[
     "GDExtensionManager",
     "Geometry2D",
     "Geometry3D",
+    "IP",
     "Input",
     "InputMap",
     "JavaScriptBridge",
     "Marshalls",
+    "NativeMenu",
+    "NavigationMeshGenerator",
+    "NavigationServer2DManager",
+    "NavigationServer3DManager",
     "OS",
     "Performance",
     "PhysicsServer2D",
+    "PhysicsServer2DManager",
+    "PhysicsServer3DManager",
     "ProjectSettings",
     "RenderingServer",
     "ResourceUID",
+    "TextServerManager",
     "Time",
     "TranslationServer",
     "WorkerThreadPool",
@@ -25683,6 +25825,554 @@ fn call_resourceuid_static(method: &str, args: &[Variant]) -> Result<Variant, Ru
         }
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("ResourceUID.{other}"),
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The eight remaining Godot 4.6.1 singletons (pat-s3rrv.211).
+//
+// Each is web-target-correct: the name resolves, every method answers, and the
+// answers match what Godot's web build would produce rather than erroring.
+// ---------------------------------------------------------------------------
+
+/// Pulls a `String` argument, naming the call in the error.
+fn singleton_string_arg(args: &[Variant], idx: usize, what: &str) -> Result<String, RuntimeError> {
+    match args.get(idx) {
+        Some(Variant::String(s)) => Ok(s.clone()),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "{what} expects a string argument"
+        )))),
+    }
+}
+
+/// Pulls an integer argument, naming the call in the error.
+fn singleton_int_arg(args: &[Variant], idx: usize, what: &str) -> Result<i64, RuntimeError> {
+    let v = args.get(idx).ok_or_else(|| {
+        RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "{what} expects an integer argument"
+        )))
+    })?;
+    to_int(v)
+}
+
+/// `IP` — backed by [`gdplatform::ip`], which models `IPWeb`'s empty results.
+fn call_ip_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    let mut ip = gdplatform::ip::global();
+    // Godot defaults the type parameter to TYPE_ANY on every resolve entry point.
+    let ip_type = match args.get(1) {
+        Some(v) => to_int(v)?,
+        None => gdplatform::ip::TYPE_ANY,
+    };
+    match method {
+        "resolve_hostname" => {
+            let host = singleton_string_arg(args, 0, "IP.resolve_hostname()")?;
+            Ok(Variant::String(ip.resolve_hostname(&host, ip_type)))
+        }
+        "resolve_hostname_addresses" => {
+            let host = singleton_string_arg(args, 0, "IP.resolve_hostname_addresses()")?;
+            Ok(Variant::PackedStringArray(
+                ip.resolve_hostname_addresses(&host, ip_type),
+            ))
+        }
+        "resolve_hostname_queue_item" => {
+            let host = singleton_string_arg(args, 0, "IP.resolve_hostname_queue_item()")?;
+            Ok(Variant::Int(ip.resolve_hostname_queue_item(&host, ip_type)))
+        }
+        "get_resolve_item_status" => {
+            let id = singleton_int_arg(args, 0, "IP.get_resolve_item_status()")?;
+            Ok(Variant::Int(ip.get_resolve_item_status(id)))
+        }
+        "get_resolve_item_address" => {
+            let id = singleton_int_arg(args, 0, "IP.get_resolve_item_address()")?;
+            Ok(Variant::String(ip.get_resolve_item_address(id)))
+        }
+        "get_resolve_item_addresses" => {
+            let id = singleton_int_arg(args, 0, "IP.get_resolve_item_addresses()")?;
+            Ok(Variant::Array(
+                ip.get_resolve_item_addresses(id)
+                    .into_iter()
+                    .map(Variant::String)
+                    .collect(),
+            ))
+        }
+        "erase_resolve_item" => {
+            let id = singleton_int_arg(args, 0, "IP.erase_resolve_item()")?;
+            ip.erase_resolve_item(id);
+            Ok(Variant::Nil)
+        }
+        "get_local_addresses" => Ok(Variant::PackedStringArray(ip.get_local_addresses())),
+        "get_local_interfaces" => Ok(Variant::Array(
+            ip.get_local_interfaces()
+                .into_iter()
+                .map(|iface| {
+                    let mut d = gdvariant::Dictionary::new();
+                    d.insert(Variant::String("name".into()), Variant::String(iface.name));
+                    d.insert(
+                        Variant::String("friendly".into()),
+                        Variant::String(iface.friendly_name),
+                    );
+                    d.insert(Variant::String("index".into()), Variant::String(iface.index));
+                    d.insert(
+                        Variant::String("addresses".into()),
+                        Variant::Array(iface.addresses.into_iter().map(Variant::String).collect()),
+                    );
+                    Variant::Dictionary(d)
+                })
+                .collect(),
+        )),
+        "clear_cache" => {
+            // Godot's hostname parameter defaults to "", which clears everything.
+            let host = match args.first() {
+                Some(Variant::String(s)) => s.clone(),
+                _ => String::new(),
+            };
+            ip.clear_cache(&host);
+            Ok(Variant::Nil)
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("IP.{other}"),
+        ))),
+    }
+}
+
+/// The process-global `NativeMenu` model.
+///
+/// `gdplatform::native_menu` already held a complete 822-line menu model whose
+/// only consumer was `macos.rs`; this promotes it to the singleton's backing
+/// store so scripts reach the same bookkeeping.
+fn native_menus() -> std::sync::MutexGuard<'static, gdplatform::native_menu::NativeMenuBar> {
+    static MENUS: std::sync::OnceLock<
+        std::sync::Mutex<gdplatform::native_menu::NativeMenuBar>,
+    > = std::sync::OnceLock::new();
+    MENUS
+        .get_or_init(|| std::sync::Mutex::new(gdplatform::native_menu::NativeMenuBar::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Accepts a menu handle as either a `Rid` — what `create_menu` returns — or a
+/// plain integer, since much of Patina's script surface still carries RIDs as
+/// ints. `to_int` rejects `Variant::Rid`, so without this the acceptance's own
+/// `create_menu()` -> `add_item(rid, ..)` round-trip would fail on a type error.
+fn menu_handle_arg(args: &[Variant], idx: usize, what: &str) -> Result<u64, RuntimeError> {
+    match args.get(idx) {
+        Some(Variant::Rid(rid)) => Ok(rid.id()),
+        Some(v) => Ok(to_int(v)? as u64),
+        None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "{what} expects a menu handle"
+        )))),
+    }
+}
+
+/// `NativeMenu` — registered on every platform, but web has no global menu, so
+/// `has_feature`/`has_system_menu`/`is_system_menu` are false while the item
+/// API stays faithful bookkeeping.
+fn call_nativemenu_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+    use gdplatform::native_menu::{MenuId, MenuItem};
+
+    let mut bar = native_menus();
+    match method {
+        // Web ships no global menu, so every Feature is absent.
+        "has_feature" => Ok(Variant::Bool(false)),
+        "has_system_menu" => Ok(Variant::Bool(false)),
+        "is_system_menu" => Ok(Variant::Bool(false)),
+        "get_system_menu" => Ok(Variant::Rid(gdcore::id::Rid::INVALID)),
+        "create_menu" => {
+            let id = bar.create_menu("");
+            Ok(Variant::Rid(gdcore::id::Rid::from_raw(id.0)))
+        }
+        "free_menu" => {
+            let rid = menu_handle_arg(args, 0, "NativeMenu.free_menu()")?;
+            Ok(Variant::Bool(bar.remove_menu(MenuId(rid))))
+        }
+        "has_menu" => {
+            let rid = menu_handle_arg(args, 0, "NativeMenu.has_menu()")?;
+            Ok(Variant::Bool(bar.get_menu(MenuId(rid)).is_some()))
+        }
+        "add_item" => {
+            let rid = menu_handle_arg(args, 0, "NativeMenu.add_item()")?;
+            let label = singleton_string_arg(args, 1, "NativeMenu.add_item()")?;
+            let item_id = bar.alloc_item_id();
+            match bar.get_menu_mut(MenuId(rid)) {
+                // Godot returns the new item's INDEX, not its id.
+                Some(menu) => {
+                    menu.add_item(MenuItem::action(item_id, label));
+                    Ok(Variant::Int(menu.item_count() as i64 - 1))
+                }
+                None => Ok(Variant::Int(-1)),
+            }
+        }
+        "add_separator" => {
+            let rid = menu_handle_arg(args, 0, "NativeMenu.add_separator()")?;
+            let item_id = bar.alloc_item_id();
+            match bar.get_menu_mut(MenuId(rid)) {
+                Some(menu) => {
+                    menu.add_item(MenuItem::separator(item_id));
+                    Ok(Variant::Int(menu.item_count() as i64 - 1))
+                }
+                None => Ok(Variant::Int(-1)),
+            }
+        }
+        "get_item_count" => {
+            let rid = menu_handle_arg(args, 0, "NativeMenu.get_item_count()")?;
+            Ok(Variant::Int(
+                bar.get_menu(MenuId(rid))
+                    .map(|m| m.item_count() as i64)
+                    .unwrap_or(0),
+            ))
+        }
+        "get_item_text" => {
+            let rid = menu_handle_arg(args, 0, "NativeMenu.get_item_text()")?;
+            let idx = singleton_int_arg(args, 1, "NativeMenu.get_item_text()")?;
+            Ok(Variant::String(
+                bar.get_menu(MenuId(rid))
+                    .and_then(|m| usize::try_from(idx).ok().and_then(|i| m.items.get(i)))
+                    .map(|item| item.label.clone())
+                    .unwrap_or_default(),
+            ))
+        }
+        "set_item_text" => {
+            let rid = menu_handle_arg(args, 0, "NativeMenu.set_item_text()")?;
+            let idx = singleton_int_arg(args, 1, "NativeMenu.set_item_text()")?;
+            let text = singleton_string_arg(args, 2, "NativeMenu.set_item_text()")?;
+            if let Some(menu) = bar.get_menu_mut(MenuId(rid)) {
+                if let Some(item) = usize::try_from(idx).ok().and_then(|i| menu.items.get_mut(i)) {
+                    item.label = text;
+                }
+            }
+            Ok(Variant::Nil)
+        }
+        "remove_item" => {
+            let rid = menu_handle_arg(args, 0, "NativeMenu.remove_item()")?;
+            let idx = singleton_int_arg(args, 1, "NativeMenu.remove_item()")?;
+            if let Some(menu) = bar.get_menu_mut(MenuId(rid)) {
+                if let Ok(i) = usize::try_from(idx) {
+                    if i < menu.items.len() {
+                        menu.items.remove(i);
+                    }
+                }
+            }
+            Ok(Variant::Nil)
+        }
+        "clear" => {
+            let rid = menu_handle_arg(args, 0, "NativeMenu.clear()")?;
+            if let Some(menu) = bar.get_menu_mut(MenuId(rid)) {
+                menu.clear();
+            }
+            Ok(Variant::Nil)
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("NativeMenu.{other}"),
+        ))),
+    }
+}
+
+/// A named-interface registry with one primary, shared by `TextServerManager`
+/// and the four `*Manager` singletons — all five are the same shape in Godot.
+#[derive(Debug, Clone)]
+struct SingletonRegistry {
+    names: Vec<String>,
+    primary: usize,
+}
+
+impl SingletonRegistry {
+    fn with(shipped: &str) -> Self {
+        Self {
+            names: vec![shipped.to_string()],
+            primary: 0,
+        }
+    }
+
+    fn find(&self, name: &str) -> i64 {
+        self.names
+            .iter()
+            .position(|n| n == name)
+            .map(|i| i as i64)
+            .unwrap_or(-1)
+    }
+
+    fn primary_name(&self) -> Option<&String> {
+        self.names.get(self.primary)
+    }
+}
+
+/// `TextServerManager` — the shipped interface is gdrender2d's real shaper.
+fn call_textservermanager_static(
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    static REG: std::sync::OnceLock<std::sync::Mutex<SingletonRegistry>> =
+        std::sync::OnceLock::new();
+    let mut reg = REG
+        .get_or_init(|| std::sync::Mutex::new(SingletonRegistry::with("TextServerLite")))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    match method {
+        "get_interface_count" => Ok(Variant::Int(reg.names.len() as i64)),
+        "get_primary_interface" => Ok(reg
+            .primary_name()
+            .map(|n| Variant::String(n.clone()))
+            .unwrap_or(Variant::Nil)),
+        "get_interface" => {
+            let idx = singleton_int_arg(args, 0, "TextServerManager.get_interface()")?;
+            Ok(usize::try_from(idx)
+                .ok()
+                .and_then(|i| reg.names.get(i))
+                .map(|n| Variant::String(n.clone()))
+                .unwrap_or(Variant::Nil))
+        }
+        "get_interfaces" => Ok(Variant::Array(
+            reg.names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| {
+                    let mut d = gdvariant::Dictionary::new();
+                    d.insert(Variant::String("id".into()), Variant::Int(i as i64));
+                    d.insert(Variant::String("name".into()), Variant::String(name.clone()));
+                    if i == 0 {
+                        // The shipped interface is gdrender2d's real shaper, so
+                        // its descriptor reports the shaper's actual state
+                        // rather than a hard-coded string.
+                        d.insert(
+                            Variant::String("has_ttf".into()),
+                            Variant::Bool(
+                                gdrender2d::text_server::TextServerLite::new().has_ttf(),
+                            ),
+                        );
+                    }
+                    Variant::Dictionary(d)
+                })
+                .collect(),
+        )),
+        "find_interface" => {
+            let name = singleton_string_arg(args, 0, "TextServerManager.find_interface()")?;
+            Ok(Variant::Int(reg.find(&name)))
+        }
+        "add_interface" => {
+            let name = singleton_string_arg(args, 0, "TextServerManager.add_interface()")?;
+            if reg.find(&name) < 0 {
+                reg.names.push(name);
+            }
+            Ok(Variant::Nil)
+        }
+        "remove_interface" => {
+            let name = singleton_string_arg(args, 0, "TextServerManager.remove_interface()")?;
+            let found = reg.find(&name);
+            if let Ok(i) = usize::try_from(found) {
+                reg.names.remove(i);
+                // Godot keeps a valid primary; clamp rather than dangle.
+                if reg.primary >= reg.names.len() {
+                    reg.primary = reg.names.len().saturating_sub(1);
+                }
+            }
+            Ok(Variant::Nil)
+        }
+        "set_primary_interface" => {
+            let target = match args.first() {
+                Some(Variant::String(name)) => reg.find(name),
+                Some(v) => to_int(v)?,
+                None => -1,
+            };
+            if let Ok(i) = usize::try_from(target) {
+                if i < reg.names.len() {
+                    reg.primary = i;
+                }
+            }
+            Ok(Variant::Nil)
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("TextServerManager.{other}"),
+        ))),
+    }
+}
+
+/// The shared body of the four `*Manager` singletons — Godot gives each the
+/// same two-method surface (`register_server`, `set_default_server`) plus the
+/// server-name/index accessors.
+fn call_server_manager_static(
+    singleton: &str,
+    reg: &mut SingletonRegistry,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    match method {
+        "register_server" => {
+            let name = singleton_string_arg(args, 0, &format!("{singleton}.register_server()"))?;
+            if reg.find(&name) < 0 {
+                reg.names.push(name);
+            }
+            Ok(Variant::Nil)
+        }
+        "set_default_server" => {
+            let name = singleton_string_arg(args, 0, &format!("{singleton}.set_default_server()"))?;
+            let found = reg.find(&name);
+            if let Ok(i) = usize::try_from(found) {
+                reg.primary = i;
+            }
+            Ok(Variant::Nil)
+        }
+        "get_servers_count" => Ok(Variant::Int(reg.names.len() as i64)),
+        "get_server_name" => {
+            let idx = singleton_int_arg(args, 0, &format!("{singleton}.get_server_name()"))?;
+            Ok(Variant::String(
+                usize::try_from(idx)
+                    .ok()
+                    .and_then(|i| reg.names.get(i))
+                    .cloned()
+                    .unwrap_or_default(),
+            ))
+        }
+        "get_default_server_name" => Ok(Variant::String(
+            reg.primary_name().cloned().unwrap_or_default(),
+        )),
+        "find_server_id" => {
+            let name = singleton_string_arg(args, 0, &format!("{singleton}.find_server_id()"))?;
+            Ok(Variant::Int(reg.find(&name)))
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("{singleton}.{other}"),
+        ))),
+    }
+}
+
+fn call_physicsserver2dmanager_static(
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    static REG: std::sync::OnceLock<std::sync::Mutex<SingletonRegistry>> =
+        std::sync::OnceLock::new();
+    let mut reg = REG
+        .get_or_init(|| std::sync::Mutex::new(SingletonRegistry::with("PatinaPhysics2D")))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    call_server_manager_static("PhysicsServer2DManager", &mut reg, method, args)
+}
+
+fn call_physicsserver3dmanager_static(
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    static REG: std::sync::OnceLock<std::sync::Mutex<SingletonRegistry>> =
+        std::sync::OnceLock::new();
+    let mut reg = REG
+        .get_or_init(|| std::sync::Mutex::new(SingletonRegistry::with("PatinaPhysics3D")))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    call_server_manager_static("PhysicsServer3DManager", &mut reg, method, args)
+}
+
+fn call_navigationserver2dmanager_static(
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    static REG: std::sync::OnceLock<std::sync::Mutex<SingletonRegistry>> =
+        std::sync::OnceLock::new();
+    let mut reg = REG
+        .get_or_init(|| std::sync::Mutex::new(SingletonRegistry::with("PatinaNavigation2D")))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    call_server_manager_static("NavigationServer2DManager", &mut reg, method, args)
+}
+
+fn call_navigationserver3dmanager_static(
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    static REG: std::sync::OnceLock<std::sync::Mutex<SingletonRegistry>> =
+        std::sync::OnceLock::new();
+    let mut reg = REG
+        .get_or_init(|| std::sync::Mutex::new(SingletonRegistry::with("PatinaNavigation3D")))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    call_server_manager_static("NavigationServer3DManager", &mut reg, method, args)
+}
+
+/// Reads a `Vector3` list out of either a `PackedVector3Array` or a plain
+/// `Array` of vectors, which is how a script may hand over source geometry.
+fn navmesh_vertices(v: Option<&Variant>) -> Vec<gdcore::math::Vector3> {
+    match v {
+        Some(Variant::PackedVector3Array(vs)) => vs.clone(),
+        Some(Variant::Array(items)) => items
+            .iter()
+            .filter_map(|item| match item {
+                Variant::Vector3(p) => Some(*p),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `NavigationMeshGenerator`.
+///
+/// ⚠️ Godot bakes into a `NavigationMesh` resource that the navigation server
+/// then consumes. Patina's navigation servers live in `gdscene`, which
+/// **depends on this crate**, so the interpreter cannot reach them without a
+/// dependency cycle. The generator therefore produces the navmesh *data*
+/// (vertices plus triangle polygons) as a Dictionary; handing that to a live
+/// `NavigationServer2D` needs a bridge on the gdscene side.
+fn call_navigationmeshgenerator_static(
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    match method {
+        "parse_source_geometry_data" | "bake_from_source_geometry_data"
+        | "bake_from_source_geometry_data_async" => {
+            // Godot's argument order is (navigation_mesh, source_geometry_data).
+            let source = args.get(1).or_else(|| args.first());
+            let (vertices, indices) = match source {
+                Some(Variant::Dictionary(d)) => (
+                    navmesh_vertices(d.get(Variant::String("vertices".into()))),
+                    match d.get(Variant::String("indices".into())) {
+                        Some(Variant::PackedInt32Array(ix)) => {
+                            ix.iter().map(|i| *i as i64).collect()
+                        }
+                        Some(Variant::Array(items)) => {
+                            items.iter().filter_map(|i| to_int(i).ok()).collect()
+                        }
+                        _ => Vec::new(),
+                    },
+                ),
+                other => (navmesh_vertices(other), Vec::new()),
+            };
+
+            // With no index buffer the vertices are taken as a triangle soup,
+            // which is what a parsed mesh surface without indices means.
+            let tri_count = if indices.is_empty() {
+                vertices.len() / 3
+            } else {
+                indices.len() / 3
+            };
+            let polygons: Vec<Variant> = (0..tri_count)
+                .map(|t| {
+                    let corner = |k: usize| -> i32 {
+                        if indices.is_empty() {
+                            (t * 3 + k) as i32
+                        } else {
+                            indices[t * 3 + k] as i32
+                        }
+                    };
+                    Variant::PackedInt32Array(vec![corner(0), corner(1), corner(2)])
+                })
+                .collect();
+
+            let mut out = gdvariant::Dictionary::new();
+            out.insert(
+                Variant::String("vertices".into()),
+                Variant::PackedVector3Array(vertices),
+            );
+            out.insert(
+                Variant::String("polygons".into()),
+                Variant::Array(polygons),
+            );
+            Ok(Variant::Dictionary(out))
+        }
+        // Baking is synchronous here, so nothing is ever in flight.
+        "is_baking" => Ok(Variant::Bool(false)),
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("NavigationMeshGenerator.{other}"),
         ))),
     }
 }

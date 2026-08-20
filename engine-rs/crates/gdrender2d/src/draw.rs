@@ -276,6 +276,9 @@ pub fn draw_texture_rect_transformed_shaded(
         uniforms,
         time,
         None,
+        // No BackBufferCopy ran, so there is no screen texture and no
+        // hint_screen_texture uniform can resolve to one (pat-s3rrv.202).
+        &[],
     )
 }
 
@@ -293,6 +296,17 @@ pub fn draw_texture_rect_transformed_shaded(
 /// Additive rather than a new parameter on the existing function: that one has
 /// call sites in another crate's tests, and this keeps their signature intact.
 #[allow(clippy::too_many_arguments)]
+/// Whether a sampler name refers to the screen/back buffer (pat-s3rrv.202).
+///
+/// Accepts BOTH spellings Godot allows: the legacy built-in `SCREEN_TEXTURE`,
+/// and any uniform the shader declared with `: hint_screen_texture`. Handling
+/// only one of the two is the recurring shape of this bug — the feature works
+/// for whichever spelling the test happened to use and silently does the wrong
+/// thing for the other.
+fn is_screen_sampler(name: &str, screen_uniforms: &[String]) -> bool {
+    matches!(name, "SCREEN_TEXTURE" | "screen_texture") || screen_uniforms.iter().any(|u| u == name)
+}
+
 pub fn draw_texture_rect_transformed_shaded_with_screen(
     fb: &mut FrameBuffer,
     texture: &Texture2D,
@@ -306,6 +320,20 @@ pub fn draw_texture_rect_transformed_shaded_with_screen(
     uniforms: &HashMap<String, Variant>,
     time: f32,
     screen: Option<&Texture2D>,
+    // Names of `uniform sampler2D` declarations carrying
+    // `: hint_screen_texture` (pat-s3rrv.202).
+    //
+    // ⚠️ `//`, NOT `///`: Rust rejects doc comments on function parameters
+    // ("documentation comments cannot be applied to function parameters"), one
+    // error per line, and it takes the whole crate down with it.
+    //
+    // ⚠️ Needed because the AST evaluator hands this sampler the uniform's
+    // LITERAL name. Godot's modern spelling is a user-named uniform —
+    // `uniform sampler2D screen_tex : hint_screen_texture` — so matching only
+    // the legacy `SCREEN_TEXTURE` silently falls through to the item's OWN
+    // texture: it looks like a working screen read and is not one, because a
+    // sprite sampling itself still produces plausible pixels.
+    screen_uniforms: &[String],
 ) {
     if texture.width == 0 || texture.height == 0 {
         return;
@@ -331,14 +359,16 @@ pub fn draw_texture_rect_transformed_shaded_with_screen(
             // BackBufferCopy actually ran, so an ordinary shaded draw pays
             // nothing.
             let screen_tex = screen.cloned();
+            let screen_names: Vec<String> = screen_uniforms.to_vec();
             Sampler::new(move |name, uv| {
                 // The NAME is what distinguishes the taps. Ignoring it — as
                 // this closure used to — makes `texture(SCREEN_TEXTURE, UV)`
                 // return the item's own texture, which looks like a working
                 // screen read and is not one.
-                let src = match name {
-                    "SCREEN_TEXTURE" | "screen_texture" => screen_tex.as_ref().unwrap_or(&tex),
-                    _ => &tex,
+                let src = if is_screen_sampler(name, &screen_names) {
+                    screen_tex.as_ref().unwrap_or(&tex)
+                } else {
+                    &tex
                 };
                 let c = canvas_material::sample_texture(src, uv[0], uv[1], filter, repeat);
                 [c.r, c.g, c.b, c.a]

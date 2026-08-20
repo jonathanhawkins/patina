@@ -58,6 +58,7 @@ fn shade(mat: &ShaderMaterial3D) -> Color {
         roughness: 1.0,
         metallic: 0.0,
         camera_position: Vector3::ZERO,
+        probe: None,
         layers: 1,
         lights: Vec::new(),
         directional_shadow_maps: Vec::new(),

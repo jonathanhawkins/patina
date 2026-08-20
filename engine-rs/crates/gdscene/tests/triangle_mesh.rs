@@ -241,6 +241,7 @@ fn extra_surfaces_are_included() {
         uvs: Vec::new(),
         indices: vec![0, 1, 2],
         primitive_type: PrimitiveType::Triangles,
+        lods: Vec::new(),
     });
 
     let tm = mesh.generate_triangle_mesh().unwrap();

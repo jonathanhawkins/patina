@@ -48,6 +48,9 @@ impl LifecycleManager {
             // (pat-nzgdu.84). Fires here for both add_child auto-enter and any
             // subtree re-entry; nodes with no connections are a no-op.
             tree.emit_signal(id, "tree_entered", &[]);
+            // A `ShaderGlobalsOverride` pushes its `params/*` values into the
+            // global shader parameter store as it enters (pat-s3rrv.209).
+            apply_shader_globals_override(tree, id);
         }
 
         // Phase 2: READY — bottom-up.
@@ -120,6 +123,96 @@ impl LifecycleManager {
             }
             tree.process_script_exit_tree(id);
             tree.notify_script(id, NOTIFICATION_EXIT_TREE.code() as i64);
+            // …and drops them again on the way out, restoring whatever the
+            // project file or a script last set (pat-s3rrv.209).
+            clear_shader_globals_override(tree, id);
+        }
+    }
+}
+
+/// Whether `id` is a `ShaderGlobalsOverride` node.
+fn is_shader_globals_override(tree: &SceneTree, id: NodeId) -> bool {
+    tree.get_node(id)
+        .map(|n| n.is_class("ShaderGlobalsOverride"))
+        .unwrap_or(false)
+}
+
+/// The node's `params/<name>` properties, stripped to `<name>`.
+///
+/// Godot's `ShaderGlobalsOverride` exposes one `params/<name>` property per
+/// declared project global; only the ones actually set are pushed.
+fn shader_globals_override_params(
+    tree: &SceneTree,
+    id: NodeId,
+) -> Vec<(String, gdvariant::Variant)> {
+    match tree.get_node(id) {
+        Some(node) => node
+            .properties()
+            .filter_map(|(key, value)| {
+                key.strip_prefix("params/")
+                    .map(|name| (name.to_string(), value.clone()))
+            })
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
+/// The `ShaderGlobalsOverride` currently in the tree, ignoring `exclude`.
+///
+/// ⚠️ Godot's rule is that exactly **one** override is active: the first in the
+/// tree wins and any other warns rather than fighting it. Resolved by walking
+/// the tree rather than caching a "current override" somewhere, so there is no
+/// stale global to leak between scenes — or, in this codebase, between tests
+/// sharing one process.
+fn active_shader_globals_override(tree: &SceneTree, exclude: Option<NodeId>) -> Option<NodeId> {
+    let mut all = Vec::new();
+    tree.collect_subtree_top_down(tree.root_id(), &mut all);
+    all.into_iter().find(|&id| {
+        Some(id) != exclude
+            && tree
+                .get_node(id)
+                .map(|n| n.is_class("ShaderGlobalsOverride") && n.is_inside_tree())
+                .unwrap_or(false)
+    })
+}
+
+/// Pushes a `ShaderGlobalsOverride`'s params into the global store.
+///
+/// A no-op for every other class, so this costs one `is_class` per node
+/// entering the tree.
+fn apply_shader_globals_override(tree: &mut SceneTree, id: NodeId) {
+    if !is_shader_globals_override(tree, id) {
+        return;
+    }
+    // ⚠️ First in the tree wins. ENTER_TREE runs top-down, so an override
+    // earlier in the scene is already `inside_tree` here and this one must
+    // stand down — it reports a configuration warning instead
+    // (`SceneTree::node_configuration_warnings`).
+    if active_shader_globals_override(tree, Some(id)).is_some() {
+        return;
+    }
+    for (name, value) in shader_globals_override_params(tree, id) {
+        gdvariant::shader_globals::set_override(&name, Some(value));
+    }
+}
+
+/// Drops a `ShaderGlobalsOverride`'s params, then hands control to whatever
+/// override is still in the tree.
+fn clear_shader_globals_override(tree: &mut SceneTree, id: NodeId) {
+    if !is_shader_globals_override(tree, id) {
+        return;
+    }
+    for (name, _) in shader_globals_override_params(tree, id) {
+        gdvariant::shader_globals::set_override(&name, None);
+    }
+    // ⚠️ Re-apply whoever remains. Two things need this: the active override
+    // leaving should promote the next one, and an INACTIVE override leaving
+    // would otherwise clear a param the active one owns, because both nodes
+    // name the same global. Re-applying makes that self-correcting rather than
+    // order-dependent.
+    if let Some(next) = active_shader_globals_override(tree, Some(id)) {
+        for (name, value) in shader_globals_override_params(tree, next) {
+            gdvariant::shader_globals::set_override(&name, Some(value));
         }
     }
 }

@@ -65,6 +65,12 @@ pub struct ReflectionProbe {
     pub cull_mask: u32,
     /// LOD threshold for mesh detail in the cubemap.
     pub mesh_lod_threshold: f32,
+    /// The environment captured by this probe, once a capture pass has run
+    /// (pat-s3rrv.206).
+    ///
+    /// `None` means "never captured": the probe then falls back to its flat
+    /// `ambient_color` term, which is all it could ever do before this change.
+    pub captured: Option<std::sync::Arc<ReflectionCubemap>>,
 }
 
 impl ReflectionProbe {
@@ -86,6 +92,7 @@ impl ReflectionProbe {
             ambient_color_energy: 1.0,
             cull_mask: 0xFFFFF, // 20 bits, Godot default
             mesh_lod_threshold: 1.0,
+            captured: None,
         }
     }
 
@@ -107,6 +114,23 @@ impl ReflectionProbe {
             && point.y <= max.y
             && point.z >= min.z
             && point.z <= max.z
+    }
+
+    /// The world-space point the cubemap is captured from.
+    pub fn capture_origin(&self) -> Vector3 {
+        self.transform.origin + self.origin_offset
+    }
+
+    /// Whether a capture pass should (re)render this probe's cubemap now.
+    ///
+    /// This is the whole of Godot's `update_mode` semantics: `Always`
+    /// re-captures every frame, `Once` captures on the first pass and then
+    /// keeps that cubemap even as the scene changes around it.
+    pub fn needs_capture(&self) -> bool {
+        match self.update_mode {
+            ReflectionProbeUpdateMode::Always => true,
+            ReflectionProbeUpdateMode::Once => self.captured.is_none(),
+        }
     }
 }
 
@@ -140,6 +164,192 @@ pub fn sample_probes_at(probes: &[ReflectionProbe], world_pos: Vector3) -> Color
         b += probe.ambient_color.b * energy * probe.intensity;
     }
     Color::new(r, g, b, 1.0)
+}
+
+/// The six cubemap faces, in the GL / Godot order used by `faces` below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CubeFace {
+    PosX = 0,
+    NegX = 1,
+    PosY = 2,
+    NegY = 3,
+    PosZ = 4,
+    NegZ = 5,
+}
+
+/// An environment cubemap captured by a [`ReflectionProbe`] (pat-s3rrv.206).
+///
+/// Six square faces of linear colour. Deliberately low resolution: a probe
+/// re-renders the whole scene once per face, so this is the term that decides
+/// whether `update_mode = Always` is affordable at all.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReflectionCubemap {
+    /// Edge length of each square face, in texels.
+    pub resolution: u32,
+    /// Six faces in [`CubeFace`] order, each `resolution * resolution`,
+    /// row-major.
+    pub faces: [Vec<Color>; 6],
+}
+
+impl ReflectionCubemap {
+    /// A cubemap with every texel of every face set to `fill`.
+    pub fn new(resolution: u32, fill: Color) -> Self {
+        let n = (resolution as usize) * (resolution as usize);
+        Self {
+            resolution,
+            faces: [
+                vec![fill; n],
+                vec![fill; n],
+                vec![fill; n],
+                vec![fill; n],
+                vec![fill; n],
+                vec![fill; n],
+            ],
+        }
+    }
+
+    /// Replaces one face. `pixels` must be `resolution * resolution` long.
+    pub fn set_face(&mut self, face: CubeFace, pixels: Vec<Color>) {
+        let n = (self.resolution as usize) * (self.resolution as usize);
+        if pixels.len() == n {
+            self.faces[face as usize] = pixels;
+        }
+    }
+
+    /// Nearest-texel lookup along `dir` (need not be normalized).
+    ///
+    /// ⚠️ The face-selection and s/t sign conventions are the standard cubemap
+    /// ones. They are NOT symmetric between faces — `+X` flips s against z
+    /// while `+Z` does not, and every face except `+Y`/`-Y` flips t against y.
+    /// Deriving them "by symmetry" produces a mapping that looks plausible and
+    /// mirrors half the faces.
+    pub fn sample_direction(&self, dir: Vector3) -> Color {
+        let fallback = Color::new(0.0, 0.0, 0.0, 1.0);
+        if self.resolution == 0 {
+            return fallback;
+        }
+        let (ax, ay, az) = (dir.x.abs(), dir.y.abs(), dir.z.abs());
+        if ax + ay + az <= 0.0 {
+            return fallback;
+        }
+
+        let (face, sc, tc, ma) = if ax >= ay && ax >= az {
+            if dir.x > 0.0 {
+                (CubeFace::PosX, -dir.z, -dir.y, ax)
+            } else {
+                (CubeFace::NegX, dir.z, -dir.y, ax)
+            }
+        } else if ay >= az {
+            if dir.y > 0.0 {
+                (CubeFace::PosY, dir.x, dir.z, ay)
+            } else {
+                (CubeFace::NegY, dir.x, -dir.z, ay)
+            }
+        } else if dir.z > 0.0 {
+            (CubeFace::PosZ, dir.x, -dir.y, az)
+        } else {
+            (CubeFace::NegZ, -dir.x, -dir.y, az)
+        };
+
+        let u = 0.5 * (sc / ma + 1.0);
+        let v = 0.5 * (tc / ma + 1.0);
+        let res = self.resolution;
+        let x = ((u.clamp(0.0, 1.0) * res as f32) as u32).min(res - 1);
+        let y = ((v.clamp(0.0, 1.0) * res as f32) as u32).min(res - 1);
+        let i = (y * res + x) as usize;
+        self.faces[face as usize]
+            .get(i)
+            .copied()
+            .unwrap_or(fallback)
+    }
+}
+
+/// One probe, resolved and flattened for a shading pass (pat-s3rrv.206).
+///
+/// The probe *list* is queried once per instance (a point query, the
+/// granularity the shading loop already used for ambient), but the cubemap has
+/// to be sampled **per fragment** — a mirror only reflects different things at
+/// different pixels if the reflection direction varies across it. This is the
+/// owned snapshot that crosses that boundary, so the fragment stage needs no
+/// borrow of the probe list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProbeReflection {
+    /// The captured environment.
+    pub cubemap: std::sync::Arc<ReflectionCubemap>,
+    /// World-space influence box, for box projection.
+    pub box_min: Vector3,
+    /// World-space influence box, for box projection.
+    pub box_max: Vector3,
+    /// Point the cubemap was captured from.
+    pub origin: Vector3,
+    /// Whether to parallax-correct the lookup against the box.
+    pub box_projection: bool,
+    /// Reflection strength multiplier.
+    pub intensity: f32,
+}
+
+impl ProbeReflection {
+    /// The reflected colour for a surface at `world_pos` reflecting along
+    /// `reflection`.
+    ///
+    /// 🔑 The `box_projection` branch here is the first and only caller of
+    /// [`crate::box_projection::box_project_reflection`]. That module has been
+    /// present, complete and unit-tested with ZERO callers, so authoring
+    /// `box_projection = true` in a `.tscn` changed nothing at all.
+    pub fn sample(&self, world_pos: Vector3, reflection: Vector3) -> Color {
+        let dir = if self.box_projection {
+            crate::box_projection::box_project_reflection(
+                world_pos,
+                reflection,
+                self.box_min,
+                self.box_max,
+                self.origin,
+            )
+        } else {
+            // Without box projection the environment is treated as infinitely
+            // far away, so the capture origin is irrelevant and the raw
+            // reflection direction is the lookup. This is exactly the
+            // difference the parallax correction exists to fix.
+            reflection
+        };
+        let c = self.cubemap.sample_direction(dir);
+        Color::new(
+            c.r * self.intensity,
+            c.g * self.intensity,
+            c.b * self.intensity,
+            1.0,
+        )
+    }
+}
+
+/// The first captured probe whose influence box contains `world_pos`.
+///
+/// `None` when no such probe has a capture yet — the caller then keeps whatever
+/// flat ambient term it already had, so a scene with no probe, or one whose
+/// probe has never been captured, is byte-identical to before.
+pub fn probe_reflection_at(
+    probes: &[ReflectionProbe],
+    world_pos: Vector3,
+) -> Option<ProbeReflection> {
+    for probe in probes {
+        if !probe.contains_point(world_pos) {
+            continue;
+        }
+        let cubemap = match probe.captured.as_ref() {
+            Some(c) => c.clone(),
+            None => continue,
+        };
+        let (box_min, box_max) = probe.world_aabb_min_max();
+        return Some(ProbeReflection {
+            cubemap,
+            box_min,
+            box_max,
+            origin: probe.capture_origin(),
+            box_projection: probe.box_projection,
+            intensity: probe.intensity,
+        });
+    }
+    None
 }
 
 #[cfg(test)]

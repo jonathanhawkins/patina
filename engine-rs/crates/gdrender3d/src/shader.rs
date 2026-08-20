@@ -128,6 +128,13 @@ pub struct ShaderUniforms {
     pub metallic: f32,
     /// Camera world-space position.
     pub camera_position: Vector3,
+    /// The reflection probe covering this draw, if any (pat-s3rrv.206).
+    ///
+    /// Selected per instance (a point query, matching how probe ambient was
+    /// already resolved) but sampled per fragment, because a mirror reflects
+    /// different things at different pixels only if the reflection direction
+    /// varies across it. `None` leaves the specular term exactly as it was.
+    pub probe: Option<gdserver3d::reflection_probe::ProbeReflection>,
     /// The render layers of the instance being shaded — Godot's
     /// `VisualInstance3D.layers`, 1-based, default 1.
     ///
@@ -827,6 +834,30 @@ pub fn pbr_shade(input: &FragmentInput, uniforms: &ShaderUniforms) -> Color {
     let mut g = uniforms.ambient.g * albedo.g;
     let mut b = uniforms.ambient.b * albedo.b;
 
+    // Image-based specular from a captured ReflectionProbe (pat-s3rrv.206).
+    //
+    // Reflect the view vector about the shading normal and look the result up
+    // in the probe's cubemap. This is what lets a probe MIRROR the scene, as
+    // opposed to the flat `ambient_color` term that was the only thing a probe
+    // could contribute before — `sample_probes_at` folds that in through
+    // `uniforms.ambient` above, and it carries no direction at all.
+    //
+    // ⚠️ Scaled by F0 and faded out with roughness. A rough surface has no
+    // single coherent mirror direction, so one cubemap texel is simply the
+    // wrong answer for it; a prefiltered mip chain is what Godot uses and is
+    // not built here. metallic = 1 / roughness = 0 — the mirror case the
+    // acceptance exercises — takes the reflection at full strength.
+    if let Some(probe) = uniforms.probe.as_ref() {
+        let reflection = n * (2.0 * n_dot_v) - v;
+        let sharpness = 1.0 - roughness.clamp(0.0, 1.0);
+        if sharpness > 0.0 {
+            let env = probe.sample(input.world_position, reflection);
+            r += env.r * f0[0] * sharpness;
+            g += env.g * f0[1] * sharpness;
+            b += env.b * f0[2] * sharpness;
+        }
+    }
+
     for (i, light) in uniforms.lights.iter().enumerate() {
         // Godot's `light_cull_mask`: a light lights this mesh only when the
         // mesh's render layer is in the mask. ⚠️ Applied in EVERY shading
@@ -1254,6 +1285,7 @@ mod tests {
             roughness: 0.5,
             metallic: 0.0,
             camera_position: Vector3::ZERO,
+            probe: None,
             lights: vec![],
             directional_shadow_maps: vec![],
             layers: 1,

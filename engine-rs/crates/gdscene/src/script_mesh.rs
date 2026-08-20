@@ -21,10 +21,25 @@ use gdserver3d::primitive_mesh::ArrayMesh;
 use gdvariant::Variant;
 
 /// `Mesh.ArrayType` slots this reads.
-const ARRAY_VERTEX: usize = 0;
-const ARRAY_NORMAL: usize = 1;
-const ARRAY_TEX_UV: usize = 4;
-const ARRAY_INDEX: usize = 12;
+// ⚠️ ONE table, `pub(crate)`, transcribed from `doc/classes/Mesh.xml`'s
+// `ArrayType` enum — not derived, and not duplicated per consumer.
+// `SurfaceTool::commit_to_arrays` writes these slots and
+// `mesh_from_mesh_array` reads them; two private copies would be free to
+// drift, which is exactly how the two mesh resolvers diverged in
+// pat-s3rrv.199.
+pub(crate) const ARRAY_VERTEX: usize = 0;
+pub(crate) const ARRAY_NORMAL: usize = 1;
+#[allow(dead_code)]
+pub(crate) const ARRAY_TANGENT: usize = 2;
+pub(crate) const ARRAY_COLOR: usize = 3;
+pub(crate) const ARRAY_TEX_UV: usize = 4;
+#[allow(dead_code)]
+pub(crate) const ARRAY_TEX_UV2: usize = 5;
+pub(crate) const ARRAY_BONES: usize = 10;
+pub(crate) const ARRAY_WEIGHTS: usize = 11;
+pub(crate) const ARRAY_INDEX: usize = 12;
+/// Slot count of a Godot mesh-array; `ARRAY_MAX` in the enum.
+pub(crate) const ARRAY_MAX: usize = 13;
 
 /// Builds a mesh from the array a script's `_create_mesh_array` returned.
 ///
@@ -146,4 +161,57 @@ mod tests {
         assert!(mesh_from_mesh_array(&vec![Variant::Nil; 13]).is_none());
         assert!(mesh_from_mesh_array(&[]).is_none());
     }
+}
+
+/// Packs a [`Mesh3D`] into Godot's `ARRAY_MAX`-slot mesh-array form.
+///
+/// The inverse of [`mesh_from_mesh_array`], and deliberately adjacent to it:
+/// a writer and reader of the same layout that live apart are free to drift.
+///
+/// Slots the surface has nothing for stay `Nil`, which is how Godot marks an
+/// **absent** channel as opposed to an empty one — a reader cannot tell those
+/// apart from an empty packed array.
+///
+/// ⚠️ `colors` is passed separately because [`Mesh3D`] has no colour channel;
+/// `SurfaceTool` holds them and the arrays form can carry them, so dropping
+/// them here would lose data the script explicitly set.
+pub fn mesh_to_mesh_array(mesh: &Mesh3D, colors: &[gdcore::math::Color]) -> Vec<Variant> {
+    let mut slots = vec![Variant::Nil; ARRAY_MAX];
+
+    if !mesh.vertices.is_empty() {
+        slots[ARRAY_VERTEX] = Variant::PackedVector3Array(mesh.vertices.clone());
+    }
+    if !mesh.normals.is_empty() {
+        slots[ARRAY_NORMAL] = Variant::PackedVector3Array(mesh.normals.clone());
+    }
+    if !mesh.uvs.is_empty() {
+        slots[ARRAY_TEX_UV] = Variant::PackedVector2Array(
+            mesh.uvs
+                .iter()
+                .map(|uv| gdcore::math::Vector2::new(uv[0], uv[1]))
+                .collect(),
+        );
+    }
+    if !colors.is_empty() {
+        slots[ARRAY_COLOR] = Variant::PackedColorArray(colors.to_vec());
+    }
+    // Skin data is present only when a script actually set it; see
+    // `SurfaceTool`'s `has_skin`. Bones and weights are flattened four-per-vertex,
+    // as Godot packs them.
+    if !mesh.bone_indices.is_empty() {
+        slots[ARRAY_BONES] = Variant::PackedInt32Array(
+            mesh.bone_indices
+                .iter()
+                .flatten()
+                .map(|b| *b as i32)
+                .collect(),
+        );
+        slots[ARRAY_WEIGHTS] =
+            Variant::PackedFloat32Array(mesh.bone_weights.iter().flatten().copied().collect());
+    }
+    if !mesh.indices.is_empty() {
+        slots[ARRAY_INDEX] =
+            Variant::PackedInt32Array(mesh.indices.iter().map(|i| *i as i32).collect());
+    }
+    slots
 }
