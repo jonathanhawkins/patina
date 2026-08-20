@@ -17,7 +17,9 @@
 //! ⚠️ Only tags `parse_bbcode` actually understands are emitted. A tag it does
 //! not recognise is STRIPPED, so an unsupported push would look like it worked
 //! — the call returns, the text still renders — while doing nothing. That is
-//! why there is no `push_bold` here: `[b]` is not parsed, and the built-in 5x7
+//! why there is no `push_bold` here: `[b]` is parsed into a run attribute and
+//! over-struck by the draw arm (pat-s3rrv.74), but the push/pop stack itself is
+//! still unimplemented. The built-in 5x7
 //! bitmap font has no weight variant to render it with.
 
 use gdcore::math::{Color, Vector2};

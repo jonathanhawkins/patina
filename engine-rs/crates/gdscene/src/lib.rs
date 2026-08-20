@@ -114,6 +114,7 @@ pub mod visibility_3d;
 // only a crate downstream of both can see the two halves (pat-0q2kx.226).
 pub mod visual_shader_custom;
 pub mod visual_shader_load;
+pub mod visual_shader_organization;
 pub mod xr_modifiers;
 
 // Re-export the most-used types at the crate root.

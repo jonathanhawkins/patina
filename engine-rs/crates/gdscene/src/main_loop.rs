@@ -725,6 +725,40 @@ pub struct MainLoop {
     /// part of the frustum — silently, since a wrong ray still hits *something*
     /// often enough to look plausible.
     viewport_size: (u32, u32),
+    /// The active movie-capture session, if any (pat-s3rrv.262).
+    movie_capture: Option<MovieCapture>,
+}
+
+/// An in-flight `MovieWriter` capture session (pat-s3rrv.262).
+///
+/// Godot turns this on with `--write-movie <path>`; the web target has no such
+/// CLI, so a host starts it through [`MainLoop::start_movie_capture`] instead.
+///
+/// ⚠️ **The pixels are published by the host, not rendered here.** `MainLoop`
+/// simulates — it has no renderer and `FrameOutput` carries no image — which
+/// mirrors Godot, where the writer is fed by the rendering server rather than
+/// by the main loop. The host calls [`MainLoop::set_movie_frame_pixels`] with
+/// whatever it just drew; until it does, the frame is opaque black at the
+/// capture size, so `_write_frame` still receives a correctly-sized image
+/// rather than a null.
+#[derive(Debug, Clone)]
+struct MovieCapture {
+    /// Path offered to `_handles_file` and passed to `_write_begin`.
+    base_path: String,
+    /// Frame size reported to `_write_begin` and used to size the image.
+    size: (i64, i64),
+    /// Frame rate reported to `_write_begin`.
+    fps: i64,
+    /// The writer chosen by `_handles_file`, resolved once at begin.
+    ///
+    /// `None` until the first frame. If no registered writer accepts the path,
+    /// it stays `None` and nothing is driven — Godot likewise writes no movie
+    /// when no writer handles the extension.
+    writer: Option<NodeId>,
+    /// Whether `_write_begin` has already run, so it runs exactly once.
+    begun: bool,
+    /// The most recent frame published by the host.
+    pixels: Vec<gdcore::math::Color>,
 }
 
 /// Reads a numeric node property as `f32`, accepting either a `Float` or an
@@ -827,6 +861,7 @@ impl MainLoop {
             hovered_pickables: std::collections::HashSet::new(),
             hovered_pickables_3d: std::collections::HashSet::new(),
             viewport_size: (1152, 648),
+            movie_capture: None,
         }
     }
 
@@ -4357,12 +4392,158 @@ impl MainLoop {
             None => crate::control::CursorShape::Arrow,
         };
 
+        // Movie capture runs last, once the frame is fully simulated, so a
+        // writer sees the same state a renderer would have drawn.
+        self.drive_movie_capture();
+
         FrameOutput {
             frame_count: self.frame_counter,
             delta: delta_secs,
             physics_steps,
             cursor_shape,
         }
+    }
+
+    // -- movie capture (pat-s3rrv.262) --------------------------------------
+
+    /// Starts a `MovieWriter` capture session targeting `base_path`.
+    ///
+    /// Godot enters this mode via `--write-movie <path>`; there is no such CLI
+    /// on the web target, so a host calls this instead. The writer is not chosen
+    /// here — selection needs `_handles_file`, which is a script call, so it
+    /// happens on the first captured frame.
+    pub fn start_movie_capture(
+        &mut self,
+        base_path: impl Into<String>,
+        size: (i64, i64),
+        fps: i64,
+    ) {
+        let (w, h) = (size.0.max(0), size.1.max(0));
+        self.movie_capture = Some(MovieCapture {
+            base_path: base_path.into(),
+            size: (w, h),
+            fps,
+            writer: None,
+            begun: false,
+            // Opaque black rather than transparent: an unpublished frame should
+            // look like an unlit frame, not like a hole.
+            pixels: vec![
+                gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0);
+                (w as usize).saturating_mul(h as usize)
+            ],
+        });
+    }
+
+    /// Publishes the pixels the host just rendered, used by the next
+    /// `_write_frame`.
+    ///
+    /// Ignored when no capture is running, so a host may call it unconditionally.
+    pub fn set_movie_frame_pixels(&mut self, pixels: Vec<gdcore::math::Color>) {
+        if let Some(cap) = self.movie_capture.as_mut() {
+            cap.pixels = pixels;
+        }
+    }
+
+    /// Whether a capture session is running.
+    pub fn movie_capture_active(&self) -> bool {
+        self.movie_capture.is_some()
+    }
+
+    /// Ends the session, calling `_write_end` on the writer that was driving it.
+    ///
+    /// Returns whether a writer was actually closed — false when no capture was
+    /// running, or when one was but no registered writer ever accepted the path.
+    pub fn finish_movie_capture(&mut self) -> bool {
+        let Some(cap) = self.movie_capture.take() else {
+            return false;
+        };
+        let Some(nid) = cap.writer else {
+            return false;
+        };
+        let _ = self.tree.call_script_method(nid, "_write_end", &[]);
+        true
+    }
+
+    /// The first registered writer whose `_handles_file` accepts `path`.
+    ///
+    /// Registration order, like Godot: the first acceptor wins and the rest are
+    /// never asked.
+    fn select_movie_writer(&mut self, path: &str) -> Option<NodeId> {
+        for writer in gdobject::movie_writer::instance_writers() {
+            // A name-only registration from Rust has no instance to call back
+            // into, so it cannot handle a file.
+            let Some(raw) = writer.object_id else {
+                continue;
+            };
+            let nid = NodeId::from_object_id(gdcore::id::ObjectId::from_raw(raw));
+            let handled = self.tree.call_script_method(
+                nid,
+                "_handles_file",
+                &[Variant::String(path.to_string())],
+            );
+            if matches!(handled, Some(Variant::Bool(true))) {
+                return Some(nid);
+            }
+        }
+        None
+    }
+
+    /// Drives `_write_begin` once and `_write_frame` once per frame.
+    ///
+    /// ⚠️ `_write_frame`'s second parameter is Godot's `audio_frame_block`,
+    /// typed `const void*` in the docs — a raw pointer, which means the virtual
+    /// is overridable only from C++/GDExtension there. A GDScript writer cannot
+    /// receive it, so `Nil` is passed and the arity still matches the six-virtual
+    /// surface ClassDB declares. The image half, which is what a script can
+    /// actually use, is real.
+    fn drive_movie_capture(&mut self) {
+        // Copied out before any script call: the calls need `&mut self.tree`
+        // while a borrow of `self.movie_capture` would still be live.
+        let Some((base_path, size, fps, writer, begun)) = self
+            .movie_capture
+            .as_ref()
+            .map(|c| (c.base_path.clone(), c.size, c.fps, c.writer, c.begun))
+        else {
+            return;
+        };
+
+        let writer = if begun {
+            writer
+        } else {
+            let chosen = self.select_movie_writer(&base_path);
+            if let Some(nid) = chosen {
+                let args = [
+                    Variant::Vector2i(gdcore::math::Vector2i::new(size.0 as i32, size.1 as i32)),
+                    Variant::Int(fps),
+                    Variant::String(base_path.clone()),
+                ];
+                let _ = self.tree.call_script_method(nid, "_write_begin", &args);
+            }
+            // Recorded even when nothing accepted the path, so `_handles_file`
+            // is asked once per session rather than once per frame.
+            if let Some(cap) = self.movie_capture.as_mut() {
+                cap.writer = chosen;
+                cap.begun = true;
+            }
+            chosen
+        };
+
+        let Some(nid) = writer else {
+            return;
+        };
+
+        let pixels = self
+            .movie_capture
+            .as_ref()
+            .map(|c| c.pixels.clone())
+            .unwrap_or_default();
+        let image =
+            gdscript_interop::interpreter::new_image_handle_from_pixels(size.0, size.1, pixels);
+        let _ = self.tree.call_script_method(
+            nid,
+            "_write_frame",
+            &[Variant::ObjectId(image), Variant::Nil],
+        );
     }
 
     /// Runs exactly `n` frames, each with the given `delta` seconds.

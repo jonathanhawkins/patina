@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::io::{self, Read};
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 use gdcore::ResourceUid;
 
@@ -266,6 +267,223 @@ fn read_u64<R: Read>(reader: &mut R) -> io::Result<u64> {
     let mut buf = [0u8; 8];
     reader.read_exact(&mut buf)?;
     Ok(u64::from_le_bytes(buf))
+}
+
+// ---------------------------------------------------------------------------
+// The process-global registry — Godot's `ResourceUID` singleton (pat-s3rrv.253)
+// ---------------------------------------------------------------------------
+//
+// Godot models `ResourceUID` as an Object singleton holding one `unique_ids`
+// map for the whole process (`core/io/resource_uid.cpp`). Patina already had the
+// [`UidRegistry`] type, but every instance was owned by something — `UnifiedLoader`
+// holds one by value — so there was no registry a *script* could reach. These
+// free functions supply that singleton.
+//
+// ⚠️ Semantics are taken from `resource_uid.cpp`, and two of them are exact
+// INVERSES that are easy to collapse into a single "upsert":
+//
+//   add_id  ERR_FAIL_COND(unique_ids.has(p_id))    — fails if the id EXISTS
+//   set_id  ERR_FAIL_COND(!unique_ids.has(p_id))   — fails if it does NOT
+//
+// [`UidRegistry::register`] overwrites unconditionally, so it implements
+// NEITHER on its own. Delegating both straight to `register` passes every
+// happy-path test and silently drops both error cases.
+
+/// Errors mirroring the `ERR_FAIL_COND` guards in Godot's `ResourceUID`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UidError {
+    /// `add_id` on an id that is already registered.
+    AlreadyExists,
+    /// `set_id` / `remove_id` on an id that is not registered.
+    NotFound,
+    /// An operation on [`ResourceUid::INVALID`].
+    Invalid,
+}
+
+static GLOBAL_REGISTRY: OnceLock<Mutex<UidRegistry>> = OnceLock::new();
+
+/// The process-global registry backing the `ResourceUID` singleton.
+pub fn global_registry() -> &'static Mutex<UidRegistry> {
+    GLOBAL_REGISTRY.get_or_init(|| Mutex::new(UidRegistry::new()))
+}
+
+/// Locks the global registry, recovering from poisoning.
+///
+/// ⚠️ Deliberately does not `unwrap()`. A test that panics while holding this
+/// lock would otherwise poison it and turn every later UID call in the same
+/// process into a second, unrelated panic — hiding the original failure.
+fn lock_global() -> std::sync::MutexGuard<'static, UidRegistry> {
+    match global_registry().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// SplitMix64 — the standard finalizer used to expand a seed into a stream.
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// FNV-1a over bytes, used to seed [`create_id_for_path`].
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xCBF2_9CE4_8422_2325;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    hash
+}
+
+/// Masks a raw 64-bit draw into Godot's UID space.
+///
+/// ⚠️ Godot clears the high bit (`id &= 0x7FFFFFFFFFFFFFFF`) so a UID is always
+/// non-negative — [`ResourceUid::INVALID`] is `-1`, so a draw that kept its sign
+/// bit could collide with the sentinel.
+fn mask_uid(raw: u64) -> ResourceUid {
+    ResourceUid::new((raw & 0x7FFF_FFFF_FFFF_FFFF) as i64)
+}
+
+/// Godot `ResourceUID.create_id()`: a fresh id not currently registered.
+///
+/// ⚠️ Godot draws from `CryptoCore::RandomGenerator`. Patina has no crypto
+/// dependency here, so this seeds SplitMix64 from `RandomState` (randomly
+/// seeded per process and per call) mixed with a monotonic counter. The counter
+/// is what makes "a distinct id each call" a *guarantee* rather than a
+/// probability: two calls can never start from the same seed.
+pub fn create_id() -> ResourceUid {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tick = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    let mut hasher =
+        std::hash::BuildHasher::build_hasher(&std::collections::hash_map::RandomState::new());
+    std::hash::Hasher::write_u64(&mut hasher, tick);
+    let mut state = std::hash::Hasher::finish(&hasher);
+
+    loop {
+        let id = mask_uid(splitmix64(&mut state));
+        if id.is_valid() && !has_id(id) {
+            return id;
+        }
+    }
+}
+
+/// Godot `ResourceUID.create_id_for_path(path)`: an id derived from the path.
+///
+/// ⚠️ **Not bit-compatible with Godot's**, and deliberately so. Godot seeds its
+/// RandomPCG with `project_name.hash64() * path.to_lower().hash64() *
+/// FileAccess::get_md5(path).hash64()` — it depends on the project name *and on
+/// the file's contents*, neither of which is available here, and the MD5 term
+/// means Godot's own id changes whenever the file is edited. A UID minted here
+/// will not match the one Godot mints for the same file; what is preserved is
+/// the property scripts rely on — same path in, same id out.
+///
+/// The path is lowercased first, as Godot does, so case-insensitive filesystems
+/// do not shift ids.
+pub fn create_id_for_path(path: &str) -> ResourceUid {
+    let mut state = fnv1a64(path.to_lowercase().as_bytes());
+    loop {
+        let id = mask_uid(splitmix64(&mut state));
+        if id.is_valid() && !has_id(id) {
+            return id;
+        }
+    }
+}
+
+/// Godot `ResourceUID.has_id(id)`: is this id registered?
+///
+/// ⚠️ This asks the REGISTRY. The previous script binding answered
+/// `id_to_text(id) != "uid://<invalid>"`, which only tests that the id is
+/// well-formed — it returned true for every non-negative integer.
+pub fn has_id(id: ResourceUid) -> bool {
+    lock_global().lookup_uid(id).is_some()
+}
+
+/// Godot `ResourceUID.add_id(id, path)`: register a NEW mapping.
+///
+/// ⚠️ Fails if the id is already registered (Godot's
+/// `ERR_FAIL_COND(unique_ids.has(p_id))`). It is not an upsert — see [`set_id`].
+pub fn add_id(id: ResourceUid, path: &str) -> Result<(), UidError> {
+    if !id.is_valid() {
+        return Err(UidError::Invalid);
+    }
+    let mut reg = lock_global();
+    if reg.lookup_uid(id).is_some() {
+        return Err(UidError::AlreadyExists);
+    }
+    reg.register(id, path);
+    Ok(())
+}
+
+/// Godot `ResourceUID.set_id(id, path)`: repoint an EXISTING mapping.
+///
+/// ⚠️ The exact inverse of [`add_id`]: fails if the id is *not* already
+/// registered (`ERR_FAIL_COND(!unique_ids.has(p_id))`).
+pub fn set_id(id: ResourceUid, path: &str) -> Result<(), UidError> {
+    if !id.is_valid() {
+        return Err(UidError::Invalid);
+    }
+    let mut reg = lock_global();
+    if reg.lookup_uid(id).is_none() {
+        return Err(UidError::NotFound);
+    }
+    reg.register(id, path);
+    Ok(())
+}
+
+/// Godot `ResourceUID.get_id_path(id)`: the path an id resolves to.
+pub fn get_id_path(id: ResourceUid) -> Option<String> {
+    lock_global().lookup_uid(id).map(str::to_string)
+}
+
+/// Godot `ResourceUID.remove_id(id)`: drop a mapping.
+///
+/// ⚠️ Fails on an unregistered id (`ERR_FAIL_COND(!unique_ids.has(p_id))`)
+/// rather than silently succeeding.
+pub fn remove_id(id: ResourceUid) -> Result<(), UidError> {
+    let mut reg = lock_global();
+    if reg.lookup_uid(id).is_none() {
+        return Err(UidError::NotFound);
+    }
+    reg.unregister_uid(id);
+    Ok(())
+}
+
+/// Godot `ResourceUID.uid_to_path(uid)`: `get_id_path(text_to_id(uid))`.
+///
+/// ⚠️ Returns an EMPTY string for an unregistered or malformed uid, because
+/// Godot's `get_id_path` fails to `String()`. That is not symmetric with
+/// [`path_to_uid`], which echoes its input instead — see there.
+pub fn uid_to_path(uid_text: &str) -> String {
+    get_id_path(text_to_id(uid_text)).unwrap_or_default()
+}
+
+/// Godot `ResourceUID.path_to_uid(path)`: the `uid://…` text for a path.
+///
+/// ⚠️ Returns **the path itself**, unchanged, when the path has no registered
+/// UID — Godot's `if (id == INVALID_ID) return p_path;`. It does NOT return
+/// empty or the invalid sentinel, so a caller can always feed the result
+/// straight into a loader. This asymmetry with [`uid_to_path`] is Godot's, not
+/// a slip.
+pub fn path_to_uid(path: &str) -> String {
+    match lock_global().lookup_path(path) {
+        Some(id) => id_to_text(id.raw()),
+        None => path.to_string(),
+    }
+}
+
+/// Godot `ResourceUID.ensure_path(path_or_uid)`: resolve only if it is a uid.
+///
+/// ⚠️ Anything not starting with `uid://` is returned verbatim, so a plain
+/// `res://` path passes through untouched.
+pub fn ensure_path(path_or_uid: &str) -> String {
+    if path_or_uid.starts_with("uid://") {
+        return uid_to_path(path_or_uid);
+    }
+    path_or_uid.to_string()
 }
 
 #[cfg(test)]

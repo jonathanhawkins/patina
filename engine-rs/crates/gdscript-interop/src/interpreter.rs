@@ -3054,6 +3054,53 @@ impl Interpreter {
         Variant::Nil
     }
 
+    /// `MovieWriter.<method>(…)` (pat-s3rrv.262).
+    ///
+    /// Godot's `MovieWriter` exposes exactly one static, `add_writer(writer)`,
+    /// which pushes a candidate encoder onto a process-global registry. The
+    /// registry itself lives in `gdobject::movie_writer` and predates this;
+    /// what was missing was any way for a script to reach it, so
+    /// `MovieWriter.add_writer(self)` raised.
+    ///
+    /// ⚠️ The **instance** is what gets recorded, not just the class name. The
+    /// frame loop has to call `_write_begin`/`_write_frame`/`_write_end` back
+    /// on the specific object that registered, and a class name cannot identify
+    /// it — nothing stops two nodes sharing one script.
+    fn call_movie_writer_static(
+        &mut self,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        match method {
+            "add_writer" => {
+                // Godot takes a `MovieWriter` object. Anything else is a no-op
+                // rather than an error: `add_writer(null)` is ignored there too.
+                let Some(Variant::ObjectId(id)) = args.first() else {
+                    return Ok(Variant::Nil);
+                };
+                // `add_writer(self)` runs inside the writer's own script, so the
+                // executing class IS the writer's class. A script that omits
+                // `class_name` has no name of its own, in which case the
+                // `extends` line is the most specific thing available.
+                let name = self
+                    .self_instance
+                    .as_ref()
+                    .and_then(|inst| {
+                        inst.class_def
+                            .name
+                            .clone()
+                            .or_else(|| inst.class_def.parent_class.clone())
+                    })
+                    .unwrap_or_default();
+                gdobject::movie_writer::add_writer_instance(name, id.raw());
+                Ok(Variant::Nil)
+            }
+            other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("MovieWriter.{other}"),
+            ))),
+        }
+    }
+
     /// Asks each registered script `Translation` for `key`, in registration
     /// order (pat-s3rrv.229).
     ///
@@ -3947,6 +3994,16 @@ impl Interpreter {
                         // the ObjectId instance path.
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "Image") {
                             return call_image_static(member, &evaluated_args);
+                        }
+                        // MovieWriter.add_writer(writer) (pat-s3rrv.262).
+                        //
+                        // ⚠️ A class *static*, not a singleton — Godot's
+                        // `Engine.has_singleton("MovieWriter")` is false, so
+                        // this is deliberately absent from BUILTIN_SINGLETONS
+                        // and dispatches here for the same reason
+                        // `Image.create` does.
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "MovieWriter") {
+                            return self.call_movie_writer_static(member, &evaluated_args);
                         }
                         // EngineDebugger singleton (pat-nzgdu.176) — backed by
                         // the real gdcore::debugger. `is_active()` is false
@@ -10549,7 +10606,12 @@ impl Interpreter {
                 return call_pck_packer_instance(*oid, method, args);
             }
             if is_camera_feed_handle(*oid) {
-                return call_camera_feed_instance(*oid, method, args);
+                let out = call_camera_feed_instance(*oid, method, args);
+                // Drain before returning, so a `frame_changed` handler runs
+                // before the script's next statement rather than whenever the
+                // next feed call happens to come along.
+                self.flush_camera_feed_signals();
+                return out;
             }
             // Before the RefCounted branch: a WeakRef IS a RefCounted in
             // Godot, and its own methods must win over the generic ones.
@@ -15661,6 +15723,18 @@ impl Interpreter {
             "add_feed" => {
                 if let Some(id) = feed_id {
                     self.emit_camera_server_signal("camera_feed_added", &[Variant::Int(id)]);
+                    // ⚠️ pat-s3rrv.261 asks for `camera_feeds_updated` here.
+                    // DELIBERATELY NOT EMITTED, because Godot does not emit it
+                    // here either: `camera_server.cpp` has exactly two
+                    // emit_signal sites (:126 added, :140 removed). The signal
+                    // is real — declared at `camera_server.h:62` and bound at
+                    // `camera_server.cpp:57` — but it is raised by the platform
+                    // DRIVERS when they re-enumerate the device list
+                    // (`modules/camera/camera_macos.mm:400`,
+                    // `camera_android.cpp:816`, `camera_linux.cpp:83`), which is
+                    // a different event from a script calling `add_feed`.
+                    // Emitting it here would be a parity defect and is pinned
+                    // against by `camera_feed.rs::camera_feeds_updated_is_never_emitted`.
                 }
             }
             "remove_feed" => {
@@ -15682,6 +15756,43 @@ impl Interpreter {
     /// `add_feed()` re-enters this registry, and dispatching while still inside
     /// `borrow()` would panic with `BorrowMutError`. Same decide-then-act rule
     /// as the profiler dispatch in .251.
+    /// Delivers everything `call_camera_feed_instance` raised (pat-s3rrv.261).
+    ///
+    /// The feed handler is a free function and cannot invoke a Callable, so it
+    /// queues; this drains. Called immediately after every feed method, so the
+    /// callback runs before the calling script's next statement — which is what
+    /// `emit_signal` does in Godot.
+    fn flush_camera_feed_signals(&mut self) {
+        loop {
+            // Take one at a time and RELEASE the borrow before invoking: a
+            // handler is free to call back into the feed and queue more, which
+            // would panic on an already-borrowed RefCell.
+            let next = PENDING_CAMERA_FEED_SIGNALS.with(|p| {
+                let mut q = p.borrow_mut();
+                if q.is_empty() {
+                    None
+                } else {
+                    Some(q.remove(0))
+                }
+            });
+            let Some((feed, signal, args)) = next else {
+                return;
+            };
+            let targets: Vec<CallableRef> = CAMERA_FEED_CONNECTIONS.with(|c| {
+                c.borrow()
+                    .iter()
+                    .filter(|(r, s, _)| *r == feed && *s == signal)
+                    .map(|(_, _, cb)| cb.clone())
+                    .collect()
+            });
+            for cb in targets {
+                // A raising handler must not turn into an error from
+                // `set_rgb_image`; Godot's emit_signal does not propagate one.
+                let _ = self.invoke_callable(&cb, &args);
+            }
+        }
+    }
+
     fn emit_camera_server_signal(&mut self, signal: &str, args: &[Variant]) {
         let targets: Vec<CallableRef> = CAMERA_SERVER_CONNECTIONS.with(|c| {
             c.borrow()
@@ -20974,6 +21085,23 @@ struct CameraFeedState {
     /// Godot's feed keeps its own `Ref<Image>`, so a later `set_pixel` on the
     /// caller's image must not retroactively change what the feed is showing.
     rgb_image: Option<ImageState>,
+    /// Luma plane from `set_ycbcr_image` or `set_ycbcr_images` (pat-s3rrv.261).
+    ///
+    /// Stored by value for the same reason as `rgb_image`.
+    y_image: Option<ImageState>,
+    /// Chroma plane, set only by `set_ycbcr_images`. `set_ycbcr_image` supplies
+    /// one interleaved plane and leaves this `None` — which is exactly the
+    /// difference between FEED_YCBCR (2) and FEED_YCBCR_SEP (3).
+    cbcr_image: Option<ImageState>,
+    /// Format dictionaries reported by `get_formats` (pat-s3rrv.261).
+    ///
+    /// ⚠️ On a real device the driver enumerates these. Patina has no camera
+    /// driver on any platform — neither does Godot's own web export — so this
+    /// describes the SCRIPT-FED path: one entry, present from construction, so
+    /// that `set_format(0, …)` is a valid selection rather than always failing.
+    formats: Vec<Variant>,
+    /// Index chosen by `set_format`, or -1 when none has been selected.
+    selected_format: i64,
 }
 
 thread_local! {
@@ -20990,6 +21118,22 @@ thread_local! {
     /// node-keyed `connect_signal` cannot represent it as a signal SOURCE —
     /// hence a registry of its own rather than a reuse of that path.
     static CAMERA_SERVER_CONNECTIONS: std::cell::RefCell<Vec<(String, CallableRef)>> =
+        std::cell::RefCell::new(Vec::new());
+    /// Per-FEED signal connections: `(feed handle raw, signal, callable)`
+    /// (pat-s3rrv.261).
+    ///
+    /// Keyed by handle rather than by the Godot-visible `feed.id` so two feeds
+    /// can carry independent `frame_changed` connections.
+    static CAMERA_FEED_CONNECTIONS: std::cell::RefCell<Vec<(u64, String, CallableRef)>> =
+        std::cell::RefCell::new(Vec::new());
+    /// Signals raised by a feed method but not yet delivered.
+    ///
+    /// ⚠️ `call_camera_feed_instance` is a FREE function with no interpreter, so
+    /// it cannot invoke a Callable. It records what it raised here and the call
+    /// site, which does have `&mut Interpreter`, drains this queue immediately
+    /// afterwards. Draining anywhere later would let a second feed call
+    /// interleave its own signals ahead of these.
+    static PENDING_CAMERA_FEED_SIGNALS: std::cell::RefCell<Vec<(u64, String, Vec<Variant>)>> =
         std::cell::RefCell::new(Vec::new());
     /// Sequence backing both the handle id and the Godot-visible feed id.
     static NEXT_CAMERA_FEED: std::cell::Cell<u64> = std::cell::Cell::new(1);
@@ -24919,6 +25063,12 @@ fn new_camera_feed_handle() -> gdcore::id::ObjectId {
                     origin: gdcore::math::Vector2::new(0.0, 1.0),
                 },
                 external_size: None,
+                y_image: None,
+                cbcr_image: None,
+                formats: vec![default_camera_format()],
+                // No selection yet; -1 rather than 0 so "never set" and
+                // "selected the first" stay distinguishable.
+                selected_format: -1,
                 rgb_image: None,
             },
         );
@@ -25905,6 +26055,69 @@ fn call_http_client_instance(
     })
 }
 
+/// The single format a script-fed `CameraFeed` reports (pat-s3rrv.261).
+///
+/// ⚠️ On a real device the driver enumerates formats from the hardware. Patina
+/// has no camera driver on any platform, and neither does Godot's own web
+/// export, so there is nothing to enumerate. Reporting an EMPTY list would be
+/// defensible but makes `set_format` permanently unusable — every index is out
+/// of range — so the script-fed path advertises one generic entry. The keys
+/// mirror the dictionaries Godot's drivers produce.
+fn default_camera_format() -> Variant {
+    let mut d = gdvariant::Dictionary::new();
+    d.insert("format", Variant::String("RGBA8".to_string()));
+    d.insert("width", Variant::Int(0));
+    d.insert("height", Variant::Int(0));
+    d.insert("frame_numerator", Variant::Int(0));
+    d.insert("frame_denominator", Variant::Int(0));
+    Variant::Dictionary(d)
+}
+
+/// Reads argument `index` as an `Image` and copies its pixels out.
+///
+/// ⚠️ The `IMAGES` borrow must END before the caller touches the feed: both are
+/// thread-locals and one combined borrow is a re-entrancy hazard. Returning an
+/// owned `ImageState` is what enforces that.
+fn camera_feed_image_arg(
+    args: &[Variant],
+    who: &str,
+    index: usize,
+) -> Result<ImageState, RuntimeError> {
+    let handle = match args.get(index) {
+        Some(Variant::ObjectId(oid)) if is_image_handle(*oid) => oid.raw(),
+        _ => {
+            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "CameraFeed.{who}() takes an Image at argument {index}"
+            ))))
+        }
+    };
+    IMAGES
+        .with(|m| m.borrow().get(&handle).cloned())
+        .ok_or_else(|| {
+            RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "CameraFeed.{who}() got an invalid Image handle"
+            )))
+        })
+}
+
+/// Records a signal for the call site to deliver.
+fn queue_camera_feed_signal(feed: u64, signal: &str) {
+    PENDING_CAMERA_FEED_SIGNALS
+        .with(|p| p.borrow_mut().push((feed, signal.to_string(), Vec::new())));
+}
+
+/// The signal name argument of a `CameraFeed` connect/disconnect/is_connected.
+fn camera_feed_signal_name(args: &[Variant], who: &str) -> Result<String, RuntimeError> {
+    match args.first() {
+        Some(Variant::String(s)) => Ok(s.clone()),
+        // `as_str().to_string()` — StringName has no Display impl.
+        Some(Variant::StringName(s)) => Ok(s.as_str().to_string()),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "CameraFeed.{who}() takes a signal name"
+        )))),
+    }
+}
+
 fn call_camera_feed_instance(
     id: gdcore::id::ObjectId,
     method: &str,
@@ -25979,6 +26192,8 @@ fn call_camera_feed_instance(
                 feed.rgb_image = Some(img);
                 // FEED_RGB = 1 (camera_feed.h:48).
                 feed.datatype = 1;
+                // camera_feed.cpp emits this from every set_*_image.
+                queue_camera_feed_signal(raw, "frame_changed");
                 Ok(Variant::Nil)
             }
             // `set_external(width, height)` (camera_feed.h:118) declares an
@@ -26012,9 +26227,87 @@ fn call_camera_feed_instance(
             // Still FEED_NOIMAGE (0) on a fresh feed: there is no camera driver,
             // so nothing supplies frames on its own.
             "get_datatype" => Ok(Variant::Int(feed.datatype)),
-            "get_formats" => Ok(Variant::Array(Vec::new())),
-            "set_format" => Ok(Variant::Bool(false)),
+            // `set_ycbcr_image(Image)` — ONE interleaved plane, so FEED_YCBCR
+            // (2). Distinct from `set_ycbcr_images`, which takes two separate
+            // planes and is FEED_YCBCR_SEP (3); collapsing them would make a
+            // shader sampling the chroma plane read the luma one.
+            "set_ycbcr_image" => {
+                let img = camera_feed_image_arg(args, "set_ycbcr_image", 0)?;
+                feed.y_image = Some(img);
+                feed.cbcr_image = None;
+                feed.datatype = 2;
+                queue_camera_feed_signal(raw, "frame_changed");
+                Ok(Variant::Nil)
+            }
+            // `set_ycbcr_images(y_image, cbcr_image)` — two planes, FEED_YCBCR_SEP.
+            "set_ycbcr_images" => {
+                let y = camera_feed_image_arg(args, "set_ycbcr_images", 0)?;
+                let cbcr = camera_feed_image_arg(args, "set_ycbcr_images", 1)?;
+                feed.y_image = Some(y);
+                feed.cbcr_image = Some(cbcr);
+                feed.datatype = 3;
+                queue_camera_feed_signal(raw, "frame_changed");
+                Ok(Variant::Nil)
+            }
+            "get_formats" => Ok(Variant::Array(feed.formats.clone())),
+            // `set_format(index, parameters)` selects one of `get_formats`.
+            // Returns true and emits `format_changed` only on a real selection;
+            // an out-of-range index is false and emits NOTHING, which is what
+            // makes the signal meaningful.
+            "set_format" => {
+                let index = match args.first() {
+                    Some(Variant::Int(i)) => *i,
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "CameraFeed.set_format() takes (index, parameters)".into(),
+                        )))
+                    }
+                };
+                if index < 0 || index as usize >= feed.formats.len() {
+                    return Ok(Variant::Bool(false));
+                }
+                feed.selected_format = index;
+                queue_camera_feed_signal(raw, "format_changed");
+                Ok(Variant::Bool(true))
+            }
+            // The index `set_format` selected, or -1. Not a Godot method; it is
+            // the only way a test can tell a successful selection from a
+            // refused one beyond the return value.
+            "get_selected_format" => Ok(Variant::Int(feed.selected_format)),
+            // Godot returns the driver's GL/Metal texture name. With no driver
+            // there is no such object, so 0 (Godot's "no texture") stays
+            // correct rather than invented.
             "get_texture_tex_id" => Ok(Variant::Int(0)),
+            // -- signals (pat-s3rrv.261) ------------------------------------
+            //
+            // Only the registry lives here; the emission needs the interpreter
+            // to invoke a Callable and happens at the call site.
+            "connect" => {
+                let signal = camera_feed_signal_name(args, "connect")?;
+                let callable = match args.get(1) {
+                    Some(Variant::Callable(c)) => (**c).clone(),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "CameraFeed.connect() takes (signal, Callable)".into(),
+                        )))
+                    }
+                };
+                CAMERA_FEED_CONNECTIONS.with(|c| c.borrow_mut().push((raw, signal, callable)));
+                // Godot's Object.connect returns an Error; OK is 0.
+                Ok(Variant::Int(0))
+            }
+            "disconnect" => {
+                let signal = camera_feed_signal_name(args, "disconnect")?;
+                CAMERA_FEED_CONNECTIONS
+                    .with(|c| c.borrow_mut().retain(|(r, s, _)| !(*r == raw && *s == signal)));
+                Ok(Variant::Nil)
+            }
+            "is_connected" => {
+                let signal = camera_feed_signal_name(args, "is_connected")?;
+                Ok(Variant::Bool(CAMERA_FEED_CONNECTIONS.with(|c| {
+                    c.borrow().iter().any(|(r, s, _)| *r == raw && *s == signal)
+                })))
+            }
             other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                 format!("CameraFeed.{other}"),
             ))),
@@ -26506,6 +26799,40 @@ fn new_image_handle(width: i64, height: i64, format: i64) -> gdcore::id::ObjectI
         );
     });
     gdcore::id::ObjectId::from_raw(raw)
+}
+
+/// Mints a script-visible `Image` handle already filled with `pixels`
+/// (pat-s3rrv.262).
+///
+/// Everything above is reachable only from inside this module: `IMAGES` is a
+/// private thread-local and [`new_image_handle`] is private, so Rust code in
+/// another crate had **no way to hand a script a real `Image`**. A frame
+/// produced by the engine could not be passed to a `MovieWriter`'s
+/// `_write_frame`, which is what this exists for.
+///
+/// ⚠️ Thread-local, like the rest of the registry: the handle only resolves on
+/// the thread that minted it. The main loop and the scripts it drives share a
+/// thread, which is what makes this sound — a handle sent to another thread
+/// would simply not be found.
+///
+/// `pixels` is fitted to `width * height` rather than trusted: a short buffer
+/// is padded transparent and a long one truncated, so a caller that miscounts
+/// gets a correctly-sized image instead of a buffer whose length disagrees with
+/// its dimensions — which every reader here indexes by `y * width + x`.
+pub fn new_image_handle_from_pixels(
+    width: i64,
+    height: i64,
+    mut pixels: Vec<gdcore::math::Color>,
+) -> gdcore::id::ObjectId {
+    let id = new_image_handle(width, height, IMAGE_FORMAT_RGBA8);
+    let needed = (width.max(0) as usize).saturating_mul(height.max(0) as usize);
+    pixels.resize(needed, gdcore::math::Color::new(0.0, 0.0, 0.0, 0.0));
+    IMAGES.with(|m| {
+        if let Some(state) = m.borrow_mut().get_mut(&id.raw()) {
+            state.pixels = pixels;
+        }
+    });
+    id
 }
 
 /// The pixels a `CameraFeed` was given by `set_rgb_image`, keyed by the raw
@@ -27381,15 +27708,68 @@ fn call_resourceuid_static(method: &str, args: &[Variant]) -> Result<Variant, Ru
                 "ResourceUID.text_to_id() expects a uid:// string".into(),
             ))),
         },
+        // 🔑 `has_id` asks the REGISTRY (pat-s3rrv.253).
+        //
+        // ⚠️ It used to answer `id_to_text(id) != "uid://<invalid>"`, which only
+        // tests that the id is well-formed — it returned true for EVERY
+        // non-negative integer, so a script could never learn that a uid was
+        // unknown. Godot: `return unique_ids.has(p_id);`
         "has_id" => {
-            let id = to_int(args.first().ok_or_else(|| {
-                RuntimeError::new(RuntimeErrorKind::TypeError(
-                    "ResourceUID.has_id() takes an id".into(),
-                ))
-            })?)?;
-            Ok(Variant::Bool(
-                gdresource::uid::id_to_text(id) != "uid://<invalid>",
+            let id = singleton_int_arg(args, 0, "ResourceUID.has_id()")?;
+            Ok(Variant::Bool(gdresource::uid::has_id(
+                gdcore::ResourceUid::new(id),
+            )))
+        }
+        "create_id" => Ok(Variant::Int(gdresource::uid::create_id().raw())),
+        "create_id_for_path" => {
+            let path = singleton_string_arg(args, 0, "ResourceUID.create_id_for_path()")?;
+            Ok(Variant::Int(
+                gdresource::uid::create_id_for_path(&path).raw(),
             ))
+        }
+        // ⚠️ `add_id`, `set_id` and `remove_id` are `void` in Godot
+        // (doc/classes/ResourceUID.xml), NOT Error-returning. Their failures are
+        // `ERR_FAIL_COND` diagnostics, so a script observes `null` either way —
+        // returning an error code here would be a nicer API but would not be
+        // parity. The Result is dropped deliberately, not by oversight.
+        "add_id" => {
+            let id = singleton_int_arg(args, 0, "ResourceUID.add_id()")?;
+            let path = singleton_string_arg(args, 1, "ResourceUID.add_id()")?;
+            let _ = gdresource::uid::add_id(gdcore::ResourceUid::new(id), &path);
+            Ok(Variant::Nil)
+        }
+        "set_id" => {
+            let id = singleton_int_arg(args, 0, "ResourceUID.set_id()")?;
+            let path = singleton_string_arg(args, 1, "ResourceUID.set_id()")?;
+            let _ = gdresource::uid::set_id(gdcore::ResourceUid::new(id), &path);
+            Ok(Variant::Nil)
+        }
+        "remove_id" => {
+            let id = singleton_int_arg(args, 0, "ResourceUID.remove_id()")?;
+            let _ = gdresource::uid::remove_id(gdcore::ResourceUid::new(id));
+            Ok(Variant::Nil)
+        }
+        // ⚠️ Returns an EMPTY string for an unregistered id, because Godot's
+        // `get_id_path` fails to `String()`.
+        "get_id_path" => {
+            let id = singleton_int_arg(args, 0, "ResourceUID.get_id_path()")?;
+            Ok(Variant::String(
+                gdresource::uid::get_id_path(gdcore::ResourceUid::new(id)).unwrap_or_default(),
+            ))
+        }
+        "uid_to_path" => {
+            let uid = singleton_string_arg(args, 0, "ResourceUID.uid_to_path()")?;
+            Ok(Variant::String(gdresource::uid::uid_to_path(&uid)))
+        }
+        // ⚠️ Echoes the PATH back when it has no registered uid — Godot's
+        // `if (id == INVALID_ID) return p_path;`. Not empty, not the sentinel.
+        "path_to_uid" => {
+            let path = singleton_string_arg(args, 0, "ResourceUID.path_to_uid()")?;
+            Ok(Variant::String(gdresource::uid::path_to_uid(&path)))
+        }
+        "ensure_path" => {
+            let path_or_uid = singleton_string_arg(args, 0, "ResourceUID.ensure_path()")?;
+            Ok(Variant::String(gdresource::uid::ensure_path(&path_or_uid)))
         }
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("ResourceUID.{other}"),

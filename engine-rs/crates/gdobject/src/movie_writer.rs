@@ -14,13 +14,24 @@
 
 use std::sync::{Mutex, OnceLock};
 
-/// A writer registered via [`add_writer`], identified by the class name of the
-/// (script or built-in) `MovieWriter` subclass. The per-frame encode callbacks
-/// are deferred, so only the identity is retained here.
+/// A writer registered via [`add_writer`] or [`add_writer_instance`].
+///
+/// The class name alone was enough while the registry was inert. Driving the
+/// `_write_begin`/`_write_frame`/`_write_end` virtuals needs the **instance**
+/// too: the frame loop has to call back into the specific object that
+/// registered itself, and a class name cannot identify it (nothing stops two
+/// nodes sharing one script). Hence `object_id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisteredWriter {
     /// Class name of the registered `MovieWriter` subclass.
     pub name: String,
+    /// Raw [`gdcore::id::ObjectId`] of the registering instance, when it came
+    /// from a script calling `MovieWriter.add_writer(self)`.
+    ///
+    /// `None` for a name-only registration from Rust, which cannot be called
+    /// back into — such a writer is still listed, matching the pre-existing
+    /// behaviour, but the frame loop skips it when selecting one to drive.
+    pub object_id: Option<u64>,
 }
 
 fn registry() -> &'static Mutex<Vec<RegisteredWriter>> {
@@ -30,11 +41,47 @@ fn registry() -> &'static Mutex<Vec<RegisteredWriter>> {
 
 /// Godot `MovieWriter.add_writer(writer)`: registers a writer (by subclass name)
 /// into the process-global registry so it is considered at movie-mode start.
+///
+/// Registers no instance, so the result cannot have its virtuals driven; see
+/// [`add_writer_instance`] for the path a script takes.
 pub fn add_writer(name: impl Into<String>) {
+    registry().lock().unwrap().push(RegisteredWriter {
+        name: name.into(),
+        object_id: None,
+    });
+}
+
+/// `MovieWriter.add_writer(self)` as reached from GDScript: registers the
+/// calling instance so the frame loop can invoke its virtuals.
+///
+/// ⚠️ Godot silently ignores a duplicate registration of the same object, and so
+/// does this — a writer that registers in `_ready` on a node that is removed and
+/// re-added would otherwise be driven twice per frame, and `_write_frame` is
+/// specified as once per frame.
+pub fn add_writer_instance(name: impl Into<String>, object_id: u64) {
+    let mut reg = registry().lock().unwrap();
+    if reg.iter().any(|w| w.object_id == Some(object_id)) {
+        return;
+    }
+    reg.push(RegisteredWriter {
+        name: name.into(),
+        object_id: Some(object_id),
+    });
+}
+
+/// The first registered writer carrying an instance, in registration order.
+///
+/// Godot picks the first writer whose `_handles_file(path)` accepts the output
+/// path; that call has to happen where scripts can be invoked, so this returns
+/// the candidates in order and leaves the choice to the caller.
+pub fn instance_writers() -> Vec<RegisteredWriter> {
     registry()
         .lock()
         .unwrap()
-        .push(RegisteredWriter { name: name.into() });
+        .iter()
+        .filter(|w| w.object_id.is_some())
+        .cloned()
+        .collect()
 }
 
 /// Returns all registered writers, in registration order.

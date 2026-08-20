@@ -9932,6 +9932,102 @@ pub fn register_3d_classes() {
                     .constant("FUNC_MAX", 32),
             ),
     );
+    // pat-s3rrv.258 — the unsigned mirror of the Int* family above.
+    //
+    // ⚠️ The enum lists are NOT the signed ones renamed. `IntFunc` carries
+    // FUNC_ABS 0 / FUNC_NEGATE 1 / FUNC_SIGN 2 / FUNC_BITWISE_NOT 3 /
+    // FUNC_MAX 4; the unsigned type has no ABS or SIGN, so every shared name
+    // sits at a different index. Values transcribed from
+    // upstream/godot/doc/classes/VisualShaderNodeUInt*.xml.
+    // pat-s3rrv.260 — the varying family.
+    //
+    // ⚠️ `varying_name` defaults to the literal string "[None]", NOT to empty.
+    // The doc XML spells it `default="&quot;[None]&quot;"`, i.e. the brackets
+    // are part of the value; Godot uses it as the "no varying selected" marker,
+    // so an empty default would read as a real, unnamed varying.
+    register_class(
+        ClassRegistration::new("VisualShaderNodeVarying")
+            .parent("VisualShaderNode")
+            .property(
+                PropertyInfo::new("varying_name", Variant::String(String::from("[None]")))
+                    .with_accessors("get_varying_name", "set_varying_name"),
+            )
+            .property(
+                PropertyInfo::new("varying_type", Variant::Int(0))
+                    .with_accessors("get_varying_type", "set_varying_type"),
+            ),
+    );
+    // The two leaves declare NO members of their own — both inherit
+    // `varying_name` and `varying_type` from the base above, exactly as the doc
+    // XML has it. Re-declaring them here would model Godot wrongly even though
+    // `get_property_list` would dedupe the result (pat-s3rrv.74).
+    register_class(
+        ClassRegistration::new("VisualShaderNodeVaryingGetter").parent("VisualShaderNodeVarying"),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeVaryingSetter").parent("VisualShaderNodeVarying"),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeUIntConstant")
+            .parent("VisualShaderNodeConstant")
+            .property(
+                PropertyInfo::new("constant", Variant::Int(0))
+                    .with_accessors("get_constant", "set_constant"),
+            ),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeUIntParameter")
+            .parent("VisualShaderNodeParameter")
+            .property(
+                PropertyInfo::new("default_value_enabled", Variant::Bool(false))
+                    .with_accessors("is_default_value_enabled", "set_default_value_enabled"),
+            )
+            .property(
+                PropertyInfo::new("default_value", Variant::Int(0))
+                    .with_accessors("get_default_value", "set_default_value"),
+            ),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeUIntFunc")
+            .parent("VisualShaderNode")
+            .property(
+                PropertyInfo::new("function", Variant::Int(0))
+                    .with_accessors("get_function", "set_function"),
+            )
+            .enumeration(
+                EnumInfo::new("Function")
+                    .constant("FUNC_NEGATE", 0)
+                    .constant("FUNC_BITWISE_NOT", 1)
+                    .constant("FUNC_MAX", 2),
+            ),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeUIntOp")
+            .parent("VisualShaderNode")
+            .property(
+                PropertyInfo::new("operator", Variant::Int(0))
+                    .with_accessors("get_operator", "set_operator"),
+            )
+            // ⚠️ OP_MAX (5) is a real operator here and the terminator is
+            // OP_ENUM_SIZE (12) — the reverse of the usual Godot convention
+            // where the `_MAX` name terminates the enum.
+            .enumeration(
+                EnumInfo::new("Operator")
+                    .constant("OP_ADD", 0)
+                    .constant("OP_SUB", 1)
+                    .constant("OP_MUL", 2)
+                    .constant("OP_DIV", 3)
+                    .constant("OP_MOD", 4)
+                    .constant("OP_MAX", 5)
+                    .constant("OP_MIN", 6)
+                    .constant("OP_BITWISE_AND", 7)
+                    .constant("OP_BITWISE_OR", 8)
+                    .constant("OP_BITWISE_XOR", 9)
+                    .constant("OP_BITWISE_LEFT_SHIFT", 10)
+                    .constant("OP_BITWISE_RIGHT_SHIFT", 11)
+                    .constant("OP_ENUM_SIZE", 12),
+            ),
+    );
     register_class(
         ClassRegistration::new("VisualShaderNodeIntFunc")
             .parent("VisualShaderNode")
@@ -9993,6 +10089,103 @@ pub fn register_3d_classes() {
                     .constant("FUNC_MAX", 33),
             ),
     );
+    // pat-s3rrv.255 — the function/parameter nodes. Parents and enum indices
+    // transcribed from upstream/godot/scene/resources/visual_shader_nodes.h
+    // (GlobalExpression lives in visual_shader.h).
+    register_class(
+        ClassRegistration::new("VisualShaderNodeClamp")
+            .parent("VisualShaderNode")
+            .property(
+                PropertyInfo::new("op_type", Variant::Int(0))
+                    .with_accessors("get_op_type", "set_op_type"),
+            )
+            .enumeration(
+                EnumInfo::new("OpType")
+                    .constant("OP_TYPE_FLOAT", 0)
+                    .constant("OP_TYPE_INT", 1)
+                    .constant("OP_TYPE_UINT", 2)
+                    .constant("OP_TYPE_VECTOR_2D", 3)
+                    .constant("OP_TYPE_VECTOR_3D", 4)
+                    .constant("OP_TYPE_VECTOR_4D", 5)
+                    .constant("OP_TYPE_MAX", 6),
+            ),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeColorFunc")
+            .parent("VisualShaderNode")
+            .property(
+                PropertyInfo::new("function", Variant::Int(0))
+                    .with_accessors("get_function", "set_function"),
+            )
+            .enumeration(
+                EnumInfo::new("Function")
+                    .constant("FUNC_GRAYSCALE", 0)
+                    .constant("FUNC_HSV2RGB", 1)
+                    .constant("FUNC_RGB2HSV", 2)
+                    .constant("FUNC_SEPIA", 3)
+                    .constant("FUNC_LINEAR_TO_SRGB", 4)
+                    .constant("FUNC_SRGB_TO_LINEAR", 5)
+                    .constant("FUNC_MAX", 6),
+            ),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeRemap")
+            .parent("VisualShaderNode")
+            .property(
+                PropertyInfo::new("op_type", Variant::Int(0))
+                    .with_accessors("get_op_type", "set_op_type"),
+            )
+            .enumeration(
+                EnumInfo::new("OpType")
+                    .constant("OP_TYPE_SCALAR", 0)
+                    .constant("OP_TYPE_VECTOR_2D", 1)
+                    .constant("OP_TYPE_VECTOR_2D_SCALAR", 2)
+                    .constant("OP_TYPE_VECTOR_3D", 3)
+                    .constant("OP_TYPE_VECTOR_3D_SCALAR", 4)
+                    .constant("OP_TYPE_VECTOR_4D", 5)
+                    .constant("OP_TYPE_VECTOR_4D_SCALAR", 6)
+                    .constant("OP_TYPE_MAX", 7),
+            ),
+    );
+    register_class(ClassRegistration::new("VisualShaderNodeRandomRange").parent("VisualShaderNode"));
+    register_class(
+        ClassRegistration::new("VisualShaderNodeBillboard")
+            .parent("VisualShaderNode")
+            // ⚠️ Godot's default is BILLBOARD_TYPE_ENABLED, which is 1 — NOT the
+            // zeroth constant, which is DISABLED.
+            .property(
+                PropertyInfo::new("billboard_type", Variant::Int(1))
+                    .with_accessors("get_billboard_type", "set_billboard_type"),
+            )
+            .property(
+                PropertyInfo::new("keep_scale", Variant::Bool(false))
+                    .with_accessors("is_keep_scale_enabled", "set_keep_scale_enabled"),
+            )
+            .enumeration(
+                EnumInfo::new("BillboardType")
+                    .constant("BILLBOARD_TYPE_DISABLED", 0)
+                    .constant("BILLBOARD_TYPE_ENABLED", 1)
+                    .constant("BILLBOARD_TYPE_FIXED_Y", 2)
+                    .constant("BILLBOARD_TYPE_PARTICLES", 3)
+                    .constant("BILLBOARD_TYPE_MAX", 4),
+            ),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeBooleanParameter")
+            .parent("VisualShaderNodeParameter")
+            .property(
+                PropertyInfo::new("default_value", Variant::Bool(false))
+                    .with_accessors("get_default_value", "set_default_value"),
+            )
+            .property(
+                PropertyInfo::new("default_value_enabled", Variant::Bool(false))
+                    .with_accessors("is_default_value_enabled", "set_default_value_enabled"),
+            ),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeGlobalExpression")
+            .parent("VisualShaderNodeExpression"),
+    );
     register_class(
         ClassRegistration::new("VisualShaderNodeMix")
             .parent("VisualShaderNode")
@@ -10010,6 +10203,109 @@ pub fn register_3d_classes() {
                     .constant("OP_TYPE_VECTOR_4D", 5)
                     .constant("OP_TYPE_VECTOR_4D_SCALAR", 6)
                     .constant("OP_TYPE_MAX", 7),
+            ),
+    );
+    // The UV and scalar-utility leaves (pat-s3rrv.259). All six parent directly
+    // to `VisualShaderNode` and sit beside `Mix`/`Compare`/`If` above, which is
+    // what makes their absence a gap rather than a deliberate cut.
+    //
+    // 🔑 Step/SmoothStep and Switch each declare an enum named `OpType`, and the
+    // two tables are NOT interchangeable — they differ in membership AND in
+    // numbering for names they share:
+    //
+    //            Step/SmoothStep   Switch
+    //   VECTOR_2D        1            3
+    //   VECTOR_3D        3            4
+    //   VECTOR_4D        5            5   <- ⚠️ EQUAL in both
+    //   OP_TYPE_MAX      7            8
+    //
+    // ⚠️ `OP_TYPE_VECTOR_4D` is 5 on both, so it is the one shared name that
+    // CANNOT witness the difference. Sharing one table between them would put
+    // Switch's VECTOR_2D at 1 instead of 3 and silently retype every switch
+    // node in a saved graph.
+    register_class(
+        ClassRegistration::new("VisualShaderNodeRotationByAxis").parent("VisualShaderNode"),
+    );
+    // ⚠️ RotationByAxis and UVPolarCoord declare an EMPTY `<members>` in their
+    // doc XML — their ports live in the generator. Inventing properties here
+    // would pass every existence check while corrupting a `.tres` round trip.
+    register_class(
+        ClassRegistration::new("VisualShaderNodeUVPolarCoord").parent("VisualShaderNode"),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeUVFunc")
+            .parent("VisualShaderNode")
+            .property(
+                PropertyInfo::new("function", Variant::Int(0))
+                    .with_accessors("get_function", "set_function"),
+            )
+            .enumeration(
+                EnumInfo::new("Function")
+                    .constant("FUNC_PANNING", 0)
+                    .constant("FUNC_SCALING", 1)
+                    .constant("FUNC_MAX", 2),
+            ),
+    );
+    // Step and SmoothStep share Godot's scalar/vector OpType table — the same
+    // eight values `VisualShaderNodeMix` above already carries.
+    register_class(
+        ClassRegistration::new("VisualShaderNodeStep")
+            .parent("VisualShaderNode")
+            .property(
+                PropertyInfo::new("op_type", Variant::Int(0))
+                    .with_accessors("get_op_type", "set_op_type"),
+            )
+            .enumeration(
+                EnumInfo::new("OpType")
+                    .constant("OP_TYPE_SCALAR", 0)
+                    .constant("OP_TYPE_VECTOR_2D", 1)
+                    .constant("OP_TYPE_VECTOR_2D_SCALAR", 2)
+                    .constant("OP_TYPE_VECTOR_3D", 3)
+                    .constant("OP_TYPE_VECTOR_3D_SCALAR", 4)
+                    .constant("OP_TYPE_VECTOR_4D", 5)
+                    .constant("OP_TYPE_VECTOR_4D_SCALAR", 6)
+                    .constant("OP_TYPE_MAX", 7),
+            ),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeSmoothStep")
+            .parent("VisualShaderNode")
+            .property(
+                PropertyInfo::new("op_type", Variant::Int(0))
+                    .with_accessors("get_op_type", "set_op_type"),
+            )
+            .enumeration(
+                EnumInfo::new("OpType")
+                    .constant("OP_TYPE_SCALAR", 0)
+                    .constant("OP_TYPE_VECTOR_2D", 1)
+                    .constant("OP_TYPE_VECTOR_2D_SCALAR", 2)
+                    .constant("OP_TYPE_VECTOR_3D", 3)
+                    .constant("OP_TYPE_VECTOR_3D_SCALAR", 4)
+                    .constant("OP_TYPE_VECTOR_4D", 5)
+                    .constant("OP_TYPE_VECTOR_4D_SCALAR", 6)
+                    .constant("OP_TYPE_MAX", 7),
+            ),
+    );
+    // ⚠️ Switch's OpType is the OTHER table: it carries FLOAT/INT/UINT and
+    // BOOLEAN/TRANSFORM, has no `_SCALAR` variants at all, and its MAX is 8.
+    register_class(
+        ClassRegistration::new("VisualShaderNodeSwitch")
+            .parent("VisualShaderNode")
+            .property(
+                PropertyInfo::new("op_type", Variant::Int(0))
+                    .with_accessors("get_op_type", "set_op_type"),
+            )
+            .enumeration(
+                EnumInfo::new("OpType")
+                    .constant("OP_TYPE_FLOAT", 0)
+                    .constant("OP_TYPE_INT", 1)
+                    .constant("OP_TYPE_UINT", 2)
+                    .constant("OP_TYPE_VECTOR_2D", 3)
+                    .constant("OP_TYPE_VECTOR_3D", 4)
+                    .constant("OP_TYPE_VECTOR_4D", 5)
+                    .constant("OP_TYPE_BOOLEAN", 6)
+                    .constant("OP_TYPE_TRANSFORM", 7)
+                    .constant("OP_TYPE_MAX", 8),
             ),
     );
     register_class(
@@ -10433,6 +10729,116 @@ pub fn register_3d_classes() {
     }
     // ⚠️ ABSTRACT — `GDREGISTER_ABSTRACT_CLASS(VisualShaderNodeResizableBase)`.
     // It exists to give resizable nodes their editor `size`; you never place one.
+    // pat-s3rrv.256 — the VisualShader graph-ORGANIZATION nodes.
+    //
+    // These carry no shader code: a Frame is an annotation box, a Reroute is a
+    // pass-through the compiler collapses, and Comment is a deprecated Frame
+    // subclass kept for compatibility. Registering them is what lets a `.tres`
+    // authored in Godot round-trip without the editor denying classes the file
+    // plainly contains.
+    //
+    // ⚠️ Parents are from each class's doc XML, not guessed from the family
+    // name: Frame and GroupBase sit under VisualShaderNodeResizableBase, but
+    // Reroute and Custom are plain VisualShaderNode. The bead does not say.
+
+    if !class_exists("VisualShaderNodeGroupBase") {
+        register_class(
+            ClassRegistration::new("VisualShaderNodeGroupBase")
+                .parent("VisualShaderNodeResizableBase")
+                .abstract_class()
+                .method(MethodInfo::new("add_input_port", 3))
+                .method(MethodInfo::new("add_output_port", 3))
+                .method(MethodInfo::new("clear_input_ports", 0))
+                .method(MethodInfo::new("clear_output_ports", 0))
+                .method(MethodInfo::new("get_free_input_port_id", 0))
+                .method(MethodInfo::new("get_free_output_port_id", 0))
+                .method(MethodInfo::new("get_input_port_count", 0))
+                .method(MethodInfo::new("get_inputs", 0))
+                .method(MethodInfo::new("get_output_port_count", 0))
+                .method(MethodInfo::new("get_outputs", 0))
+                .method(MethodInfo::new("has_input_port", 1))
+                .method(MethodInfo::new("has_output_port", 1))
+                .method(MethodInfo::new("is_valid_port_name", 1))
+                .method(MethodInfo::new("remove_input_port", 1))
+                .method(MethodInfo::new("remove_output_port", 1))
+                .method(MethodInfo::new("set_input_port_name", 2))
+                .method(MethodInfo::new("set_input_port_type", 2))
+                .method(MethodInfo::new("set_inputs", 1))
+                .method(MethodInfo::new("set_output_port_name", 2))
+                .method(MethodInfo::new("set_output_port_type", 2))
+                .method(MethodInfo::new("set_outputs", 1)),
+        );
+    }
+    if !class_exists("VisualShaderNodeFrame") {
+        register_class(
+            ClassRegistration::new("VisualShaderNodeFrame")
+                .parent("VisualShaderNodeResizableBase")
+                .property(PropertyInfo::new(
+                    "attached_nodes",
+                    Variant::PackedInt32Array(Vec::new()),
+                ))
+                .property(PropertyInfo::new("autoshrink", Variant::Bool(true)))
+                .property(PropertyInfo::new(
+                    "tint_color",
+                    Variant::Color(gdcore::math::Color::new(0.3, 0.3, 0.3, 0.75)),
+                ))
+                .property(PropertyInfo::new(
+                    "tint_color_enabled",
+                    Variant::Bool(false),
+                ))
+                .property(PropertyInfo::new(
+                    "title",
+                    Variant::String("Title".to_string()),
+                ))
+                .method(MethodInfo::new("add_attached_node", 1))
+                .method(MethodInfo::new("remove_attached_node", 1)),
+        );
+    }
+    if !class_exists("VisualShaderNodeComment") {
+        register_class(
+            ClassRegistration::new("VisualShaderNodeComment")
+                .parent("VisualShaderNodeFrame")
+                .property(PropertyInfo::new(
+                    "description",
+                    Variant::String(String::new()),
+                )),
+        );
+    }
+    if !class_exists("VisualShaderNodeReroute") {
+        register_class(
+            ClassRegistration::new("VisualShaderNodeReroute")
+                .parent("VisualShaderNode")
+                .method(MethodInfo::new("get_port_type", 0)),
+        );
+    }
+    if !class_exists("VisualShaderNodeCustom") {
+        register_class(
+            ClassRegistration::new("VisualShaderNodeCustom")
+                .parent("VisualShaderNode")
+                .method(MethodInfo::new("_get_category", 0))
+                .method(MethodInfo::new("_get_code", 4))
+                .method(MethodInfo::new("_get_default_input_port", 1))
+                .method(MethodInfo::new("_get_description", 0))
+                .method(MethodInfo::new("_get_func_code", 2))
+                .method(MethodInfo::new("_get_global_code", 1))
+                .method(MethodInfo::new("_get_input_port_count", 0))
+                .method(MethodInfo::new("_get_input_port_default_value", 1))
+                .method(MethodInfo::new("_get_input_port_name", 1))
+                .method(MethodInfo::new("_get_input_port_type", 1))
+                .method(MethodInfo::new("_get_name", 0))
+                .method(MethodInfo::new("_get_output_port_count", 0))
+                .method(MethodInfo::new("_get_output_port_name", 1))
+                .method(MethodInfo::new("_get_output_port_type", 1))
+                .method(MethodInfo::new("_get_property_count", 0))
+                .method(MethodInfo::new("_get_property_default_index", 1))
+                .method(MethodInfo::new("_get_property_name", 1))
+                .method(MethodInfo::new("_get_property_options", 1))
+                .method(MethodInfo::new("_get_return_icon_type", 0))
+                .method(MethodInfo::new("_is_available", 2))
+                .method(MethodInfo::new("_is_highend", 0))
+                .method(MethodInfo::new("get_option_index", 1)),
+        );
+    }
     if !class_exists("VisualShaderNodeResizableBase") {
         register_class(
             ClassRegistration::new("VisualShaderNodeResizableBase")
@@ -11324,6 +11730,120 @@ pub fn register_3d_classes() {
             .property(
                 PropertyInfo::new("expression", Variant::String(String::new()))
                     .with_accessors("get_expression", "set_expression"),
+            ),
+    );
+    // The transform graph family (pat-s3rrv.257). Seven leaves that were all
+    // absent while both of their bases were already present —
+    // `VisualShaderNodeConstant` and `VisualShaderNodeParameter` are registered
+    // earlier in this block — so they plug straight in.
+    //
+    // ⚠️ Every name, parent, default and enum value is transcribed from
+    // `doc/classes/VisualShaderNodeTransform*.xml`, never derived. Two operator
+    // names do not survive derivation:
+    //
+    //   OP_AxB      — a LOWERCASE `x`, not `OP_AXB`
+    //   OP_3x3_AxB  — a DIGIT immediately after the prefix
+    //
+    // A screaming-snake-case guess produces names no script can reference, and
+    // `class_exists` still answers true, so the class looks registered while
+    // every constant lookup on it fails.
+    register_class(
+        ClassRegistration::new("VisualShaderNodeTransformCompose").parent("VisualShaderNode"),
+    );
+    // ⚠️ Compose/Decompose declare an EMPTY `<members>` in their doc XML — they
+    // are graph nodes whose ports live in the generator. Inventing properties
+    // here would pass every existence check while corrupting a `.tres` round
+    // trip, exactly as the SDF marker nodes above note.
+    register_class(
+        ClassRegistration::new("VisualShaderNodeTransformDecompose").parent("VisualShaderNode"),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeTransformConstant")
+            .parent("VisualShaderNodeConstant")
+            .property(
+                PropertyInfo::new(
+                    "constant",
+                    Variant::Transform3D(gdcore::math3d::Transform3D::IDENTITY),
+                )
+                .with_accessors("get_constant", "set_constant"),
+            ),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeTransformFunc")
+            .parent("VisualShaderNode")
+            .property(
+                PropertyInfo::new("function", Variant::Int(0))
+                    .with_accessors("get_function", "set_function"),
+            )
+            .enumeration(
+                EnumInfo::new("Function")
+                    .constant("FUNC_INVERSE", 0)
+                    .constant("FUNC_TRANSPOSE", 1)
+                    .constant("FUNC_MAX", 2),
+            ),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeTransformOp")
+            .parent("VisualShaderNode")
+            .property(
+                PropertyInfo::new("operator", Variant::Int(0))
+                    .with_accessors("get_operator", "set_operator"),
+            )
+            .enumeration(
+                EnumInfo::new("Operator")
+                    .constant("OP_AxB", 0)
+                    .constant("OP_BxA", 1)
+                    .constant("OP_AxB_COMP", 2)
+                    .constant("OP_BxA_COMP", 3)
+                    .constant("OP_ADD", 4)
+                    .constant("OP_A_MINUS_B", 5)
+                    .constant("OP_B_MINUS_A", 6)
+                    .constant("OP_A_DIV_B", 7)
+                    .constant("OP_B_DIV_A", 8)
+                    .constant("OP_MAX", 9),
+            ),
+    );
+    // ⚠️ VecMult's `Operator` is a DIFFERENT enum from TransformOp's despite the
+    // shared name and the shared first two constants: it has five members and
+    // its OP_MAX is 4, against TransformOp's 9. Reusing the other table here
+    // would leave OP_3x3_AxB/OP_3x3_BxA unreachable and OP_MAX wrong.
+    register_class(
+        ClassRegistration::new("VisualShaderNodeTransformVecMult")
+            .parent("VisualShaderNode")
+            .property(
+                PropertyInfo::new("operator", Variant::Int(0))
+                    .with_accessors("get_operator", "set_operator"),
+            )
+            .enumeration(
+                EnumInfo::new("Operator")
+                    .constant("OP_AxB", 0)
+                    .constant("OP_BxA", 1)
+                    .constant("OP_3x3_AxB", 2)
+                    .constant("OP_3x3_BxA", 3)
+                    .constant("OP_MAX", 4),
+            ),
+    );
+    // ⚠️ Only the two members this leaf ADDS are declared. `parameter_name`,
+    // `qualifier` and `instance_index` come from `VisualShaderNodeParameter`.
+    //
+    // Re-declaring one would NOT duplicate it — `get_property_list` merges a
+    // re-declaration as an OVERRIDE, keeping the base position and taking the
+    // derived value (pat-s3rrv.74). That is worse than a duplicate here,
+    // because it silently changes the inherited default with nothing to see in
+    // the property list.
+    register_class(
+        ClassRegistration::new("VisualShaderNodeTransformParameter")
+            .parent("VisualShaderNodeParameter")
+            .property(
+                PropertyInfo::new("default_value_enabled", Variant::Bool(false))
+                    .with_accessors("is_default_value_enabled", "set_default_value_enabled"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "default_value",
+                    Variant::Transform3D(gdcore::math3d::Transform3D::IDENTITY),
+                )
+                .with_accessors("get_default_value", "set_default_value"),
             ),
     );
     register_class(

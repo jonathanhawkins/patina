@@ -354,25 +354,60 @@ fn underline_and_strikethrough_draw_rules_at_different_heights() {
     );
 }
 
-/// ⚠️ `[b]` and `[i]` are still stripped, and that is correct, not an oversight.
+/// `[b]` is OVER-STRUCK; `[i]` still has nothing to render; neither draws a rule.
 ///
-/// The built-in 5x7 bitmap font has no weight or slant variants, so a bold flag
-/// would have nothing to render. Pinning this stops a later pass from "fixing"
-/// the asymmetry by emitting a rule for `[b]` — a bold word with a line under it
-/// is worse than a plain one.
+/// ⚠️ This test previously asserted that `[b]` and `[i]` were both *stripped*,
+/// on the grounds that the built-in 5x7 bitmap font has no weight or slant
+/// variant so a bold flag would have nothing to render (pat-s3rrv.74).
+///
+/// Half of that was right. There is no bold FACE to select — but weight can
+/// still be faked by over-striking the run one pixel across, which thickens
+/// every stem by exactly one pixel. So `[b]` now renders, and only `[i]` stays
+/// unrepresentable: a bitmap glyph cannot be sheared without resampling it.
+///
+/// The original warning still stands and is still pinned below: neither tag may
+/// be "fixed" by emitting a RULE. A bold word with a line under it is worse
+/// than a plain one.
 #[test]
-fn bold_and_italic_remain_stripped_and_draw_no_rule() {
+fn bold_is_overstruck_italic_is_not_and_neither_draws_a_rule() {
     let (mut tree, id) = label("[b]bold[/b] [i]it[/i]");
+    let runs = drawn(&mut tree, id);
 
-    assert_eq!(
-        drawn(&mut tree, id).join(""),
-        "bold it",
-        "the tags are stripped and the text survives"
+    // The tag text itself never reaches the glyphs.
+    assert!(
+        !runs.join("").contains('['),
+        "the tags are stripped from the rendered text, got {runs:?}"
     );
     assert!(
+        runs.iter().any(|r| r.contains("bold")),
+        "the bold run's text survives, got {runs:?}"
+    );
+    assert!(
+        runs.iter().any(|r| r.contains("it")),
+        "the italic run's text survives, got {runs:?}"
+    );
+
+    // ⚠️ The over-strike: the bold run is emitted TWICE, the italic run once.
+    // Counting both in one test is what makes it meaningful — an implementation
+    // that doubled every run would satisfy the bold half alone.
+    let bold_runs = runs.iter().filter(|r| r.trim() == "bold").count();
+    let italic_runs = runs.iter().filter(|r| r.trim() == "it").count();
+    assert_eq!(
+        bold_runs, 2,
+        "a [b] run is drawn twice — once plain, once over-struck one pixel \
+         right — to fake weight the bitmap font has no variant for; got {runs:?}"
+    );
+    assert_eq!(
+        italic_runs, 1,
+        "an [i] run is drawn ONCE: a bitmap glyph cannot be sheared, so slant \
+         stays unrepresentable and must not be faked by doubling; got {runs:?}"
+    );
+
+    // The original guard, unchanged.
+    assert!(
         drawn_lines(&mut tree, id).is_empty(),
-        "no rule is drawn for weight or slant — this renderer cannot express \
-         either, and inventing a decoration would be worse than omitting it"
+        "no rule is drawn for weight or slant — inventing a decoration would be \
+         worse than omitting it"
     );
 }
 

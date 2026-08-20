@@ -36,6 +36,29 @@ fn op_kind(operator: i64) -> VisualShaderNodeType {
     }
 }
 
+/// The operator index of an op node whose operator has no expression here.
+///
+/// `op_kind` collapses every unmapped operator onto multiply; this reports which
+/// ones were collapsed so the caller can say so.
+fn unmapped_operator(class_name: &str, sub: &Resource) -> Option<i64> {
+    if !matches!(
+        class_name,
+        "VisualShaderNodeVectorOp" | "VisualShaderNodeFloatOp" | "VisualShaderNodeIntOp"
+    ) {
+        return None;
+    }
+    let operator = match sub.get_property("operator") {
+        Some(Variant::Int(i)) => *i,
+        // Absent means the default, OP_ADD (0), which IS emitted.
+        _ => return None,
+    };
+    // 0 = ADD and 2 = MUL both have real arms in `op_kind`.
+    match operator {
+        0 | 2 => None,
+        other => Some(other),
+    }
+}
+
 /// Maps a `VisualShaderNode*` class name onto the graph's node kind.
 ///
 /// ⚠️ Returns `None` for classes the codegen has no expression for, so an
@@ -64,7 +87,67 @@ fn node_kind(class_name: &str, sub: &Resource) -> Option<VisualShaderNodeType> {
             Some(Variant::String(s)) if s == "uv" => Some(VisualShaderNodeType::Uv),
             _ => None,
         },
+        // pat-s3rrv.255 — the function/parameter nodes.
+        "VisualShaderNodeClamp" => Some(VisualShaderNodeType::Clamp),
+        "VisualShaderNodeColorFunc" => Some(VisualShaderNodeType::ColorFunc),
+        "VisualShaderNodeRemap" => Some(VisualShaderNodeType::Remap),
+        "VisualShaderNodeRandomRange" => Some(VisualShaderNodeType::RandomRange),
+        "VisualShaderNodeBillboard" => Some(VisualShaderNodeType::Billboard),
+        "VisualShaderNodeBooleanParameter" => Some(VisualShaderNodeType::BooleanParameter),
+        "VisualShaderNodeGlobalExpression" => Some(VisualShaderNodeType::GlobalExpression),
         _ => None,
+    }
+}
+
+/// The properties a node kind reads out of its `.tres` sub-resource.
+///
+/// Only the names each kind actually consumes are copied, so an unrelated
+/// serialised property cannot shadow one of them.
+fn node_properties(kind: VisualShaderNodeType, sub: &Resource) -> Vec<(String, Variant)> {
+    let names: &[&str] = match kind {
+        VisualShaderNodeType::ColorFunc => &["function"],
+        VisualShaderNodeType::Billboard => &["billboard_type", "keep_scale"],
+        VisualShaderNodeType::BooleanParameter => &["parameter_name", "default_value"],
+        VisualShaderNodeType::GlobalExpression => &["expression"],
+        _ => &[],
+    };
+    names
+        .iter()
+        .filter_map(|name| {
+            sub.get_property(name)
+                .map(|v| ((*name).to_string(), v.clone()))
+        })
+        .collect()
+}
+
+/// Godot's per-port default values, from each node's C++ constructor.
+///
+/// ⚠️ Sizing matters as much as the values: `Remap` has FIVE input ports, and a
+/// three-slot vector leaves ports 3 and 4 resolving to the opaque-black
+/// fallback, which turns the remap into a division by a zero range.
+fn default_inputs(kind: VisualShaderNodeType) -> Vec<Variant> {
+    match kind {
+        // set_input_port_default_value(1, 0.0), (2, 1.0), (3, 0.0), (4, 1.0)
+        VisualShaderNodeType::Remap => vec![
+            Variant::Nil,
+            Variant::Float(0.0),
+            Variant::Float(1.0),
+            Variant::Float(0.0),
+            Variant::Float(1.0),
+        ],
+        // set_input_port_default_value(0, 0.0), (1, 0.0), (2, 1.0)
+        VisualShaderNodeType::Clamp => vec![
+            Variant::Float(0.0),
+            Variant::Float(0.0),
+            Variant::Float(1.0),
+        ],
+        // seed, min, max
+        VisualShaderNodeType::RandomRange => vec![
+            Variant::Vector3(gdcore::math::Vector3::new(1.0, 1.0, 1.0)),
+            Variant::Float(0.0),
+            Variant::Float(1.0),
+        ],
+        _ => vec![Variant::Nil, Variant::Nil, Variant::Nil],
     }
 }
 
@@ -77,6 +160,21 @@ pub fn visual_shader_from_resource(res: &Resource) -> Option<VisualShader> {
     if res.class_name != "VisualShader" {
         return None;
     }
+
+    // pat-s3rrv.256 — reroutes collapse into direct edges and Frame/Comment
+    // annotations drop out before any node is mapped below.
+    //
+    // ⚠️ This must happen *here* rather than as a pass over the finished
+    // `VisualShader`: the loop below drops a node class it cannot map, so by
+    // the time the graph exists a reroute's id is gone and the edge it stood
+    // in for can no longer be reconnected. `A -> R` and `R -> B` would both
+    // dangle and the wire the author drew would silently vanish.
+    //
+    // `None` means the graph has no organization nodes — the overwhelmingly
+    // common case — so it costs no clone.
+    let collapsed = crate::visual_shader_organization::collapse_graph_organization(res);
+    let res = collapsed.as_ref().unwrap_or(res);
+
     let mut shader = VisualShader::new();
 
     // Godot's Shader.Mode: SPATIAL 0, CANVAS_ITEM 1, PARTICLES 2, SKY 3, FOG 4.
@@ -114,8 +212,23 @@ pub fn visual_shader_from_resource(res: &Resource) -> Option<VisualShader> {
             continue;
         };
         let Some(kind) = node_kind(&sub.class_name, sub) else {
+            // ⚠️ This used to be a bare `continue`: the node vanished and the
+            // graph compiled to something valid but wrong, with nothing said.
+            shader.diagnostics.push(format!(
+                "node {id} ({}) has no codegen in Patina; it was dropped from the graph",
+                sub.class_name
+            ));
             continue;
         };
+        // An operator this codegen cannot emit still becomes a multiply — that
+        // keeps a tint graph working — but it is no longer silent.
+        if let Some(op) = unmapped_operator(&sub.class_name, sub) {
+            shader.diagnostics.push(format!(
+                "node {id} ({}) uses operator {op}, which Patina cannot emit; \
+                 it was compiled as a multiply",
+                sub.class_name
+            ));
+        }
 
         // A constant carries its value in a class-specific property; the port
         // literal is what the codegen reads.
@@ -128,13 +241,14 @@ pub fn visual_shader_from_resource(res: &Resource) -> Option<VisualShader> {
         };
         let inputs = match literal {
             Some(v) => vec![v],
-            None => vec![Variant::Nil, Variant::Nil, Variant::Nil],
+            None => default_inputs(kind),
         };
         shader.add_node(VisualShaderNode {
             id,
             node_type: kind,
             inputs,
             output_count: 1,
+            properties: node_properties(kind, sub),
         });
     }
 
@@ -148,6 +262,7 @@ pub fn visual_shader_from_resource(res: &Resource) -> Option<VisualShader> {
             node_type: VisualShaderNodeType::Output,
             inputs: vec![Variant::Nil, Variant::Nil, Variant::Nil],
             output_count: 0,
+            properties: Vec::new(),
         });
     }
 

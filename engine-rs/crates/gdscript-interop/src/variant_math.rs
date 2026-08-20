@@ -533,6 +533,33 @@ pub(crate) fn member_get(value: &Variant, member: &str) -> Option<Variant> {
             "w" => Some(Variant::Int(v.w as i64)),
             _ => None,
         },
+        // 🔑 `Vector2i` and `Vector3i` had NO member arm anywhere — not here and
+        // not in the interpreter's inline dispatch, which covers only Vector2,
+        // Vector3, Color and Dictionary before falling through to this function.
+        // So `.x` on an int vector raised "cannot access member 'x' on
+        // Vector2i" from GDScript, for every script, since always.
+        //
+        // ⚠️ This is far wider than the pat-s3rrv.59 builtins that surfaced it.
+        // `Vector2i` is what `Rect2i.size`, `Image.get_size()`, `DisplayServer`
+        // screen sizes and every tile coordinate return, so `img.get_size().x`
+        // — the idiom the comment at `image_alpha_ops_and_size.rs:70` describes
+        // in passing — could not run. It was invisible because the existing
+        // tests read those components in RUST, off the returned Variant, rather
+        // than from a script.
+        //
+        // Components come back as `Int`, per the note above: a Float here would
+        // make `v.x == 3` fail (pat-nzgdu.78).
+        Variant::Vector2i(v) => match member {
+            "x" => Some(Variant::Int(v.x as i64)),
+            "y" => Some(Variant::Int(v.y as i64)),
+            _ => None,
+        },
+        Variant::Vector3i(v) => match member {
+            "x" => Some(Variant::Int(v.x as i64)),
+            "y" => Some(Variant::Int(v.y as i64)),
+            "z" => Some(Variant::Int(v.z as i64)),
+            _ => None,
+        },
         // ⚠️ A Projection's `x`/`y`/`z`/`w` are its four COLUMNS, each a whole
         // Vector4 (doc/classes/Projection.xml:268-277) — NOT scalar components
         // the way `Vector4.x` is. Storage is column-major, so `m[0]` really is

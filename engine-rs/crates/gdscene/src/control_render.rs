@@ -1315,6 +1315,14 @@ struct TextSpan {
     underline: bool,
     /// Whether `[s]` covers this run.
     strike: bool,
+    /// Whether `[b]` covers this run (pat-s3rrv.74).
+    ///
+    /// ⚠️ Carried as an ATTRIBUTE, not a glyph change: the built-in 5x7 bitmap
+    /// font has no weight variant, so the draw path emboldens by over-striking.
+    /// The attribute is what a consumer with a real font needs.
+    bold: bool,
+    /// Whether `[i]` covers this run.
+    italic: bool,
     /// The `[url=…]` payload covering this run, if any — Godot's "meta".
     ///
     /// Carried per-run rather than as a separate region list so the text and its
@@ -1328,10 +1336,13 @@ struct TextSpan {
 /// `[url=target]` … `[/url]` attaches a meta payload (what `meta_clicked`
 /// carries); `[u]` and `[s]` mark the run underlined / struck through.
 ///
-/// ⚠️ `[b]` and `[i]` are still **stripped**, and that asymmetry is deliberate:
-/// the built-in 5x7 bitmap font has no weight or slant variants, so a bold flag
-/// would have nothing to render. Underline and strikethrough are *rules* rather
-/// than glyph shapes, so the draw arm can honour them exactly (pat-s3rrv.74).
+/// `[b]` and `[i]` set run attributes. ⚠️ Only `[b]` is RENDERED: the built-in
+/// 5x7 bitmap font has no weight or slant variant, so there is no bold face to
+/// select — but weight can be faked by over-striking the run one pixel across,
+/// which thickens every stem by one pixel. Slant cannot be faked the same way,
+/// because shearing a bitmap glyph means resampling it, so `[i]` is parsed and
+/// carried but not yet drawn differently. Underline and strikethrough are
+/// *rules* rather than glyph shapes, so they are honoured exactly (pat-s3rrv.74).
 ///
 /// Unknown `[...]` tags are dropped. `default` colors untagged text.
 fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
@@ -1360,6 +1371,8 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                  bgcolor: Option<Color>,
                  underline: bool,
                  strike: bool,
+                 bold: bool,
+                 italic: bool,
                  line: usize,
                  align: ParagraphAlign,
                  spans: &mut Vec<TextSpan>| {
@@ -1375,6 +1388,8 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                 bgcolor,
                 underline,
                 strike,
+                bold,
+                italic,
                 line,
                 align,
             });
@@ -1389,6 +1404,8 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
     let mut bg_stack: Vec<Color> = Vec::new();
     let mut u_depth: usize = 0;
     let mut s_depth: usize = 0;
+    let mut b_depth: usize = 0;
+    let mut i_depth: usize = 0;
     // Line/paragraph state. `[center]` and friends push an alignment AND start a
     // new line, matching `push_paragraph`.
     let mut line: usize = 0;
@@ -1429,6 +1446,8 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                     bg_stack.last().copied(),
                     u_depth > 0,
                     s_depth > 0,
+                    b_depth > 0,
+                    i_depth > 0,
                     line,
                     *align_stack.last().unwrap(),
                     &mut spans,
@@ -1448,6 +1467,8 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                     bg_stack.last().copied(),
                     u_depth > 0,
                     s_depth > 0,
+                    b_depth > 0,
+                    i_depth > 0,
                     line,
                     *align_stack.last().unwrap(),
                     &mut spans,
@@ -1464,6 +1485,8 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                     bg_stack.last().copied(),
                     u_depth > 0,
                     s_depth > 0,
+                    b_depth > 0,
+                    i_depth > 0,
                     line,
                     *align_stack.last().unwrap(),
                     &mut spans,
@@ -1484,6 +1507,8 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                     bg_stack.last().copied(),
                     u_depth > 0,
                     s_depth > 0,
+                    b_depth > 0,
+                    i_depth > 0,
                     line,
                     *align_stack.last().unwrap(),
                     &mut spans,
@@ -1500,6 +1525,8 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                     bg_stack.last().copied(),
                     u_depth > 0,
                     s_depth > 0,
+                    b_depth > 0,
+                    i_depth > 0,
                     line,
                     *align_stack.last().unwrap(),
                     &mut spans,
@@ -1523,6 +1550,8 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                     bg_stack.last().copied(),
                     u_depth > 0,
                     s_depth > 0,
+                    b_depth > 0,
+                    i_depth > 0,
                     line,
                     *align_stack.last().unwrap(),
                     &mut spans,
@@ -1539,6 +1568,8 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                     bg_stack.last().copied(),
                     u_depth > 0,
                     s_depth > 0,
+                    b_depth > 0,
+                    i_depth > 0,
                     line,
                     *align_stack.last().unwrap(),
                     &mut spans,
@@ -1555,6 +1586,8 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                     bg_stack.last().copied(),
                     u_depth > 0,
                     s_depth > 0,
+                    b_depth > 0,
+                    i_depth > 0,
                     line,
                     *align_stack.last().unwrap(),
                     &mut spans,
@@ -1590,6 +1623,8 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                     bg_stack.last().copied(),
                     u_depth > 0,
                     s_depth > 0,
+                    b_depth > 0,
+                    i_depth > 0,
                     line,
                     *align_stack.last().unwrap(),
                     &mut spans,
@@ -1623,11 +1658,20 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                 // an effected run, restart the glyph phase at the escape.
                 cur.push(if lower == "lb" { '[' } else { ']' });
                 char_index += 1;
-            } else if matches!(lower.as_str(), "u" | "s" | "/u" | "/s") {
-                // `[u]` / `[s]`. Godot cannot render weight or slant here — the
-                // built-in 5x7 bitmap font has no variants, which is why `[b]`
-                // and `[i]` are still stripped — but underline and strikethrough
-                // are RULES, not glyph shapes, so they are drawable exactly.
+            } else if matches!(
+                lower.as_str(),
+                "u" | "s" | "/u" | "/s" | "b" | "i" | "/b" | "/i"
+            ) {
+                // `[u]`/`[s]` are RULES, not glyph shapes, so they are drawable
+                // exactly. `[b]`/`[i]` used to be STRIPPED here, on the grounds
+                // that the built-in 5x7 bitmap font has no weight or slant
+                // variant (pat-s3rrv.74).
+                //
+                // ⚠️ That conflated two things. The font cannot *shape* a bold
+                // glyph, but the run still needs to CARRY the attribute: it is
+                // what the draw path emboldens from, and what any consumer with
+                // a real font would use. Dropping the tag at parse time threw
+                // the information away at the earliest possible point.
                 //
                 // ⚠️ Matched as whole tags: `[s]` must not be confused with
                 // `[shake]`, and `[u]` must not swallow `[url=…]`, which is
@@ -1641,6 +1685,8 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                     bg_stack.last().copied(),
                     u_depth > 0,
                     s_depth > 0,
+                    b_depth > 0,
+                    i_depth > 0,
                     line,
                     *align_stack.last().unwrap(),
                     &mut spans,
@@ -1649,9 +1695,13 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                 match lower.as_str() {
                     "u" => u_depth += 1,
                     "s" => s_depth += 1,
+                    "b" => b_depth += 1,
+                    "i" => i_depth += 1,
                     // Saturating: a stray `[/u]` with nothing open is stripped,
                     // not an underflow panic.
                     "/u" => u_depth = u_depth.saturating_sub(1),
+                    "/b" => b_depth = b_depth.saturating_sub(1),
+                    "/i" => i_depth = i_depth.saturating_sub(1),
                     _ => s_depth = s_depth.saturating_sub(1),
                 }
             } else if let Some(name) = lower.strip_prefix('/') {
@@ -1666,6 +1716,8 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                         bg_stack.last().copied(),
                         u_depth > 0,
                         s_depth > 0,
+                        b_depth > 0,
+                        i_depth > 0,
                         line,
                         *align_stack.last().unwrap(),
                         &mut spans,
@@ -1687,6 +1739,8 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                         bg_stack.last().copied(),
                         u_depth > 0,
                         s_depth > 0,
+                        b_depth > 0,
+                        i_depth > 0,
                         line,
                         *align_stack.last().unwrap(),
                         &mut spans,
@@ -1719,6 +1773,8 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                 bg_stack.last().copied(),
                 u_depth > 0,
                 s_depth > 0,
+                b_depth > 0,
+                i_depth > 0,
                 line,
                 *align_stack.last().unwrap(),
                 &mut spans,
@@ -1744,6 +1800,8 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
         bg_stack.last().copied(),
         u_depth > 0,
         s_depth > 0,
+        b_depth > 0,
+        i_depth > 0,
         line,
         *align_stack.last().unwrap(),
         &mut spans,
@@ -2131,6 +2189,12 @@ pub(crate) struct PlacedSpan {
 /// They previously each advanced `x` themselves, which agreed only by accident
 /// and would have diverged the moment lines existed — a link on line 2 would
 /// have been clickable on line 1.
+/// How far right a `[b]` run is over-struck to fake weight (pat-s3rrv.74).
+///
+/// One pixel: enough to thicken a 5x7 stem, small enough that the doubled run
+/// still reads as the same glyphs rather than a shadow.
+const BOLD_OVERSTRIKE: f32 = 1.0;
+
 fn richtext_placements(
     tree: &SceneTree,
     node_id: NodeId,
@@ -2939,6 +3003,24 @@ fn draw_control(
                             color: span.color,
                             font_size: font_size.max(1) as u32,
                         });
+                        // `[b]` (pat-s3rrv.74). The built-in 5x7 bitmap font has
+                        // no weight variant, so there is no bold FACE to select.
+                        // Over-striking the run one pixel to the right is the
+                        // standard bitmap-font answer and thickens every stem by
+                        // exactly one pixel.
+                        //
+                        // ⚠️ Emitted at the SAME y and the same advance, so the
+                        // run's width and the `[u]`/`[s]` rules — which are laid
+                        // out from `placed.rect` — stay correct. A bold run must
+                        // not re-flow the line under it.
+                        if span.bold {
+                            out.push(DrawCommand::DrawString {
+                                text: span.text.clone(),
+                                position: Vector2::new(x + BOLD_OVERSTRIKE, y),
+                                color: span.color,
+                                font_size: font_size.max(1) as u32,
+                            });
+                        }
                     }
                     // Effected text: each glyph moves independently, so it needs
                     // its own draw call with its own offset/color.
@@ -2971,11 +3053,11 @@ fn draw_control(
                         }
                     }
                 }
-                // `[u]` / `[s]`. Godot cannot vary weight or slant with this
-                // renderer — the built-in 5x7 bitmap font has no variants, which
-                // is why `[b]`/`[i]` remain stripped — but underline and
-                // strikethrough are RULES rather than glyph shapes, so they are
-                // drawable exactly rather than approximated.
+                // `[u]` / `[s]`. The 5x7 bitmap font has no weight or slant
+                // variant, so `[b]` is faked by over-striking (above) and `[i]`
+                // is carried but not drawn — but underline and strikethrough are
+                // RULES rather than glyph shapes, so they are drawable exactly
+                // rather than approximated.
                 //
                 // Spanning the run's full placed width, so an effected run
                 // (whose glyphs are displaced individually) still gets one

@@ -146,6 +146,45 @@ fn xml_parser_open_offset_and_line() {
     );
 }
 
+/// ClassDB must know the class the interpreter has been driving all along.
+///
+/// The bead's second merged finding: every method below was dispatchable while
+/// `class_exists("XMLParser")` answered false, so reflection and the inspector
+/// denied a class a script could construct and use.
+#[test]
+fn xml_parser_open_offset_and_line_is_registered() {
+    use gdobject::class_db::{class_exists, get_class_info, register_all_classes};
+
+    register_all_classes();
+    assert!(class_exists("XMLParser"), "XMLParser must be registered");
+
+    let info = get_class_info("XMLParser").expect("registered");
+    assert_eq!(
+        info.parent_class, "RefCounted",
+        "XMLParser inherits RefCounted per its doc XML"
+    );
+    for name in [
+        "open",
+        "open_buffer",
+        "read",
+        "seek",
+        "skip_section",
+        "get_node_offset",
+        "get_current_line",
+        "get_named_attribute_value_safe",
+    ] {
+        assert!(
+            info.methods.iter().any(|m| m.name == name),
+            "XMLParser must declare {name}"
+        );
+    }
+    // The control: the lookup reports what was declared, not anything asked of it.
+    assert!(
+        !info.methods.iter().any(|m| m.name == "no_such_method"),
+        "a method lookup that says yes to anything would satisfy the loop above"
+    );
+}
+
 /// A fresh parser reports line 1, not line 0 or a cursor.
 ///
 /// Godot's line numbers are 1-based, and the off-by-one here is invisible in

@@ -173,14 +173,20 @@ fn a_non_visualshader_resource_is_declined() {
 
 /// An unsupported node class is skipped rather than mapped to something wrong —
 /// the graph still loads and still compiles.
+///
+/// ⚠️ The fixture was `VisualShaderNodeBillboard` until pat-s3rrv.255, which
+/// gave Billboard real codegen. The test then failed for the best possible
+/// reason: its premise had become false. Swapped to a class that is still
+/// unmapped, because the behaviour under test — an unknown class must not be
+/// guessed into some other kind — is unchanged and still worth pinning.
 #[test]
 fn an_unsupported_node_class_is_skipped_not_guessed() {
     let tres = r#"[gd_resource type="VisualShader" format=3]
 
-[sub_resource type="VisualShaderNodeBillboard" id="Bill_1"]
+[sub_resource type="VisualShaderNodeCubemap" id="Cube_1"]
 
 [resource]
-nodes/fragment/2/node = SubResource("Bill_1")
+nodes/fragment/2/node = SubResource("Cube_1")
 "#;
     let shader = load(tres);
     assert_eq!(
@@ -192,5 +198,15 @@ nodes/fragment/2/node = SubResource("Bill_1")
     assert!(
         shader.get_code().contains("shader_type spatial"),
         "and the graph still compiles"
+    );
+    // pat-s3rrv.255: skipping is right, but skipping in SILENCE was not — the
+    // graph used to load smaller than it was authored with nothing to say so.
+    assert!(
+        shader
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("VisualShaderNodeCubemap")),
+        "the skipped class must be reported; got {:?}",
+        shader.diagnostics
     );
 }
