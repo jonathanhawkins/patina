@@ -8,6 +8,10 @@
 #   rustup target add wasm32-unknown-unknown
 #   cargo install wasm-bindgen-cli   # version must match the wasm-bindgen dep
 #
+# Set WASM_BINDGEN=/path/to/wasm-bindgen to use a CLI other than the one on
+# PATH. `scripts/web.sh --runtime` does this with a version-matched copy it installs
+# under target/, so most people should just run that instead.
+#
 # Then serve the output over HTTP — file:// cannot instantiate wasm:
 #   python3 -m http.server 8099 --directory engine-rs/crates/patina-web/web
 #
@@ -18,6 +22,7 @@ set -euo pipefail
 crate_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 workspace_dir="$(cd "$crate_dir/../.." && pwd)"
 out_dir="$crate_dir/web"
+wasm_bindgen="${WASM_BINDGEN:-wasm-bindgen}"
 
 profile_dir="debug"
 cargo_args=(build -p patina-web --target wasm32-unknown-unknown)
@@ -34,7 +39,7 @@ cd "$workspace_dir"
 # As of 2026-07-27 the box has CLI 0.2.126 while Cargo.lock pins 0.2.114.
 lock_version="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/[",]/, ""); print $3; exit }' \
   "$workspace_dir/Cargo.lock")"
-cli_version="$(wasm-bindgen --version | awk '{ print $2 }')"
+cli_version="$("$wasm_bindgen" --version | awk '{ print $2 }')"
 if [[ "$lock_version" != "$cli_version" ]]; then
   cat >&2 <<EOF
 error: wasm-bindgen version mismatch — the bundle step would fail.
@@ -56,7 +61,7 @@ if [[ ! -f "$wasm_path" ]]; then
   exit 1
 fi
 
-wasm-bindgen "$wasm_path" --out-dir "$out_dir" --target web
+"$wasm_bindgen" "$wasm_path" --out-dir "$out_dir" --target web
 
 echo "bundle written to $out_dir"
 echo "serve it with: python3 -m http.server 8099 --directory $out_dir"

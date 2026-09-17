@@ -157,6 +157,19 @@ pub struct WebTransfer<B: FetchBackend> {
     spent: bool,
 }
 
+// Hand-written so `B` needn't be `Debug`: `http_request::RequestState` derives
+// `Debug` and holds a `WebTransfer<WebFetchBackend>` on wasm32, which broke the
+// web build. The body and buffer are summarised by length, not dumped.
+impl<B: FetchBackend> std::fmt::Debug for WebTransfer<B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebTransfer")
+            .field("body_len", &self.body.len())
+            .field("chunk_size", &self.chunk_size)
+            .field("spent", &self.spent)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<B: FetchBackend> WebTransfer<B> {
     /// Starts a transfer whose `fetch` has already been issued.
     ///
