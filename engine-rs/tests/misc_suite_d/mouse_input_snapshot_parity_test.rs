@@ -241,6 +241,7 @@ fn script_snapshot_uses_godot_button_indices() {
         input_map: Default::default(),
         mouse_position: Vector2::new(100.0, 200.0),
         mouse_buttons_pressed: ["1".to_string(), "3".to_string()].into_iter().collect(),
+        ..Default::default()
     };
 
     // Godot indices: 1=Left, 2=Right, 3=Middle

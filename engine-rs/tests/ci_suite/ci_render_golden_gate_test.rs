@@ -320,28 +320,19 @@ fn golden_staleness_test_exists() {
 
 #[test]
 fn software_renderer_is_deterministic() {
-    use gdcore::math::{Color, Rect2, Transform2D, Vector2};
+    use gdcore::math::{Color, Rect2, Vector2};
     use gdrender2d::renderer::SoftwareRenderer;
     use gdserver2d::canvas::{CanvasItem, CanvasItemId, DrawCommand};
     use gdserver2d::server::RenderingServer2D;
     use gdserver2d::viewport::Viewport;
 
     let mut viewport = Viewport::new(8, 8, Color::BLACK);
-    let item = CanvasItem {
-        id: CanvasItemId(1),
-        transform: Transform2D::IDENTITY,
-        z_index: 0,
-        visible: true,
-        material: None,
-        commands: vec![DrawCommand::DrawRect {
-            rect: Rect2::new(Vector2::new(2.0, 2.0), Vector2::new(4.0, 4.0)),
-            color: Color::new(1.0, 0.0, 0.0, 1.0),
-            filled: true,
-        }],
-        children: vec![],
-        parent: None,
-        layer_id: None,
-    };
+    let mut item = CanvasItem::new(CanvasItemId(1));
+    item.commands = vec![DrawCommand::DrawRect {
+        rect: Rect2::new(Vector2::new(2.0, 2.0), Vector2::new(4.0, 4.0)),
+        color: Color::new(1.0, 0.0, 0.0, 1.0),
+        filled: true,
+    }];
     viewport.add_canvas_item(item.clone());
 
     let mut renderer = SoftwareRenderer::new();

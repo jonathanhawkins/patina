@@ -950,7 +950,7 @@ fn multiplayer_synchronizer_property_sync_once() {
     auth.set_root_path("..");
     auth.set_net_id(9);
     auth.add_property("position");
-    auth.set_property_value("position", "12.5,-3.0");
+    auth.set_property_value("position", gdvariant::Variant::from("12.5,-3.0"));
     assert!(
         auth.poll_outbound(&mut server, client_id, 1000, true)
             .expect("poll_outbound"),
@@ -980,7 +980,10 @@ fn multiplayer_synchronizer_property_sync_once() {
         .apply_sync_packet(&packet)
         .expect("apply_sync_packet");
     assert_eq!(sync.net_id, 9);
-    assert_eq!(remote.get_property_value("position"), Some("12.5,-3.0"));
+    assert_eq!(
+        remote.get_property_value("position"),
+        Some(&gdvariant::Variant::from("12.5,-3.0"))
+    );
     assert_eq!(remote.get_net_id(), 9);
 
     client.close();

@@ -149,11 +149,7 @@ fn render_runtime(tree: &SceneTree) -> FrameBuffer {
     }
 
     let frame = renderer.render_frame(&viewport);
-    FrameBuffer {
-        width: frame.width,
-        height: frame.height,
-        pixels: frame.pixels,
-    }
+    FrameBuffer::from_pixels(frame.width, frame.height, frame.pixels)
 }
 
 fn save_golden(fb: &FrameBuffer, name: &str) {
@@ -167,11 +163,7 @@ fn save_golden(fb: &FrameBuffer, name: &str) {
 fn load_golden(name: &str) -> Option<FrameBuffer> {
     let path = golden_render_dir().join(format!("{name}.png"));
     let tex = load_png(path.to_str().unwrap())?;
-    Some(FrameBuffer {
-        width: tex.width,
-        height: tex.height,
-        pixels: tex.pixels,
-    })
+    Some(FrameBuffer::from_pixels(tex.width, tex.height, tex.pixels))
 }
 
 fn assert_golden_match(fb: &FrameBuffer, name: &str) {
@@ -470,11 +462,7 @@ fn golden_png_roundtrip_fidelity() {
     // Encode to PNG and decode back.
     let png_data = fb.to_png();
     let tex = gdrender2d::texture::decode_png(&png_data).expect("failed to decode PNG");
-    let decoded = FrameBuffer {
-        width: tex.width,
-        height: tex.height,
-        pixels: tex.pixels,
-    };
+    let decoded = FrameBuffer::from_pixels(tex.width, tex.height, tex.pixels);
 
     let result = compare_framebuffers(&fb, &decoded, PIXEL_TOLERANCE);
     assert!(

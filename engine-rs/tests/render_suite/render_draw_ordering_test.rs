@@ -757,11 +757,7 @@ fn save_draw_order_golden(fb: &FrameBuffer, name: &str) {
 fn load_draw_order_golden(name: &str) -> Option<FrameBuffer> {
     let path = golden_draw_order_dir().join(format!("{name}.png"));
     let tex = load_png(path.to_str().unwrap())?;
-    Some(FrameBuffer {
-        width: tex.width,
-        height: tex.height,
-        pixels: tex.pixels,
-    })
+    Some(FrameBuffer::from_pixels(tex.width, tex.height, tex.pixels))
 }
 
 /// Compares a rendered framebuffer against a golden reference.

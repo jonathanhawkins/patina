@@ -95,11 +95,7 @@ fn save_golden(fb: &FrameBuffer, name: &str) {
 fn load_golden(name: &str) -> Option<FrameBuffer> {
     let path = golden_render_dir().join(format!("{name}.png"));
     let tex = load_png(path.to_str().unwrap())?;
-    Some(FrameBuffer {
-        width: tex.width,
-        height: tex.height,
-        pixels: tex.pixels,
-    })
+    Some(FrameBuffer::from_pixels(tex.width, tex.height, tex.pixels))
 }
 
 /// Compares a rendered framebuffer against a golden reference.
@@ -317,11 +313,7 @@ fn png_roundtrip_preserves_render() {
 
     let png_data = fb.to_png();
     let tex = decode_png(&png_data).expect("failed to decode our own PNG");
-    let decoded_fb = FrameBuffer {
-        width: tex.width,
-        height: tex.height,
-        pixels: tex.pixels,
-    };
+    let decoded_fb = FrameBuffer::from_pixels(tex.width, tex.height, tex.pixels);
 
     let result = compare_framebuffers(&fb, &decoded_fb, PIXEL_TOLERANCE);
     assert!(

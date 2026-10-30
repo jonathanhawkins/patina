@@ -1018,6 +1018,7 @@ fn standard_material_render_matches_direct_material3d() {
         normal_enabled: true,
         normal_texture: Some(TextureSlot::new("res://n.png")),
         normal_scale: 2.0,
+        ..StandardMaterial3D::default()
     };
     let direct_mat = Material3D {
         albedo: std_mat.albedo_color,

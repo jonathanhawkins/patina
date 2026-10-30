@@ -1441,6 +1441,7 @@ fn nine_patch_through_renderer() {
     item.commands.push(DrawCommand::DrawNinePatch {
         texture_path: "res://np.png".to_string(),
         rect: Rect2::new(Vector2::ZERO, Vector2::new(20.0, 20.0)),
+        region: Rect2::new(Vector2::ZERO, Vector2::ZERO),
         margin_left: 2.0,
         margin_top: 2.0,
         margin_right: 2.0,
@@ -1472,6 +1473,7 @@ fn nine_patch_no_center_through_renderer() {
     item.commands.push(DrawCommand::DrawNinePatch {
         texture_path: "res://np_nc.png".to_string(),
         rect: Rect2::new(Vector2::ZERO, Vector2::new(20.0, 20.0)),
+        region: Rect2::new(Vector2::ZERO, Vector2::ZERO),
         margin_left: 2.0,
         margin_top: 2.0,
         margin_right: 2.0,
@@ -1504,6 +1506,7 @@ fn nine_patch_with_modulate_through_renderer() {
     item.commands.push(DrawCommand::DrawNinePatch {
         texture_path: "res://np_mod.png".to_string(),
         rect: Rect2::new(Vector2::ZERO, Vector2::new(12.0, 12.0)),
+        region: Rect2::new(Vector2::ZERO, Vector2::ZERO),
         margin_left: 2.0,
         margin_top: 2.0,
         margin_right: 2.0,
@@ -1541,6 +1544,7 @@ fn nine_patch_asymmetric_corners() {
     item.commands.push(DrawCommand::DrawNinePatch {
         texture_path: "res://np_asym.png".to_string(),
         rect: Rect2::new(Vector2::ZERO, Vector2::new(20.0, 20.0)),
+        region: Rect2::new(Vector2::ZERO, Vector2::ZERO),
         margin_left: 2.0,
         margin_top: 2.0,
         margin_right: 2.0,
@@ -1788,6 +1792,7 @@ fn nine_patch_with_transform() {
     item.commands.push(DrawCommand::DrawNinePatch {
         texture_path: "res://np_t.png".to_string(),
         rect: Rect2::new(Vector2::ZERO, Vector2::new(10.0, 10.0)),
+        region: Rect2::new(Vector2::ZERO, Vector2::ZERO),
         margin_left: 2.0,
         margin_top: 2.0,
         margin_right: 2.0,
@@ -1840,6 +1845,7 @@ fn mixed_rect_texture_ninepatch_on_single_item() {
     item.commands.push(DrawCommand::DrawNinePatch {
         texture_path: "res://np_tex.png".to_string(),
         rect: Rect2::new(Vector2::new(20.0, 20.0), Vector2::new(10.0, 10.0)),
+        region: Rect2::new(Vector2::ZERO, Vector2::ZERO),
         margin_left: 2.0,
         margin_top: 2.0,
         margin_right: 2.0,
@@ -1923,6 +1929,7 @@ fn nine_patch_over_texture_z_order() {
     fg.commands.push(DrawCommand::DrawNinePatch {
         texture_path: "res://np_fg.png".to_string(),
         rect: Rect2::new(Vector2::new(5.0, 5.0), Vector2::new(10.0, 10.0)),
+        region: Rect2::new(Vector2::ZERO, Vector2::ZERO),
         margin_left: 2.0,
         margin_top: 2.0,
         margin_right: 2.0,
@@ -2034,6 +2041,7 @@ fn deterministic_ninepatch_scene() {
         np.commands.push(DrawCommand::DrawNinePatch {
             texture_path: "res://np.png".to_string(),
             rect: Rect2::new(Vector2::ZERO, Vector2::new(15.0, 15.0)),
+            region: Rect2::new(Vector2::ZERO, Vector2::ZERO),
             margin_left: 2.0,
             margin_top: 2.0,
             margin_right: 2.0,

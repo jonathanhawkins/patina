@@ -72,6 +72,24 @@ impl FrameBuffer {
         }
     }
 
+    /// Wraps existing pixel data (e.g. a decoded golden PNG or a rendered
+    /// frame) with the same default drawing state as [`new`](Self::new).
+    ///
+    /// Prefer this over a struct literal: the drawing-state fields keep
+    /// growing, and every literal breaks when they do.
+    pub fn from_pixels(width: u32, height: u32, pixels: Vec<Color>) -> Self {
+        debug_assert_eq!(pixels.len(), (width * height) as usize);
+        Self {
+            width,
+            height,
+            pixels,
+            scissor: None,
+            blend_mode: BlendMode::Mix,
+            texture_filter: TextureFilter::Nearest,
+            texture_repeat: TextureRepeat::Disabled,
+        }
+    }
+
     /// Clears the entire framebuffer to the given color.
     ///
     /// Ignores the scissor — clearing is a whole-frame operation, as it is in

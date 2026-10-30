@@ -268,11 +268,7 @@ fn measured_vertical_slice_end_to_end() {
 
     let golden_match_ratio = if golden_path.exists() {
         let tex = load_png(golden_path.to_str().unwrap()).expect("failed to load golden PNG");
-        let golden_fb = FrameBuffer {
-            width: tex.width,
-            height: tex.height,
-            pixels: tex.pixels,
-        };
+        let golden_fb = FrameBuffer::from_pixels(tex.width, tex.height, tex.pixels);
         let diff = compare_framebuffers(&fb, &golden_fb, PIXEL_TOLERANCE);
         diff.match_ratio()
     } else {
