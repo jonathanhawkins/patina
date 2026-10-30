@@ -499,6 +499,126 @@ pub fn busy_crate_labels(conn: &Connection) -> Result<std::collections::HashSet<
     })
 }
 
+/// Where a park-review candidate came from: the literal `blocked` status, or
+/// one of the two assignment-excluding labels on an otherwise-open bead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParkSource {
+    /// `status = 'blocked'` — set by workers (deliberate park) or left behind
+    /// after dependency blockers closed (stale block).
+    BlockedStatus,
+    /// `needs-attention` label — fail-streak parking by the verifier lane.
+    NeedsAttention,
+    /// `env-blocked` label — waiting on the machine environment / operator.
+    EnvBlocked,
+}
+
+/// One parked bead with the dependency and comment context the park-review
+/// pass needs to classify it. All ages are in fractional days (UTC).
+#[derive(Debug, Clone)]
+pub struct ParkedBead {
+    pub id: String,
+    pub title: String,
+    pub priority: i64,
+    pub source: ParkSource,
+    /// Dependencies of blocking type (`blocks`/`conditional-blocks`/`waits-for`).
+    pub blocking_deps_total: i64,
+    /// Of those, blockers still open (not closed, not deleted).
+    pub blocking_deps_open: i64,
+    /// Days since the bead was last touched (`updated_at`).
+    pub age_days: f64,
+    /// Total comments on the bead (a park with zero comments has no recorded reason).
+    pub comment_count: i64,
+    /// Latest comment text, if any (the park reason by convention).
+    pub last_comment: Option<String>,
+}
+
+/// Shared correlated-subquery columns for park queries. Timestamps are stored
+/// both as ISO-8601 `T` and space-separated forms; substr+replace normalizes
+/// before julianday.
+const PARK_CONTEXT_COLS: &str = "\
+    (SELECT count(*) FROM dependencies d WHERE d.issue_id = i.id \
+       AND d.type IN ('blocks','conditional-blocks','waits-for')) AS dep_total, \
+    (SELECT count(*) FROM dependencies d JOIN issues b ON b.id = d.depends_on_id \
+       WHERE d.issue_id = i.id \
+         AND d.type IN ('blocks','conditional-blocks','waits-for') \
+         AND b.status != 'closed' AND b.deleted_at IS NULL) AS dep_open, \
+    julianday('now') - julianday(replace(substr(i.updated_at,1,19),'T',' ')) AS age_days, \
+    (SELECT count(*) FROM comments c WHERE c.issue_id = i.id) AS comment_count, \
+    (SELECT c.text FROM comments c WHERE c.issue_id = i.id \
+       ORDER BY c.created_at DESC, c.id DESC LIMIT 1) AS last_comment";
+
+fn parked_bead_from_row(row: &rusqlite::Row<'_>, source: ParkSource) -> rusqlite::Result<ParkedBead> {
+    Ok(ParkedBead {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        priority: row.get(2)?,
+        source,
+        blocking_deps_total: row.get(3)?,
+        blocking_deps_open: row.get(4)?,
+        age_days: row.get::<_, Option<f64>>(5)?.unwrap_or(0.0),
+        comment_count: row.get(6)?,
+        last_comment: row.get(7)?,
+    })
+}
+
+/// All beads sitting in the literal `blocked` status. The ready query only
+/// considers `status='open'`, so nothing else in the system ever revisits
+/// these — this feeds the park-review pass that does.
+pub fn parked_blocked_beads(conn: &Connection) -> Result<Vec<ParkedBead>> {
+    with_retry(|| {
+        let sql = format!(
+            "SELECT i.id, coalesce(i.title,''), coalesce(i.priority,999), {PARK_CONTEXT_COLS} \
+             FROM issues i \
+             WHERE i.status = 'blocked' AND i.deleted_at IS NULL \
+             ORDER BY coalesce(i.priority,999), i.id"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map([], |row| parked_bead_from_row(row, ParkSource::BlockedStatus))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    })
+}
+
+/// Open (non-closed, non-blocked-status) beads excluded from assignment by a
+/// parking label. A bead carrying both labels is reported once, preferring
+/// `needs-attention` (the retryable one).
+pub fn parked_labeled_beads(conn: &Connection) -> Result<Vec<ParkedBead>> {
+    with_retry(|| {
+        let sql = format!(
+            "SELECT i.id, coalesce(i.title,''), coalesce(i.priority,999), {PARK_CONTEXT_COLS}, \
+                    l.label \
+             FROM issues i JOIN labels l ON l.issue_id = i.id \
+             WHERE l.label IN ('{NEEDS_ATTENTION_LABEL}','{ENV_BLOCKED_LABEL}') \
+               AND i.status NOT IN ('closed','tombstone','blocked') \
+               AND i.deleted_at IS NULL \
+             ORDER BY coalesce(i.priority,999), i.id"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            let label: String = row.get(8)?;
+            let source = if label == NEEDS_ATTENTION_LABEL {
+                ParkSource::NeedsAttention
+            } else {
+                ParkSource::EnvBlocked
+            };
+            parked_bead_from_row(row, source)
+        })?;
+        let mut by_id: std::collections::BTreeMap<String, ParkedBead> = std::collections::BTreeMap::new();
+        for bead in rows {
+            let bead = bead?;
+            match by_id.get(&bead.id) {
+                Some(existing) if existing.source == ParkSource::NeedsAttention => {}
+                _ => {
+                    by_id.insert(bead.id.clone(), bead);
+                }
+            }
+        }
+        let mut out: Vec<ParkedBead> = by_id.into_values().collect();
+        out.sort_by_key(|b| (b.priority, b.id.clone()));
+        Ok(out)
+    })
+}
+
 /// Get all in_progress beads assigned to workers not in the active set.
 /// Returns (bead_id, assignee) pairs for stale assignments.
 pub fn stale_assignments(
@@ -874,6 +994,13 @@ mod tests {
                 issue_id TEXT NOT NULL,
                 label TEXT NOT NULL,
                 PRIMARY KEY (issue_id, label)
+            );
+            CREATE TABLE comments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                issue_id TEXT NOT NULL,
+                author TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
             );",
         )
         .unwrap();
@@ -1170,12 +1297,14 @@ mod tests {
     fn test_queue_hygiene_counts() {
         let conn = setup_test_db();
         conn.execute_batch(
+            // Relative dates: absolute timestamps rot as the calendar moves
+            // ('fresh' 2026-07-13 literals broke this test 38 days later).
             "INSERT INTO issues (id, title, status, priority, updated_at) VALUES
-             ('pat-p0a', 'P0 ready', 'open', 0, '2026-07-13T00:00:00Z'),
-             ('pat-p0b', 'P0 blocked', 'open', 0, '2026-07-13T00:00:00Z'),
-             ('pat-p1', 'P1 stale', 'open', 1, '2020-01-01T00:00:00Z'),
-             ('pat-blocker', 'Blocker in progress', 'in_progress', 0, '2026-07-13T00:00:00Z'),
-             ('pat-closed', 'Closed', 'closed', 0, '2020-01-01T00:00:00Z');
+             ('pat-p0a', 'P0 ready', 'open', 0, datetime('now', '-1 day')),
+             ('pat-p0b', 'P0 blocked', 'open', 0, datetime('now', '-1 day')),
+             ('pat-p1', 'P1 stale', 'open', 1, datetime('now', '-100 days')),
+             ('pat-blocker', 'Blocker in progress', 'in_progress', 0, datetime('now', '-1 day')),
+             ('pat-closed', 'Closed', 'closed', 0, datetime('now', '-100 days'));
              INSERT INTO dependencies (issue_id, depends_on_id, type) VALUES
              ('pat-p0b', 'pat-blocker', 'blocks'),
              ('pat-p1', 'pat-blocker', 'blocks');",
@@ -1745,8 +1874,103 @@ mod tests {
     /// trim surrounding whitespace, and reject every malformed variant.
     /// Regression: a broken extractor silently disables the dedupe path
     /// and the planner burst-creates duplicate beads every 10 minutes.
+    /// Fixture: a blocked bead (`blk-*` blockers), a labeled park, and noise.
+    fn seed_park_fixture(conn: &Connection) {
+        conn.execute_batch(
+            "INSERT INTO issues (id, title, status, priority) VALUES
+                 ('pat-stale', 'Stale block', 'blocked', 0),
+                 ('pat-live', 'Live block', 'blocked', 1),
+                 ('pat-park', 'Deliberate park', 'blocked', 2),
+                 ('pat-na', 'Fail streak', 'open', 1),
+                 ('pat-env', 'Env blocked', 'open', 2),
+                 ('pat-both', 'Both labels', 'open', 3),
+                 ('pat-closed-na', 'Closed labeled', 'closed', 1),
+                 ('pat-open-plain', 'Ordinary open', 'open', 1),
+                 ('blk-closed', 'Closed blocker', 'closed', 1),
+                 ('blk-deleted', 'Deleted blocker', 'open', 1),
+                 ('blk-open', 'Open blocker', 'open', 1),
+                 ('epic-parent', 'Parent epic', 'open', 1);
+             UPDATE issues SET deleted_at = CURRENT_TIMESTAMP WHERE id = 'blk-deleted';
+             INSERT INTO dependencies (issue_id, depends_on_id, type) VALUES
+                 ('pat-stale', 'blk-closed', 'blocks'),
+                 ('pat-stale', 'blk-deleted', 'waits-for'),
+                 ('pat-live', 'blk-closed', 'blocks'),
+                 ('pat-live', 'blk-open', 'blocks'),
+                 -- parent-child must NOT count as a blocking dep
+                 ('pat-park', 'epic-parent', 'parent-child');
+             INSERT INTO labels (issue_id, label) VALUES
+                 ('pat-na', 'needs-attention'),
+                 ('pat-env', 'env-blocked'),
+                 ('pat-both', 'needs-attention'),
+                 ('pat-both', 'env-blocked'),
+                 ('pat-closed-na', 'needs-attention');
+             INSERT INTO comments (issue_id, author, text, created_at) VALUES
+                 ('pat-park', 'worker', 'old note', '2026-07-01 00:00:00'),
+                 ('pat-park', 'worker', 'BLOCKED: needs owner decision', '2026-07-02 00:00:00');",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_parked_blocked_beads_dep_and_comment_context() {
+        let conn = setup_test_db();
+        seed_park_fixture(&conn);
+
+        let parked = parked_blocked_beads(&conn).unwrap();
+        let ids: Vec<&str> = parked.iter().map(|b| b.id.as_str()).collect();
+        // Priority order; only status='blocked' rows.
+        assert_eq!(ids, vec!["pat-stale", "pat-live", "pat-park"]);
+
+        let stale = &parked[0];
+        // A deleted blocker counts as closed — both blockers are gone.
+        assert_eq!(stale.blocking_deps_total, 2);
+        assert_eq!(stale.blocking_deps_open, 0);
+        assert_eq!(stale.comment_count, 0);
+        assert_eq!(stale.last_comment, None);
+        assert_eq!(stale.source, ParkSource::BlockedStatus);
+
+        let live = &parked[1];
+        assert_eq!(live.blocking_deps_total, 2);
+        assert_eq!(live.blocking_deps_open, 1);
+
+        let park = &parked[2];
+        // parent-child is epic membership, not a blocker.
+        assert_eq!(park.blocking_deps_total, 0);
+        assert_eq!(park.comment_count, 2);
+        // Latest comment wins.
+        assert_eq!(
+            park.last_comment.as_deref(),
+            Some("BLOCKED: needs owner decision")
+        );
+    }
+
+    #[test]
+    fn test_parked_labeled_beads_labels_and_dedupe() {
+        let conn = setup_test_db();
+        seed_park_fixture(&conn);
+
+        let parked = parked_labeled_beads(&conn).unwrap();
+        let ids: Vec<&str> = parked.iter().map(|b| b.id.as_str()).collect();
+        // Closed beads excluded; ordinary open beads excluded; a bead with
+        // both labels appears once.
+        assert_eq!(ids, vec!["pat-na", "pat-env", "pat-both"]);
+
+        assert_eq!(parked[0].source, ParkSource::NeedsAttention);
+        assert_eq!(parked[1].source, ParkSource::EnvBlocked);
+        // Dedupe prefers needs-attention (the retryable source).
+        assert_eq!(parked[2].source, ParkSource::NeedsAttention);
+    }
+
+    #[test]
+    fn test_parked_queries_empty_db() {
+        let conn = setup_test_db();
+        assert!(parked_blocked_beads(&conn).unwrap().is_empty());
+        assert!(parked_labeled_beads(&conn).unwrap().is_empty());
+    }
+
     #[test]
     fn test_extract_planner_key_variants() {
+        // (park-review tests above; planner-key parsing below)
         // Well-formed: key found, whitespace trimmed.
         assert_eq!(
             extract_planner_key("foo [planner-key: ci-export-matrix] bar"),

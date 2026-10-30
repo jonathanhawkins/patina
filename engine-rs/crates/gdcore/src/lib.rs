@@ -12,6 +12,7 @@ pub mod comparison_tooling;
 pub mod content_scale;
 pub mod crash_triage;
 pub mod crypto;
+pub mod crypto_rsa;
 pub mod dashboard;
 pub mod debug_protocol;
 pub mod debugger;

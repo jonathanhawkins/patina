@@ -222,8 +222,18 @@ pub fn normalize_pack_dir(dir: &str) -> String {
 /// matching how `res://` behaves as its own root rather than wrapping into the
 /// host filesystem.
 fn join_res_dir(base: &str, relative: &str) -> String {
+    join_uri_dir("res://", base, relative)
+}
+
+/// The scheme-generic body of [`join_res_dir`] (pat-u3l8c.113).
+///
+/// `user://` needs the identical walk once a [`UserStorage`] backs it: with a
+/// store registered there is no filesystem path to join a relative name onto,
+/// so the join has to happen in URI space for `user://` exactly as it already
+/// does for a packed `res://`.
+fn join_uri_dir(prefix: &str, base: &str, relative: &str) -> String {
     let mut segments: Vec<&str> = base
-        .trim_start_matches("res://")
+        .trim_start_matches(prefix)
         .split('/')
         .filter(|s| !s.is_empty())
         .collect();
@@ -237,10 +247,51 @@ fn join_res_dir(base: &str, relative: &str) -> String {
         }
     }
     if segments.is_empty() {
-        "res://".to_string()
+        prefix.to_string()
     } else {
-        format!("res://{}", segments.join("/"))
+        format!("{prefix}{}", segments.join("/"))
     }
+}
+
+/// Joins a relative path onto a normalized `user://` directory (pat-u3l8c.113).
+fn join_user_dir(base: &str, relative: &str) -> String {
+    join_uri_dir("user://", base, relative)
+}
+
+/// The canonical spelling of a `user://` directory used as a store lookup key
+/// (pat-u3l8c.113), mirroring [`normalize_pack_dir`].
+///
+/// Public for the same reason: a [`UserStorage::list_dir`] implementor must key
+/// on exactly the spelling this hands it.
+pub fn normalize_user_dir(dir: &str) -> String {
+    if dir == "user://" || dir == "user:/" {
+        return "user://".to_string();
+    }
+    dir.trim_end_matches('/').to_string()
+}
+
+/// A store directory listing, filtered and sorted the way the filesystem
+/// listing in `DirAccess::split_entries` is (pat-u3l8c.113).
+///
+/// Keeping the two in step matters because a script cannot tell which backend
+/// it is talking to: dot-files stay hidden unless asked for, `.import` sidecars
+/// stay out of the file list, and both lists come back sorted.
+fn user_dir_listing(
+    backend: &std::sync::Arc<dyn UserStorage>,
+    dir: &str,
+    include_hidden: bool,
+) -> PackDirListing {
+    let listing = backend.list_dir(dir);
+    let visible = |name: &String| include_hidden || !name.starts_with('.');
+    let mut files: Vec<String> = listing
+        .files
+        .into_iter()
+        .filter(|n| visible(n) && !n.ends_with(".import"))
+        .collect();
+    let mut dirs: Vec<String> = listing.dirs.into_iter().filter(visible).collect();
+    files.sort();
+    dirs.sort();
+    PackDirListing { files, dirs }
 }
 
 /// Immediate children of `dir` across every mounted pack (pat-s3rrv.34).
@@ -308,6 +359,103 @@ pub fn read_from_packs(path: &str) -> Option<Vec<u8>> {
         return None;
     }
     with_mounts(|mounts| mounts.iter().find_map(|m| m.pack.read_file(path)))
+}
+
+// ---------------------------------------------------------------------------
+// User data storage backend (user://) — pat-u3l8c.113
+// ---------------------------------------------------------------------------
+
+/// A read-write store backing `user://`, in place of the filesystem.
+///
+/// `user://` is the one Godot path that must be writable, and in a browser
+/// there is no filesystem under it: persistent storage is IndexedDB or the
+/// Origin Private File System. Godot's own web export solves this the same way,
+/// by routing `user://` through an Emscripten IDBFS mount instead of the host
+/// FS.
+///
+/// This is a trait rather than a concrete backend for the same reason
+/// [`MountedPack`] is: the browser bindings live in `patina-web`, which depends
+/// on `gdcore`, so the dependency can only point one way. A backend registers
+/// itself through [`set_user_storage`], and every `user://` read, write and
+/// listing in [`FileAccess`] / [`DirAccess`] then goes through it.
+///
+/// Unlike [`MountedPack`], a registered backend *replaces* the filesystem for
+/// `user://` rather than shadowing it. There is exactly one user data store,
+/// and a half-and-half view would let a write land where the next read does not
+/// look. With no backend registered, every path keeps resolving under
+/// [`user_root`] exactly as before, so the native build is unaffected.
+///
+/// Paths arrive as the full `user://…` spelling, so an implementation never has
+/// to reconstruct the prefix.
+pub trait UserStorage: Send + Sync {
+    /// Whether `user_path` exists as a file.
+    fn file_exists(&self, user_path: &str) -> bool;
+
+    /// The bytes of `user_path`, or `None` when it does not exist.
+    fn read_file(&self, user_path: &str) -> Option<Vec<u8>>;
+
+    /// Replaces the contents of `user_path`, creating it and any missing
+    /// parents. The error string is surfaced as the [`FileAccess`] error.
+    fn write_file(&self, user_path: &str, bytes: &[u8]) -> Result<(), String>;
+
+    /// Removes a file or empty directory at `user_path`.
+    fn remove(&self, user_path: &str) -> Result<(), String>;
+
+    /// Whether `user_dir` exists as a directory.
+    fn dir_exists(&self, user_dir: &str) -> bool;
+
+    /// Moves `from` to `to`.
+    fn rename(&self, from: &str, to: &str) -> Result<(), String>;
+
+    /// Immediate children of `user_dir` — bare names, as
+    /// [`MountedPack::list_dir`] returns them.
+    ///
+    /// Defaulted to empty so a store that cannot enumerate stays
+    /// trait-compatible; `DirAccess` then lists nothing rather than failing.
+    fn list_dir(&self, _user_dir: &str) -> PackDirListing {
+        PackDirListing::default()
+    }
+
+    /// Creates `user_dir`, including missing parents.
+    ///
+    /// Defaulted to `Ok(())` because a flat key-value store (IndexedDB) has no
+    /// real directories — a path separator is just part of the key, so creating
+    /// one is a no-op rather than an error.
+    fn make_dir(&self, _user_dir: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+static USER_STORAGE: RwLock<Option<std::sync::Arc<dyn UserStorage>>> = RwLock::new(None);
+
+/// Routes every `user://` path through `storage`, in place of the filesystem.
+///
+/// Passing `None` restores the default [`user_root`] behaviour.
+pub fn set_user_storage(storage: Option<std::sync::Arc<dyn UserStorage>>) {
+    *USER_STORAGE
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = storage;
+}
+
+/// The registered `user://` backend, if any.
+pub fn user_storage() -> Option<std::sync::Arc<dyn UserStorage>> {
+    USER_STORAGE
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+/// The registered backend, but only for a `user://` path.
+///
+/// Every call site consults this *before* [`resolve_path`], which is the whole
+/// point: `resolve_path` fails a `user://` path outright when no user root is
+/// configured, and in a browser there is no root to configure.
+fn user_storage_for(path: &str) -> Option<std::sync::Arc<dyn UserStorage>> {
+    if path.starts_with("user://") {
+        user_storage()
+    } else {
+        None
+    }
 }
 
 /// Resolves a Godot-style path (`res://`, `user://`, or plain) to a filesystem path.
@@ -414,10 +562,42 @@ pub struct FileAccess {
     /// been pack-first all along. Only the static helper consulted the packs;
     /// the handle API did not.
     packed: Option<std::io::Cursor<Vec<u8>>>,
+    /// The `user://` store this handle is bound to, when one is registered
+    /// (pat-u3l8c.113). Reads and writes go through an in-memory buffer that is
+    /// flushed back to the store by [`close`](Self::close).
+    user: Option<UserFile>,
     last_error: Option<String>,
     /// When true, multi-byte typed reads/writes use big-endian order
     /// (Godot `FileAccess.set_big_endian`); default little-endian.
     big_endian: bool,
+}
+
+/// A `user://` handle served by a registered [`UserStorage`] (pat-u3l8c.113).
+///
+/// The buffer holds the whole file: a browser store is a key-value map, so
+/// there is no partial write to make — the value is replaced on flush.
+///
+/// `dirty` is taken from the open mode rather than from the calls actually
+/// made, so a handle opened for writing always flushes. That matches the
+/// filesystem branch, where an `OpenOptions::write` open creates or truncates
+/// whether or not anything is then stored.
+struct UserFile {
+    backend: std::sync::Arc<dyn UserStorage>,
+    path: String,
+    cursor: std::io::Cursor<Vec<u8>>,
+    dirty: bool,
+}
+
+// `dyn UserStorage` is not `Debug`, and `FileAccess` derives it, so the backend
+// is reported by what it holds rather than by what it is.
+impl std::fmt::Debug for UserFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserFile")
+            .field("path", &self.path)
+            .field("len", &self.cursor.get_ref().len())
+            .field("dirty", &self.dirty)
+            .finish()
+    }
 }
 
 impl FileAccess {
@@ -429,6 +609,40 @@ impl FileAccess {
     ///
     /// Returns an error when the path cannot be resolved or the OS open fails.
     pub fn open(path: &str, mode: FileMode) -> EngineResult<Self> {
+        // pat-u3l8c.113: a registered `user://` store stands in for the
+        // filesystem, so it is consulted before `resolve_path` — which fails a
+        // `user://` path outright with no user root configured, as in a browser.
+        //
+        // The missing-file rule mirrors the `OpenOptions` branch below exactly:
+        // only a read-only open fails on an absent file; every write mode
+        // creates it.
+        if let Some(backend) = user_storage_for(path) {
+            let existing = backend.read_file(path);
+            if !mode.is_write() && existing.is_none() {
+                return Err(EngineError::NotFound(format!(
+                    "{path} does not exist in the registered user:// storage"
+                )));
+            }
+            let bytes = if mode.truncate() {
+                Vec::new()
+            } else {
+                existing.unwrap_or_default()
+            };
+            return Ok(Self {
+                path: PathBuf::from(path),
+                mode,
+                file: None,
+                packed: None,
+                user: Some(UserFile {
+                    backend,
+                    path: path.to_string(),
+                    cursor: std::io::Cursor::new(bytes),
+                    dirty: mode.is_write(),
+                }),
+                last_error: None,
+                big_endian: false,
+            });
+        }
         let resolved = resolve_path(path)?;
         let mut opts = OpenOptions::new();
         opts.read(mode.is_read()).write(mode.is_write());
@@ -458,6 +672,7 @@ impl FileAccess {
                     mode,
                     file: None,
                     packed: Some(std::io::Cursor::new(bytes)),
+                    user: None,
                     last_error: None,
                     big_endian: false,
                 });
@@ -470,6 +685,7 @@ impl FileAccess {
             mode,
             file: Some(file),
             packed: None,
+            user: None,
             last_error: None,
             big_endian: false,
         })
@@ -483,6 +699,11 @@ impl FileAccess {
     /// removes reports `false` even if it is still present on disk — that is what
     /// makes a removal entry meaningful.
     pub fn file_exists(path: &str) -> bool {
+        // pat-u3l8c.113: a registered `user://` store is the only authority for
+        // `user://`; `resolve_path` below would fail with no user root set.
+        if let Some(backend) = user_storage_for(path) {
+            return backend.file_exists(path);
+        }
         if path.starts_with("res://") {
             if pack_removes(path) {
                 return false;
@@ -506,6 +727,16 @@ impl FileAccess {
     /// entry is a separate concern from reading it whole, which is what every
     /// current loader does.
     pub fn read_file_bytes(path: &str) -> EngineResult<Vec<u8>> {
+        // pat-u3l8c.113: `user://` first — a registered store replaces the
+        // filesystem for it, and no mounted pack can ever supply a `user://`
+        // path, so the two branches cannot both match.
+        if let Some(backend) = user_storage_for(path) {
+            return backend.read_file(path).ok_or_else(|| {
+                EngineError::NotFound(format!(
+                    "{path} does not exist in the registered user:// storage"
+                ))
+            });
+        }
         if let Some(bytes) = read_from_packs(path) {
             return Ok(bytes);
         }
@@ -546,6 +777,23 @@ impl FileAccess {
         // pat-s3rrv.34: a pack-served handle reads from memory. Checked first
         // because such a handle has no `file` at all, and the closed-file error
         // below would otherwise report it as closed.
+        // pat-u3l8c.113: a `user://` handle reads and writes its in-memory
+        // buffer; `close()` flushes it back to the store. Checked alongside the
+        // pack branch and for the same reason — such a handle has no `file`, so
+        // the closed-file error below would otherwise claim it is closed.
+        if let Some(user) = self.user.as_mut() {
+            return match f(&mut user.cursor) {
+                Ok(v) => {
+                    self.last_error = None;
+                    Ok(v)
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    self.last_error = Some(msg.clone());
+                    Err(EngineError::Io(e))
+                }
+            };
+        }
         if let Some(cursor) = self.packed.as_mut() {
             return match f(cursor) {
                 Ok(v) => {
@@ -769,6 +1017,16 @@ impl FileAccess {
         // Clearing only `file` would leave a packed handle readable after
         // `close()`, so "closed" would mean nothing for an exported game.
         self.packed = None;
+        // pat-u3l8c.113: flushing on close (and so on drop) is what makes a
+        // `user://` write persist. The buffer is taken first, so a second
+        // `close()` — or the `Drop` that follows an explicit one — cannot write
+        // the same bytes twice.
+        if let Some(user) = self.user.take().filter(|u| u.dirty) {
+            if let Err(e) = user.backend.write_file(&user.path, user.cursor.get_ref()) {
+                self.last_error = Some(e);
+                return;
+            }
+        }
         self.last_error = None;
     }
 }
@@ -856,6 +1114,12 @@ pub struct DirAccess {
     /// keyed by `res://` path and `path` has already lost that spelling. `None`
     /// for `user://` and plain filesystem directories, which no pack can supply.
     res_path: Option<String>,
+    /// The `user://` spelling this handle was opened with, normalized
+    /// (pat-u3l8c.113). `Some` only when a [`UserStorage`] is registered, which
+    /// is what makes it the marker for "this handle is store-backed, not
+    /// filesystem-backed" — the resolved `path` is then a synthetic `user://…`
+    /// and nothing on disk corresponds to it.
+    user_path: Option<String>,
     entries: Vec<DirEntry>,
     index: usize,
     include_navigational: bool,
@@ -878,6 +1142,29 @@ impl DirAccess {
     /// (pat-s3rrv.34): an exported game has no project tree on disk, so
     /// requiring a real directory here made every packed listing fail.
     pub fn open(path: &str) -> EngineResult<Self> {
+        // pat-u3l8c.113: a registered `user://` store stands in for the
+        // filesystem, so it answers before `resolve_path` — which fails a
+        // `user://` path outright with no user root configured, as in a browser.
+        // The store's own root always opens, as the filesystem root does.
+        if let Some(backend) = user_storage_for(path) {
+            let normalized = normalize_user_dir(path);
+            if normalized != "user://" && !backend.dir_exists(&normalized) {
+                return Err(EngineError::NotFound(format!(
+                    "not a directory in the registered user:// storage: {normalized}"
+                )));
+            }
+            return Ok(Self {
+                path: PathBuf::from(&normalized),
+                res_path: None,
+                user_path: Some(normalized),
+                entries: Vec::new(),
+                index: 0,
+                include_navigational: false,
+                include_hidden: false,
+                current_is_dir: false,
+                last_error: None,
+            });
+        }
         let resolved = resolve_path(path)?;
         let res_path = path.starts_with("res://").then(|| normalize_pack_dir(path));
         let in_pack = res_path.as_deref().map(pack_has_dir).unwrap_or(false);
@@ -890,6 +1177,7 @@ impl DirAccess {
         Ok(Self {
             path: resolved,
             res_path,
+            user_path: None,
             entries: Vec::new(),
             index: 0,
             include_navigational: false,
@@ -916,6 +1204,26 @@ impl DirAccess {
 
     /// Starts a new directory listing. Call [`get_next`](Self::get_next) to iterate.
     pub fn list_dir_begin(&mut self) -> EngineResult<()> {
+        // pat-u3l8c.113: a store-backed handle has no directory on disk at all,
+        // so it lists from the store alone rather than merging — `fs::read_dir`
+        // on the synthetic `user://…` path would fail and, with no `res_path`,
+        // that failure is returned rather than swallowed.
+        if let Some(listing) = self.user_listing() {
+            let mut entries: Vec<DirEntry> = listing
+                .dirs
+                .into_iter()
+                .map(|name| DirEntry { name, is_dir: true })
+                .collect();
+            entries.extend(listing.files.into_iter().map(|name| DirEntry {
+                name,
+                is_dir: false,
+            }));
+            self.entries = entries;
+            self.index = 0;
+            self.current_is_dir = false;
+            self.last_error = None;
+            return Ok(());
+        }
         let mut entries = Vec::new();
         // A pack-only directory has nothing on disk to read. That is not an
         // error when a mount supplies entries for it (pat-s3rrv.34) — but a
@@ -1076,6 +1384,12 @@ impl DirAccess {
     /// The non-directory file names in this directory, excluding `.import`
     /// sidecars (Godot `DirAccess.get_files`).
     pub fn get_files(&self) -> Vec<String> {
+        // pat-u3l8c.113: a store-backed handle lists from the store, which
+        // replaces the filesystem rather than adding to it, so unlike a mounted
+        // pack there is nothing to merge.
+        if let Some(listing) = self.user_listing() {
+            return listing.files;
+        }
         Self::split_entries(
             &self.path,
             self.res_path.as_deref(),
@@ -1087,6 +1401,9 @@ impl DirAccess {
 
     /// The subdirectory names in this directory (Godot `DirAccess.get_directories`).
     pub fn get_directories(&self) -> Vec<String> {
+        if let Some(listing) = self.user_listing() {
+            return listing.dirs;
+        }
         Self::split_entries(
             &self.path,
             self.res_path.as_deref(),
@@ -1099,12 +1416,18 @@ impl DirAccess {
     /// Static: file names at `path` (`res://` / `user://` resolved), excluding
     /// `.import` sidecars (Godot `DirAccess.get_files_at`).
     pub fn get_files_at(path: &str) -> EngineResult<Vec<String>> {
+        if let Some(listing) = Self::user_listing_at(path) {
+            return Ok(listing.files);
+        }
         let res_path = path.starts_with("res://").then(|| normalize_pack_dir(path));
         Ok(Self::split_entries(&resolve_path(path)?, res_path.as_deref(), false, false).0)
     }
 
     /// Static: subdirectory names at `path` (Godot `DirAccess.get_directories_at`).
     pub fn get_directories_at(path: &str) -> EngineResult<Vec<String>> {
+        if let Some(listing) = Self::user_listing_at(path) {
+            return Ok(listing.dirs);
+        }
         let res_path = path.starts_with("res://").then(|| normalize_pack_dir(path));
         Ok(Self::split_entries(&resolve_path(path)?, res_path.as_deref(), false, false).1)
     }
@@ -1117,6 +1440,20 @@ impl DirAccess {
     /// Changes the current directory to `path` (relative to this handle, or an
     /// absolute / `res://` path). Errors if the target is not a directory.
     pub fn change_dir(&mut self, path: &str) -> EngineResult<()> {
+        // pat-u3l8c.113: the `user://` spelling is tracked for the same reason
+        // the `res://` one is — a store listing has to keep working after a
+        // change_dir, and the resolved path carries no scheme.
+        if let Some((backend, user_target)) = self.user_child(path) {
+            if user_target != "user://" && !backend.dir_exists(&user_target) {
+                return Err(EngineError::NotFound(format!(
+                    "not a directory in the registered user:// storage: {user_target}"
+                )));
+            }
+            self.path = PathBuf::from(&user_target);
+            self.res_path = None;
+            self.user_path = Some(user_target);
+            return Ok(());
+        }
         let target = self.resolve_child(path)?;
         // The `res://` spelling is tracked alongside the filesystem path so a
         // pack listing keeps working after a change_dir (pat-s3rrv.34).
@@ -1153,6 +1490,9 @@ impl DirAccess {
 
     /// Creates a directory relative to this handle (or absolute / `res://` path).
     pub fn make_dir(&mut self, path: &str) -> EngineResult<()> {
+        if let Some((backend, target)) = self.user_child(path) {
+            return self.report(backend.make_dir(&target));
+        }
         let target = self.resolve_child(path)?;
         fs::create_dir(&target).map_err(|e| {
             self.last_error = Some(e.to_string());
@@ -1164,6 +1504,11 @@ impl DirAccess {
 
     /// Creates a directory and any missing parents.
     pub fn make_dir_recursive(&mut self, path: &str) -> EngineResult<()> {
+        // `UserStorage::make_dir` already creates missing parents, so the
+        // recursive and non-recursive forms coincide for a store.
+        if let Some((backend, target)) = self.user_child(path) {
+            return self.report(backend.make_dir(&target));
+        }
         let target = self.resolve_child(path)?;
         fs::create_dir_all(&target).map_err(|e| {
             self.last_error = Some(e.to_string());
@@ -1175,6 +1520,9 @@ impl DirAccess {
 
     /// Removes a file or empty directory at `path`.
     pub fn remove(&mut self, path: &str) -> EngineResult<()> {
+        if let Some((backend, target)) = self.user_child(path) {
+            return self.report(backend.remove(&target));
+        }
         let target = self.resolve_child(path)?;
         let result = if target.is_dir() {
             fs::remove_dir(&target)
@@ -1191,6 +1539,10 @@ impl DirAccess {
 
     /// Renames / moves `from` to `to`.
     pub fn rename(&mut self, from: &str, to: &str) -> EngineResult<()> {
+        if let (Some((backend, src)), Some((_, dst))) = (self.user_child(from), self.user_child(to))
+        {
+            return self.report(backend.rename(&src, &dst));
+        }
         let src = self.resolve_child(from)?;
         let dst = self.resolve_child(to)?;
         fs::rename(&src, &dst).map_err(|e| {
@@ -1203,6 +1555,12 @@ impl DirAccess {
 
     /// Returns `true` if `path` exists as a directory.
     pub fn dir_exists(path: &str) -> bool {
+        // pat-u3l8c.113: a registered store is the only authority for `user://`.
+        // Its root always exists, as the filesystem user root does once set.
+        if let Some(backend) = user_storage_for(path) {
+            let normalized = normalize_user_dir(path);
+            return normalized == "user://" || backend.dir_exists(&normalized);
+        }
         // A directory that exists only inside a mounted pack counts, mirroring
         // `FileAccess::file_exists` (pat-s3rrv.34). Checked before resolving so
         // it still answers `true` for a pack mounted without a project root.
@@ -1218,6 +1576,56 @@ impl DirAccess {
     /// Last error message from a failed mutation, if any.
     pub fn get_error(&self) -> Option<&str> {
         self.last_error.as_deref()
+    }
+
+    /// This handle's listing from the registered `user://` store, or `None`
+    /// when it is not store-backed (pat-u3l8c.113).
+    fn user_listing(&self) -> Option<PackDirListing> {
+        let user_path = self.user_path.as_deref()?;
+        let backend = user_storage()?;
+        Some(user_dir_listing(&backend, user_path, self.include_hidden))
+    }
+
+    /// [`user_listing`](Self::user_listing) for a bare path, for the static
+    /// `*_at` accessors — which, like their filesystem counterparts, list
+    /// without hidden entries.
+    fn user_listing_at(path: &str) -> Option<PackDirListing> {
+        let backend = user_storage_for(path)?;
+        Some(user_dir_listing(&backend, &normalize_user_dir(path), false))
+    }
+
+    /// The store and full `user://` path for a child of this handle
+    /// (pat-u3l8c.113).
+    ///
+    /// A relative name joins onto this handle's own `user://` directory rather
+    /// than onto `self.path`: with a store registered, `self.path` is a
+    /// synthetic `user://…` and no filesystem path exists to join onto. An
+    /// absolute or `res://` child is not the store's business and gives `None`,
+    /// which sends the caller down its filesystem branch.
+    fn user_child(&self, path: &str) -> Option<(std::sync::Arc<dyn UserStorage>, String)> {
+        if let Some(backend) = user_storage_for(path) {
+            return Some((backend, normalize_user_dir(path)));
+        }
+        if path.starts_with("res://") || Path::new(path).is_absolute() {
+            return None;
+        }
+        let dir = self.user_path.as_deref()?;
+        Some((user_storage()?, join_user_dir(dir, path)))
+    }
+
+    /// Records a store error on this handle the way the `fs::*` mutators record
+    /// an `io::Error` (pat-u3l8c.113).
+    fn report(&mut self, result: Result<(), String>) -> EngineResult<()> {
+        match result {
+            Ok(()) => {
+                self.last_error = None;
+                Ok(())
+            }
+            Err(e) => {
+                self.last_error = Some(e.clone());
+                Err(EngineError::InvalidOperation(e))
+            }
+        }
     }
 
     fn resolve_child(&self, path: &str) -> EngineResult<PathBuf> {

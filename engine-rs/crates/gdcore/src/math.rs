@@ -3862,7 +3862,24 @@ mod tests {
 
         // ⚠️ `hex` is RGBA, matching to_rgba32 — not the ARGB of to_argb32.
         let round = Color::from_hex32(0xff8000ff);
-        assert!(round.is_equal_approx(c), "{round:?}");
+        // ⚠️ Asserted as 8-bit CHANNELS, not `is_equal_approx` against `c`.
+        //
+        // This line used to read `assert!(round.is_equal_approx(c))`, and it could
+        // NEVER have passed — whatever the engine did. `0.5` has no exact 8-bit
+        // encoding: `from_hex32` divides by 255 (math.rs:2306), so `0x80` comes back
+        // as 128/255 = 0.5019608, which is 1.96e-3 away from 0.5, while
+        // `Color::is_equal_approx` uses a 1e-5 per-channel tolerance (math.rs:2183)
+        // — 196x too tight. The assertion was demanding a precision the 8-bit hex
+        // format does not have, so it was a defect in the test, not in `from_hex32`.
+        //
+        // Channel equality pins what this line is actually FOR — that `hex` is
+        // RGBA-ordered, matching `to_rgba32`, and not the ARGB of `to_argb32` — and
+        // does it exactly, with no tolerance to get wrong.
+        assert_eq!(
+            (round.r8(), round.g8(), round.b8(), round.a8()),
+            (0xff, 0x80, 0x00, 0xff),
+            "from_hex32 must decode as R,G,B,A in that order: {round:?}"
+        );
         assert_eq!(
             Color::from_hex32(c.to_rgba32() as u32).to_rgba32(),
             c.to_rgba32()

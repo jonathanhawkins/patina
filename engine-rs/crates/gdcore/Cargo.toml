@@ -14,6 +14,25 @@ aes = "0.8"
 # and 0.3.4 is already pinned in Cargo.lock, so this adds no new build.
 getrandom = "0.3"
 cbc = { version = "0.1", features = ["alloc"] }
+# RSA + PKCS#1/PKCS#8/SPKI for `crypto_rsa` (pat-s3rrv.195): Godot's
+# `Crypto.generate_rsa` / `sign` / `verify` / `encrypt` / `decrypt` and
+# `CryptoKey` PEM.
+#
+# `sha2` is for its OID ONLY — PKCS#1 v1.5 needs the digest's ASN.1 DigestInfo
+# prefix, which `rsa` derives from the digest type; hashing itself still goes
+# through this crate's own `crypto::sha256`.
+#
+# `u64_digit` is a DEFAULT feature re-listed by hand: it gives the bigint
+# 64-bit limbs, and the keygen is several times slower without it.
+#
+# 🔑 `default-features = false` DROPS `std`, DELIBERATELY. `rsa`'s `std`
+# feature pulls `rand_core/std`, which pulls `getrandom` 0.2 — and getrandom
+# 0.2 REFUSES to compile for wasm32-unknown-unknown unless its `js` backend is
+# selected, so leaving `std` on would break `scripts/web.sh` for a feature we
+# never use (all `std` adds is `impl std::error::Error`; `Display` is
+# unconditional, which is all `crypto_rsa` formats). The `pem` default goes
+# with it: `crypto_rsa` writes its own PEM armour.
+rsa = { version = "0.9", default-features = false, features = ["sha2", "u64_digit"] }
 thiserror.workspace = true
 tracing.workspace = true
 

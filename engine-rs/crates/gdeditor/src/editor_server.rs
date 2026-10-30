@@ -3481,6 +3481,26 @@ fn parse_json_body(body: &str) -> Option<serde_json::Value> {
 }
 
 fn node_to_json_tree(tree: &SceneTree, node_id: NodeId) -> serde_json::Value {
+    node_to_json_tree_with_warnings(tree, node_id, &HashMap::new())
+}
+
+/// Same as [`node_to_json_tree`], plus each node's configuration-warning
+/// messages (pat-417cn).
+///
+/// Godot's `SceneTreeEditor::update_node` hangs a `BUTTON_WARNING` triangle off
+/// every row whose node reports `_get_configuration_warnings()`, so the warning
+/// has to travel with the tree payload the dock renders — one request, not one
+/// per row. Collecting it needs `&mut SceneTree` (a script's
+/// `_get_configuration_warnings` is a method call), which this recursive
+/// immutable walk cannot do, so the caller pre-computes the map keyed by
+/// `NodeId::raw()` and hands it in. Callers that have no mutable tree (the
+/// remote/runtime tree) go through the wrapper above and get an empty list,
+/// which is exactly "no warning".
+fn node_to_json_tree_with_warnings(
+    tree: &SceneTree,
+    node_id: NodeId,
+    node_warnings: &HashMap<u64, Vec<String>>,
+) -> serde_json::Value {
     let node = match tree.get_node(node_id) {
         Some(n) => n,
         None => return serde_json::Value::Null,
@@ -3489,8 +3509,13 @@ fn node_to_json_tree(tree: &SceneTree, node_id: NodeId) -> serde_json::Value {
     let children: Vec<serde_json::Value> = node
         .children()
         .iter()
-        .map(|&cid| node_to_json_tree(tree, cid))
+        .map(|&cid| node_to_json_tree_with_warnings(tree, cid, node_warnings))
         .collect();
+
+    // Godot's row triangle: present when the node reports at least one
+    // configuration warning, and its tooltip lists them.
+    let configuration_warnings: Vec<String> =
+        node_warnings.get(&node_id.raw()).cloned().unwrap_or_default();
 
     let visible = match node.get_property("visible") {
         Variant::Bool(b) => b,
@@ -3582,6 +3607,7 @@ fn node_to_json_tree(tree: &SceneTree, node_id: NodeId) -> serde_json::Value {
         "script_path": script_path,
         "has_signals": has_signals,
         "groups": all_groups,
+        "configuration_warnings": configuration_warnings,
         "children": children
     })
 }
@@ -4311,9 +4337,32 @@ fn find_node_by_raw_id(tree: &SceneTree, raw: u64) -> Option<NodeId> {
 fn api_get_scene(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     // Lock → build JSON → unlock → then send (minimizes lock hold time).
     let json = {
-        let state = state.lock().unwrap();
+        let mut state = state.lock().unwrap();
         let root_id = state.scene_tree.root_id();
-        let tree_json = node_to_json_tree(&state.scene_tree, root_id);
+        // pat-417cn: collect every node's configuration warnings up front so the
+        // dock can draw Godot's per-row warning triangle from this one payload.
+        // `node_configuration_warnings` calls into the node's script, hence the
+        // mutable borrow — it has to finish before the immutable tree walk below.
+        // Both producers feed Godot's single `get_configuration_warnings()`:
+        // `node_configuration_warnings` covers the script override plus the
+        // native ShaderGlobalsOverride case, and `dock::compute_node_warnings`
+        // covers the C++ class overrides Patina had already implemented and
+        // tested but never served (missing CollisionShape child, textureless
+        // Sprite, ambiguous `%Name`) — it had no caller outside its own tests.
+        let mut node_warnings: HashMap<u64, Vec<String>> = HashMap::new();
+        let all_ids = state.scene_tree.all_nodes_in_tree_order();
+        for id in all_ids {
+            let mut warnings = state.scene_tree.node_configuration_warnings(id);
+            warnings.extend(
+                crate::dock::compute_node_warnings(&state.scene_tree, id)
+                    .into_iter()
+                    .map(|w| w.message),
+            );
+            if !warnings.is_empty() {
+                node_warnings.insert(id.raw(), warnings);
+            }
+        }
+        let tree_json = node_to_json_tree_with_warnings(&state.scene_tree, root_id, &node_warnings);
         // Godot parity: tell the client which main-screen editor (2D/3D) fits this
         // scene so a freshly opened 3D scene lands in the spatial editor instead
         // of the 2D canvas (where the 3D camera controls don't apply).
@@ -23439,15 +23488,27 @@ fn api_get_import_settings(state: &Arc<Mutex<EditorState>>, query: &str, stream:
         .map(|p| format!("\"{p}\""))
         .collect::<Vec<_>>()
         .join(",");
+    // pat-93pfv: the Import dock's "Advanced..." button is visible only for
+    // importers that override `has_advanced_options()` — the scene importer
+    // (upstream/godot/editor/import/3d/resource_importer_scene.cpp:3373) and the
+    // dynamic-font importer (resource_importer_dynamic_font.cpp:145). Everything
+    // else inherits `ResourceImporter::has_advanced_options() { return false; }`
+    // (upstream/godot/core/io/resource_importer.h:145), so the dock keeps the
+    // button hidden as its constructor left it (import_dock.cpp:810-811).
+    let advanced = matches!(
+        rty,
+        ImportResourceType::Scene | ImportResourceType::Mesh | ImportResourceType::Font
+    );
     send_json(
         stream,
         &format!(
-            r#"{{"importable":true,"path":"{}","importer":"{}","importers":["{}"],"presets":[{}],"options":[{}]}}"#,
+            r#"{{"importable":true,"path":"{}","importer":"{}","importers":["{}"],"presets":[{}],"options":[{}],"advanced":{}}}"#,
             path.replace('"', "\\\""),
             importer,
             importer,
             presets_json,
-            options.join(",")
+            options.join(","),
+            advanced
         ),
     );
 }

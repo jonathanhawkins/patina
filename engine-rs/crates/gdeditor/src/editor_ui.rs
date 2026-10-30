@@ -141,6 +141,15 @@ select.renderer-indicator option { color: var(--text); background: var(--panel);
 }
 .st-tool-btn:hover:not(:disabled) { background: var(--hover); color: var(--text); border-color: var(--border); }
 .st-tool-btn:disabled { opacity: 0.35; cursor: default; }
+/* pat-417cn: the Remote/Local toggle fills the dock width, as Godot's two
+   SIZE_EXPAND_FILL FlatButtons do. */
+#scene-tree-remote-local { display: flex; gap: 2px; padding: 2px 4px; }
+.st-tree-source {
+  flex: 1; background: none; border: 1px solid transparent; border-radius: 3px;
+  color: var(--text-dim); cursor: pointer; font-size: 11px; padding: 2px 0;
+}
+.st-tree-source:hover { background: var(--hover); color: var(--text); }
+.st-tree-source.active { background: var(--selected); color: var(--accent); border-color: var(--accent); }
 #scene-search {
   flex: 1; min-width: 0; margin: 0; padding: 4px 8px; font-size: 12px; border-radius: 3px;
   background: var(--bg); color: var(--text); border: 1px solid var(--border);
@@ -182,6 +191,28 @@ select.renderer-indicator option { color: var(--text); background: var(--panel);
 .import-opt-row input[type="checkbox"] { margin-left: auto; }
 .import-reimport { flex: none; align-self: stretch; margin-top: 8px; background: var(--panel); }
 .import-reimport:disabled { opacity: 0.5; cursor: default; }
+/* pat-93pfv: the rest of the chrome ImportDock's constructor always builds
+   (upstream/godot/editor/docks/import_dock.cpp:745-836): the `imported` header
+   label (LineEdit-styled, :760-764), the "Advanced..." button sharing an HBox
+   with Reimport (:796-812), and the reimport ConfirmationDialog with its two
+   warning labels (:814-823). */
+.import-imported {
+  font-size: 12px; color: var(--text); background: var(--panel);
+  border: 1px solid var(--border); border-radius: 3px;
+  padding: 3px 6px; margin-bottom: 6px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.import-btn-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.import-btn-row .import-reimport { flex: 1; margin-top: 0; align-self: auto; }
+.import-advanced { flex: none; }
+#import-reimport-confirm {
+  position: absolute; left: 50%; top: 40%; transform: translate(-50%, -50%);
+  z-index: 60; min-width: 320px; max-width: 420px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+  padding: 12px; font-size: 12px; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+}
+#import-reimport-confirm .import-warning { color: var(--text-dim); line-height: 1.5; margin-bottom: 8px; }
+#import-reimport-confirm .import-confirm-row { display: flex; justify-content: flex-end; gap: 8px; }
 .tree-node { user-select: none; }
 .tree-row {
   display: flex; align-items: center; padding: 2px 8px; cursor: pointer;
@@ -212,6 +243,10 @@ select.renderer-indicator option { color: var(--text); background: var(--panel);
 .tree-lock.locked { opacity: 0.7; color: var(--accent); }
 .tree-badge { font-size: 10px; flex-shrink: 0; margin-left: 2px; }
 .tree-badge.unique-name { color: #c88eff; font-size: 9px; font-weight: bold; }
+/* pat-417cn: a %-name already claimed by another node in the scene. */
+.tree-badge.unique-name-collision { color: #e05050; }
+.tree-badge.tree-grouped, .tree-badge.tree-subscene { font-size: 10px; color: var(--text-dim); }
+.tree-row:hover .tree-grouped, .tree-row:hover .tree-subscene { color: var(--text); }
 .tree-children { display: none; }
 .tree-children.expanded { display: block; }
 
@@ -262,6 +297,8 @@ select.renderer-indicator option { color: var(--text); background: var(--panel);
 .vp2d-dropdown .vp2d-mi { padding: 4px 12px; cursor: pointer; white-space: nowrap; display: flex; align-items: center; gap: 6px; }
 .vp2d-dropdown .vp2d-mi:hover { background: var(--hover); }
 .vp2d-dropdown .vp2d-mi .vp2d-check { width: 12px; color: var(--accent); }
+.vp2d-dropdown .vp2d-mi .vp2d-sub { margin-left: auto; padding-left: 12px; color: var(--text-dim); }
+.vp2d-dropdown .vp2d-mi-indent { padding-left: 26px; }
 .vp2d-dropdown .vp2d-mi-sep { height: 1px; background: var(--border); margin: 4px 0; }
 /* Central script editor (pat-qtmbv): Godot-style toolbar + script list + relocated #script-panel. */
 #script-editor-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
@@ -778,6 +815,32 @@ input.audio-bus-name:focus { border-color: var(--accent); }
 .anim-record { color: #888; }
 .anim-record.active { color: #e05050; }
 #anim-time-display { color: var(--text-dim); font-size: 11px; margin-left: auto; font-family: monospace; }
+/* Animation panel toolbar chrome (Godot AnimationPlayerEditor hbox, 
+   editor/animation/animation_player_editor_plugin.cpp:2052-2190): the
+   Animation/Edit/Onion-Skinning MenuButtons and the frame SpinBox. */
+#anim-frame { width: 80px; font-size: 11px; font-family: monospace; }
+#anim-scale { width: 56px; font-size: 11px; }
+.anim-menu { position: relative; }
+.anim-menu-btn {
+  background: transparent; border: 1px solid var(--border); color: var(--text);
+  font-size: 11px; padding: 2px 7px; border-radius: 3px; cursor: pointer; font-family: inherit;
+}
+.anim-menu-btn:hover, .anim-menu-btn.open { background: var(--hover); }
+.anim-dropdown {
+  position: absolute; bottom: 100%; left: 0; z-index: 100; margin-bottom: 2px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+  box-shadow: 0 -4px 12px rgba(0,0,0,0.5); padding: 3px 0; min-width: 210px;
+  max-height: 60vh; overflow-y: auto;
+}
+.anim-mi { padding: 4px 12px; cursor: pointer; color: var(--text); white-space: nowrap; display: flex; gap: 6px; align-items: center; font-size: 12px; }
+.anim-mi:hover { background: var(--accent); color: #000; }
+.anim-mi .anim-check { width: 11px; display: inline-block; color: var(--accent); font-size: 11px; }
+.anim-mi:hover .anim-check { color: #000; }
+.anim-mi-key { margin-left: auto; color: var(--text-dim); font-size: 11px; padding-left: 18px; }
+.anim-mi:hover .anim-mi-key { color: #000; }
+.anim-mi-sep { height: 1px; background: var(--border); margin: 3px 0; }
+.anim-mi-label { padding: 3px 12px; color: var(--text-dim); font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; }
+.anim-onion.active, .anim-pin.active, .anim-autoplay.active { color: var(--accent); }
 .anim-timeline-area { display: flex; flex: 1; overflow: hidden; min-height: 50px; }
 .anim-tracks {
   width: 160px; min-width: 100px; border-right: 1px solid var(--border);
@@ -1605,6 +1668,8 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
 .vp3d-mi:hover { background: var(--accent); color: #000; }
 .vp3d-mi .vp3d-check { width: 11px; display: inline-block; color: var(--accent); font-size: 11px; }
 .vp3d-mi:hover .vp3d-check { color: #000; }
+.vp3d-mi .vp3d-sub { margin-left: auto; padding-left: 12px; color: var(--text-dim); font-size: 11px; }
+.vp3d-mi:hover .vp3d-sub { color: #000; }
 .vp3d-sep { height: 1px; background: var(--border); margin: 3px 0; }
 /* 3D spatial editor toolbar (Godot Node3DEditor main_menu_hbox parity). */
 #vp3d-toolbar {
@@ -2258,16 +2323,50 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         <button id="st-extend-script" class="st-tool-btn" title="Extend the script of the selected node.">&#10530;</button>
         <button id="st-tree-menu" class="st-tool-btn" title="Extra scene options.">&#8942;</button>
       </div>
+      <!-- pat-417cn: Godot's SceneTreeDock `button_hb`
+           (upstream/godot/editor/docks/scene_tree_dock.cpp:4899-4921): the
+           Remote/Local scene-tree source toggle, built between the filter
+           toolbar and the tree. Godot hides it until the project is being
+           debugged (`button_hb->hide()`) and presses Local by default; Remote
+           carries the stutter warning verbatim. Patina already served the
+           running clone at `/api/runtime/scene` but gave no way back to the
+           edit tree during play. -->
+      <div id="scene-tree-remote-local" style="display:none;">
+        <button id="st-remote" class="st-tree-source" title="If selected, the Remote scene tree dock will cause the project to stutter every time it updates.&#10;Switch back to the Local scene tree dock to improve performance.">Remote</button>
+        <button id="st-local" class="st-tree-source active">Local</button>
+      </div>
       <div id="scene-tree"></div>
       <!-- Import dock (Godot parity): tabbed with Scene; shows import settings for
            the selected resource. Empty-state until a file is selected. -->
       <div id="import-dock" style="display:none">
-        <div id="import-empty">Select a resource file in the FileSystem dock to import it.</div>
+        <div id="import-empty">Select a resource file in the filesystem or in the inspector to adjust import settings.</div>
         <div id="import-content" style="display:none">
+          <!-- pat-93pfv: ImportDock's `imported` Label (import_dock.cpp:760-764)
+               heads the content with the file being imported, styled like a
+               read-only LineEdit. -->
+          <div id="import-imported" class="import-imported"></div>
           <div class="import-row"><span class="import-label">Import As:</span><select id="import-as" class="import-select"></select></div>
           <div class="import-row"><span class="import-label">Preset</span><button id="import-preset" class="import-btn">Preset</button></div>
           <div id="import-options"></div>
-          <button id="import-reimport" class="import-btn import-reimport">Reimport</button>
+          <!-- pat-93pfv: import_dock.cpp:796-812 puts "Advanced..." and
+               "Reimport" in one HBox; Advanced is hidden unless the importer
+               overrides has_advanced_options(). -->
+          <div class="import-btn-row">
+            <button id="import-advanced" class="import-btn import-advanced" style="display:none">Advanced...</button>
+            <button id="import-reimport" class="import-btn import-reimport">Reimport</button>
+          </div>
+          <!-- pat-93pfv: the reimport ConfirmationDialog and its two warning
+               labels (import_dock.cpp:814-823), popped when the chosen importer
+               differs from the one the asset was imported with
+               (import_dock.cpp:558-576). -->
+          <div id="import-reimport-confirm" style="display:none">
+            <div id="import-cleanup-warning" class="import-warning">The imported resource is currently loaded. All instances will be replaced and undo history will be cleared.</div>
+            <div id="import-type-warning" class="import-warning">WARNING: Assets exist that use this resource. They may stop loading properly after changing type.</div>
+            <div class="import-confirm-row">
+              <button id="import-reimport-cancel" class="import-btn">Cancel</button>
+              <button id="import-reimport-ok" class="import-btn">OK</button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -2374,14 +2473,26 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         <div class="vp3d-tb-menu">
           <button class="vp3d-tb-menubtn" id="vp3d-viewmenu-btn">View</button>
           <div class="vp3d-tb-dropdown" id="vp3d-viewmenu-dropdown" style="display:none;">
+            <!-- pat-pq0l1: Godot's view_layout_menu popup in source order
+                 (node_3d_editor_plugin.cpp:9999-10026): the six viewport-layout
+                 radio items (including the two Alt splits), a Gizmos submenu,
+                 View Origin / View Grid, a Preview Translation submenu, then
+                 Settings.... Patina renders a single viewport, so the multi-view
+                 layouts stay present-but-disabled. -->
             <div class="vp3d-mi" data-act="view-1"><span class="vp3d-check">&#10003;</span>1 Viewport</div>
             <div class="vp3d-mi vp3d-disabled" title="Patina uses a single viewport"><span class="vp3d-check"></span>2 Viewports</div>
+            <div class="vp3d-mi vp3d-disabled" title="Patina uses a single viewport"><span class="vp3d-check"></span>2 Viewports (Alt)</div>
             <div class="vp3d-mi vp3d-disabled" title="Patina uses a single viewport"><span class="vp3d-check"></span>3 Viewports</div>
+            <div class="vp3d-mi vp3d-disabled" title="Patina uses a single viewport"><span class="vp3d-check"></span>3 Viewports (Alt)</div>
             <div class="vp3d-mi vp3d-disabled" title="Patina uses a single viewport"><span class="vp3d-check"></span>4 Viewports</div>
+            <div class="vp3d-sep"></div>
+            <div class="vp3d-mi" data-act="view-gizmos"><span class="vp3d-check"></span>Gizmos<span class="vp3d-sub">&#9656;</span></div>
             <div class="vp3d-sep"></div>
             <div class="vp3d-mi" data-act="view-origin"><span class="vp3d-check">&#10003;</span>View Origin</div>
             <div class="vp3d-mi" data-act="view-grid"><span class="vp3d-check">&#10003;</span>View Grid</div>
             <div class="vp3d-mi" data-act="view-frame-time"><span class="vp3d-check"></span>View Frame Time</div>
+            <div class="vp3d-sep"></div>
+            <div class="vp3d-mi" data-act="view-preview-translation"><span class="vp3d-check"></span>Preview Translation<span class="vp3d-sub">&#9656;</span></div>
             <div class="vp3d-sep"></div>
             <div class="vp3d-mi" data-act="view-settings">Settings...</div>
           </div>
@@ -2466,8 +2577,21 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         </div>
         <!-- pat-9yq5q: 2D viewport toolbar (Godot CanvasItemEditor main_menu_hbox,
              canvas_item_editor_plugin.cpp:5702-6040), in Godot order. Shown in 2D
-             mode. The transform tools (Q/W/E/R) live in the main editor toolbar. -->
+             mode.
+             pat-pq0l1: Godot's main_menu_hbox opens with the four transform tool
+             toggles (canvas_item_editor_plugin.cpp:5702-5745): select (pressed by
+             default), a separator, then move / rotate / scale, then a separator
+             before the list-select/pivot tools. All eight share ONE exclusive
+             tool group in Godot (`_button_tool_select` sets a single `tool`), so
+             the transform buttons carry `.vp2d-tool` too and clicking either half
+             releases the other. -->
         <div id="vp2d-toolbar">
+          <button class="vp2d-btn vp2d-tool active" data-vp2dtool="select" id="vp2d-tool-select" title="Select Mode (Q)">&#11034;</button>
+          <span class="vp2d-sep"></span>
+          <button class="vp2d-btn vp2d-tool" data-vp2dtool="move" id="vp2d-tool-move" title="Move Mode (W)">&#10011;</button>
+          <button class="vp2d-btn vp2d-tool" data-vp2dtool="rotate" id="vp2d-tool-rotate" title="Rotate Mode (E)">&#10227;</button>
+          <button class="vp2d-btn vp2d-tool" data-vp2dtool="scale" id="vp2d-tool-scale" title="Scale Mode (R)&#10;Shift: Scale proportionally.">&#10530;</button>
+          <span class="vp2d-sep"></span>
           <button class="vp2d-btn vp2d-tool" id="vp2d-list-select" title="Show list of selectable nodes at position clicked.">&#9776;</button>
           <button class="vp2d-btn vp2d-tool" id="vp2d-pivot" title="Click to change object's rotation pivot.">&#10043;</button>
           <span class="vp2d-sep"></span>
@@ -2962,23 +3086,126 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
             </div>
           </div>
           <div id="animation-panel">
+            <!-- pat-wuhv1: Animation bottom-panel toolbar, enumerated 1:1 from
+                 Godot's AnimationPlayerEditor hbox
+                 (upstream/godot/editor/animation/animation_player_editor_plugin.cpp
+                 :2052-2190) and the AnimationTrackEditor Edit MenuButton
+                 (animation_track_editor.cpp:8336-8381). Godot's order is:
+                 play_bw_from / play_bw / stop / play / play_from, the frame
+                 SpinBox, a separator, the (hidden) scale LineEdit, the
+                 "Animation" tools MenuButton, the animation OptionButton,
+                 autoplay, the track editor's "Edit" MenuButton, the onion
+                 skinning toggle + options MenuButton, and pin. Patina's own
+                 extra controls follow after, so existing wiring still holds. -->
             <div class="anim-toolbar">
-              <select id="anim-select"><option value="">-- No Animation --</option></select>
+              <!-- playback_container: Godot builds these five in this order. -->
+              <button id="anim-play-bw-from-btn" title="Play Animation Backwards (A)">&#9664;</button>
+              <button id="anim-play-bw-btn" title="Play Animation Backwards from End (Shift+A)">&#9664;&#9646;</button>
+              <button id="anim-stop-btn" title="Pause/Stop Animation (S)">&#9632;</button>
+              <button id="anim-play-btn" title="Play Animation from Start (Shift+D)">&#9646;&#9654;</button>
+              <button id="anim-play-from-btn" title="Play Animation (D)">&#9654;</button>
+              <!-- frame SpinBox (step 0.0001 in Godot). -->
+              <input id="anim-frame" type="number" step="0.0001" min="0" value="0" title="Animation position (in seconds)."
+                     aria-label="Animation position (in seconds).">
+              <span class="anim-sep"></span>
+              <!-- scale LineEdit. Godot constructs it then calls scale->hide(),
+                   so it is present in the tree but not visible. -->
+              <input id="anim-scale" type="text" style="display:none" title="Scale animation playback globally for the node."
+                     aria-label="Scale animation playback globally for the node.">
+              <!-- tool_anim MenuButton, text "Animation", tooltip "Animation Tools". -->
+              <div class="anim-menu" data-menu="tool-anim">
+                <button class="anim-menu-btn" id="anim-tool-btn" type="button" title="Animation Tools">Animation</button>
+                <div class="anim-dropdown" id="anim-tool-dropdown" style="display:none">
+                  <div class="anim-mi" data-act="new-anim"><span>New...</span></div>
+                  <div class="anim-mi-sep"></div>
+                  <div class="anim-mi" data-act="anim-library"><span>Manage Animations...</span></div>
+                  <div class="anim-mi-sep"></div>
+                  <div class="anim-mi" data-act="duplicate-anim"><span>Duplicate...</span></div>
+                  <div class="anim-mi-sep"></div>
+                  <div class="anim-mi" data-act="rename-anim"><span>Rename...</span></div>
+                  <div class="anim-mi" data-act="edit-transitions"><span>Edit Transitions...</span></div>
+                  <div class="anim-mi" data-act="open-in-inspector"><span>Open in Inspector</span></div>
+                  <div class="anim-mi-sep"></div>
+                  <div class="anim-mi" data-act="remove-anim"><span>Remove</span></div>
+                </div>
+              </div>
+              <!-- animation OptionButton: "Display list of animations in player." -->
+              <select id="anim-select" title="Display list of animations in player."><option value="">-- No Animation --</option></select>
+              <button id="anim-autoplay-btn" class="anim-autoplay" title="Autoplay on Load">&#9654;&#9733;</button>
+              <span class="anim-sep"></span>
+              <!-- track_editor->get_edit_menu(): MenuButton text "Edit",
+                   tooltip "Animation properties." -->
+              <div class="anim-menu" data-menu="track-edit">
+                <button class="anim-menu-btn" id="anim-edit-btn" type="button" title="Animation properties.">Edit</button>
+                <div class="anim-dropdown" id="anim-edit-dropdown" style="display:none">
+                  <div class="anim-mi" data-act="copy-tracks"><span>Copy Tracks...</span></div>
+                  <div class="anim-mi" data-act="paste-tracks"><span>Paste Tracks</span></div>
+                  <div class="anim-mi-sep"></div>
+                  <div class="anim-mi" data-act="scale-selection"><span>Scale Selection...</span></div>
+                  <div class="anim-mi" data-act="scale-from-cursor"><span>Scale From Cursor...</span></div>
+                  <div class="anim-mi-sep"></div>
+                  <div class="anim-mi" data-act="set-start-offset"><span>Set Start Offset (Audio)</span><span class="anim-mi-key">Ctrl+[</span></div>
+                  <div class="anim-mi" data-act="set-end-offset"><span>Set End Offset (Audio)</span><span class="anim-mi-key">Ctrl+]</span></div>
+                  <div class="anim-mi-sep"></div>
+                  <div class="anim-mi" data-act="ease-selection"><span>Make Easing Selection...</span></div>
+                  <div class="anim-mi-sep"></div>
+                  <div class="anim-mi" data-act="duplicate-selected-keys"><span>Duplicate Selected Keys</span><span class="anim-mi-key">Ctrl+D</span></div>
+                  <div class="anim-mi" data-act="cut-selected-keys"><span>Cut Selected Keys</span><span class="anim-mi-key">Ctrl+X</span></div>
+                  <div class="anim-mi" data-act="copy-selected-keys"><span>Copy Selected Keys</span><span class="anim-mi-key">Ctrl+C</span></div>
+                  <div class="anim-mi" data-act="paste-keys"><span>Paste Keys</span><span class="anim-mi-key">Ctrl+V</span></div>
+                  <div class="anim-mi-sep"></div>
+                  <div class="anim-mi" data-act="move-first-selected-key-to-cursor"><span>Move First Selected Key to Cursor</span><span class="anim-mi-key">[</span></div>
+                  <div class="anim-mi" data-act="move-last-selected-key-to-cursor"><span>Move Last Selected Key to Cursor</span><span class="anim-mi-key">]</span></div>
+                  <div class="anim-mi-sep"></div>
+                  <div class="anim-mi" data-act="delete-selection"><span>Delete Selection</span><span class="anim-mi-key">Del</span></div>
+                  <div class="anim-mi-sep"></div>
+                  <div class="anim-mi" data-act="goto-next-step"><span>Go to Next Step</span><span class="anim-mi-key">Ctrl+Right</span></div>
+                  <div class="anim-mi" data-act="goto-prev-step"><span>Go to Previous Step</span><span class="anim-mi-key">Ctrl+Left</span></div>
+                  <div class="anim-mi-sep"></div>
+                  <div class="anim-mi" data-act="goto-next-keyframe"><span>Go to Next Keyframe</span><span class="anim-mi-key">Shift+Alt+D</span></div>
+                  <div class="anim-mi" data-act="goto-prev-keyframe"><span>Go to Previous Keyframe</span><span class="anim-mi-key">Shift+Alt+A</span></div>
+                  <div class="anim-mi-sep"></div>
+                  <div class="anim-mi" data-act="add-reset-value"><span>Add tracks to RESET</span></div>
+                  <div class="anim-mi" data-act="apply-reset"><span>Apply RESET</span></div>
+                  <div class="anim-mi-sep"></div>
+                  <div class="anim-mi" data-act="bake-animation"><span>Bake Animation...</span></div>
+                  <div class="anim-mi" data-act="optimize-animation"><span>Optimize Animation (no undo)...</span></div>
+                  <div class="anim-mi" data-act="clean-up-animation"><span>Clean-Up Animation (no undo)...</span></div>
+                </div>
+              </div>
+              <span class="anim-sep"></span>
+              <button id="anim-onion-btn" class="anim-onion" title="Enable Onion Skinning">&#x1f9c5;</button>
+              <!-- onion_skinning MenuButton: "Onion Skinning Options". -->
+              <div class="anim-menu" data-menu="onion">
+                <button class="anim-menu-btn" id="anim-onion-options-btn" type="button" title="Onion Skinning Options">&#9662;</button>
+                <div class="anim-dropdown" id="anim-onion-dropdown" style="display:none">
+                  <div class="anim-mi-label">Directions</div>
+                  <div class="anim-mi" data-act="onion-past"><span class="anim-check">&#10003;</span><span>Past</span></div>
+                  <div class="anim-mi" data-act="onion-future"><span class="anim-check"></span><span>Future</span></div>
+                  <div class="anim-mi-label">Depth</div>
+                  <div class="anim-mi" data-act="onion-1-step"><span class="anim-check">&#10003;</span><span>1 step</span></div>
+                  <div class="anim-mi" data-act="onion-2-steps"><span class="anim-check"></span><span>2 steps</span></div>
+                  <div class="anim-mi" data-act="onion-3-steps"><span class="anim-check"></span><span>3 steps</span></div>
+                  <div class="anim-mi-sep"></div>
+                  <div class="anim-mi" data-act="onion-differences-only"><span class="anim-check"></span><span>Differences Only</span></div>
+                  <div class="anim-mi" data-act="onion-force-white-modulate"><span class="anim-check"></span><span>Force White Modulate</span></div>
+                  <div class="anim-mi" data-act="onion-include-gizmos"><span class="anim-check"></span><span>Include Gizmos (3D)</span></div>
+                </div>
+              </div>
+              <span class="anim-sep"></span>
+              <button id="anim-pin-btn" class="anim-pin" title="Pin AnimationPlayer">&#128204;</button>
+              <!-- Patina additions beyond Godot's hbox. -->
+              <span class="anim-sep"></span>
               <button id="anim-new-btn" title="New Animation">+</button>
               <button id="anim-delete-btn" title="Delete Animation">&#x2715;</button>
-              <span class="anim-sep"></span>
               <button id="anim-record-btn" class="anim-record" title="Toggle Recording">&#9679;</button>
-              <button id="anim-play-btn" title="Play">&#9654;</button>
-              <button id="anim-stop-btn" title="Stop">&#9632;</button>
               <button id="anim-curve-btn" title="Edit Curve (select a keyframe first)">&#x2312;</button>
               <!-- pat-nzgdu.104: keyframe copy/paste + track reorder, wired to the
                    existing /api/animation/keyframe/copy|paste and /track/reorder. -->
-              <span class="anim-sep"></span>
               <button id="anim-copy-key-btn" title="Copy selected keyframe (Ctrl+C)">&#128203;</button>
               <button id="anim-paste-key-btn" title="Paste keyframe (Ctrl+V)">&#128204;</button>
               <button id="anim-track-up-btn" title="Move selected track up">&#9650;</button>
               <button id="anim-track-down-btn" title="Move selected track down">&#9660;</button>
-              <button id="anim-onion-btn" class="anim-onion" title="Toggle Onion Skinning">&#x1f9c5;</button>
               <button id="anim-tree-btn" title="Open AnimationTree">&#x1f332;</button>
               <span id="anim-time-display">0.00 / 0.00</span>
             </div>
@@ -3251,7 +3478,18 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
             <div id="node-groups-list"></div>
           </div>
         </div>
-        <div class="insp-empty" id="node-dock-empty">Select a node to view signals</div>
+        <!-- pat-2u9jl: Godot builds one empty-state Label per dock, outside the
+             hidden `holder`, and only toggles its visibility — ConnectionsDock's
+             `select_an_object` (connections_dialog.cpp) and GroupsEditor's
+             `select_a_node` (groups_editor.cpp), each with its own wording. -->
+        <div class="insp-empty" id="node-dock-empty">
+          <div id="node-signals-empty">Select a single node or resource to edit its signals.</div>
+          <div id="node-groups-empty">Select one or more nodes to edit their groups.</div>
+        </div>
+        <!-- The selection-dependent lists are rebuilt in here, so the permanent
+             chrome above survives a selection the way Godot's constructor-built
+             widgets do. -->
+        <div id="node-dock-dynamic"></div>
       </div>
     </div>
   </div>
@@ -3905,10 +4143,30 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       groupBadge.style.fontWeight = 'bold';
     }
 
+    // pat-417cn: node configuration warning triangle — Godot's BUTTON_WARNING,
+    // added per row by SceneTreeEditor::update_node whenever the node reports
+    // `_get_configuration_warnings()`. The tooltip is Godot's wording ("Node
+    // configuration warning:" then the messages); clicking it spells them out in
+    // the Output panel, which is where Godot's dialog text ends up here.
+    var warnBadge = document.createElement('span');
+    warnBadge.className = 'tree-badge tree-warning';
+    var nodeWarnings = node.configuration_warnings || [];
+    if (nodeWarnings.length > 0) {
+      warnBadge.textContent = '\u26A0';
+      warnBadge.title = 'Node configuration warning:\n' + nodeWarnings.join('\n');
+      warnBadge.style.color = '#e0b020';
+      warnBadge.style.cursor = 'pointer';
+      warnBadge.addEventListener('click', (function(nname, ws) { return function(e) {
+        e.stopPropagation();
+        logMessage('warn', nname + ': ' + ws.join(' '));
+      }; })(node.name, nodeWarnings));
+    }
+
     var visBtn = document.createElement('span');
     visBtn.className = 'tree-visibility' + (node.visible === false ? ' vis-hidden' : '');
     visBtn.innerHTML = node.visible === false ? '&#9673;' : '&#9678;';
-    visBtn.title = node.visible === false ? 'Show' : 'Hide';
+    // Godot's BUTTON_VISIBILITY tooltip is the same either way.
+    visBtn.title = 'Toggle Visibility';
     visBtn.addEventListener('click', (function(nid, isVis) { return function(e) {
       e.stopPropagation();
       api('POST', '/api/property/set', {
@@ -3917,19 +4175,70 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       }).then(function() { fetchScene(); });
     }; })(node.id, node.visible !== false));
 
-    // pat-zgwgu: Unique name badge (%Name)
+    // pat-zgwgu: Unique name badge (%Name) — Godot's BUTTON_UNIQUE.
+    // pat-417cn: this read `node.unique_name`, a key `/api/scene` never sends
+    // (the payload field is `unique_name_in_owner`, as the context-menu toggle
+    // at doToggleUniqueName already knew), so the badge was dead code and a
+    // %-accessible node looked identical to any other. Tooltip is Godot's
+    // wording from SceneTreeEditor::update_node, plus the collision the server
+    // already reports in `unique_name_collision`.
     var uniqueBadge = document.createElement('span');
     uniqueBadge.className = 'tree-badge unique-name';
-    if (node.unique_name) {
+    if (node.unique_name_in_owner) {
       uniqueBadge.textContent = '%';
-      uniqueBadge.title = 'Unique name: %' + node.name;
+      uniqueBadge.title = "This node can be accessed from anywhere within the scene it belongs to by using the '%' prefix in the node path."
+        + (node.unique_name_collision
+            ? '\nAnother node in this scene already claims this unique name.'
+            : '\nClick to disable this.');
+      if (node.unique_name_collision) uniqueBadge.className += ' unique-name-collision';
+      uniqueBadge.style.cursor = 'pointer';
+      uniqueBadge.addEventListener('click', (function(nid) { return function(e) {
+        e.stopPropagation();
+        doToggleUniqueName(nid);
+      }; })(node.id));
+    }
+
+    // pat-417cn: Godot's BUTTON_GROUP (scene_tree_editor.cpp:605) — the
+    // "children are not selectable" marker, hung off any row whose node carries
+    // the editor group flag. `/api/scene` has reported `grouped` all along; no
+    // row ever read it, so the state was invisible in the dock even though the
+    // 2D/3D toolbars can set it.
+    var groupedBadge = document.createElement('span');
+    groupedBadge.className = 'tree-badge tree-grouped';
+    if (node.grouped) {
+      groupedBadge.innerHTML = '&#9783;';
+      groupedBadge.title = 'Children are not selectable.\nClick to make them selectable.';
+      groupedBadge.style.cursor = 'pointer';
+      groupedBadge.addEventListener('click', (function(nid) { return function(e) {
+        e.stopPropagation();
+        api('POST', '/api/node/group', { node_id: nid, grouped: false })
+          .then(function() { fetchScene(); });
+      }; })(node.id));
+    }
+
+    // pat-417cn: Godot's BUTTON_SUBSCENE (scene_tree_editor.cpp:671) — every
+    // instanced scene row gets an "Open in Editor" button. Patina drew the
+    // instance link icon but offered no way to open the source scene from the
+    // row, although `instance_path` travels with the node.
+    var subsceneBtn = document.createElement('span');
+    subsceneBtn.className = 'tree-badge tree-subscene';
+    if (node.is_instance && node.instance_path) {
+      subsceneBtn.innerHTML = '&#9205;';
+      subsceneBtn.title = 'Open in Editor';
+      subsceneBtn.style.cursor = 'pointer';
+      subsceneBtn.addEventListener('click', (function(path) { return function(e) {
+        e.stopPropagation();
+        doOpenScene(path);
+      }; })(node.instance_path));
     }
 
     // pat-zgwgu: Lock button (prevent selection in viewport)
     var lockBtn = document.createElement('span');
     lockBtn.className = 'tree-lock' + (node.locked ? ' locked' : '');
     lockBtn.innerHTML = node.locked ? '&#128274;' : '&#128275;';
-    lockBtn.title = node.locked ? 'Unlock (allow selection)' : 'Lock (prevent selection)';
+    lockBtn.title = node.locked
+      ? 'Node is locked.\nClick to unlock it.'
+      : 'Lock (prevent selection)';
     lockBtn.addEventListener('click', (function(nid, isLocked) { return function(e) {
       e.stopPropagation();
       api('POST', '/api/property/set', {
@@ -3945,6 +4254,9 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     row.appendChild(scriptBadge);
     row.appendChild(signalBadge);
     row.appendChild(groupBadge);
+    row.appendChild(warnBadge);
+    row.appendChild(subsceneBtn);
+    row.appendChild(groupedBadge);
     row.appendChild(lockBtn);
     row.appendChild(visBtn);
 
@@ -4126,6 +4438,36 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     if (el) el.textContent = remote ? 'Scene (Remote)' : 'Scene';
   }
 
+  // pat-417cn: Godot's Remote/Local toggle (SceneTreeDock::_remote_tree_selected
+  // / _local_tree_selected). `null` means "follow the default", which here is
+  // Remote while the project runs — the tree a player is looking at. Pressing
+  // Local pins the dock to the edit tree, which is the whole point of Godot's
+  // toggle: the Remote tree re-reads the running scene every refresh.
+  var sceneTreeSource = null;   // null | 'remote' | 'local'
+  function sceneTreeShowsRemote() {
+    var running = (typeof runtimeRunning !== 'undefined' && runtimeRunning);
+    return running && sceneTreeSource !== 'local';
+  }
+  // The toggle only exists while the project runs (Godot `button_hb->hide()`),
+  // and its pressed button always reflects the tree actually on screen.
+  function syncSceneTreeSourceButtons() {
+    var row = document.getElementById('scene-tree-remote-local');
+    var running = (typeof runtimeRunning !== 'undefined' && runtimeRunning);
+    if (row) row.style.display = running ? 'flex' : 'none';
+    var remote = sceneTreeShowsRemote();
+    var rb = document.getElementById('st-remote');
+    var lb = document.getElementById('st-local');
+    if (rb) rb.classList.toggle('active', remote);
+    if (lb) lb.classList.toggle('active', !remote);
+  }
+  function setupSceneTreeSourceToggle() {
+    var rb = document.getElementById('st-remote');
+    var lb = document.getElementById('st-local');
+    if (rb) rb.addEventListener('click', function() { sceneTreeSource = 'remote'; fetchScene(); });
+    if (lb) lb.addEventListener('click', function() { sceneTreeSource = 'local'; fetchScene(); });
+    syncSceneTreeSourceButtons();
+  }
+
   // On stop with Movie Maker on, pull the recorded frames and offer them as a
   // download. The route existed with no caller, so a recording was unreachable.
   async function downloadMovieFrames() {
@@ -4146,17 +4488,19 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     // Godot's Scene dock switches to a Remote tree during play: the running
     // game is a CLONE, so nodes a script spawns in _ready exist only there and
     // are invisible in the edit tree (pat-0q2kx.72).
-    if (typeof runtimeRunning !== 'undefined' && runtimeRunning) {
+    if (sceneTreeShowsRemote()) {
       var remote = await api('GET', '/api/runtime/scene');
       if (remote && remote.tree) {
         sceneData = { nodes: remote.tree };
         setSceneDockRemoteLabel(true);
+        syncSceneTreeSourceButtons();
         if (expandedNodes.size === 0) expandedNodes.add(remote.tree.id);
         refreshTree();
         return;
       }
     }
     setSceneDockRemoteLabel(false);
+    syncSceneTreeSourceButtons();
     var data = await api('GET', '/api/scene');
     if (data) {
       sceneData = data;
@@ -4749,8 +5093,67 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     });
   }
 
+  // The resource half of the inspector toolbar does not depend on what is
+  // selected (Godot: resource_new_button / resource_load_button /
+  // resource_save_button / resource_extra_button, built in the InspectorDock
+  // constructor), so the empty state wires exactly the same handlers as a
+  // populated inspector instead of shipping dead buttons.
+  function wireInspectorResourceToolbar() {
+    var tm = document.getElementById('insp-tool-menu');
+    if (tm) tm.addEventListener('click', function(e) {
+      e.stopPropagation();
+      openSimpleMenu(tm, [
+        ['Edit Resource from Clipboard', function() { logMessage('info', 'Edit Resource from Clipboard'); }],
+        ['Copy Resource', function() { logMessage('info', 'Copy Resource'); }],
+        ['Show in FileSystem', function() { logMessage('info', 'Show in FileSystem'); }],
+        ['Make Resource Built-In', function() { logMessage('info', 'Make Resource Built-In'); }]
+      ]);
+    });
+    var nr = document.getElementById('insp-new-res'); if (nr) nr.addEventListener('click', function() { logMessage('info', 'New Resource'); });
+    var lr = document.getElementById('insp-load-res'); if (lr) lr.addEventListener('click', function() { logMessage('info', 'Load Resource'); });
+    var sr = document.getElementById('insp-save-res');
+    if (sr) sr.addEventListener('click', function(e) {
+      e.stopPropagation();
+      openSimpleMenu(sr, [
+        ['Save', function() { logMessage('info', 'Save'); }],
+        ['Save As...', function() { logMessage('info', 'Save As...'); }]
+      ]);
+    });
+  }
+
+  // Godot's inspector chrome is permanent: with nothing selected the dock still
+  // shows the resource toolbar, the (empty) object-selector row with its
+  // Open Documentation button, and the "Filter Properties" box. The widgets
+  // Godot disables until something is edited are disabled here too:
+  // resource_save_button, backward_button, forward_button, open_docs_button.
+  function inspectorPermanentChromeHtml() {
+    return '' +
+      '<div class="insp-toolbar">' +
+        '<button class="insp-tool-btn" id="insp-new-res" title="Create a new resource in memory and edit it.">&#10010;</button>' +
+        '<button class="insp-tool-btn" id="insp-load-res" title="Load an existing resource from disk and edit it.">&#128193;</button>' +
+        '<button class="insp-tool-btn" id="insp-save-res" title="Save the currently edited resource." disabled>&#128190;</button>' +
+        '<button class="insp-tool-btn" id="insp-tool-menu" title="Extra resource options.">&#8942;</button>' +
+        '<span class="insp-toolbar-spacer"></span>' +
+        '<button class="insp-tool-btn" id="inspector-history-back" title="Go to previous edited object in history." disabled>&larr;</button>' +
+        '<button class="insp-tool-btn" id="inspector-history-forward" title="Go to next edited object in history." disabled>&rarr;</button>' +
+        '<button class="insp-tool-btn" id="insp-history-btn" title="History of recently edited objects.">&#8634;</button>' +
+      '</div>' +
+      '<div class="insp-object-selector">' +
+        '<span class="insp-object-name"></span>' +
+        '<span class="insp-object-chevron">&#9660;</span>' +
+        '<button class="insp-tool-btn insp-open-docs" id="insp-open-docs" title="Open documentation for this object." disabled>&#128270;</button>' +
+      '</div>' +
+      '<div class="insp-filter-row">' +
+        '<input type="text" id="insp-filter-input" placeholder="Filter Properties" disabled style="flex:1;min-width:0;padding:3px 6px;font-size:11px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:2px;">' +
+        '<button class="insp-tool-btn" id="insp-filter-tools" title="Manage object properties.">&#9881;</button>' +
+      '</div>';
+  }
+
   function renderInspectorEmpty() {
-    document.getElementById('inspector').innerHTML = '<div class="insp-empty">Select a node to inspect</div>';
+    document.getElementById('inspector').innerHTML = inspectorPermanentChromeHtml() +
+      '<div class="insp-empty">Select a node to inspect</div>';
+    wireInspectorResourceToolbar();
+    updateHistoryButtons();
     document.getElementById('status-selected').textContent = 'None';
     document.getElementById('status-path').textContent = '\u2014';
   }
@@ -4770,26 +5173,18 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     var toolbar = document.createElement('div');
     toolbar.className = 'insp-toolbar';
     toolbar.innerHTML =
-      '<button class="insp-tool-btn" id="insp-new-res" title="New Resource">&#10010;</button>' +
-      '<button class="insp-tool-btn" id="insp-load-res" title="Load Resource">&#128193;</button>' +
-      '<button class="insp-tool-btn" id="insp-save-res" title="Save Resource">&#128190;</button>' +
-      '<button class="insp-tool-btn" id="insp-tool-menu" title="More options">&#8942;</button>' +
+      '<button class="insp-tool-btn" id="insp-new-res" title="Create a new resource in memory and edit it.">&#10010;</button>' +
+      '<button class="insp-tool-btn" id="insp-load-res" title="Load an existing resource from disk and edit it.">&#128193;</button>' +
+      '<button class="insp-tool-btn" id="insp-save-res" title="Save the currently edited resource.">&#128190;</button>' +
+      '<button class="insp-tool-btn" id="insp-tool-menu" title="Extra resource options.">&#8942;</button>' +
       '<span class="insp-toolbar-spacer"></span>' +
-      '<button class="insp-tool-btn" id="inspector-history-back" title="Back (Alt+Left)" disabled>&larr;</button>' +
-      '<button class="insp-tool-btn" id="inspector-history-forward" title="Forward (Alt+Right)" disabled>&rarr;</button>' +
-      '<button class="insp-tool-btn" id="insp-history-btn" title="Object History">&#8634;</button>' +
+      '<button class="insp-tool-btn" id="inspector-history-back" title="Go to previous edited object in history." disabled>&larr;</button>' +
+      '<button class="insp-tool-btn" id="inspector-history-forward" title="Go to next edited object in history." disabled>&rarr;</button>' +
+      '<button class="insp-tool-btn" id="insp-history-btn" title="History of recently edited objects.">&#8634;</button>' +
       '<span id="resource-info" class="resource-info" style="display:none"><span class="resource-type"></span><span class="resource-path"></span></span>';
     el.appendChild(toolbar);
     (function() {
-      function setAllSubgroups(collapse) {
-        el.querySelectorAll('.insp-subgroup-arrow').forEach(function(a) { a.classList.toggle('collapsed', collapse); });
-        el.querySelectorAll('.insp-subgroup-body').forEach(function(b) { b.classList.toggle('collapsed', collapse); });
-      }
-      var tm = document.getElementById('insp-tool-menu');
-      if (tm) tm.addEventListener('click', function(e) { e.stopPropagation(); openSimpleMenu(tm, [['Expand All', function() { setAllSubgroups(false); }], ['Collapse All', function() { setAllSubgroups(true); }]]); });
-      var nr = document.getElementById('insp-new-res'); if (nr) nr.addEventListener('click', function() { logMessage('info', 'New Resource'); });
-      var lr = document.getElementById('insp-load-res'); if (lr) lr.addEventListener('click', function() { logMessage('info', 'Load Resource'); });
-      var sr = document.getElementById('insp-save-res'); if (sr) sr.addEventListener('click', function() { logMessage('info', 'Save Resource'); });
+      wireInspectorResourceToolbar();
       // pat-nzgdu.170: wire inspector Back/Forward + Object History to the
       // existing server routes (/api/inspector/back|forward|history|history/select).
       function inspectorNav(dir) {
@@ -4872,7 +5267,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     var propFilterInput = document.createElement('input');
     propFilterInput.type = 'text';
     propFilterInput.id = 'insp-filter-input';
-    propFilterInput.placeholder = 'Filter properties...';
+    propFilterInput.placeholder = 'Filter Properties';
     propFilterInput.style.cssText = 'flex:1;min-width:0;padding:3px 6px;font-size:11px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:2px;';
     propFilterInput.addEventListener('input', function() {
       var filter = propFilterInput.value.toLowerCase();
@@ -4889,7 +5284,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     filterRow.appendChild(propFilterInput);
     var filterTools = document.createElement('button');
     filterTools.className = 'insp-tool-btn'; filterTools.id = 'insp-filter-tools';
-    filterTools.innerHTML = '&#9881;'; filterTools.title = 'Property Tools';
+    filterTools.innerHTML = '&#9881;'; filterTools.title = 'Manage object properties.';
     filterTools.addEventListener('click', function(e) {
       e.stopPropagation();
       openSimpleMenu(filterTools, [
@@ -7989,6 +8384,17 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     }
   }
 
+  // pat-pq0l1: Godot's CanvasItemEditor keeps the transform toggles and the
+  // mode tools (list-select / pivot / pan / ruler) in ONE exclusive group —
+  // `_button_tool_select` stores a single `tool` — so pushing a transform mode
+  // releases any active mode tool and vice versa.
+  function syncVp2dToolActive(mode) {
+    var vts = document.querySelectorAll('#vp2d-toolbar .vp2d-tool');
+    for (var i = 0; i < vts.length; i++) {
+      vts[i].classList.toggle('active', vts[i].getAttribute('data-vp2dtool') === mode);
+    }
+  }
+
   function setToolMode(mode) {
     currentToolMode = mode;
     var toolEl = document.getElementById('status-tool');
@@ -7999,6 +8405,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     }
     currentVpTool = VP3D_MODE_TO_TOOL[mode] || 'transform';
     syncVp3dToolActive();
+    syncVp2dToolActive(mode);
     push3DGizmoMode();
   }
 
@@ -10267,16 +10674,31 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   // constructor (upstream/godot/editor/docks/filesystem_dock.cpp), so they are
   // permanent chrome — visible before you ever favorite or filter anything.
   var fsFilter = '';
+  // pat-mb61q: Godot splits the filter term on spaces and keeps only entries
+  // matching EVERY token (filesystem_dock.cpp:2822 `searched_tokens` +
+  // `_matches_all_search_tokens`), so 'player tscn' narrows to player.tscn.
+  // `fsFilter` stays the raw lowercased string: the tree render reads it as a
+  // plain 'filtering is active' flag.
+  var fsFilterTokens = [];
   var fsSortDesc = false;
   var fsNavHistory = [];
   var fsNavIdx = -1;
   var fsDisplayMode = 'tree_only'; // pat-96yv4: tree_only | vsplit | hsplit
 
+  // Godot's `_matches_all_search_tokens`: every space-separated token must
+  // appear somewhere in the text, case-insensitively.
+  function fsMatchesAllSearchTokens(text) {
+    var lower = text.toLowerCase();
+    for (var ti = 0; ti < fsFilterTokens.length; ti++) {
+      if (lower.indexOf(fsFilterTokens[ti]) < 0) return false;
+    }
+    return true;
+  }
+  function fsEntryMatches(e) { return fsMatchesAllSearchTokens(e.name); }
   // A node is shown when it (or any descendant) matches the Filter Files box, so
   // a match deep in the tree keeps its parent folders visible.
-  function fsEntryMatches(e) { return e.name.toLowerCase().indexOf(fsFilter) >= 0; }
   function fsSubtreeMatches(e) {
-    if (!fsFilter) return true;
+    if (!fsFilterTokens.length) return true;
     if (fsEntryMatches(e)) return true;
     if (e.is_dir && e.children) {
       for (var i = 0; i < e.children.length; i++) {
@@ -10333,6 +10755,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     var filter = document.getElementById('fs-filter');
     if (filter) filter.addEventListener('input', function() {
       fsFilter = this.value.trim().toLowerCase();
+      fsFilterTokens = fsFilter.split(/\s+/).filter(function(t) { return t.length > 0; });
       refreshFsTree();
     });
     var sort = document.getElementById('fs-sort');
@@ -11197,17 +11620,33 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     var content = document.getElementById('import-content');
     if (!empty || !content) return;
     if (!currentImportResource) {
-      empty.textContent = 'Select a resource file in the FileSystem dock to import it.';
+      empty.textContent = 'Select a resource file in the filesystem or in the inspector to adjust import settings.';
       empty.style.display = ''; content.style.display = 'none';
+      resetImportChrome();
       return;
     }
     var info = await api('GET', '/api/import_settings?path=' + encodeURIComponent(currentImportResource));
     if (!info || !info.importable) {
       empty.textContent = currentImportResource.split('/').pop() + ' is not an imported resource.';
       empty.style.display = ''; content.style.display = 'none';
+      resetImportChrome();
       return;
     }
     empty.style.display = 'none'; content.style.display = '';
+    // pat-93pfv: the `imported` header label carries the file being imported
+    // (import_dock.cpp:157 `imported->set_text(p_path.get_file())`).
+    var importedLabel = document.getElementById('import-imported');
+    if (importedLabel) importedLabel.textContent = currentImportResource.split('/').pop();
+    // pat-93pfv: "Advanced..." stays hidden unless the importer overrides
+    // has_advanced_options() (import_dock.cpp:217-218 / 350-351 / 531-532 are
+    // the only places that show() it; the ctor hides it at :810-811).
+    var advBtn = document.getElementById('import-advanced');
+    if (advBtn) {
+      advBtn.style.display = info.advanced ? '' : 'none';
+      advBtn.onclick = function() {
+        showFsToast('Advanced import settings for ' + info.importer + ' are not implemented yet.');
+      };
+    }
     // Import As: dropdown of compatible importers.
     var importAs = document.getElementById('import-as');
     importAs.innerHTML = '';
@@ -11255,11 +11694,39 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     // Reimport button.
     var reBtn = document.getElementById('import-reimport');
     reBtn.disabled = false;
-    reBtn.onclick = function() {
+    var doReimport = function() {
       api('POST', '/api/reimport', { path: currentImportResource }).then(function(resp) {
         if (resp && resp.reimported) showFsToast('Reimported ' + resp.reimported.split('/').pop());
       });
     };
+    // pat-93pfv: Godot only pops the confirmation when the importer chosen in
+    // "Import As" differs from the one the asset was imported with
+    // (import_dock.cpp:558-576); a same-importer reimport runs straight away.
+    var confirmBox = document.getElementById('import-reimport-confirm');
+    var okBtn = document.getElementById('import-reimport-ok');
+    var cancelBtn = document.getElementById('import-reimport-cancel');
+    if (okBtn) okBtn.onclick = function() { if (confirmBox) confirmBox.style.display = 'none'; doReimport(); };
+    if (cancelBtn) cancelBtn.onclick = function() { if (confirmBox) confirmBox.style.display = 'none'; };
+    reBtn.onclick = function() {
+      if (confirmBox && importAs.value && importAs.value !== info.importer) {
+        confirmBox.style.display = '';
+        return;
+      }
+      doReimport();
+    };
+  }
+
+  // pat-93pfv: the Import dock chrome that only makes sense with a resource
+  // selected — Godot clears `imported` (import_dock.cpp:494) and leaves the
+  // Advanced button and the reimport dialog hidden when it shows
+  // `select_a_resource` (:504).
+  function resetImportChrome() {
+    var importedLabel = document.getElementById('import-imported');
+    if (importedLabel) importedLabel.textContent = '';
+    var advBtn = document.getElementById('import-advanced');
+    if (advBtn) advBtn.style.display = 'none';
+    var confirmBox = document.getElementById('import-reimport-confirm');
+    if (confirmBox) confirmBox.style.display = 'none';
   }
 
   function showSceneDockTab(which) {
@@ -13071,6 +13538,13 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     // Keep permanent Signals/Groups chrome; only clear dynamic lists.
     var empty = document.getElementById('node-dock-empty');
     if (empty) empty.style.display = '';
+    // pat-2u9jl: bring the permanent chrome back and drop the selection-only
+    // widgets, mirroring Godot showing `select_an_object`/`select_a_node` again
+    // when the selection empties.
+    var permChrome = document.getElementById('node-dock-chrome');
+    if (permChrome) permChrome.style.display = '';
+    var dyn = document.getElementById('node-dock-dynamic');
+    if (dyn) dyn.innerHTML = '';
     var sigList = document.getElementById('node-signals-list');
     if (sigList) sigList.innerHTML = '';
     var grpList = document.getElementById('node-groups-list');
@@ -13118,8 +13592,17 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   }
 
   function renderNodeDock(data) {
-    var el = document.getElementById('node-dock');
+    // pat-2u9jl: render into the dynamic child, NOT into #node-dock itself.
+    // Wiping #node-dock destroyed the permanent Signals/Groups chrome and both
+    // empty-state labels on the first selection, so they never came back when
+    // the selection cleared — Godot only ever hides its constructor-built
+    // widgets (holder->hide()), it does not free them.
+    var el = document.getElementById('node-dock-dynamic');
     el.innerHTML = '';
+    var permChrome = document.getElementById('node-dock-chrome');
+    if (permChrome) permChrome.style.display = 'none';
+    var permEmpty = document.getElementById('node-dock-empty');
+    if (permEmpty) permEmpty.style.display = 'none';
 
     // Signals section
     var sigSection = createSection('Signals', 'node-signals');
@@ -13131,7 +13614,10 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     sigSearchWrap.className = 'signal-search-wrap';
     var sigSearch = document.createElement('input');
     sigSearch.type = 'text';
-    sigSearch.id = 'signal-search';
+    // pat-2u9jl: `signal-search` belongs to the permanent chrome, which now
+    // survives a selection — so the selection-time box needs its own id, the
+    // way the groups side already distinguishes group-search from group-filter.
+    sigSearch.id = 'signal-filter';
     sigSearch.className = 'signal-search';
     sigSearch.placeholder = 'Filter Signals';
     sigSearch.value = nodeSignalFilter;
@@ -14741,6 +15227,213 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       document.body.classList.toggle('anim-recording', animRecording);
     });
 
+    // -----------------------------------------------------------------------
+    // pat-wuhv1: the rest of Godot's AnimationPlayerEditor toolbar.
+    //
+    // Godot's playback cluster is five buttons, not two
+    // (animation_player_editor_plugin.cpp:2072-2092): play_bw_from, play_bw,
+    // stop, play, play_from. `play` restarts from the beginning -- which is
+    // exactly what the server's /api/animation/play does, since it resets
+    // current_time -- and `play_from` resumes at the current position. The
+    // editor server only advances time forwards, so the two backwards buttons
+    // are driven from here by stepping /api/animation/seek, which re-poses the
+    // scene the same way dragging the timeline does.
+    // -----------------------------------------------------------------------
+    var animFrameEl = document.getElementById('anim-frame');
+    var animReverseTimer = null;
+
+    function animClipLength() {
+      return (currentAnimData && currentAnimData.length) ? currentAnimData.length : 0;
+    }
+
+    function animFramePosition() {
+      if (!animFrameEl) return 0;
+      var v = parseFloat(animFrameEl.value);
+      return isNaN(v) ? 0 : Math.max(0, Math.min(v, animClipLength()));
+    }
+
+    function stopReversePlayback() {
+      if (animReverseTimer) { clearInterval(animReverseTimer); animReverseTimer = null; }
+    }
+
+    function playBackwardsFrom(startTime) {
+      if (!sel || !sel.value) { logMessage('warn', 'Select an animation first'); return; }
+      stopReversePlayback();
+      stopPlaybackPolling();
+      animPlaying = false;
+      var t = Math.max(0, Math.min(startTime, animClipLength()));
+      animReverseTimer = setInterval(function() {
+        t = t - 0.05;
+        if (t <= 0) { t = 0; stopReversePlayback(); }
+        var at = t;
+        api('POST', '/api/animation/seek', { time: at }).then(function() {
+          updatePlayhead(at);
+          updateTimeDisplay(at);
+        });
+      }, 50);
+    }
+
+    var playBwFromBtn = document.getElementById('anim-play-bw-from-btn');
+    if (playBwFromBtn) playBwFromBtn.addEventListener('click', function() {
+      playBackwardsFrom(animFramePosition());
+    });
+
+    var playBwBtn = document.getElementById('anim-play-bw-btn');
+    if (playBwBtn) playBwBtn.addEventListener('click', function() {
+      playBackwardsFrom(animClipLength());
+    });
+
+    var playFromBtn = document.getElementById('anim-play-from-btn');
+    if (playFromBtn) playFromBtn.addEventListener('click', async function() {
+      if (!sel || !sel.value) { logMessage('warn', 'Select an animation first'); return; }
+      stopReversePlayback();
+      var resume = animFramePosition();
+      await api('POST', '/api/animation/play', { name: sel.value });
+      // /play rewinds to 0; seek back so this really is "play from here".
+      if (resume > 0) await api('POST', '/api/animation/seek', { time: resume });
+      animPlaying = true;
+      startPlaybackPolling();
+    });
+
+    // The frame SpinBox is also an input: typing a position scrubs there.
+    if (animFrameEl) animFrameEl.addEventListener('change', function() {
+      var t = animFramePosition();
+      api('POST', '/api/animation/seek', { time: t }).then(function() {
+        updatePlayhead(t);
+        updateTimeDisplay(t);
+      });
+    });
+
+    // Stop also cancels a reverse scrub, or the clip would keep running back.
+    if (stopBtn) stopBtn.addEventListener('click', stopReversePlayback);
+
+    // autoplay: in Godot this is a property of the AnimationPlayer NODE, not of
+    // one animation, so it goes through the generic property setter.
+    var autoplayBtn = document.getElementById('anim-autoplay-btn');
+    if (autoplayBtn) autoplayBtn.addEventListener('click', async function() {
+      if (selectedNodeId === null || selectedNodeId === undefined) {
+        logMessage('warn', 'Select the AnimationPlayer node to set Autoplay on Load');
+        return;
+      }
+      var on = !autoplayBtn.classList.contains('active');
+      var value = on && sel ? sel.value : '';
+      await api('POST', '/api/property/set', {
+        node_id: selectedNodeId,
+        property: 'autoplay',
+        value: { type: 'String', value: value },
+      });
+      autoplayBtn.classList.toggle('active', on);
+      logMessage('info', on ? ('Autoplay on load: ' + value) : 'Autoplay on load cleared');
+    });
+
+    // pin: Godot keeps the panel bound to this AnimationPlayer across selection
+    // changes. Patina's panel is not selection-bound, so this records the
+    // pinned player and reports it; it does not re-route the panel yet.
+    var pinBtn = document.getElementById('anim-pin-btn');
+    if (pinBtn) pinBtn.addEventListener('click', function() {
+      var on = !pinBtn.classList.contains('active');
+      pinBtn.classList.toggle('active', on);
+      editorSettings.anim_pinned_player = on ? selectedNodeId : null;
+      logMessage('info', on ? 'Pinned AnimationPlayer' : 'Unpinned AnimationPlayer');
+    });
+
+    // Generic open/close for the three toolbar MenuButtons (Animation, Edit,
+    // Onion Skinning Options). One open at a time, like a Godot PopupMenu.
+    function closeAnimMenus() {
+      ['anim-tool-dropdown', 'anim-edit-dropdown', 'anim-onion-dropdown'].forEach(function(id) {
+        var d = document.getElementById(id);
+        if (d) d.style.display = 'none';
+      });
+      ['anim-tool-btn', 'anim-edit-btn', 'anim-onion-options-btn'].forEach(function(id) {
+        var b = document.getElementById(id);
+        if (b) b.classList.remove('open');
+      });
+    }
+
+    [['anim-tool-btn', 'anim-tool-dropdown'],
+     ['anim-edit-btn', 'anim-edit-dropdown'],
+     ['anim-onion-options-btn', 'anim-onion-dropdown']].forEach(function(pair) {
+      var btn = document.getElementById(pair[0]);
+      var drop = document.getElementById(pair[1]);
+      if (!btn || !drop) return;
+      btn.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var wasOpen = drop.style.display !== 'none';
+        closeAnimMenus();
+        if (!wasOpen) { drop.style.display = 'block'; btn.classList.add('open'); }
+      });
+    });
+    document.addEventListener('click', function(e) {
+      if (!e.target.closest || !e.target.closest('.anim-menu')) closeAnimMenus();
+    });
+
+    // Onion Skinning Options. Past/Future and the three "only" flags are check
+    // items; the depth is a radio group (animation_player_editor_plugin.cpp
+    // :2159-2178).
+    var ONION_RADIO = ['onion-1-step', 'onion-2-steps', 'onion-3-steps'];
+    var onionDrop = document.getElementById('anim-onion-dropdown');
+    if (onionDrop) onionDrop.addEventListener('click', function(e) {
+      var item = e.target.closest ? e.target.closest('.anim-mi') : null;
+      if (!item) return;
+      var act = item.getAttribute('data-act');
+      var check = item.querySelector('.anim-check');
+      if (!act || !check) return;
+      if (ONION_RADIO.indexOf(act) !== -1) {
+        ONION_RADIO.forEach(function(a) {
+          var other = onionDrop.querySelector('.anim-mi[data-act="' + a + '"] .anim-check');
+          if (other) other.innerHTML = (a === act) ? '&#10003;' : '';
+        });
+      } else {
+        check.innerHTML = check.innerHTML.trim() ? '' : '&#10003;';
+      }
+      var flags = [];
+      onionDrop.querySelectorAll('.anim-mi').forEach(function(mi) {
+        var c = mi.querySelector('.anim-check');
+        if (c && c.innerHTML.trim()) flags.push(mi.getAttribute('data-act'));
+      });
+      editorSettings.onion_skinning_flags = flags;
+      logMessage('info', 'Onion skinning: ' + flags.join(', '));
+    });
+
+    // The "Animation" tools menu and the track editor's "Edit" menu route to
+    // the panel actions that already exist; anything with no Patina equivalent
+    // yet says so instead of silently doing nothing.
+    var ANIM_MENU_ROUTES = {
+      'new-anim': function() { if (newBtn) newBtn.click(); },
+      'remove-anim': function() { if (delBtn) delBtn.click(); },
+      'edit-transitions': function() { var t = document.getElementById('anim-tree-btn'); if (t) t.click(); },
+      'copy-selected-keys': function() { var b = document.getElementById('anim-copy-key-btn'); if (b) b.click(); },
+      'paste-keys': function() { var b = document.getElementById('anim-paste-key-btn'); if (b) b.click(); },
+      'goto-next-step': function() { seekAnimBy(currentAnimStep()); },
+      'goto-prev-step': function() { seekAnimBy(-currentAnimStep()); },
+    };
+
+    function currentAnimStep() {
+      return (currentAnimData && currentAnimData.step) ? currentAnimData.step : 0.1;
+    }
+
+    function seekAnimBy(delta) {
+      var t = Math.max(0, Math.min(animFramePosition() + delta, animClipLength()));
+      api('POST', '/api/animation/seek', { time: t }).then(function() {
+        updatePlayhead(t);
+        updateTimeDisplay(t);
+      });
+    }
+
+    ['anim-tool-dropdown', 'anim-edit-dropdown'].forEach(function(id) {
+      var drop = document.getElementById(id);
+      if (!drop) return;
+      drop.addEventListener('click', function(e) {
+        var item = e.target.closest ? e.target.closest('.anim-mi') : null;
+        if (!item) return;
+        closeAnimMenus();
+        var act = item.getAttribute('data-act');
+        var fn = ANIM_MENU_ROUTES[act];
+        if (fn) { fn(); return; }
+        logMessage('warn', 'Animation menu action not implemented yet: ' + act);
+      });
+    });
+
     if (sel) sel.addEventListener('change', async function() {
       if (sel.value) {
         await loadAnimation(sel.value);
@@ -15143,6 +15836,13 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   }
 
   function updateTimeDisplay(currentTime) {
+    // pat-wuhv1: Godot's frame SpinBox IS the position readout ("Animation
+    // position (in seconds)."), so it follows playback. Skip it while the user
+    // is typing in it, or every keystroke would be overwritten by the poll.
+    var frameEl = document.getElementById('anim-frame');
+    if (frameEl && document.activeElement !== frameEl) {
+      frameEl.value = currentTime.toFixed(4);
+    }
     var el = document.getElementById('anim-time-display');
     if (!el) return;
     var total = (currentAnimData && currentAnimData.length) ? currentAnimData.length : 0;
@@ -17005,12 +17705,26 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       { label: 'Show Bones', check: true }, { sep: true },
       { label: 'Make Bone2D Node(s) from Node(s)', check: false }, { label: 'Clear Bones', check: false }
     ];
+    // pat-pq0l1: the View menu in Godot order (canvas_item_editor_plugin.cpp
+    // :5905-5968). `sub` marks a submenu parent (Grid, Gizmos, Preview Theme,
+    // Preview Translation); its children render indented beneath it. Godot 4.6
+    // retired the single group/lock icons item in favour of the Gizmos submenu
+    // (Position / Lock / Group / Transformation).
     var VIEW_MENU = [
-      { label: 'Grid', check: true }, { label: 'Show Helpers', check: true }, { label: 'Show Rulers', check: true },
-      { label: 'Show Guides', check: true }, { label: 'Show Origin', check: true }, { label: 'Show Viewport', check: true },
-      { label: 'Show Group And Lock Icons', check: true }, { sep: true },
+      { label: 'Grid', sub: true },
+      { label: 'Show', check: true, indent: true }, { label: 'Show When Snapping', check: false, indent: true },
+      { label: 'Hide', check: false, indent: true }, { label: 'Toggle Grid', check: false, indent: true },
+      { label: 'Show Helpers', check: true }, { label: 'Show Rulers', check: true },
+      { label: 'Show Guides', check: true }, { label: 'Show Origin', check: true },
+      { label: 'Show Viewport', check: true }, { sep: true },
+      { label: 'Gizmos', sub: true },
+      { label: 'Position', check: true, indent: true }, { label: 'Lock', check: true, indent: true },
+      { label: 'Group', check: true, indent: true }, { label: 'Transformation', check: true, indent: true },
+      { sep: true },
       { label: 'Center Selection', check: false }, { label: 'Frame Selection', check: false },
-      { label: 'Preview Canvas Scale', check: false }
+      { label: 'Clear Guides', check: false }, { sep: true },
+      { label: 'Auto Resample CanvasItems', check: true }, { label: 'Preview Canvas Scale', check: false },
+      { label: 'Preview Theme', sub: true }, { label: 'Preview Translation', sub: true }
     ];
     function openVp2dMenu(btn, items) {
       var old = document.getElementById('vp2d-active-dropdown'); if (old) { old.remove(); return; }
@@ -17018,8 +17732,9 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       var r = btn.getBoundingClientRect(); menu.style.left = r.left + 'px'; menu.style.top = (r.bottom + 2) + 'px';
       items.forEach(function(it) {
         if (it.sep) { var s = document.createElement('div'); s.className = 'vp2d-mi-sep'; menu.appendChild(s); return; }
-        var mi = document.createElement('div'); mi.className = 'vp2d-mi';
-        mi.innerHTML = '<span class="vp2d-check">' + (it.check ? '✓' : '') + '</span>' + escapeHtml(it.label);
+        var mi = document.createElement('div'); mi.className = 'vp2d-mi' + (it.indent ? ' vp2d-mi-indent' : '');
+        mi.innerHTML = '<span class="vp2d-check">' + (it.check ? '✓' : '') + '</span>' + escapeHtml(it.label) +
+          (it.sub ? '<span class="vp2d-sub">▸</span>' : '');
         mi.addEventListener('click', function() {
           it.check = !it.check; logMessage('info', it.label); menu.remove();
         });
@@ -17029,6 +17744,11 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       var dismiss = function() { menu.remove(); document.removeEventListener('click', dismiss); };
       setTimeout(function() { document.addEventListener('click', dismiss); }, 0);
     }
+    // pat-pq0l1: the four transform toggles drive the real gizmo mode (Godot
+    // TOOL_SELECT/MOVE/ROTATE/SCALE); setToolMode re-syncs the exclusive group.
+    document.querySelectorAll('#vp2d-toolbar [data-vp2dtool]').forEach(function(b) {
+      b.addEventListener('click', function() { setToolMode(b.getAttribute('data-vp2dtool')); });
+    });
     // Mode tools (list-select / pivot / pan / ruler) toggle active state.
     ['vp2d-list-select', 'vp2d-pivot', 'vp2d-pan', 'vp2d-ruler'].forEach(function(id) {
       var b = document.getElementById(id);
@@ -17488,6 +18208,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   setupToolMode();
   setupContextMenu();
   setupSearch();
+  setupSceneTreeSourceToggle();
   setupKeyboardShortcuts();
   setupBottomPanel();
   setupShaderEditor();

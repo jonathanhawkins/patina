@@ -26131,10 +26131,15 @@ pub fn register_io_classes() {
                 .method(MethodInfo::new("generate_random_bytes", 1))
                 .method(MethodInfo::new("hmac_digest", 3))
                 .method(MethodInfo::new("constant_time_compare", 2))
-                // ⚠️ Registered but stage 2: the interpreter answers these with
-                // null / empty / false rather than a fake key or signature.
+                // ✅ Stage 2 landed (pat-s3rrv.195): `gdscript-interop` now
+                // answers these from `gdcore::crypto_rsa` with real RSA, so
+                // `has_method` and the call agree. `sign`/`verify` are
+                // SHA-256 only and report failure for any other hash type.
                 .method(MethodInfo::new("generate_rsa", 1))
-                .method(MethodInfo::new("generate_self_signed_certificate", 3))
+                // 4, not 3: `generate_self_signed_certificate(key,
+                // issuer_name, not_before, not_after)` — the last three carry
+                // Godot defaults, which is why the arity read as 3.
+                .method(MethodInfo::new("generate_self_signed_certificate", 4))
                 .method(MethodInfo::new("sign", 3))
                 .method(MethodInfo::new("verify", 4))
                 .method(MethodInfo::new("encrypt", 2))

@@ -8,6 +8,7 @@ mod editor_3d_toolbar_actions_test;
 mod editor_3d_toolbar_chrome_test;
 mod editor_3d_viewport_test;
 mod editor_animation_panel_test;
+mod editor_animation_panel_toolbar_test;
 mod editor_audio_panel_test;
 mod editor_beads_test;
 mod editor_bottom_panel_chrome_test;

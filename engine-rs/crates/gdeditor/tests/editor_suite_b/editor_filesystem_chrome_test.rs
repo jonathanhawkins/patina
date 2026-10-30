@@ -121,3 +121,29 @@ fn filesystem_dock_chrome_is_wired() {
     }
     handle.stop();
 }
+
+/// Godot's dock filter is not a substring test: `_set_search_filter` splits the
+/// term on spaces into `searched_tokens` (`filesystem_dock.cpp:2822`) and every
+/// token must appear in the name (`_matches_all_search_tokens`, used at :846 for
+/// the tree and :932 for the file list). So `player tscn` narrows to
+/// `player.tscn` in Godot, while a single `indexOf` of the whole term matches
+/// nothing. These needles pin the tokenizing form so the dock cannot silently
+/// regress to one substring compare.
+#[test]
+fn filesystem_dock_filter_matches_all_search_tokens() {
+    let (handle, port) = make_server();
+    let html = editor_html(port);
+    for needle in [
+        "fsFilterTokens",                     // the tokenized filter state
+        "function fsMatchesAllSearchTokens",  // Godot's all-tokens predicate
+        "fsMatchesAllSearchTokens(e.name)",   // honored by the per-entry matcher
+        "fsFilter.split(",                    // the filter box tokenizes on input
+        "!fsFilterTokens.length",             // an empty filter still shows everything
+    ] {
+        assert!(
+            html.contains(needle),
+            "served FileSystem dock filter is missing Godot token matching `{needle}`"
+        );
+    }
+    handle.stop();
+}

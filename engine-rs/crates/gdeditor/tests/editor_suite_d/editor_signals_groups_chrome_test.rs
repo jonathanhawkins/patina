@@ -65,6 +65,59 @@ fn node_dock_shell_is_present() {
     handle.stop();
 }
 
+/// pat-2u9jl — the Node dock's chrome is *permanent*, the way Godot's is.
+///
+/// `ConnectionsDock` and `GroupsEditor` build their widgets once in their
+/// constructors and only ever toggle visibility (`holder->hide()`), including
+/// one empty-state Label each, worded differently:
+/// `select_an_object` = "Select a single node or resource to edit its signals."
+/// (connections_dialog.cpp) and `select_a_node` = "Select one or more nodes to
+/// edit their groups." (groups_editor.cpp).
+///
+/// Patina served that shell but `renderNodeDock` then did
+/// `getElementById('node-dock').innerHTML = ''`, destroying the permanent chrome
+/// and both labels on the first selection — so they never returned when the
+/// selection cleared. `node_dock_shell_is_present` above could not see it: it
+/// only inspects the *initial* document, which was correct the whole time. The
+/// selection-dependent lists now render into `#node-dock-dynamic` instead, and
+/// nothing may fetch `#node-dock` to clear it again.
+#[test]
+fn node_dock_permanent_chrome_survives_a_selection() {
+    let (handle, port) = make_server();
+    let html = editor_html(port);
+
+    for needle in [
+        // Godot's two distinct empty-state labels, verbatim.
+        r#"id="node-signals-empty""#,
+        "Select a single node or resource to edit its signals.",
+        r#"id="node-groups-empty""#,
+        "Select one or more nodes to edit their groups.",
+        // The dynamic container that keeps the permanent chrome alive, and the
+        // renderer targeting it.
+        r#"id="node-dock-dynamic""#,
+        "document.getElementById('node-dock-dynamic')",
+        // The permanent chrome is hidden and restored, not freed.
+        "permChrome.style.display = 'none'",
+        "permChrome.style.display = ''",
+    ] {
+        assert!(
+            html.contains(needle),
+            "Node dock permanent chrome is missing `{needle}`"
+        );
+    }
+
+    // The regression itself: no code may clear `#node-dock` wholesale again.
+    // (This literal cannot match `getElementById('node-dock-dynamic')` — the
+    // closing quote and paren are part of the needle.)
+    assert!(
+        !html.contains("getElementById('node-dock')"),
+        "something still fetches #node-dock directly; clearing it destroys the \
+         permanent Signals/Groups chrome Godot keeps for the dock's lifetime"
+    );
+
+    handle.stop();
+}
+
 #[test]
 fn connect_signal_dialog_chrome_present() {
     let (handle, port) = make_server();

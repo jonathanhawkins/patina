@@ -4367,6 +4367,19 @@ impl Interpreter {
                                 if class_name == "HMACContext" {
                                     return Ok(Variant::ObjectId(new_hmac_context_handle()));
                                 }
+                                // Both are Resources in Godot, not RefCounted,
+                                // and both were registered in ClassDB with no
+                                // constructor — `CryptoKey.new().load(path)`
+                                // used to hand back an object whose every
+                                // method was undefined (pat-s3rrv.195).
+                                if class_name == "CryptoKey" {
+                                    return Ok(Variant::ObjectId(new_crypto_key_handle(None)));
+                                }
+                                if class_name == "X509Certificate" {
+                                    return Ok(Variant::ObjectId(new_x509_certificate_handle(
+                                        None,
+                                    )));
+                                }
                                 // pat-s3rrv.57: an abstract class is a
                                 // DIFFERENT error from an unknown one. Falling
                                 // through to `UndefinedVariable` told the author
@@ -10892,6 +10905,12 @@ impl Interpreter {
             }
             if is_hmac_context_handle(*oid) {
                 return call_hmac_context_instance(*oid, method, args);
+            }
+            if is_crypto_key_handle(*oid) {
+                return call_crypto_key_instance(*oid, method, args);
+            }
+            if is_x509_certificate_handle(*oid) {
+                return call_x509_certificate_instance(*oid, method, args);
             }
             if is_regex_match_handle(*oid) {
                 return call_regex_match_instance(*oid, method, args);
@@ -22964,6 +22983,140 @@ fn new_crypto_handle() -> gdcore::id::ObjectId {
     gdcore::id::ObjectId::from_raw(raw)
 }
 
+/// `CryptoKey` handles (pat-s3rrv.195). `0xC5` and `0xC6` continue the crypto
+/// family — `0xC1` hashing, `0xC2` AES, `0xC3` Crypto, `0xC4` HMAC — and were
+/// confirmed unused by a sweep of every `_TAG: u64 = 0x..` in the workspace.
+/// Two families sharing a tag byte makes both `is_*_handle` predicates claim
+/// the same ids, which misroutes every method call with no error anywhere.
+const CRYPTO_KEY_HANDLE_TAG: u64 = 0xC5_00_0000_0000_0000;
+/// `X509Certificate` handles (pat-s3rrv.195).
+const X509_CERTIFICATE_HANDLE_TAG: u64 = 0xC6_00_0000_0000_0000;
+
+/// Godot `Error` codes, transcribed from `core/error/error_list.h`.
+///
+/// ⚠️ NOT derivable from the names: `ERR_INVALID_DATA` is 30, not something in
+/// the single digits, and the file-error block starts at 7 — so the one
+/// plausible guess (counting from the error you care about) is wrong for all
+/// of them.
+const ERR_FILE_BAD_PATH: i64 = 9;
+const ERR_FILE_CANT_OPEN: i64 = 12;
+const ERR_FILE_CANT_WRITE: i64 = 13;
+const ERR_INVALID_DATA: i64 = 30;
+
+thread_local! {
+    /// 🔑 `Option`, not a bare key: Godot's `CryptoKey.new()` hands back an
+    /// EMPTY key for a script to fill with `load_from_string`. Generating one
+    /// eagerly here would make `is_public_only()` answer about a key the
+    /// script never set, and would burn a keygen on every `.new()`.
+    static CRYPTO_KEYS: std::cell::RefCell<HashMap<u64, Option<gdcore::crypto_rsa::CryptoKey>>> =
+        std::cell::RefCell::new(HashMap::new());
+    static NEXT_CRYPTO_KEY: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    static X509_CERTIFICATES: std::cell::RefCell<
+        HashMap<u64, Option<gdcore::crypto_rsa::X509Certificate>>,
+    > = std::cell::RefCell::new(HashMap::new());
+    static NEXT_X509_CERTIFICATE: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+}
+
+/// Returns `true` when `id` was issued by [`new_crypto_key_handle`].
+fn is_crypto_key_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == CRYPTO_KEY_HANDLE_TAG
+}
+
+/// Returns `true` when `id` was issued by [`new_x509_certificate_handle`].
+fn is_x509_certificate_handle(id: gdcore::id::ObjectId) -> bool {
+    id.raw() & 0xFF00_0000_0000_0000 == X509_CERTIFICATE_HANDLE_TAG
+}
+
+/// Allocates a `CryptoKey` handle. `None` is `CryptoKey.new()`'s empty key;
+/// `Some` is what `Crypto.generate_rsa` hands back.
+fn new_crypto_key_handle(key: Option<gdcore::crypto_rsa::CryptoKey>) -> gdcore::id::ObjectId {
+    let seq = NEXT_CRYPTO_KEY.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = CRYPTO_KEY_HANDLE_TAG | seq;
+    CRYPTO_KEYS.with(|m| m.borrow_mut().insert(raw, key));
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+/// Allocates an `X509Certificate` handle, empty for `X509Certificate.new()`.
+fn new_x509_certificate_handle(
+    cert: Option<gdcore::crypto_rsa::X509Certificate>,
+) -> gdcore::id::ObjectId {
+    let seq = NEXT_X509_CERTIFICATE.with(|n| {
+        let v = n.get();
+        n.set(v + 1);
+        v
+    });
+    let raw = X509_CERTIFICATE_HANDLE_TAG | seq;
+    X509_CERTIFICATES.with(|m| m.borrow_mut().insert(raw, cert));
+    gdcore::id::ObjectId::from_raw(raw)
+}
+
+/// Clones out the `CryptoKey` that argument `index` names.
+///
+/// ⚠️ A CLONE, deliberately. Signing runs a modular exponentiation; holding
+/// the `CRYPTO_KEYS` `RefCell` borrow across it would panic the moment any
+/// crypto method touched the table again, and the key is a few hundred bytes
+/// against an operation measured in milliseconds.
+fn crypto_key_arg(args: &[Variant], index: usize) -> Option<gdcore::crypto_rsa::CryptoKey> {
+    let Some(Variant::ObjectId(id)) = args.get(index) else {
+        return None;
+    };
+    if !is_crypto_key_handle(*id) {
+        return None;
+    }
+    CRYPTO_KEYS.with(|m| m.borrow().get(&id.raw()).cloned().flatten())
+}
+
+/// Reads a text argument, accepting the `PackedByteArray` form a script gets
+/// back from `FileAccess.get_buffer()`.
+fn crypto_string_arg(args: &[Variant], index: usize, what: &str) -> Result<String, RuntimeError> {
+    match args.get(index) {
+        Some(Variant::String(s)) => Ok(s.clone()),
+        Some(Variant::StringName(s)) => Ok(s.as_str().to_string()),
+        Some(Variant::PackedByteArray(b)) => String::from_utf8(b.clone()).map_err(|_| {
+            RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "{what} expects UTF-8 text"
+            )))
+        }),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "{what} expects a String argument"
+        )))),
+    }
+}
+
+/// An optional Godot `bool` flag. A MISSING argument is `false`, not an error:
+/// `save_to_string()` and `load_from_string(pem)` are both legal calls, with
+/// `public_only` defaulting to `false`.
+fn crypto_bool_arg(args: &[Variant], index: usize) -> bool {
+    matches!(args.get(index), Some(Variant::Bool(true)))
+}
+
+/// Writes `text` to a Godot path, returning a Godot `Error`.
+fn crypto_write_text(path: &str, text: &str) -> i64 {
+    let Ok(resolved) = gdcore::file_access::resolve_path(path) else {
+        return ERR_FILE_BAD_PATH;
+    };
+    if let Some(dir) = resolved.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    match std::fs::write(&resolved, text.as_bytes()) {
+        Ok(()) => 0,
+        Err(e) => {
+            tracing::warn!("writing {} failed: {}", path, e);
+            ERR_FILE_CANT_WRITE
+        }
+    }
+}
+
+/// Reads a Godot path as text, or `None` when it cannot be read.
+fn crypto_read_text(path: &str) -> Option<String> {
+    let resolved = gdcore::file_access::resolve_path(path).ok()?;
+    std::fs::read_to_string(resolved).ok()
+}
+
 /// Reads a `PackedByteArray` argument.
 ///
 /// A `String` is accepted too and taken as its UTF-8 bytes: GDScript's
@@ -23178,8 +23331,166 @@ fn call_aes_context_instance(
     }
 }
 
-/// `Crypto`'s script surface. The RSA/X509 half is stage 2 and reports
-/// ERR_UNAVAILABLE rather than pretending.
+/// `CryptoKey`'s script surface (`doc/classes/CryptoKey.xml`), pat-s3rrv.195.
+///
+/// The class was registered in ClassDB all along, so `ClassDB.class_exists`
+/// and the inspector schema both reported it — but `CryptoKey.new()` reached
+/// no constructor, so every method on the result was undefined.
+fn call_crypto_key_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    let raw = id.raw();
+    match method {
+        // An EMPTY key reports `true`: it holds no private half, and the
+        // alternative — `false` — would tell a script it could sign.
+        "is_public_only" => Ok(Variant::Bool(
+            CRYPTO_KEYS
+                .with(|m| {
+                    m.borrow()
+                        .get(&raw)
+                        .map(|slot| slot.as_ref().map(|k| k.is_public_only()).unwrap_or(true))
+                })
+                .unwrap_or(true),
+        )),
+        "save_to_string" => {
+            let public_only = crypto_bool_arg(args, 0);
+            let text = CRYPTO_KEYS.with(|m| {
+                m.borrow()
+                    .get(&raw)
+                    .and_then(|slot| slot.as_ref())
+                    .and_then(|k| k.save_to_string(public_only).ok())
+            });
+            // Godot returns an empty String for an unset key, not null.
+            Ok(Variant::String(text.unwrap_or_default()))
+        }
+        "load_from_string" => {
+            let pem = crypto_string_arg(args, 0, "CryptoKey.load_from_string()")?;
+            let public_only = crypto_bool_arg(args, 1);
+            match gdcore::crypto_rsa::CryptoKey::load_from_string(&pem, public_only) {
+                Ok(key) => {
+                    CRYPTO_KEYS.with(|m| {
+                        m.borrow_mut().insert(raw, Some(key));
+                    });
+                    Ok(Variant::Int(0))
+                }
+                Err(e) => {
+                    tracing::warn!("CryptoKey.load_from_string: {}", e);
+                    Ok(Variant::Int(ERR_INVALID_DATA))
+                }
+            }
+        }
+        "save" => {
+            let path = crypto_string_arg(args, 0, "CryptoKey.save()")?;
+            let public_only = crypto_bool_arg(args, 1);
+            let text = CRYPTO_KEYS.with(|m| {
+                m.borrow()
+                    .get(&raw)
+                    .and_then(|slot| slot.as_ref())
+                    .and_then(|k| k.save_to_string(public_only).ok())
+            });
+            match text {
+                Some(text) => Ok(Variant::Int(crypto_write_text(&path, &text))),
+                None => Ok(Variant::Int(ERR_INVALID_DATA)),
+            }
+        }
+        "load" => {
+            let path = crypto_string_arg(args, 0, "CryptoKey.load()")?;
+            let public_only = crypto_bool_arg(args, 1);
+            let Some(text) = crypto_read_text(&path) else {
+                return Ok(Variant::Int(ERR_FILE_CANT_OPEN));
+            };
+            match gdcore::crypto_rsa::CryptoKey::load_from_string(&text, public_only) {
+                Ok(key) => {
+                    CRYPTO_KEYS.with(|m| {
+                        m.borrow_mut().insert(raw, Some(key));
+                    });
+                    Ok(Variant::Int(0))
+                }
+                Err(e) => {
+                    tracing::warn!("CryptoKey.load({}): {}", path, e);
+                    Ok(Variant::Int(ERR_INVALID_DATA))
+                }
+            }
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("CryptoKey.{other}"),
+        ))),
+    }
+}
+
+/// `X509Certificate`'s script surface (`doc/classes/X509Certificate.xml`),
+/// pat-s3rrv.195.
+fn call_x509_certificate_instance(
+    id: gdcore::id::ObjectId,
+    method: &str,
+    args: &[Variant],
+) -> Result<Variant, RuntimeError> {
+    let raw = id.raw();
+    match method {
+        "save_to_string" => {
+            let text = X509_CERTIFICATES.with(|m| {
+                m.borrow()
+                    .get(&raw)
+                    .and_then(|slot| slot.as_ref())
+                    .map(|c| c.save_to_string())
+            });
+            Ok(Variant::String(text.unwrap_or_default()))
+        }
+        "load_from_string" => {
+            let pem = crypto_string_arg(args, 0, "X509Certificate.load_from_string()")?;
+            match gdcore::crypto_rsa::X509Certificate::load_from_string(&pem) {
+                Ok(cert) => {
+                    X509_CERTIFICATES.with(|m| {
+                        m.borrow_mut().insert(raw, Some(cert));
+                    });
+                    Ok(Variant::Int(0))
+                }
+                Err(e) => {
+                    tracing::warn!("X509Certificate.load_from_string: {}", e);
+                    Ok(Variant::Int(ERR_INVALID_DATA))
+                }
+            }
+        }
+        "save" => {
+            let path = crypto_string_arg(args, 0, "X509Certificate.save()")?;
+            let text = X509_CERTIFICATES.with(|m| {
+                m.borrow()
+                    .get(&raw)
+                    .and_then(|slot| slot.as_ref())
+                    .map(|c| c.save_to_string())
+            });
+            match text {
+                Some(text) => Ok(Variant::Int(crypto_write_text(&path, &text))),
+                None => Ok(Variant::Int(ERR_INVALID_DATA)),
+            }
+        }
+        "load" => {
+            let path = crypto_string_arg(args, 0, "X509Certificate.load()")?;
+            let Some(text) = crypto_read_text(&path) else {
+                return Ok(Variant::Int(ERR_FILE_CANT_OPEN));
+            };
+            match gdcore::crypto_rsa::X509Certificate::load_from_string(&text) {
+                Ok(cert) => {
+                    X509_CERTIFICATES.with(|m| {
+                        m.borrow_mut().insert(raw, Some(cert));
+                    });
+                    Ok(Variant::Int(0))
+                }
+                Err(e) => {
+                    tracing::warn!("X509Certificate.load({}): {}", path, e);
+                    Ok(Variant::Int(ERR_INVALID_DATA))
+                }
+            }
+        }
+        other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+            format!("X509Certificate.{other}"),
+        ))),
+    }
+}
+
+/// `Crypto`'s script surface, RSA/X509 half included (pat-s3rrv.195).
 fn call_crypto_instance(
     _id: gdcore::id::ObjectId,
     method: &str,
@@ -23209,13 +23520,117 @@ fn call_crypto_instance(
             let b = crypto_bytes_arg(args, 1, "Crypto.constant_time_compare()")?;
             Ok(Variant::Bool(gdcore::crypto::constant_time_compare(&a, &b)))
         }
-        // ⚠️ Stage 2 (RSA + X509 via the RustCrypto crates). These report
-        // ERR_UNAVAILABLE (2) / null **loudly** rather than returning something
-        // that looks like a key — a silent stub here would let a script build a
-        // "signature" that verifies nothing.
-        "generate_rsa" | "generate_self_signed_certificate" => Ok(Variant::Nil),
-        "sign" | "encrypt" | "decrypt" => Ok(Variant::PackedByteArray(Vec::new())),
-        "verify" => Ok(Variant::Bool(false)),
+        // ✅ Stage 2 landed (pat-s3rrv.195): real RSA through
+        // `gdcore::crypto_rsa`. Every FAILURE path still answers the way the
+        // old stubs did — null / empty bytes / `false` — because the hazard
+        // those stubs guarded against is a script that cannot tell "no
+        // signature" from "a signature". The difference is that success is now
+        // reachable, and `tracing::warn!` says why when it is not.
+        "generate_rsa" => {
+            let bits = crypto_int_arg(args, 0, "Crypto.generate_rsa()")?;
+            match gdcore::crypto_rsa::CryptoKey::generate(bits.max(0) as usize) {
+                Ok(key) => Ok(Variant::ObjectId(new_crypto_key_handle(Some(key)))),
+                Err(e) => {
+                    tracing::warn!("Crypto.generate_rsa({}): {}", bits, e);
+                    Ok(Variant::Nil)
+                }
+            }
+        }
+        "generate_self_signed_certificate" => {
+            let Some(key) = crypto_key_arg(args, 0) else {
+                tracing::warn!(
+                    "Crypto.generate_self_signed_certificate: argument 0 is not a CryptoKey"
+                );
+                return Ok(Variant::Nil);
+            };
+            // Godot's own defaults, from `doc/classes/Crypto.xml`. A missing
+            // argument takes the default rather than failing: the one-argument
+            // call is the form the Godot docs' own example uses.
+            let issuer = crypto_string_arg(args, 1, "Crypto.generate_self_signed_certificate()")
+                .unwrap_or_else(|_| "CN=myserver,O=myorganisation,C=IT".to_string());
+            let not_before =
+                crypto_string_arg(args, 2, "Crypto.generate_self_signed_certificate()")
+                    .unwrap_or_else(|_| "20140101000000".to_string());
+            let not_after = crypto_string_arg(args, 3, "Crypto.generate_self_signed_certificate()")
+                .unwrap_or_else(|_| "20340101000000".to_string());
+            match gdcore::crypto_rsa::X509Certificate::self_signed(
+                &key,
+                &issuer,
+                &not_before,
+                &not_after,
+            ) {
+                Ok(cert) => Ok(Variant::ObjectId(new_x509_certificate_handle(Some(cert)))),
+                Err(e) => {
+                    tracing::warn!("Crypto.generate_self_signed_certificate: {}", e);
+                    Ok(Variant::Nil)
+                }
+            }
+        }
+        // `sign(hash_type, hash, key)` — `hash` is the DIGEST, not the
+        // message. Godot takes the output of `HashingContext`/`sha256_buffer`
+        // and prefixes the PKCS#1 DigestInfo itself.
+        "sign" => {
+            let kind = crypto_int_arg(args, 0, "Crypto.sign()")?;
+            let digest = crypto_bytes_arg(args, 1, "Crypto.sign()")?;
+            let Some(key) = crypto_key_arg(args, 2) else {
+                tracing::warn!("Crypto.sign: argument 2 is not a CryptoKey");
+                return Ok(Variant::PackedByteArray(Vec::new()));
+            };
+            if hash_type_from_int(kind) != Some(gdcore::crypto::HashType::Sha256) {
+                // ⚠️ Signing under the wrong DigestInfo prefix would produce a
+                // signature no other implementation verifies, which is worse
+                // than refusing: see the module docs on `gdcore::crypto_rsa`.
+                tracing::warn!("Crypto.sign: only HASH_SHA256 is implemented, got {}", kind);
+                return Ok(Variant::PackedByteArray(Vec::new()));
+            }
+            match key.sign_sha256(&digest) {
+                Ok(sig) => Ok(Variant::PackedByteArray(sig)),
+                Err(e) => {
+                    tracing::warn!("Crypto.sign: {}", e);
+                    Ok(Variant::PackedByteArray(Vec::new()))
+                }
+            }
+        }
+        "verify" => {
+            let kind = crypto_int_arg(args, 0, "Crypto.verify()")?;
+            let digest = crypto_bytes_arg(args, 1, "Crypto.verify()")?;
+            let signature = crypto_bytes_arg(args, 2, "Crypto.verify()")?;
+            let Some(key) = crypto_key_arg(args, 3) else {
+                return Ok(Variant::Bool(false));
+            };
+            if hash_type_from_int(kind) != Some(gdcore::crypto::HashType::Sha256) {
+                return Ok(Variant::Bool(false));
+            }
+            Ok(Variant::Bool(key.verify_sha256(&digest, &signature)))
+        }
+        "encrypt" => {
+            let Some(key) = crypto_key_arg(args, 0) else {
+                tracing::warn!("Crypto.encrypt: argument 0 is not a CryptoKey");
+                return Ok(Variant::PackedByteArray(Vec::new()));
+            };
+            let plaintext = crypto_bytes_arg(args, 1, "Crypto.encrypt()")?;
+            match key.encrypt(&plaintext) {
+                Ok(ct) => Ok(Variant::PackedByteArray(ct)),
+                Err(e) => {
+                    tracing::warn!("Crypto.encrypt: {}", e);
+                    Ok(Variant::PackedByteArray(Vec::new()))
+                }
+            }
+        }
+        "decrypt" => {
+            let Some(key) = crypto_key_arg(args, 0) else {
+                tracing::warn!("Crypto.decrypt: argument 0 is not a CryptoKey");
+                return Ok(Variant::PackedByteArray(Vec::new()));
+            };
+            let ciphertext = crypto_bytes_arg(args, 1, "Crypto.decrypt()")?;
+            match key.decrypt(&ciphertext) {
+                Ok(pt) => Ok(Variant::PackedByteArray(pt)),
+                Err(e) => {
+                    tracing::warn!("Crypto.decrypt: {}", e);
+                    Ok(Variant::PackedByteArray(Vec::new()))
+                }
+            }
+        }
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("Crypto.{other}"),
         ))),

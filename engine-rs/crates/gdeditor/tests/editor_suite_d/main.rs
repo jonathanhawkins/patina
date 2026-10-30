@@ -8,6 +8,7 @@ mod editor_save_scene_e2e_test;
 mod editor_save_scene_wiring_test;
 mod editor_scene_tree_context_ops_wired_test;
 mod editor_scene_tree_dock_chrome_test;
+mod editor_scene_tree_row_warning_test;
 mod editor_script_history_help_test;
 mod editor_script_list_members_test;
 mod editor_script_menu_actions_test;

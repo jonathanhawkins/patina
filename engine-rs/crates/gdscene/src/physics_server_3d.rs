@@ -530,6 +530,63 @@ pub(crate) fn shape_from_node_3d(tree: &SceneTree, node_id: NodeId) -> Option<Sh
     }
 }
 
+/// Every collision shape under `body_id`, paired with its offset in the body's
+/// LOCAL space, in document order (pat-s3rrv.104).
+///
+/// Godot's `CollisionObject3D` owns a LIST of shape owners, each with its own
+/// transform (`shape_owner_set_transform`), so a platform is routinely two boxes
+/// and a character a capsule raised by half its height. The previous reader took
+/// the FIRST matching direct child and dropped the rest, and dropped its
+/// transform too, so every shape collided at the body origin.
+///
+/// ⚠️ Walks the whole descendant subtree, not just direct children — a
+/// `CollisionShape3D` under an intermediate `Node3D` is normal authoring — but
+/// stops at a nested `CollisionObject3D`, which owns its own shapes and would
+/// otherwise have them counted twice, once for itself and once for its ancestor.
+///
+/// The offset is taken from GLOBAL transforms and then rotated back through the
+/// body's inverse rotation, so it is expressed in the body's local frame. That
+/// matters because [`PhysicsBody3D::shapes_world`] re-applies the body rotation:
+/// handing it a world-space delta would rotate the offset twice for any tilted
+/// body, and the error would be invisible in an axis-aligned test.
+pub(crate) fn shapes_from_body_subtree(
+    tree: &SceneTree,
+    body_id: NodeId,
+) -> Vec<(Vector3, Shape3D)> {
+    let body_origin = node3d::get_global_transform(tree, body_id).origin;
+    let inv_rot = Quaternion::from_euler(node3d::get_rotation(tree, body_id)).inverse();
+
+    let mut out: Vec<(Vector3, Shape3D)> = Vec::new();
+    let mut stack: Vec<NodeId> = tree
+        .get_node(body_id)
+        .map(|n| n.children().to_vec())
+        .unwrap_or_default();
+    // Reversed so `pop()` yields children in document order, keeping the FIRST
+    // authored shape primary — the shape the old `find_map` would have picked.
+    stack.reverse();
+
+    while let Some(nid) = stack.pop() {
+        let Some(node) = tree.get_node(nid) else {
+            continue;
+        };
+        let class = node.class_name().to_string();
+        let mut kids = node.children().to_vec();
+
+        if body_type_for_class_3d(&class).is_some() || class == "Area3D" {
+            continue;
+        }
+
+        if let Some(shape) = shape_from_node_3d(tree, nid) {
+            let delta = node3d::get_global_transform(tree, nid).origin - body_origin;
+            out.push((inv_rot.xform(delta), shape));
+        }
+
+        kids.reverse();
+        stack.extend(kids);
+    }
+    out
+}
+
 /// Bridges scene tree 3D physics nodes to a [`PhysicsWorld3D`].
 ///
 /// Tracks which scene nodes have been registered as physics bodies and
@@ -734,17 +791,19 @@ impl PhysicsServer3D {
                         let default_mass = if class == "VehicleBody3D" { 40.0 } else { 1.0 };
                         let mass = float_prop_3d(tree, nid, "mass", default_mass) as f32;
 
-                        // Look for a CollisionShape3D child.
-                        let shape = tree
-                            .get_node(nid)
-                            .map(|n| n.children().to_vec())
-                            .unwrap_or_default()
-                            .iter()
-                            .find_map(|&child_id| shape_from_node_3d(tree, child_id))
-                            .unwrap_or(Shape3D::Sphere { radius: 0.5 });
+                        // Every CollisionShape3D in the subtree, with offsets.
+                        let mut authored = shapes_from_body_subtree(tree, nid);
+                        let (shape, shape_offset) = if authored.is_empty() {
+                            (Shape3D::Sphere { radius: 0.5 }, Vector3::ZERO)
+                        } else {
+                            let (off, sh) = authored.remove(0);
+                            (sh, off)
+                        };
 
                         let mut body =
                             PhysicsBody3D::new(placeholder_id, body_type, position, shape, mass);
+                        body.shape_offset = shape_offset;
+                        body.extra_shapes = authored;
 
                         // Initial orientation from the node transform.
                         body.rotation =
@@ -869,6 +928,34 @@ impl PhysicsServer3D {
                                 }
                                 b.position = position;
                                 b.rotation = rotation;
+                            }
+                        }
+                    }
+
+                    // Re-seed the shape list EVERY tick, for every body type —
+                    // deliberately outside the Rigid/else split above.
+                    //
+                    // ⚠️ Placing this inside the `else` arm (where the rest of the
+                    // per-tick node sync lives) would skip RigidBody3D entirely,
+                    // which is the one body type most likely to have a shape
+                    // resized at runtime. Areas already re-seed unconditionally
+                    // further down; bodies did not, which is why a CollisionShape3D
+                    // added, moved, resized or disabled after the first tick was
+                    // ignored forever.
+                    if let Some(&body_id) = self.node_to_body.get(&nid) {
+                        let mut authored = shapes_from_body_subtree(tree, nid);
+                        if let Some(b) = self.world.get_body_mut(body_id) {
+                            if authored.is_empty() {
+                                // No authored shape: leave whatever the body already
+                                // has rather than snapping it to the 0.5 sphere
+                                // fallback part-way through a simulation.
+                                b.shape_offset = Vector3::ZERO;
+                                b.extra_shapes.clear();
+                            } else {
+                                let (off, sh) = authored.remove(0);
+                                b.shape = sh;
+                                b.shape_offset = off;
+                                b.extra_shapes = authored;
                             }
                         }
                     }

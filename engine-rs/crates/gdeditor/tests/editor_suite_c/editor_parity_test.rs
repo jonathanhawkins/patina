@@ -772,9 +772,17 @@ fn test_zgwgu_unique_name_badge_js() {
         b.contains("unique_name"),
         "Editor JS must check node.unique_name for unique name badge"
     );
+    // pat-417cn: the title is now Godot's own BUTTON_UNIQUE wording
+    // (upstream/godot/editor/scene/scene_tree_editor.cpp:516) instead of
+    // Patina's invented "Unique name: %Foo" string, and the badge reads the
+    // `unique_name_in_owner` key `/api/scene` actually sends.
     assert!(
-        b.contains("Unique name:"),
-        "Unique name badge must have descriptive title"
+        b.contains("by using the '%' prefix in the node path."),
+        "Unique name badge must carry Godot's BUTTON_UNIQUE tooltip"
+    );
+    assert!(
+        b.contains("node.unique_name_in_owner"),
+        "the badge must read the key /api/scene sends, not a key it never sets"
     );
     handle.stop();
 }

@@ -1924,6 +1924,12 @@ impl Coordinator {
         self.mail.send_message_best_effort(&msg)
     }
 
+    /// Whether this coordinator was constructed in dry-run mode (no br writes,
+    /// no tmux sends). Read by out-of-module passes like park review.
+    pub fn is_dry_run(&self) -> bool {
+        self.dry_run
+    }
+
     pub fn notify_boss(&self, message: &str) {
         let script = self.config.notify_boss_script();
         if !script.exists() {

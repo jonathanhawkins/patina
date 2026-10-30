@@ -143,6 +143,23 @@ fn red_dominant(c: Color) -> bool {
     c.r > c.g + 0.02 && c.r > c.b + 0.02
 }
 
+/// A pixel showing the CAPTURED RED WALL, as opposed to the probe's own gizmo.
+///
+/// ⚠️ `red_dominant` is not sufficient to tell those apart. The editor draws a
+/// mesh-less spatial node — which a `ReflectionProbe` is — as a generic box
+/// marker in `BOX_COLOR_3D`, `(0.90, 0.62, 0.20)`. That orange satisfies
+/// `r > g + 0.02 && r > b + 0.02`, so the marker counts as "red" and any test
+/// that merely filters by `red_dominant` is still counting the gizmo.
+///
+/// 🔑 The separator is the RATIO, not the magnitude. The marker's `g/r` is
+/// 0.62/0.90 ≈ 0.69; the wall's albedo is `Color(1, 0, 0, 1)`, so its `g/r` is
+/// 0. Shading multiplies all three channels, so that ratio survives whatever
+/// light lands on either surface — a threshold between them is stable in a way
+/// an absolute brightness cutoff would not be.
+fn captured_wall_red(c: Color) -> bool {
+    c.r > 0.05 && c.g < c.r * 0.35 && c.b < c.r * 0.35
+}
+
 // ---------------------------------------------------------------------------
 // The acceptance
 // ---------------------------------------------------------------------------
@@ -208,8 +225,10 @@ fn a_rough_surface_takes_less_reflection_than_a_mirror() {
     // smooth=64`, equal to the digit, which is the signature of a measurement
     // that never saw the input it claims to vary.
     //
-    // `red_dominant` is what separates the captured red wall from the probe's
-    // own grey marker, which is why the acceptance already filters by it. The
+    // ⚠️ `captured_wall_red`, NOT `red_dominant`: the marker is ORANGE
+    // (`BOX_COLOR_3D` = 0.90/0.62/0.20), which is red-dominant, so the weaker
+    // predicate counts the gizmo too — this assertion read `rough=55 vs
+    // smooth=55` with it. See the helper for why the ratio separates them. The
     // intent here is unchanged — a rough surface must take less of the capture
     // than a mirror — and a build that tinted every surface regardless of
     // roughness still fails, because then `rough` would match `smooth` again.
@@ -217,11 +236,11 @@ fn a_rough_surface_takes_less_reflection_than_a_mirror() {
     let with_rough = render(&scene_src(PROBE_PLAIN, 1.0));
     let smooth = differing(&with_smooth, &baseline_smooth)
         .into_iter()
-        .filter(|&i| red_dominant(with_smooth[i]))
+        .filter(|&i| captured_wall_red(with_smooth[i]))
         .count();
     let rough = differing(&with_rough, &baseline_rough)
         .into_iter()
-        .filter(|&i| red_dominant(with_rough[i]))
+        .filter(|&i| captured_wall_red(with_rough[i]))
         .count();
 
     assert!(

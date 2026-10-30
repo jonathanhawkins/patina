@@ -111,3 +111,16 @@ path = "examples/editor.rs"
 # full variable info under a debugger.
 [profile.dev]
 debug = "line-tables-only"
+
+# RSA keygen cost (pat-s3rrv.195). `Crypto.generate_rsa(2048)` is a prime
+# search in `num-bigint-dig`, and an unoptimised bigint makes that tens of
+# times slower — slow enough that the script-level acceptance test looks hung
+# rather than slow. Optimising ONLY the bigint and RSA crates keeps every
+# first-party crate at `opt-level = 0`, so panic line numbers and step
+# debugging in engine code are unchanged; `profile.test` inherits `profile.dev`,
+# so this covers the test binaries too.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.dev.package.rsa]
+opt-level = 3

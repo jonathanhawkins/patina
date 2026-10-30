@@ -78,7 +78,9 @@ fn import_dock_renders_skeleton() {
     for needle in [
         "id=\"import-dock\"",        // the dock container
         "id=\"import-empty\"",       // empty-state placeholder
-        "FileSystem dock to import", // empty-state text (mirrors Godot's prompt)
+        // pat-93pfv: Godot's `select_a_resource` prompt verbatim
+        // (import_dock.cpp:829); Patina used to paraphrase it.
+        "in the filesystem or in the inspector to adjust import settings",
         "Import As:",                // import_dock.cpp:765 OptionButton label
         "id=\"import-as\"",          // the type selector
         "id=\"import-preset\"",      // import_dock.cpp:776 preset menu

@@ -73,6 +73,16 @@ pub struct Config {
     /// needs-attention label (excluded from assignment). 0 disables.
     pub verify_fail_park_threshold: u32,
 
+    // Park review (periodic revisit of blocked / needs-attention / env-blocked
+    // beads — the states nothing else in the system ever flips back)
+    /// Interval between park-review passes. 0 disables the pass.
+    pub park_review_interval_seconds: u64,
+    /// Cooldown before a needs-attention bead is retried (label cleared).
+    pub park_retry_cooldown_seconds: u64,
+    /// Maximum needs-attention retries before the bead is left to an operator.
+    /// 0 disables retries entirely.
+    pub park_retry_max: u32,
+
     // Crate-breakage circuit breaker
     /// Consecutive `could not compile <crate>` verify failures before the
     /// lane holds that crate's verifies behind a check pre-flight. 0 disables.
@@ -227,6 +237,9 @@ impl Config {
             gardener_p0_dilution_threshold: env_or("ORCH_GARDENER_P0_DILUTION_THRESHOLD", 15),
             gardener_stale_days: env_or("ORCH_GARDENER_STALE_DAYS", 14),
             verify_fail_park_threshold: env_or("ORCH_VERIFY_FAIL_PARK_THRESHOLD", 2),
+            park_review_interval_seconds: env_or("ORCH_PARK_REVIEW_INTERVAL_SECONDS", 1800),
+            park_retry_cooldown_seconds: env_or("ORCH_PARK_RETRY_COOLDOWN_SECONDS", 7200),
+            park_retry_max: env_or("ORCH_PARK_RETRY_MAX", 3),
             crate_breaker_threshold: env_or("ORCH_CRATE_BREAKER_THRESHOLD", 3),
             coordinator_failstop_polls: env_or("ORCH_COORDINATOR_FAILSTOP_POLLS", 10),
             checkpoint_closes: env_or("ORCH_CHECKPOINT_CLOSES", 10),
@@ -509,6 +522,9 @@ pub fn test_config() -> Config {
         gardener_p0_dilution_threshold: 15,
         gardener_stale_days: 14,
         verify_fail_park_threshold: 2,
+        park_review_interval_seconds: 1800,
+        park_retry_cooldown_seconds: 7200,
+        park_retry_max: 3,
         crate_breaker_threshold: 3,
         coordinator_failstop_polls: 10,
         checkpoint_closes: 10,

@@ -31,6 +31,16 @@ pub mod engine;
 /// Browser event → engine input translation (pat-s3rrv.41).
 pub mod browser_input;
 
+/// The browser end of the frame loop and the input listeners
+/// (pat-u3l8c.111): registers `requestAnimationFrame`, subscribes the DOM
+/// events, polls `navigator.getGamepads()`, and feeds it all into
+/// [`engine::WebEngine`].
+///
+/// Browser-only — everything it decides lives in [`browser_input`] and
+/// [`engine`], which are host-tested; this module is the JS plumbing.
+#[cfg(target_arch = "wasm32")]
+pub mod browser_runtime;
+
 /// The web audio backend: the engine's `AudioServer` mixing into the ring an
 /// `AudioWorkletProcessor` drains (pat-u3l8c.112).
 ///
@@ -106,9 +116,156 @@ pub fn core_linked() -> bool {
     matches!(i, Variant::Int(7)) && (v.x - 3.0).abs() < 1e-6 && (v.y - 4.0).abs() < 1e-6
 }
 
+/// Frames-per-second over a sliding one-second window (pat-u3l8c.111).
+///
+/// The acceptance for the web frame loop is a rate, so the rate has to be
+/// *measurable* from the page rather than asserted. Dividing the frame count
+/// by the total elapsed time would report a long-run average that hides a
+/// stall; counting frames inside a window reports what the last second
+/// actually did.
+///
+/// Target-independent: it takes the same `DOMHighResTimeStamp` the frame
+/// callback gets, so the averaging is unit-tested on the host.
+#[derive(Debug, Clone)]
+pub struct FpsMeter {
+    window_ms: f64,
+    window_start_ms: Option<f64>,
+    frames_in_window: u32,
+    last_fps: f64,
+}
+
+impl FpsMeter {
+    /// A meter averaging over `window_ms` milliseconds.
+    ///
+    /// A non-finite or non-positive window falls back to one second rather
+    /// than dividing by zero on the first report.
+    pub fn new(window_ms: f64) -> Self {
+        let window_ms = if window_ms.is_finite() && window_ms > 0.0 {
+            window_ms
+        } else {
+            1000.0
+        };
+        Self {
+            window_ms,
+            window_start_ms: None,
+            frames_in_window: 0,
+            last_fps: 0.0,
+        }
+    }
+
+    /// Records a frame at `now_ms` and returns the current rate.
+    ///
+    /// The rate only changes once a full window has elapsed; before then the
+    /// previous window's value stands (0.0 for the very first second), because
+    /// extrapolating from a partial window makes the first reading wild.
+    pub fn frame(&mut self, now_ms: f64) -> f64 {
+        let start = match self.window_start_ms {
+            Some(start) => start,
+            None => {
+                // The first frame only opens the window; it is the boundary,
+                // not a sample inside it.
+                self.window_start_ms = Some(now_ms);
+                return self.last_fps;
+            }
+        };
+        self.frames_in_window += 1;
+        let span = now_ms - start;
+        // A backwards clock (a stepped system time) would otherwise produce a
+        // negative span and a negative rate.
+        if span <= 0.0 {
+            self.window_start_ms = Some(now_ms);
+            self.frames_in_window = 0;
+            return self.last_fps;
+        }
+        if span >= self.window_ms {
+            self.last_fps = f64::from(self.frames_in_window) * 1000.0 / span;
+            self.window_start_ms = Some(now_ms);
+            self.frames_in_window = 0;
+        }
+        self.last_fps
+    }
+
+    /// The last completed window's rate.
+    pub fn fps(&self) -> f64 {
+        self.last_fps
+    }
+}
+
+impl Default for FpsMeter {
+    fn default() -> Self {
+        Self::new(1000.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fps_meter_reports_sixty_for_sixty_even_frames() {
+        let mut meter = FpsMeter::new(1000.0);
+        // The browser clock does not start at zero.
+        let origin = 1234.5;
+        // The first callback only opens the window, so 61 timestamps bound 60
+        // frames across exactly one second.
+        for i in 0..=60 {
+            meter.frame(origin + f64::from(i) * (1000.0 / 60.0));
+        }
+        assert!(
+            (meter.fps() - 60.0).abs() < 0.01,
+            "expected ~60 fps, got {}",
+            meter.fps()
+        );
+    }
+
+    #[test]
+    fn fps_meter_is_zero_before_the_first_window_closes() {
+        let mut meter = FpsMeter::new(1000.0);
+        for i in 0..30 {
+            assert_eq!(meter.frame(f64::from(i) * 16.0), 0.0);
+        }
+    }
+
+    #[test]
+    fn fps_meter_halves_when_the_frame_rate_halves() {
+        let mut meter = FpsMeter::new(1000.0);
+        for i in 0..=30 {
+            meter.frame(f64::from(i) * (1000.0 / 30.0));
+        }
+        assert!(
+            (meter.fps() - 30.0).abs() < 0.01,
+            "expected ~30 fps, got {}",
+            meter.fps()
+        );
+    }
+
+    #[test]
+    fn fps_meter_survives_a_backwards_clock() {
+        let mut meter = FpsMeter::new(1000.0);
+        for i in 0..=60 {
+            meter.frame(f64::from(i) * (1000.0 / 60.0));
+        }
+        let before = meter.fps();
+        // A stepped system clock hands back a smaller timestamp.
+        meter.frame(0.0);
+        assert_eq!(meter.fps(), before, "a rewind must not produce a new rate");
+        assert!(meter.fps() > 0.0);
+    }
+
+    #[test]
+    fn fps_meter_rejects_a_nonsensical_window() {
+        for window in [0.0, -1000.0, f64::NAN] {
+            let mut meter = FpsMeter::new(window);
+            for i in 0..=60 {
+                meter.frame(f64::from(i) * (1000.0 / 60.0));
+            }
+            assert!(
+                (meter.fps() - 60.0).abs() < 0.01,
+                "window {window} should fall back to 1s, got {}",
+                meter.fps()
+            );
+        }
+    }
 
     #[test]
     fn engine_version_is_nonempty() {

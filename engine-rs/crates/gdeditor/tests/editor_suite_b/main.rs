@@ -13,6 +13,7 @@ mod editor_game_toolbar_test;
 mod editor_groups_dock_membership_test;
 mod editor_history_dock_test;
 mod editor_idle_render_test;
+mod editor_import_dock_chrome_test;
 mod editor_import_dock_test;
 mod editor_import_hooks_test;
 mod editor_input_map_e2e_test;

@@ -62,6 +62,23 @@ pub struct PhysicsBody3D {
     pub angular_velocity: Vector3,
     /// Collision shape in local space.
     pub shape: Shape3D,
+    /// Local-space offset of [`Self::shape`] from the body origin.
+    ///
+    /// Godot's `CollisionObject3D` owns a LIST of shapes, each with its own
+    /// transform relative to the body (`shape_owner_set_transform`), and a
+    /// `CollisionShape3D` contributes its own node transform — so authoring a
+    /// character as a capsule raised by half its height is routine. Defaults to
+    /// `ZERO`, which is exactly the old behaviour (pat-s3rrv.104).
+    pub shape_offset: Vector3,
+    /// Additional shapes beyond [`Self::shape`], each with its local offset.
+    ///
+    /// ⚠️ Kept SEPARATE from `shape` rather than folding both into one
+    /// `Vec<(Vector3, Shape3D)>`. `shape` has 33 readers across this crate
+    /// (character controller, queries, areas, the 2D crate's 3D stack), and every
+    /// body is built through [`Self::new`] — so an additive field changes one
+    /// constructor and no call sites, while retyping `shape` would touch all of
+    /// them at once. Empty for a single-shape body, which is the common case.
+    pub extra_shapes: Vec<(Vector3, Shape3D)>,
     /// Mass in arbitrary units.
     pub mass: f32,
     /// Friction coefficient in [0, 1].
@@ -162,6 +179,8 @@ impl PhysicsBody3D {
             linear_velocity: Vector3::ZERO,
             angular_velocity: Vector3::ZERO,
             shape,
+            shape_offset: Vector3::ZERO,
+            extra_shapes: Vec::new(),
             mass,
             friction: 0.5,
             bounce: 0.0,
@@ -443,8 +462,47 @@ impl PhysicsBody3D {
     /// the pipeline this treats shapes as axis-aligned, so for spheres it is
     /// exact and for other shapes it is a conservative bound.
     pub fn world_aabb(&self) -> Aabb {
-        let local = self.shape.bounding_aabb();
-        Aabb::new(local.position + self.position, local.size)
+        // ⚠️ Must cover EVERY shape, not just the primary one. The broad-phase
+        // prunes on this box, so a body whose shapes sit at x = -2 and x = +2
+        // would have both of them pruned away before the narrow-phase ever ran —
+        // the feature would look implemented and collide with nothing.
+        let mut out: Option<Aabb> = None;
+        for (world_pos, shape) in self.shapes_world() {
+            let local = shape.bounding_aabb();
+            let one = Aabb::new(local.position + world_pos, local.size);
+            out = Some(match out {
+                Some(acc) => acc.merge(one),
+                None => one,
+            });
+        }
+        // `shapes_world` always yields at least the primary shape, so the
+        // fallback is unreachable; it keeps the signature total rather than
+        // panicking on a future empty-shape body.
+        out.unwrap_or_else(|| {
+            let local = self.shape.bounding_aabb();
+            Aabb::new(local.position + self.position, local.size)
+        })
+    }
+
+    /// Every collision shape this body owns, paired with its WORLD-space centre.
+    ///
+    /// The primary shape comes first, then [`Self::extra_shapes`] in order. Each
+    /// offset is rotated by the body's own rotation before being added to its
+    /// position, so a tilted body carries its offset shapes around with it.
+    ///
+    /// Returns owned clones to match how the collision loop already consumes
+    /// `shape` — it clones out of the borrow so the borrow ends before the
+    /// mutable `bodies.get_mut` calls that follow.
+    pub fn shapes_world(&self) -> Vec<(Vector3, Shape3D)> {
+        let mut out = Vec::with_capacity(1 + self.extra_shapes.len());
+        out.push((
+            self.position + self.rotation.xform(self.shape_offset),
+            self.shape.clone(),
+        ));
+        for (offset, shape) in &self.extra_shapes {
+            out.push((self.position + self.rotation.xform(*offset), shape.clone()));
+        }
+        out
     }
 
     /// Returns `true` if this body is allowed to collide with `other` under

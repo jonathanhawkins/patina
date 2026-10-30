@@ -7,6 +7,7 @@ mod gate_map;
 mod launcher;
 mod mail;
 mod message;
+mod park_review;
 mod planner;
 mod prd_parser;
 mod project_config;
@@ -902,6 +903,7 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
     let mut consecutive_poll_failures: usize = 0; // leader fail-stop input
     let mut bg_planner = BackgroundPlannerState::new();
     let mut planner_recovery = PlannerRecoveryState::new();
+    let mut last_park_review: Option<Instant> = None; // periodic parked-bead revisit
     let mut last_mail_check = Instant::now(); // Fix #5: cache mail server check
     let deep_cooldown = Duration::from_secs(coord.config.deep_planner_cooldown_secs);
     let planner_restart_cooldown = Duration::from_secs(coord.config.planner_restart_cooldown_secs);
@@ -1288,6 +1290,36 @@ fn cmd_run(project_root: &Path, cli: &CliArgs) {
                             Err(_) => {
                                 tracing::warn!("Tier 2 deep planner thread panicked");
                             }
+                        }
+                    }
+                }
+
+                // Step 5: Park review — periodic revisit of blocked /
+                // needs-attention / env-blocked beads. These states are
+                // one-way doors otherwise: the ready query never looks at
+                // them and nothing else flips them back. Runs on its own
+                // timer, independent of planner health.
+                if gardener_due(
+                    last_park_review.map(|t| t.elapsed()),
+                    coord.config.park_review_interval_seconds,
+                ) {
+                    last_park_review = Some(Instant::now());
+                    if let Some(outcome) = park_review::run_park_review(&coord) {
+                        let reopened = outcome
+                            .reviewed
+                            .iter()
+                            .filter(|r| {
+                                r.applied
+                                    && matches!(
+                                        r.action,
+                                        park_review::ParkAction::Reopen { .. }
+                                            | park_review::ParkAction::ClearNeedsAttention { .. }
+                                    )
+                            })
+                            .count();
+                        if reopened > 0 {
+                            // Freshly unparked beads are assignable right now.
+                            all_prompts.extend(run_idle_fill(&coord, session, window));
                         }
                     }
                 }

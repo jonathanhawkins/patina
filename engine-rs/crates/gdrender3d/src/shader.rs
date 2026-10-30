@@ -821,6 +821,26 @@ impl FragmentShader for LambertFragmentShader {
                 ];
                 let reflection = n * (2.0 * n_dot_v) - v;
                 let env = probe.sample(input.world_position, reflection);
+
+                // 🔑 Metals have no diffuse. At `metallic = 1.0` the surface
+                // must show the reflection INSTEAD of a Lambert term, not on
+                // top of one. Adding a red capture to a lit white plane gives
+                // `(W + 1, W, W)` — pink, not red — so a mirror read as
+                // "reflecting" while failing any strict red-dominance test.
+                // `pbr_shade` avoids this because its diffuse is already
+                // energy-split by metallic before the same `+=` runs;
+                // duplicating that block without the split was the defect.
+                //
+                // ⚠️ Scoped INSIDE the probe/sharpness guard deliberately, so
+                // the "invisible to existing frames" property is preserved: a
+                // probe-less frame never reaches here, and neither does a
+                // default `roughness = 1.0` material. A dielectric is
+                // unaffected either way — `keep` is 1.0 at `metallic = 0.0`.
+                let keep = 1.0 - m.metallic.clamp(0.0, 1.0) * sharpness;
+                diffuse_r *= keep;
+                diffuse_g *= keep;
+                diffuse_b *= keep;
+
                 diffuse_r += env.r * f0[0] * sharpness;
                 diffuse_g += env.g * f0[1] * sharpness;
                 diffuse_b += env.b * f0[2] * sharpness;
