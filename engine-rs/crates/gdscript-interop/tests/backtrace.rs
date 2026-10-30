@@ -46,7 +46,7 @@ fn call_check(src: &str) -> Variant {
 
 fn array(v: Variant) -> Vec<Variant> {
     match v {
-        Variant::Array(a) => a,
+        Variant::Array(a) => a.to_vec(),
         other => panic!("expected an Array, got {other:?}"),
     }
 }

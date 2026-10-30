@@ -3130,7 +3130,7 @@ mod tests {
             );
             region.set_property(
                 "__navmesh_polygons__",
-                Variant::Array(vec![Variant::PackedInt32Array(vec![0, 1, 2, 3])]),
+                Variant::Array(vec![Variant::PackedInt32Array(vec![0, 1, 2, 3])].into()),
             );
         }
         tree.add_child(root, region).unwrap();
@@ -3239,7 +3239,7 @@ mod tests {
         );
         region.set_property(
             "__navmesh_polygons__",
-            Variant::Array(vec![Variant::PackedInt32Array(vec![0, 1, 2, 3])]),
+            Variant::Array(vec![Variant::PackedInt32Array(vec![0, 1, 2, 3])].into()),
         );
         tree.add_child(root, region).unwrap();
 

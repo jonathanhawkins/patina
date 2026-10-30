@@ -276,7 +276,7 @@ impl Dictionary {
 /// Recursively deep-clones nested containers for `duplicate(true)`.
 fn deep_clone_variant(v: &Variant) -> Variant {
     match v {
-        Variant::Array(a) => Variant::Array(a.iter().map(deep_clone_variant).collect()),
+        Variant::Array(a) => Variant::Array(a.to_vec().iter().map(deep_clone_variant).collect()),
         Variant::Dictionary(d) => Variant::Dictionary(d.duplicate(true)),
         other => other.clone(),
     }
@@ -517,15 +517,15 @@ mod tests {
         let mut inner = Dictionary::new();
         inner.insert("n", Variant::Int(1));
         let mut d = Dictionary::new();
-        d.insert("inner", Variant::Dictionary(inner));
+        d.insert("inner", Variant::Dictionary(inner.into()));
 
         let deep = d.duplicate(true);
         // Mutate the original's nested dict; deep copy must be unaffected.
         if let Some(Variant::Dictionary(orig_inner)) = d.get_mut("inner") {
-            orig_inner.insert("n", Variant::Int(999));
+            orig_inner.insert("n", Variant::Int(999)).unwrap();
         }
         if let Some(Variant::Dictionary(copy_inner)) = deep.get("inner") {
-            assert_eq!(copy_inner.get("n"), Some(&Variant::Int(1)));
+            assert_eq!(copy_inner.get("n"), Some(Variant::Int(1)));
         } else {
             panic!("expected nested dictionary");
         }

@@ -94,7 +94,7 @@ pub fn mesh_from_script(script_path: &str) -> Option<Mesh3D> {
         .call_instance_method(&mut instance, "_create_mesh_array", &[])
         .ok()?;
     match returned {
-        Variant::Array(items) => mesh_from_mesh_array(&items),
+        Variant::Array(items) => mesh_from_mesh_array(&items.to_vec()),
         _ => None,
     }
 }

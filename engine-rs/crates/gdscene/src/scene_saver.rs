@@ -121,13 +121,14 @@ pub fn format_variant_value(v: &Variant) -> String {
             )
         }
         Variant::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(format_variant_value).collect();
+            let items: Vec<String> = arr.to_vec().iter().map(format_variant_value).collect();
             format!("[{}]", items.join(", "))
         }
         Variant::Dictionary(dict) => {
             // Keys are Variants; render each to a stable display string and sort
             // for deterministic output.
             let mut pairs: Vec<(String, String)> = dict
+                .to_dict()
                 .iter()
                 .map(|(k, v)| (dict_key_display(k), format_variant_value(v)))
                 .collect();
@@ -1571,6 +1572,7 @@ fn tileset_custom_data_layer_names(node: &crate::node::Node) -> Vec<String> {
     match node.get_property(crate::tilemap::TILE_CUSTOM_DATA_LAYERS) {
         Variant::PackedStringArray(v) => v,
         Variant::Array(items) => items
+            .to_vec()
             .iter()
             .filter_map(|v| match v {
                 Variant::String(s) => Some(s.clone()),
@@ -1592,6 +1594,7 @@ fn tileset_custom_data_layer_types(node: &crate::node::Node) -> Vec<i32> {
         Variant::PackedInt32Array(v) => v,
         Variant::PackedInt64Array(v) => v.iter().map(|t| *t as i32).collect(),
         Variant::Array(items) => items
+            .to_vec()
             .iter()
             .map(|v| match v {
                 Variant::Int(t) => *t as i32,
@@ -2172,17 +2175,23 @@ mod tests {
 
     #[test]
     fn format_array() {
-        let arr = Variant::Array(vec![
-            Variant::Int(1),
-            Variant::String("two".into()),
-            Variant::Bool(true),
-        ]);
+        let arr = Variant::Array(
+            vec![
+                Variant::Int(1),
+                Variant::String("two".into()),
+                Variant::Bool(true),
+            ]
+            .into(),
+        );
         assert_eq!(format_variant_value(&arr), "[1, \"two\", true]");
     }
 
     #[test]
     fn format_empty_array() {
-        assert_eq!(format_variant_value(&Variant::Array(vec![])), "[]");
+        assert_eq!(
+            format_variant_value(&Variant::Array(Default::default())),
+            "[]"
+        );
     }
 
     #[test]
@@ -2190,7 +2199,7 @@ mod tests {
         let mut d = Dictionary::new();
         d.insert("b".to_string(), Variant::Int(2));
         d.insert("a".to_string(), Variant::Int(1));
-        let result = format_variant_value(&Variant::Dictionary(d));
+        let result = format_variant_value(&Variant::Dictionary(d.into()));
         // Keys are sorted.
         assert_eq!(result, "{\"a\": 1, \"b\": 2}");
     }
@@ -2198,7 +2207,7 @@ mod tests {
     #[test]
     fn format_empty_dictionary() {
         assert_eq!(
-            format_variant_value(&Variant::Dictionary(Dictionary::new())),
+            format_variant_value(&Variant::Dictionary(Default::default())),
             "{}"
         );
     }

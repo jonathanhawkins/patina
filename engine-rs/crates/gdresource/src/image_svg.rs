@@ -100,7 +100,7 @@ pub fn import_svg_bytes(bytes: &[u8], path: &Path, scale: f32) -> EngineResult<A
     res.set_property("bit_depth", Variant::Int(8));
 
     let pixels: Vec<Variant> = colors.into_iter().map(Variant::Color).collect();
-    res.set_property("pixels", Variant::Array(pixels));
+    res.set_property("pixels", Variant::Array(pixels.into()));
     res.set_property("has_pixel_data", Variant::Bool(true));
 
     Ok(Arc::new(res))
@@ -276,6 +276,7 @@ pub fn import_svg_with_params(
 fn svg_color_map(params: &crate::importers::ImportParams) -> Vec<(Color, Color)> {
     match params.get("color_map") {
         Some(Variant::Dictionary(dict)) => dict
+            .to_dict()
             .iter()
             .filter_map(|(k, v)| match (k, v) {
                 (Variant::Color(from), Variant::Color(to)) => Some((*from, *to)),
@@ -339,8 +340,8 @@ mod tests {
         // The rasterization actually ran (not a blank/hardcoded buffer): the
         // blue circle sits at the SVG center, so the center pixel is blue-ish.
         let center = match res.get_property("pixels") {
-            Some(Variant::Array(a)) => match &a[16 * 32 + 16] {
-                Variant::Color(c) => *c,
+            Some(Variant::Array(a)) => match a.to_vec()[16 * 32 + 16].clone() {
+                Variant::Color(c) => c,
                 other => panic!("expected Color, got {other:?}"),
             },
             other => panic!("expected pixels Array, got {other:?}"),

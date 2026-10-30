@@ -61,14 +61,14 @@ impl AwaitTarget {
         match v {
             Variant::Dictionary(d) => {
                 let kind = match d.get("__await_kind") {
-                    Some(Variant::String(s)) => s.as_str(),
+                    Some(Variant::String(s)) => s,
                     _ => return None,
                 };
-                match kind {
+                match kind.as_str() {
                     "timer" => {
                         let secs = match d.get("seconds") {
-                            Some(Variant::Float(f)) => *f as f32,
-                            Some(Variant::Int(i)) => *i as f32,
+                            Some(Variant::Float(f)) => f as f32,
+                            Some(Variant::Int(i)) => i as f32,
                             _ => 0.0,
                         };
                         Some(Self::Timer {
@@ -82,15 +82,15 @@ impl AwaitTarget {
                         };
                         // Absent for the legacy name-only awaitables.
                         let object_id = match d.get("object_id") {
-                            Some(Variant::Int(i)) if *i > 0 => Some(*i as u64),
+                            Some(Variant::Int(i)) if i > 0 => Some(i as u64),
                             _ => None,
                         };
                         Some(Self::Signal { name, object_id })
                     }
                     "frames" => {
                         let n = match d.get("count") {
-                            Some(Variant::Int(i)) => (*i).max(0) as u32,
-                            Some(Variant::Float(f)) => (*f).max(0.0) as u32,
+                            Some(Variant::Int(i)) => i.max(0) as u32,
+                            Some(Variant::Float(f)) => f.max(0.0) as u32,
                             _ => 1,
                         };
                         Some(Self::Frames {
@@ -130,7 +130,7 @@ impl AwaitTarget {
         let mut d = Dictionary::new();
         d.insert("__await_kind", Variant::String("timer".into()));
         d.insert("seconds", Variant::Float(seconds));
-        Variant::Dictionary(d)
+        Variant::Dictionary(d.into())
     }
 
     /// Build the dictionary form of a signal awaitable.
@@ -138,7 +138,7 @@ impl AwaitTarget {
         let mut d = Dictionary::new();
         d.insert("__await_kind", Variant::String("signal".into()));
         d.insert("name", Variant::String(name.into()));
-        Variant::Dictionary(d)
+        Variant::Dictionary(d.into())
     }
 
     /// Like [`signal_variant`](Self::signal_variant) but bound to the object
@@ -149,7 +149,7 @@ impl AwaitTarget {
         d.insert("__await_kind", Variant::String("signal".into()));
         d.insert("name", Variant::String(name.into()));
         d.insert("object_id", Variant::Int(object_id as i64));
-        Variant::Dictionary(d)
+        Variant::Dictionary(d.into())
     }
 
     /// Build the dictionary form of a frames awaitable.
@@ -157,7 +157,7 @@ impl AwaitTarget {
         let mut d = Dictionary::new();
         d.insert("__await_kind", Variant::String("frames".into()));
         d.insert("count", Variant::Int(count));
-        Variant::Dictionary(d)
+        Variant::Dictionary(d.into())
     }
 }
 

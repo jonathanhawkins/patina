@@ -202,6 +202,7 @@ fn read_exceptions(tree: &SceneTree, node_id: NodeId) -> Vec<u64> {
     tree.get_node(node_id)
         .map(|n| match n.get_property("_exceptions") {
             Variant::Array(items) => items
+                .to_vec()
                 .iter()
                 .filter_map(|v| match v {
                     Variant::Int(i) => Some(*i as u64),
@@ -216,7 +217,7 @@ fn read_exceptions(tree: &SceneTree, node_id: NodeId) -> Vec<u64> {
 fn write_exceptions(tree: &mut SceneTree, node_id: NodeId, raws: &[u64]) {
     let arr: Vec<Variant> = raws.iter().map(|&r| Variant::Int(r as i64)).collect();
     if let Some(node) = tree.get_node_mut(node_id) {
-        node.set_property("_exceptions", Variant::Array(arr));
+        node.set_property("_exceptions", Variant::Array(arr.into()));
     }
 }
 

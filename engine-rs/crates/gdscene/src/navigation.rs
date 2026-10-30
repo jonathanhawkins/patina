@@ -33,6 +33,7 @@ pub(crate) fn navmesh_polygon_indices(
 ) -> Vec<Vec<usize>> {
     match node.get_property("__navmesh_polygons__") {
         gdvariant::Variant::Array(entries) => entries
+            .to_vec()
             .iter()
             .filter_map(|entry| match entry {
                 gdvariant::Variant::PackedInt32Array(ids) => Some(
@@ -3894,10 +3895,13 @@ mod tests {
         );
         malformed.set_property(
             "__navmesh_polygons__",
-            Variant::Array(vec![
-                Variant::PackedInt32Array(vec![0, 1, 9]),
-                Variant::PackedInt32Array(vec![0, 1, 2]),
-            ]),
+            Variant::Array(
+                vec![
+                    Variant::PackedInt32Array(vec![0, 1, 9]),
+                    Variant::PackedInt32Array(vec![0, 1, 2]),
+                ]
+                .into(),
+            ),
         );
         let polys = navmesh_polygons_local(&malformed);
         assert_eq!(

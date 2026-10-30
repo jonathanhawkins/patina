@@ -135,12 +135,12 @@ fn the_collection_defaults_are_populated() {
     );
     assert_eq!(
         pairs.get("("),
-        Some(&Variant::String(")".to_string())),
+        Some(Variant::String(")".to_string())),
         "a bracket closes its partner"
     );
     assert_eq!(
         pairs.get("\""),
-        Some(&Variant::String("\"".to_string())),
+        Some(Variant::String("\"".to_string())),
         "a quote closes itself"
     );
 
@@ -152,7 +152,8 @@ fn the_collection_defaults_are_populated() {
         vec![
             Variant::String("' '".to_string()),
             Variant::String("\" \"".to_string()),
-        ],
+        ]
+        .into(),
         "each entry is `<start> <end>`, so a lone quote character would be wrong"
     );
 

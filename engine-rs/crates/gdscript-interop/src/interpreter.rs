@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use gdvariant::{CallableRef, Dictionary, ResourceRef, Variant};
+use gdvariant::{CallableRef, ContainerError, Dictionary, ResourceRef, SharedArray, Variant};
 
 use crate::bindings::{
     MethodFlags, MethodInfo, SceneAccess, ScriptError, ScriptInstance, ScriptPropertyInfo,
@@ -1035,8 +1035,10 @@ impl Interpreter {
                 body,
             } => {
                 let iter_val = self.eval_expr(iterable)?;
-                let items = match iter_val {
-                    Variant::Array(a) => a,
+                // A snapshot, as before the pat-s3rrv.8 flip: the body may
+                // mutate the array it iterates.
+                let items: Vec<Variant> = match iter_val {
+                    Variant::Array(a) => a.to_vec(),
                     // Godot iterates an int as range(n): 0, 1, ..., n-1
                     // (empty when n <= 0). Mirrors `for i in 5:`.
                     Variant::Int(n) => (0..n).map(Variant::Int).collect(),
@@ -1628,7 +1630,7 @@ impl Interpreter {
                         return Ok(None);
                     }
                     let mut bindings = vec![];
-                    for (pat, val) in fixed.iter().zip(arr.iter()) {
+                    for (pat, val) in fixed.iter().zip(arr.to_vec().iter()) {
                         match self.match_pattern(pat, val)? {
                             Some(b) => bindings.extend(b),
                             None => return Ok(None),
@@ -1640,7 +1642,7 @@ impl Interpreter {
                         return Ok(None);
                     }
                     let mut bindings = vec![];
-                    for (pat, val) in patterns.iter().zip(arr.iter()) {
+                    for (pat, val) in patterns.iter().zip(arr.to_vec().iter()) {
                         match self.match_pattern(pat, val)? {
                             Some(b) => bindings.extend(b),
                             None => return Ok(None),
@@ -2298,7 +2300,7 @@ impl Interpreter {
         crate::script_backtrace::insert(raw, backtrace);
         Ok(Variant::Array(vec![Variant::ObjectId(
             gdcore::id::ObjectId::from_raw(raw),
-        )]))
+        )].into()))
     }
 
     fn call_xr_server_static(
@@ -2406,7 +2408,7 @@ impl Interpreter {
                         );
                     }
                 });
-                Ok(Variant::Dictionary(d))
+                Ok(Variant::Dictionary(d.into()))
             }
             other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "XRServer has no method '{other}'"
@@ -2572,19 +2574,19 @@ impl Interpreter {
                     if let Some(Variant::Dictionary(d)) = args.get(1) {
                         let key = |k: &str| Variant::String(k.to_string());
                         if let Some(Variant::Bool(b)) = d.get(key("ordered")) {
-                            config.ordered = *b;
+                            config.ordered = b;
                         }
                         if let Some(Variant::Bool(b)) = d.get(key("negotiated")) {
-                            config.negotiated = *b;
+                            config.negotiated = b;
                         }
                         if let Some(Variant::Int(v)) = d.get(key("maxRetransmits")) {
-                            config.max_retransmits = Some(*v);
+                            config.max_retransmits = Some(v);
                         }
                         if let Some(Variant::Int(v)) = d.get(key("maxPacketLifetime")) {
-                            config.max_packet_life_time = Some(*v);
+                            config.max_packet_life_time = Some(v);
                         }
                         if let Some(Variant::Int(v)) = d.get(key("id")) {
-                            config.id = Some(*v);
+                            config.id = Some(v);
                         }
                         if let Some(Variant::String(v)) = d.get(key("protocol")) {
                             config.protocol = v.clone();
@@ -3323,7 +3325,7 @@ impl Interpreter {
             "parse" => {
                 let code = args.first().map(arg_str).unwrap_or_default();
                 let input_names: Vec<String> = match args.get(1) {
-                    Some(Variant::Array(items)) => items.iter().map(arg_str).collect(),
+                    Some(Variant::Array(items)) => items.to_vec().iter().map(arg_str).collect(),
                     Some(Variant::PackedStringArray(items)) => items.clone(),
                     _ => Vec::new(),
                 };
@@ -3356,7 +3358,7 @@ impl Interpreter {
 
             "execute" => {
                 let inputs: Vec<Variant> = match args.first() {
-                    Some(Variant::Array(items)) => items.clone(),
+                    Some(Variant::Array(items)) => items.clone().to_vec(),
                     _ => Vec::new(),
                 };
 
@@ -4699,7 +4701,7 @@ impl Interpreter {
                     .iter()
                     .map(|e| self.eval_expr(e))
                     .collect::<Result<_, _>>()?;
-                Ok(Variant::Array(values))
+                Ok(Variant::Array(values.into()))
             }
 
             Expr::DictLiteral(entries) => {
@@ -4711,7 +4713,7 @@ impl Interpreter {
                     // are Variant-keyed, e.g. `{1: "a", Vector2(): "b"}`).
                     map.insert(key, val);
                 }
-                Ok(Variant::Dictionary(map))
+                Ok(Variant::Dictionary(map.into()))
             }
 
             Expr::SelfRef => {
@@ -4726,7 +4728,7 @@ impl Interpreter {
                 if let Some(ref inst) = self.self_instance {
                     Ok(Variant::Dictionary(Dictionary::from(
                         inst.properties.clone(),
-                    )))
+                    ).into()))
                 } else {
                     Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "'self' used outside of a class instance".into(),
@@ -5175,7 +5177,7 @@ impl Interpreter {
             BinOp::Le => self.binary_cmp(lhs, rhs, |o| o.is_le()),
             BinOp::Ge => self.binary_cmp(lhs, rhs, |o| o.is_ge()),
             BinOp::In => match rhs {
-                Variant::Array(a) => Ok(Variant::Bool(a.iter().any(|v| variant_eq(v, lhs)))),
+                Variant::Array(a) => Ok(Variant::Bool(a.to_vec().iter().any(|v| variant_eq(v, lhs)))),
                 Variant::Dictionary(d) => Ok(Variant::Bool(d.contains_key(lhs))),
                 _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                     "cannot use 'in' with {}",
@@ -5320,7 +5322,7 @@ impl Interpreter {
     fn binary_mod(&self, lhs: &Variant, rhs: &Variant) -> Result<Variant, RuntimeError> {
         if let Variant::String(fmt) = lhs {
             let values: Vec<Variant> = match rhs {
-                Variant::Array(a) => a.clone(),
+                Variant::Array(a) => a.clone().to_vec(),
                 other => vec![other.clone()],
             };
             return Ok(Variant::String(string_format(fmt, &values)));
@@ -5739,7 +5741,7 @@ impl Interpreter {
                             crate::coroutine::AwaitTarget::signal_variant(&signal_name),
                         );
                         d.insert("time_left", Variant::Float(secs));
-                        return Ok(Some(Variant::Dictionary(d)));
+                        return Ok(Some(Variant::Dictionary(d.into())));
                     }
                 }
                 Ok(Some(crate::coroutine::AwaitTarget::timer_variant(secs)))
@@ -5942,7 +5944,7 @@ impl Interpreter {
                 1 => match &args[0] {
                     Variant::Int(n) => {
                         let arr: Vec<Variant> = (0..*n).map(Variant::Int).collect();
-                        Ok(Some(Variant::Array(arr)))
+                        Ok(Some(Variant::Array(arr.into())))
                     }
                     _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "range() argument must be int".into(),
@@ -5951,7 +5953,7 @@ impl Interpreter {
                 2 => match (&args[0], &args[1]) {
                     (Variant::Int(start), Variant::Int(end)) => {
                         let arr: Vec<Variant> = (*start..*end).map(Variant::Int).collect();
-                        Ok(Some(Variant::Array(arr)))
+                        Ok(Some(Variant::Array(arr.into())))
                     }
                     _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "range() arguments must be int".into(),
@@ -5977,7 +5979,7 @@ impl Interpreter {
                                 i += step;
                             }
                         }
-                        Ok(Some(Variant::Array(arr)))
+                        Ok(Some(Variant::Array(arr.into())))
                     }
                     _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "range() arguments must be int".into(),
@@ -6528,10 +6530,10 @@ impl Interpreter {
                             ),
                         );
                         d.insert("source", Variant::String(String::new()));
-                        Variant::Dictionary(d)
+                        Variant::Dictionary(d.into())
                     })
                     .collect();
-                Ok(Some(Variant::Array(frames)))
+                Ok(Some(Variant::Array(frames.into())))
             }
             // `print_stack()` prints the same frames rather than returning them.
             "print_stack" => {
@@ -6727,7 +6729,7 @@ impl Interpreter {
                         .iter()
                         .map(|id| Variant::ObjectId(gdcore::id::ObjectId::from_raw(*id)))
                         .collect();
-                    Ok(Some(Variant::Array(arr)))
+                    Ok(Some(Variant::Array(arr.into())))
                 } else {
                     Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "get_children() requires scene access".into(),
@@ -8372,7 +8374,7 @@ impl Interpreter {
                 // A plain Array of Vector2 is what an untyped GDScript literal
                 // (`[Vector2(0,0), …]`) evaluates to.
                 Some(Variant::Array(items)) => items
-                    .iter()
+                    .to_vec().iter()
                     .filter_map(|i| match i {
                         Variant::Vector2(v) => Some(*v),
                         _ => None,
@@ -8503,7 +8505,7 @@ impl Interpreter {
                 let color = match args.get(2) {
                     Some(Variant::PackedColorArray(c)) if !c.is_empty() => c[0],
                     Some(Variant::Array(items)) => items
-                        .iter()
+                        .to_vec().iter()
                         .find_map(|i| match i {
                             Variant::Color(c) => Some(*c),
                             _ => None,
@@ -8998,7 +9000,7 @@ impl Interpreter {
                     "travel",
                     Variant::Vector2(gdcore::math::Vector2::new(travel.0, travel.1)),
                 );
-                Ok(Variant::Dictionary(d))
+                Ok(Variant::Dictionary(d.into()))
             }
             _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                 format!("PhysicsServer2D.{method}"),
@@ -9146,7 +9148,7 @@ impl Interpreter {
                             .into(),
                     )));
                 };
-                let get = |k: &str| dict.get(Variant::String(k.to_string())).cloned();
+                let get = |k: &str| dict.get(Variant::String(k.to_string()));
                 let class = match get("class") {
                     Some(Variant::String(s)) => s,
                     // An event naming an action is an InputEventAction whether
@@ -10241,7 +10243,7 @@ impl Interpreter {
             match args.get(index) {
                 Some(Variant::Int(code)) => Ok(InputEventSpec::key(*code)),
                 Some(Variant::Dictionary(d)) => {
-                    InputEventSpec::from_dictionary(d).ok_or_else(|| {
+                    InputEventSpec::from_dictionary(&d.to_dict()).ok_or_else(|| {
                         type_err(format!(
                             "InputMap.{method}() event dictionary needs a keycode, \
                          button_index or axis entry"
@@ -10421,24 +10423,23 @@ impl Interpreter {
         }
     }
 
-    /// Call a method on a value (e.g. array.push_back, array.size, etc.)
-    /// Clones the array, applies `f` (which mutates it and yields a return
-    /// value), then writes the whole array back to its place. This is how every
-    /// mutating Array method (`append`, `sort`, `insert`, …) persists through
-    /// the general lvalue write path, so `self.items.append(x)` and
-    /// `grid[i].append(x)` work.
-    fn array_mutate<F>(
-        &mut self,
-        arr: &[Variant],
-        object_expr: &Expr,
-        f: F,
-    ) -> Result<Variant, RuntimeError>
+    /// Applies a mutating Array method (`append`, `sort`, `insert`, …) to the
+    /// array's SHARED storage, so every reference to it observes the change:
+    /// `var b = a; b.append(1)` shows in `a`, and an array passed into a
+    /// function is mutated for the caller (pat-s3rrv.8). There is no write-back
+    /// to the place expression — the handle IS the storage.
+    ///
+    /// `f` runs on a snapshot and the result is stored into the same handle,
+    /// rather than running under the write lock, because an array may contain
+    /// itself (`a.append(a)`): a sort comparing nested elements would otherwise
+    /// re-lock the array it is mutating.
+    fn array_mutate<F>(arr: &SharedArray, f: F) -> Result<Variant, RuntimeError>
     where
         F: FnOnce(&mut Vec<Variant>) -> Variant,
     {
         let mut items = arr.to_vec();
         let ret = f(&mut items);
-        self.write_place(object_expr, Variant::Array(items))?;
+        arr.with_mut(|a| *a = items).map_err(container_error)?;
         Ok(ret)
     }
 
@@ -10554,7 +10555,7 @@ impl Interpreter {
         };
 
         let nodes: Vec<Variant> = match doc.get_property("nodes") {
-            Some(Variant::Array(a)) => a.clone(),
+            Some(Variant::Array(a)) => a.clone().to_vec(),
             _ => Vec::new(),
         };
 
@@ -10576,7 +10577,7 @@ impl Interpreter {
             let access = self.scene_access.as_mut().ok_or_else(no_access)?;
             let id = access.create_node(class, &name).ok_or_else(no_access)?;
             if let Some(Variant::Int(mesh)) = d.get("mesh") {
-                access.set_node_property(id, "gltf_mesh_index", Variant::Int(*mesh));
+                access.set_node_property(id, "gltf_mesh_index", Variant::Int(mesh));
             }
             created.push(id);
         }
@@ -10594,9 +10595,9 @@ impl Interpreter {
             let Some(&parent) = created.get(i) else {
                 continue;
             };
-            for kid in kids {
+            for kid in kids.to_vec() {
                 let Variant::Int(ki) = kid else { continue };
-                let ki = *ki as usize;
+                let ki = ki as usize;
                 if let Some(&child) = created.get(ki) {
                     let access = self.scene_access.as_mut().ok_or_else(no_access)?;
                     access.add_child(parent, child);
@@ -11079,10 +11080,10 @@ impl Interpreter {
                                         name: name.clone(),
                                     },
                                 );
-                                Variant::Dictionary(d)
+                                Variant::Dictionary(d.into())
                             })
                             .collect();
-                        Ok(Variant::Array(conns))
+                        Ok(Variant::Array(conns.into()))
                     }
                     "has_connections" => Ok(Variant::Bool(
                         !access.signal_connections(source, name).is_empty(),
@@ -11105,22 +11106,22 @@ impl Interpreter {
                 "is_empty" => Ok(Variant::Bool(arr.is_empty())),
                 "push_back" | "append" => {
                     Self::require_args(method, args, 1)?;
-                    self.array_mutate(arr, object_expr, |a| {
+                    Self::array_mutate(arr, |a| {
                         a.push(args[0].clone());
                         Variant::Nil
                     })
                 }
                 "push_front" => {
                     Self::require_args("push_front", args, 1)?;
-                    self.array_mutate(arr, object_expr, |a| {
+                    Self::array_mutate(arr, |a| {
                         a.insert(0, args[0].clone());
                         Variant::Nil
                     })
                 }
                 "pop_back" => {
-                    self.array_mutate(arr, object_expr, |a| a.pop().unwrap_or(Variant::Nil))
+                    Self::array_mutate(arr, |a| a.pop().unwrap_or(Variant::Nil))
                 }
-                "pop_front" => self.array_mutate(arr, object_expr, |a| {
+                "pop_front" => Self::array_mutate(arr, |a| {
                     if a.is_empty() {
                         Variant::Nil
                     } else {
@@ -11130,7 +11131,7 @@ impl Interpreter {
                 "pop_at" => {
                     Self::require_args("pop_at", args, 1)?;
                     let i = to_int(&args[0])?;
-                    self.array_mutate(arr, object_expr, |a| {
+                    Self::array_mutate(arr, |a| {
                         let idx = if i < 0 { i + a.len() as i64 } else { i };
                         if idx >= 0 && (idx as usize) < a.len() {
                             a.remove(idx as usize)
@@ -11142,31 +11143,31 @@ impl Interpreter {
                 "remove_at" => {
                     Self::require_args("remove_at", args, 1)?;
                     let idx = to_int(&args[0])?;
-                    self.array_mutate(arr, object_expr, |a| {
+                    Self::array_mutate(arr, |a| {
                         if idx >= 0 && (idx as usize) < a.len() {
                             a.remove(idx as usize);
                         }
                         Variant::Nil
                     })
                 }
-                "front" => Ok(arr.first().cloned().unwrap_or(Variant::Nil)),
-                "back" => Ok(arr.last().cloned().unwrap_or(Variant::Nil)),
-                "clear" => self.array_mutate(arr, object_expr, |a| {
+                "front" => Ok(arr.to_vec().first().cloned().unwrap_or(Variant::Nil)),
+                "back" => Ok(arr.to_vec().last().cloned().unwrap_or(Variant::Nil)),
+                "clear" => Self::array_mutate(arr, |a| {
                     a.clear();
                     Variant::Nil
                 }),
-                "sort" => self.array_mutate(arr, object_expr, |a| {
+                "sort" => Self::array_mutate(arr, |a| {
                     a.sort_by(variant_cmp);
                     Variant::Nil
                 }),
-                "reverse" => self.array_mutate(arr, object_expr, |a| {
+                "reverse" => Self::array_mutate(arr, |a| {
                     a.reverse();
                     Variant::Nil
                 }),
                 "find" => {
                     Self::require_args("find", args, 1)?;
                     Ok(Variant::Int(
-                        arr.iter()
+                        arr.to_vec().iter()
                             .position(|v| variant_eq(v, &args[0]))
                             .map(|idx| idx as i64)
                             .unwrap_or(-1),
@@ -11175,7 +11176,7 @@ impl Interpreter {
                 "rfind" => {
                     Self::require_args("rfind", args, 1)?;
                     Ok(Variant::Int(
-                        arr.iter()
+                        arr.to_vec().iter()
                             .rposition(|v| variant_eq(v, &args[0]))
                             .map(|idx| idx as i64)
                             .unwrap_or(-1),
@@ -11184,16 +11185,16 @@ impl Interpreter {
                 "count" => {
                     Self::require_args("count", args, 1)?;
                     Ok(Variant::Int(
-                        arr.iter().filter(|v| variant_eq(v, &args[0])).count() as i64,
+                        arr.to_vec().iter().filter(|v| variant_eq(v, &args[0])).count() as i64,
                     ))
                 }
                 "has" => {
                     Self::require_args("has", args, 1)?;
-                    Ok(Variant::Bool(arr.iter().any(|v| variant_eq(v, &args[0]))))
+                    Ok(Variant::Bool(arr.to_vec().iter().any(|v| variant_eq(v, &args[0]))))
                 }
                 "erase" => {
                     Self::require_args("erase", args, 1)?;
-                    self.array_mutate(arr, object_expr, |a| {
+                    Self::array_mutate(arr, |a| {
                         if let Some(pos) = a.iter().position(|v| variant_eq(v, &args[0])) {
                             a.remove(pos);
                         }
@@ -11203,7 +11204,7 @@ impl Interpreter {
                 "insert" => {
                     Self::require_args("insert", args, 2)?;
                     let idx = to_int(&args[0])?.max(0) as usize;
-                    self.array_mutate(arr, object_expr, |a| {
+                    Self::array_mutate(arr, |a| {
                         if idx <= a.len() {
                             a.insert(idx, args[1].clone());
                         }
@@ -11217,73 +11218,78 @@ impl Interpreter {
                             "append_array() argument must be an Array".into(),
                         )));
                     };
-                    self.array_mutate(arr, object_expr, |a| {
-                        a.extend(other.iter().cloned());
+                    Self::array_mutate(arr, |a| {
+                        a.extend(other.to_vec().iter().cloned());
                         Variant::Nil
                     })
                 }
                 "resize" => {
                     Self::require_args("resize", args, 1)?;
                     let n = to_int(&args[0])?.max(0) as usize;
-                    self.array_mutate(arr, object_expr, |a| {
+                    Self::array_mutate(arr, |a| {
                         a.resize(n, Variant::Nil);
                         Variant::Int(0)
                     })
                 }
                 "fill" => {
                     Self::require_args("fill", args, 1)?;
-                    self.array_mutate(arr, object_expr, |a| {
+                    Self::array_mutate(arr, |a| {
                         for e in a.iter_mut() {
                             *e = args[0].clone();
                         }
                         Variant::Nil
                     })
                 }
+                // Typed and read-only state (pat-s3rrv.8). Each Array handle
+                // carries it, so these answer for THIS array and every alias of
+                // it. `get_typed_builtin()` is TYPE_NIL for an untyped array.
+                "is_typed" => Ok(Variant::Bool(arr.is_typed())),
+                "get_typed_builtin" => Ok(Variant::Int(arr.typed_builtin().map_or(0, crate::global_constants::variant_type_code_of))),
+                "get_typed_class_name" => Ok(Variant::StringName(arr.typed_class_name().into())),
+                "get_typed_script" => Ok(arr.typed_script()),
+                "is_same_typed" => {
+                    Self::require_args("is_same_typed", args, 1)?;
+                    match &args[0] {
+                        Variant::Array(other) => Ok(Variant::Bool(arr.is_same_typed(other))),
+                        other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "Array.is_same_typed() takes an Array, got {other:?}"
+                        )))),
+                    }
+                }
+                "make_read_only" => {
+                    arr.make_read_only();
+                    Ok(Variant::Nil)
+                }
+                "is_read_only" => Ok(Variant::Bool(arr.is_read_only())),
+                "duplicate_deep" => Ok(Variant::Array(arr.duplicate_deep())),
                 // `assign(array)` copies another array's CONTENTS into this
                 // one (`Array.xml`: "Assigns elements of another array into the
-                // array. Resizes the array to match").
-                //
-                // ⚠️ Today this is observationally identical to `a = b`, because
-                // Array is still a value type. Post-flip (pat-s3rrv.8) the two
-                // diverge, and this method is the reason the distinction exists:
-                // `a = b` makes `a` refer to `b`'s storage, while `assign` keeps
-                // `a`'s identity and overwrites what it holds, so every other
-                // reference to `a` observes the new contents. It is written
-                // through `array_mutate` deliberately, so the flip rewrites it
-                // in the same sweep as `push_back`/`clear` rather than needing a
-                // treatment of its own.
+                // array. Resizes the array to match"). Unlike `a = b`, which
+                // makes `a` refer to `b`'s storage, `assign` keeps `a`'s
+                // identity, so every other reference to `a` observes the new
+                // contents — and a typed or read-only `a` can refuse them.
                 "assign" => {
                     Self::require_args("assign", args, 1)?;
-                    let src = match &args[0] {
-                        Variant::Array(other) => other.clone(),
-                        other => {
-                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                                format!("Array.assign() takes an Array, got {other:?}"),
-                            )))
+                    match &args[0] {
+                        Variant::Array(src) => {
+                            arr.assign(src).map_err(container_error)?;
+                            Ok(Variant::Nil)
                         }
-                    };
-                    self.array_mutate(arr, object_expr, |a| {
-                        *a = src;
-                        Variant::Nil
-                    })
+                        other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "Array.assign() takes an Array, got {other:?}"
+                        )))),
+                    }
                 }
                 "duplicate" => {
-                    // ⚠️ `deep` is accepted and DISCARDED here, and that is
-                    // invisible only because Array is a value type: `arr.clone()`
-                    // already deep-copies every nested container, so shallow and
-                    // deep coincide. Godot's DEFAULT is the shallow one, where
-                    // nested Array/Dictionary/Resource elements are *shared* with
-                    // the original (`Array.xml`). Once pat-s3rrv.8 makes Array a
-                    // handle this arm is wrong in the default case: `duplicate()`
-                    // must copy the outer array and SHARE the nested ones, and
-                    // only `duplicate(true)` may recurse. Contrast the Dictionary
-                    // arm further down, which already threads `deep` through to
-                    // `Dictionary::duplicate`.
-                    Ok(Variant::Array(arr.clone()))
+                    // A NEW handle. Godot's default is shallow: nested
+                    // Array/Dictionary elements stay SHARED with the original
+                    // (`Array.xml`); only `duplicate(true)` recurses.
+                    let deep = matches!(args.first(), Some(Variant::Bool(true)));
+                    Ok(Variant::Array(arr.duplicate(deep)))
                 }
                 "max" => {
                     let mut best: Option<Variant> = None;
-                    for v in arr {
+                    for v in arr.to_vec().iter() {
                         best = Some(match best {
                             None => v.clone(),
                             Some(b) => {
@@ -11299,7 +11305,7 @@ impl Interpreter {
                 }
                 "min" => {
                     let mut best: Option<Variant> = None;
-                    for v in arr {
+                    for v in arr.to_vec().iter() {
                         best = Some(match best {
                             None => v.clone(),
                             Some(b) => {
@@ -11314,6 +11320,8 @@ impl Interpreter {
                     Ok(best.unwrap_or(Variant::Nil))
                 }
                 "bsearch" => {
+                    // Snapshot: the callable may mutate the array mid-scan.
+                    let arr = arr.to_vec();
                     Self::require_args("bsearch", args, 1)?;
                     let mut lo = 0usize;
                     let mut hi = arr.len();
@@ -11328,6 +11336,8 @@ impl Interpreter {
                     Ok(Variant::Int(lo as i64))
                 }
                 "pick_random" => {
+                    // Snapshot: the callable may mutate the array mid-scan.
+                    let arr = arr.to_vec();
                     if arr.is_empty() {
                         Ok(Variant::Nil)
                     } else {
@@ -11335,7 +11345,7 @@ impl Interpreter {
                         Ok(arr[idx].clone())
                     }
                 }
-                "shuffle" => self.array_mutate(arr, object_expr, |a| {
+                "shuffle" => Self::array_mutate(arr, |a| {
                     let n = a.len();
                     if n > 1 {
                         for i in (1..n).rev() {
@@ -11362,22 +11372,22 @@ impl Interpreter {
                     } else {
                         1
                     };
-                    Ok(Variant::Array(array_slice(arr, begin, end, step)?))
+                    Ok(Variant::Array(array_slice(&arr.to_vec(), begin, end, step)?.into()))
                 }
                 "map" => {
                     Self::require_args("map", args, 1)?;
                     let callable = extract_callable(&args[0])?;
                     let mut out = Vec::with_capacity(arr.len());
-                    for elem in arr {
+                    for elem in arr.to_vec().iter() {
                         out.push(self.invoke_callable(&callable, &[elem.clone()])?);
                     }
-                    Ok(Variant::Array(out))
+                    Ok(Variant::Array(out.into()))
                 }
                 "filter" => {
                     Self::require_args("filter", args, 1)?;
                     let callable = extract_callable(&args[0])?;
                     let mut out = Vec::new();
-                    for elem in arr {
+                    for elem in arr.to_vec().iter() {
                         if self
                             .invoke_callable(&callable, &[elem.clone()])?
                             .is_truthy()
@@ -11385,12 +11395,12 @@ impl Interpreter {
                             out.push(elem.clone());
                         }
                     }
-                    Ok(Variant::Array(out))
+                    Ok(Variant::Array(out.into()))
                 }
                 "any" => {
                     Self::require_args("any", args, 1)?;
                     let callable = extract_callable(&args[0])?;
-                    for elem in arr {
+                    for elem in arr.to_vec().iter() {
                         if self
                             .invoke_callable(&callable, &[elem.clone()])?
                             .is_truthy()
@@ -11403,7 +11413,7 @@ impl Interpreter {
                 "all" => {
                     Self::require_args("all", args, 1)?;
                     let callable = extract_callable(&args[0])?;
-                    for elem in arr {
+                    for elem in arr.to_vec().iter() {
                         if !self
                             .invoke_callable(&callable, &[elem.clone()])?
                             .is_truthy()
@@ -11414,6 +11424,8 @@ impl Interpreter {
                     Ok(Variant::Bool(true))
                 }
                 "reduce" => {
+                    // Snapshot: the callable may mutate the array mid-scan.
+                    let arr = arr.to_vec();
                     if args.is_empty() || args.len() > 2 {
                         return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                             "reduce() takes 1 or 2 arguments".into(),
@@ -11452,7 +11464,7 @@ impl Interpreter {
                     if from < 0 || arr.is_empty() {
                         return Ok(Variant::Int(-1));
                     }
-                    for (i, elem) in arr.iter().enumerate().skip(from as usize) {
+                    for (i, elem) in arr.to_vec().iter().enumerate().skip(from as usize) {
                         if self
                             .invoke_callable(&callable, &[elem.clone()])?
                             .is_truthy()
@@ -11463,6 +11475,8 @@ impl Interpreter {
                     Ok(Variant::Int(-1))
                 }
                 "rfind_custom" => {
+                    // Snapshot: the callable may mutate the array mid-scan.
+                    let arr = arr.to_vec();
                     Self::require_args_range("rfind_custom", args, 1, 2)?;
                     let callable = extract_callable(&args[0])?;
                     if arr.is_empty() {
@@ -11494,6 +11508,8 @@ impl Interpreter {
                     Ok(Variant::Int(-1))
                 }
                 "bsearch_custom" => {
+                    // Snapshot: the callable may mutate the array mid-scan.
+                    let arr = arr.to_vec();
                     Self::require_args_range("bsearch_custom", args, 2, 3)?;
                     let callable = extract_callable(&args[1])?;
                     // `before` picks which end of a run of equal elements the
@@ -11548,7 +11564,7 @@ impl Interpreter {
                             }
                         }
                     }
-                    self.write_place(object_expr, Variant::Array(items))?;
+                    arr.with_mut(|a| *a = items).map_err(container_error)?;
                     Ok(Variant::Nil)
                 }
                 _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
@@ -11593,7 +11609,7 @@ impl Interpreter {
                             .map(|pp| Variant::String(pp.to_string()))
                             .collect()
                     };
-                    Ok(Variant::Array(parts))
+                    Ok(Variant::Array(parts.into()))
                 }
                 "rsplit" => {
                     if args.is_empty() {
@@ -11611,13 +11627,13 @@ impl Interpreter {
                             .map(|pp| Variant::String(pp.to_string()))
                             .collect()
                     };
-                    Ok(Variant::Array(parts))
+                    Ok(Variant::Array(parts.into()))
                 }
                 "join" => {
                     Self::require_args("join", args, 1)?;
                     match &args[0] {
                         Variant::Array(a) => {
-                            let parts: Vec<String> = a.iter().map(|v| format!("{v}")).collect();
+                            let parts: Vec<String> = a.to_vec().iter().map(|v| format!("{v}")).collect();
                             Ok(Variant::String(parts.join(s)))
                         }
                         // Godot's signature is literally
@@ -11987,37 +12003,59 @@ impl Interpreter {
                         )));
                     }
                     match &args[0] {
-                        Variant::Array(keys) => Ok(Variant::Bool(d.has_all(keys))),
+                        Variant::Array(keys) => Ok(Variant::Bool(d.to_dict().has_all(&keys.to_vec()))),
                         _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                             "has_all() arg must be an array".into(),
                         ))),
                     }
                 }
-                "keys" => Ok(Variant::Array(d.keys().cloned().collect())),
-                "values" => Ok(Variant::Array(d.values().cloned().collect())),
+                "keys" => Ok(Variant::Array(d.to_dict().keys().cloned().collect())),
+                "values" => Ok(Variant::Array(d.to_dict().values().cloned().collect())),
                 "find_key" => {
                     if args.len() != 1 {
                         return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                             "find_key() takes 1 argument".into(),
                         )));
                     }
-                    Ok(d.find_key(&args[0]))
+                    Ok(d.to_dict().find_key(&args[0]))
                 }
+                // Typed and read-only state (pat-s3rrv.8): Godot 4.4 typed
+                // dictionaries carry a key type and a value type.
+                "is_typed" => Ok(Variant::Bool(d.is_typed())),
+                "is_typed_key" => Ok(Variant::Bool(d.is_typed_key())),
+                "is_typed_value" => Ok(Variant::Bool(d.is_typed_value())),
+                "get_typed_key_builtin" => Ok(Variant::Int(d.typed_key_builtin().map_or(0, crate::global_constants::variant_type_code_of))),
+                "get_typed_value_builtin" => Ok(Variant::Int(d.typed_value_builtin().map_or(0, crate::global_constants::variant_type_code_of))),
+                "get_typed_key_class_name" => Ok(Variant::StringName(d.typed_key_class_name().into())),
+                "get_typed_value_class_name" => Ok(Variant::StringName(d.typed_value_class_name().into())),
+                "is_same_typed" | "is_same_typed_key" | "is_same_typed_value" => {
+                    Self::require_args(method, args, 1)?;
+                    match &args[0] {
+                        Variant::Dictionary(other) => Ok(Variant::Bool(match method {
+                            "is_same_typed" => d.is_same_typed(other),
+                            "is_same_typed_key" => d.is_same_typed_key(other),
+                            _ => d.is_same_typed_value(other),
+                        })),
+                        other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "Dictionary.{method}() takes a Dictionary, got {other:?}"
+                        )))),
+                    }
+                }
+                "make_read_only" => {
+                    d.make_read_only();
+                    Ok(Variant::Nil)
+                }
+                "is_read_only" => Ok(Variant::Bool(d.is_read_only())),
+                "duplicate_deep" => Ok(Variant::Dictionary(d.duplicate_deep())),
                 // `assign(dictionary)` copies another dictionary's CONTENTS
-                // into this one (`Dictionary.xml`). Same story as `Array.assign`
-                // above: indistinguishable from `d = other` while Dictionary is
-                // a value type, and the entire point of the method once
-                // pat-s3rrv.8 lands.
-                //
-                // It deliberately does not read `d` — assign replaces the
-                // contents wholesale, so there is nothing of the old dictionary
-                // left to preserve.
+                // into this one (`Dictionary.xml`), keeping `d`'s identity so
+                // every alias of `d` sees them. Unlike `d = other`, which makes
+                // `d` refer to `other`'s storage.
                 "assign" => {
                     Self::require_args("assign", args, 1)?;
                     match &args[0] {
                         Variant::Dictionary(src) => {
-                            let copy = src.clone();
-                            self.write_place(object_expr, Variant::Dictionary(copy))?;
+                            d.assign(src).map_err(container_error)?;
                             Ok(Variant::Nil)
                         }
                         other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
@@ -12035,21 +12073,11 @@ impl Interpreter {
                             "erase() takes 1 argument".into(),
                         )));
                     }
-                    let mut c = self.eval_expr(object_expr)?;
-                    let existed = if let Variant::Dictionary(ref mut dm) = c {
-                        dm.remove(&args[0]).is_some()
-                    } else {
-                        false
-                    };
-                    self.write_place(object_expr, c)?;
+                    let existed = d.remove(args[0].clone()).map_err(container_error)?.is_some();
                     Ok(Variant::Bool(existed))
                 }
                 "clear" => {
-                    let mut c = self.eval_expr(object_expr)?;
-                    if let Variant::Dictionary(ref mut dm) = c {
-                        dm.clear();
-                    }
-                    self.write_place(object_expr, c)?;
+                    d.clear().map_err(container_error)?;
                     Ok(Variant::Nil)
                 }
                 "merge" => {
@@ -12061,11 +12089,10 @@ impl Interpreter {
                     match &args[0] {
                         Variant::Dictionary(other) => {
                             let overwrite = matches!(args.get(1), Some(Variant::Bool(true)));
-                            let mut c = self.eval_expr(object_expr)?;
-                            if let Variant::Dictionary(ref mut dm) = c {
-                                dm.merge(other, overwrite);
-                            }
-                            self.write_place(object_expr, c)?;
+                            // Snapshot first: `d.merge(d)` names one storage twice.
+                            let other = other.to_dict();
+                            d.with_mut(|m| m.merge(&other, overwrite))
+                                .map_err(container_error)?;
                             Ok(Variant::Nil)
                         }
                         _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -12082,7 +12109,7 @@ impl Interpreter {
                     match &args[0] {
                         Variant::Dictionary(other) => {
                             let overwrite = matches!(args.get(1), Some(Variant::Bool(true)));
-                            Ok(Variant::Dictionary(d.merged(other, overwrite)))
+                            Ok(Variant::Dictionary(d.to_dict().merged(&other.to_dict(), overwrite).into()))
                         }
                         _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                             "merged() arg must be dictionary".into(),
@@ -12095,13 +12122,13 @@ impl Interpreter {
                     // Godot sorts the entries in place, ascending by key
                     // (core/variant/dictionary.cpp `Dictionary::sort`).
                     let mut pairs: Vec<(Variant, Variant)> =
-                        d.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                        d.to_dict().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                     pairs.sort_by(|a, b| variant_cmp(&a.0, &b.0));
                     let mut sorted = gdvariant::Dictionary::with_capacity(pairs.len());
                     for (k, v) in pairs {
                         sorted.insert(k, v);
                     }
-                    self.write_place(object_expr, Variant::Dictionary(sorted))?;
+                    d.with_mut(|m| *m = sorted).map_err(container_error)?;
                     Ok(Variant::Nil)
                 }
                 "recursive_equal" => {
@@ -12128,9 +12155,9 @@ impl Interpreter {
                     }
                     // Patina's `Variant: PartialEq` is already a deep structural
                     // compare, so per-key equality is the recursive step.
-                    for (key, value) in d.iter() {
+                    for (key, value) in d.to_dict().iter() {
                         match other.get(key.clone()) {
-                            Some(other_value) if other_value == value => {}
+                            Some(other_value) if &other_value == value => {}
                             _ => return Ok(Variant::Bool(false)),
                         }
                     }
@@ -12147,7 +12174,7 @@ impl Interpreter {
                     } else {
                         Variant::Nil
                     };
-                    Ok(d.get(&args[0]).cloned().unwrap_or(default))
+                    Ok(d.get(&args[0]).unwrap_or(default))
                 }
                 "get_or_add" => {
                     if args.is_empty() || args.len() > 2 {
@@ -12160,13 +12187,9 @@ impl Interpreter {
                     } else {
                         Variant::Nil
                     };
-                    let mut c = self.eval_expr(object_expr)?;
-                    let result = if let Variant::Dictionary(ref mut dm) = c {
-                        dm.get_or_add(args[0].clone(), default)
-                    } else {
-                        Variant::Nil
-                    };
-                    self.write_place(object_expr, c)?;
+                    let result = d
+                        .with_mut(|m| m.get_or_add(args[0].clone(), default))
+                        .map_err(container_error)?;
                     Ok(result)
                 }
                 _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
@@ -12362,7 +12385,7 @@ impl Interpreter {
                                 .iter()
                                 .map(|c| Variant::ObjectId(gdcore::id::ObjectId::from_raw(*c)))
                                 .collect();
-                            Ok(Variant::Array(arr))
+                            Ok(Variant::Array(arr.into()))
                         } else {
                             Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                                 "no scene access".into(),
@@ -12716,7 +12739,7 @@ impl Interpreter {
                                 d.insert("hint", Variant::Int(p.hint as i64));
                                 d.insert("hint_string", Variant::String(p.hint_string));
                                 d.insert("usage", Variant::Int(p.usage as i64));
-                                Variant::Dictionary(d)
+                                Variant::Dictionary(d.into())
                             })
                             .collect();
                         // Godot appends whatever the object's
@@ -12727,7 +12750,7 @@ impl Interpreter {
                         // reflection (pat-0q2kx.82).
                         let mut props: Vec<Variant> = props;
                         props.extend(self.call_property_list_virtual(id));
-                        Ok(Variant::Array(props))
+                        Ok(Variant::Array(props.into()))
                     }
                     "get_method_list" => {
                         let class = self
@@ -12741,7 +12764,7 @@ impl Interpreter {
                                 let mut d = gdvariant::Dictionary::new();
                                 d.insert("name", Variant::String(m.name));
                                 d.insert("args", Variant::Int(m.argument_count as i64));
-                                Variant::Dictionary(d)
+                                Variant::Dictionary(d.into())
                             })
                             .collect();
                         Ok(Variant::Array(methods))
@@ -12762,8 +12785,8 @@ impl Interpreter {
                                     .into_iter()
                                     .map(Variant::String)
                                     .collect::<Vec<_>>();
-                                d.insert("args", Variant::Array(args));
-                                Variant::Dictionary(d)
+                                d.insert("args", Variant::Array(args.into()));
+                                Variant::Dictionary(d.into())
                             })
                             .collect();
                         Ok(Variant::Array(signals))
@@ -12802,7 +12825,7 @@ impl Interpreter {
                                 d.insert("target", Variant::Int(target as i64));
                                 // Godot reports the connect flags; ONE_SHOT is 1.
                                 d.insert("flags", Variant::Int(i64::from(one_shot)));
-                                Variant::Dictionary(d)
+                                Variant::Dictionary(d.into())
                             })
                             .collect();
                         Ok(Variant::Array(conns))
@@ -12819,7 +12842,7 @@ impl Interpreter {
                                 d.insert("source", Variant::Int(source as i64));
                                 d.insert("signal", Variant::String(signal_name));
                                 d.insert("callable", Variant::String(method));
-                                Variant::Dictionary(d)
+                                Variant::Dictionary(d.into())
                             })
                             .collect();
                         Ok(Variant::Array(conns))
@@ -13567,7 +13590,7 @@ impl Interpreter {
                                 names.into_iter().map(Variant::String).collect(),
                             ))
                         } else {
-                            Ok(Variant::Array(Vec::new()))
+                            Ok(Variant::Array(Default::default()))
                         }
                     }
                     "set" => {
@@ -13719,7 +13742,7 @@ impl Interpreter {
                         };
                         let call_args: Vec<Variant> = if method == "callv" {
                             match args.get(1) {
-                                Some(Variant::Array(items)) => items.clone(),
+                                Some(Variant::Array(items)) => items.clone().to_vec(),
                                 None | Some(Variant::Nil) => Vec::new(),
                                 _ => {
                                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -13878,7 +13901,7 @@ impl Interpreter {
                             )));
                         }
                     };
-                    self.invoke_callable(callable_ref, &call_args)
+                    self.invoke_callable(callable_ref, &call_args.to_vec())
                 }
                 "is_valid" => {
                     let valid = match &**callable_ref {
@@ -13924,7 +13947,7 @@ impl Interpreter {
                     };
                     Ok(Variant::Callable(Box::new(CallableRef::Bound {
                         inner: Box::new((**callable_ref).clone()),
-                        bound_args,
+                        bound_args: bound_args.to_vec(),
                     })))
                 }
                 // The object a standard callable targets. `target_id == 0` is the
@@ -13949,7 +13972,7 @@ impl Interpreter {
                 }
                 // Bound arguments accumulate across nested `bind` calls, so the
                 // whole chain is walked rather than just the outermost layer.
-                "get_bound_arguments" => Ok(Variant::Array(collect_bound_args(callable_ref))),
+                "get_bound_arguments" => Ok(Variant::Array(collect_bound_args(callable_ref).into())),
                 "get_bound_arguments_count" => {
                     Ok(Variant::Int(collect_bound_args(callable_ref).len() as i64))
                 }
@@ -14059,7 +14082,7 @@ impl Interpreter {
                                     Variant::String(u.hint.clone().unwrap_or_default()),
                                 );
                                 d.insert("default".to_string(), u.default_value);
-                                Variant::Dictionary(d)
+                                Variant::Dictionary(d.into())
                             })
                             .collect(),
                     ))
@@ -15034,7 +15057,7 @@ impl Interpreter {
     fn call_property_list_virtual(&mut self, id: u64) -> Vec<Variant> {
         if self.current_node_id == Some(id) {
             return match self.call_user_func("_get_property_list", &[]) {
-                Ok(Variant::Array(entries)) => entries,
+                Ok(Variant::Array(entries)) => entries.to_vec(),
                 _ => Vec::new(),
             };
         }
@@ -15149,14 +15172,14 @@ impl Interpreter {
                 let callable = (**cb).clone();
                 let extra = match args.get(2) {
                     Some(Variant::Array(a)) => a.clone(),
-                    _ => Vec::new(),
+                    _ => Default::default(),
                 };
                 PERFORMANCE_CUSTOM_MONITORS.with(|m| {
                     let mut m = m.borrow_mut();
                     // Godot rejects a duplicate id rather than replacing the
                     // callable, so a second registration is a no-op here too.
                     if !m.iter().any(|(n, _, _)| n == &name) {
-                        m.push((name, callable, extra));
+                        m.push((name, callable, extra.to_vec()));
                     }
                 });
                 Ok(Variant::Nil)
@@ -15200,7 +15223,7 @@ impl Interpreter {
                         .map(|(n, _, _)| Variant::String(n.clone()))
                         .collect::<Vec<_>>()
                 });
-                Ok(Variant::Array(names))
+                Ok(Variant::Array(names.into()))
             }
 
             // Godot reports when a monitor last changed; nothing here tracks
@@ -15882,7 +15905,7 @@ impl Interpreter {
                 // Array, NOT Nil: `_toggle` is typed `(bool, Array)`.
                 let options = match args.get(2) {
                     Some(Variant::Array(a)) => a.clone(),
-                    _ => Vec::new(),
+                    _ => Default::default(),
                 };
                 self.dispatch_profiler_virtual(
                     &name,
@@ -15896,7 +15919,7 @@ impl Interpreter {
                 // fall back to empty on a bad call — it errored above.
                 let data = match args.get(1) {
                     Some(Variant::Array(a)) => a.clone(),
-                    _ => Vec::new(),
+                    _ => Default::default(),
                 };
                 self.dispatch_profiler_virtual(&name, "_add_frame", &[Variant::Array(data)]);
             }
@@ -16005,7 +16028,7 @@ impl Interpreter {
                 dict.insert(Variant::String(variant_name.clone()), Variant::Int(*value));
             }
             self.environment
-                .define_const(enum_name.clone(), Variant::Dictionary(dict));
+                .define_const(enum_name.clone(), Variant::Dictionary(dict.into()));
         }
 
         // Push an inner scope for the method body so that local `var`
@@ -16162,7 +16185,7 @@ fn build_packed_array(empty: Variant, args: &[Variant]) -> Result<Variant, Runti
         0 => Ok(out),
         1 => {
             let elems: Vec<Variant> = match &args[0] {
-                Variant::Array(a) => a.clone(),
+                Variant::Array(a) => a.clone().to_vec(),
                 v if v.is_packed_array() => v.packed_to_array().unwrap(),
                 other => {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
@@ -16218,7 +16241,7 @@ fn index_into(container: &Variant, idx: &Variant) -> Result<Variant, RuntimeErro
                 *i as usize
             };
             a.get(index)
-                .cloned()
+                
                 .ok_or(RuntimeError::new(RuntimeErrorKind::IndexOutOfBounds {
                     index: *i,
                     length: a.len(),
@@ -16262,7 +16285,7 @@ fn index_into(container: &Variant, idx: &Variant) -> Result<Variant, RuntimeErro
                 length: 4,
             })),
         },
-        (Variant::Dictionary(d), key) => d.get(key).cloned().ok_or_else(|| {
+        (Variant::Dictionary(d), key) => d.get(key).ok_or_else(|| {
             RuntimeError::new(RuntimeErrorKind::UndefinedVariable(key.to_string_lossy()))
         }),
         // Godot's `Object` supports `obj["prop"]` alongside `obj.prop`, and an
@@ -16337,11 +16360,13 @@ fn set_index(container: &mut Variant, idx: &Variant, value: Variant) -> Result<(
                     length: a.len(),
                 }));
             }
-            a[index] = value;
+            // Through the shared handle: every reference to this array sees
+            // the write (pat-s3rrv.8), and typed/read-only arrays refuse it.
+            a.set(index, value).map_err(container_error)?;
             Ok(())
         }
         (Variant::Dictionary(d), key) => {
-            d.insert(key.clone(), value);
+            d.insert(key.clone(), value).map_err(container_error)?;
             Ok(())
         }
         // The write half of the resource property path (pat-s3rrv.98). Reading
@@ -17196,8 +17221,9 @@ fn gd_indent(s: &str, prefix: &str) -> String {
 fn gd_format(template: &str, values: &Variant) -> String {
     match values {
         Variant::Array(a) => {
+            let a = a.to_vec();
             let mut result = template.to_string();
-            for (i, v) in a.iter().enumerate() {
+            for (i, v) in a.to_vec().iter().enumerate() {
                 result = result.replace(&format!("{{{i}}}"), &format!("{v}"));
             }
             let mut out = String::new();
@@ -17220,7 +17246,7 @@ fn gd_format(template: &str, values: &Variant) -> String {
         }
         Variant::Dictionary(d) => {
             let mut result = template.to_string();
-            for (k, v) in d {
+            for (k, v) in d.to_dict().iter() {
                 result = result.replace(&format!("{{{k}}}"), &format!("{v}"));
             }
             result
@@ -17293,6 +17319,13 @@ fn ordering_to_int(o: std::cmp::Ordering) -> i64 {
         std::cmp::Ordering::Greater => 1,
     }
 }
+/// Surfaces a refused container write (read-only, or an element of the wrong
+/// type for a typed Array/Dictionary) as a script error, the way Godot reports
+/// it at the call site rather than silently dropping the write.
+fn container_error(e: ContainerError) -> RuntimeError {
+    RuntimeError::new(RuntimeErrorKind::TypeError(e.to_string()))
+}
+
 fn variant_cmp(a: &Variant, b: &Variant) -> std::cmp::Ordering {
     match (a, b) {
         (Variant::Int(x), Variant::Int(y)) => x.cmp(y),
@@ -17671,7 +17704,7 @@ fn variant_to_gd_string(v: &Variant) -> String {
             format_gd_component(c.a as f64)
         ),
         Variant::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(variant_to_gd_string).collect();
+            let items: Vec<String> = arr.to_vec().iter().map(variant_to_gd_string).collect();
             format!("[{}]", items.join(", "))
         }
         Variant::Dictionary(d) => {
@@ -17686,7 +17719,7 @@ fn variant_to_gd_string(v: &Variant) -> String {
                 // string-like keys that dominate, and a stable order for the
                 // rest.
                 let mut items: Vec<(String, String)> = d
-                    .iter()
+                    .to_dict().iter()
                     .map(|(k, val)| (variant_to_gd_string(k), variant_to_gd_string(val)))
                     .collect();
                 items.sort_by(|a, b| a.0.cmp(&b.0));
@@ -17962,7 +17995,7 @@ impl GdTextParser {
         self.skip_ws();
         if self.peek() == Some(']') {
             self.pos += 1;
-            return Some(Variant::Array(arr));
+            return Some(Variant::Array(arr.into()));
         }
         loop {
             let v = self.parse_value()?;
@@ -17972,7 +18005,7 @@ impl GdTextParser {
                 ',' => self.pos += 1,
                 ']' => {
                     self.pos += 1;
-                    return Some(Variant::Array(arr));
+                    return Some(Variant::Array(arr.into()));
                 }
                 _ => return None,
             }
@@ -17985,7 +18018,7 @@ impl GdTextParser {
         self.skip_ws();
         if self.peek() == Some('}') {
             self.pos += 1;
-            return Some(Variant::Dictionary(d));
+            return Some(Variant::Dictionary(d.into()));
         }
         loop {
             let key = self.parse_value()?;
@@ -18001,7 +18034,7 @@ impl GdTextParser {
                 ',' => self.pos += 1,
                 '}' => {
                     self.pos += 1;
-                    return Some(Variant::Dictionary(d));
+                    return Some(Variant::Dictionary(d.into()));
                 }
                 _ => return None,
             }
@@ -18117,9 +18150,9 @@ fn variant_hash(v: &Variant) -> i64 {
 fn variant_contains_object(v: &Variant) -> bool {
     match v {
         Variant::ObjectId(_) => true,
-        Variant::Array(items) => items.iter().any(variant_contains_object),
+        Variant::Array(items) => items.to_vec().iter().any(variant_contains_object),
         Variant::Dictionary(d) => d
-            .iter()
+            .to_dict().iter()
             .any(|(k, val)| variant_contains_object(k) || variant_contains_object(val)),
         _ => false,
     }
@@ -19000,7 +19033,7 @@ fn call_file_access_instance(
             }
             let bytes: Vec<u8> = match &args[0] {
                 Variant::Array(items) => items
-                    .iter()
+                    .to_vec().iter()
                     .map(|v| match v {
                         Variant::Int(i) => Ok(*i as u8),
                         _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -19605,7 +19638,7 @@ fn call_os_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeErro
             let arguments = match args.get(1) {
                 Some(Variant::PackedStringArray(v)) => v.clone(),
                 Some(Variant::Array(items)) => items
-                    .iter()
+                    .to_vec().iter()
                     .map(|v| match v {
                         Variant::String(s) => s.clone(),
                         other => other.to_string(),
@@ -19693,7 +19726,7 @@ fn call_os_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeErro
                 }
             };
             let cmd_args: Vec<String> = match args.get(1) {
-                Some(Variant::Array(a)) => a.iter().map(|v| v.to_string_lossy()).collect(),
+                Some(Variant::Array(a)) => a.to_vec().iter().map(|v| v.to_string_lossy()).collect(),
                 Some(Variant::PackedStringArray(a)) => a.clone(),
                 None | Some(Variant::Nil) => Vec::new(),
                 _ => {
@@ -19823,7 +19856,7 @@ fn call_os_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeErro
             for key in ["physical", "free", "available", "stack"] {
                 d.insert(key.to_string(), Variant::Int(-1));
             }
-            Ok(Variant::Dictionary(d))
+            Ok(Variant::Dictionary(d.into()))
         }
         // -- Process control that the web export cannot honor. Godot documents
         // ERR_UNAVAILABLE (46) for these where no process API exists; natively
@@ -19990,7 +20023,7 @@ fn call_classdb_static(method: &str, args: &[Variant]) -> Result<Variant, Runtim
                     d.insert("hint", Variant::Int(p.hint as i64));
                     d.insert("hint_string", Variant::String(p.hint_string));
                     d.insert("usage", Variant::Int(p.usage as i64));
-                    Variant::Dictionary(d)
+                    Variant::Dictionary(d.into())
                 })
                 .collect();
             Ok(Variant::Array(props))
@@ -20037,11 +20070,11 @@ fn call_classdb_static(method: &str, args: &[Variant]) -> Result<Variant, Runtim
                             a.insert("hint", Variant::Int(p.hint as i64));
                             a.insert("hint_string", Variant::String(p.hint_string));
                             a.insert("usage", Variant::Int(p.usage as i64));
-                            Variant::Dictionary(a)
+                            Variant::Dictionary(a.into())
                         })
                         .collect();
-                    d.insert("args", Variant::Array(args));
-                    d.insert("default_args", Variant::Array(Vec::new()));
+                    d.insert("args", Variant::Array(args.into()));
+                    d.insert("default_args", Variant::Array(Default::default()));
                     // Godot's dict always carries `return`, shaped like one of
                     // the argument dicts above. An undeclared return serialises
                     // as a NIL type, which is also what a void method looks
@@ -20061,9 +20094,9 @@ fn call_classdb_static(method: &str, args: &[Variant]) -> Result<Variant, Runtim
                     ret.insert("hint", Variant::Int(declared.hint as i64));
                     ret.insert("hint_string", Variant::String(declared.hint_string));
                     ret.insert("usage", Variant::Int(declared.usage as i64));
-                    d.insert("return", Variant::Dictionary(ret));
+                    d.insert("return", Variant::Dictionary(ret.into()));
                     d.insert("flags", Variant::Int(flags));
-                    Variant::Dictionary(d)
+                    Variant::Dictionary(d.into())
                 })
                 .collect();
             Ok(Variant::Array(methods))
@@ -20104,7 +20137,7 @@ fn call_classdb_static(method: &str, args: &[Variant]) -> Result<Variant, Runtim
                     let mut d = Dictionary::new();
                     d.insert("name", Variant::String(s.name));
                     d.insert("args", Variant::PackedStringArray(s.arguments));
-                    Variant::Dictionary(d)
+                    Variant::Dictionary(d.into())
                 })
                 .collect();
             Ok(Variant::Array(list))
@@ -20137,7 +20170,7 @@ fn call_classdb_static(method: &str, args: &[Variant]) -> Result<Variant, Runtim
                 d.insert("name", Variant::String(sig.name));
                 d.insert("args", Variant::PackedStringArray(sig.arguments));
             }
-            Ok(Variant::Dictionary(d))
+            Ok(Variant::Dictionary(d.into()))
         }
         "class_get_integer_constant" => {
             let class = class_name_arg(args, 0, "ClassDB.class_get_integer_constant()")?;
@@ -20818,7 +20851,7 @@ fn call_displayserver_static(method: &str, args: &[Variant]) -> Result<Variant, 
             Ok(Variant::Nil)
         }
         "tts_pause" | "tts_resume" | "tts_stop" => Ok(Variant::Nil),
-        "tts_get_voices" => Ok(Variant::Array(Vec::new())),
+        "tts_get_voices" => Ok(Variant::Array(Default::default())),
         "tts_get_voices_for_language" => Ok(Variant::PackedStringArray(Vec::new())),
         "tts_is_speaking" | "tts_is_paused" => Ok(Variant::Bool(false)),
         // -- Virtual keyboard / cursor (web / mobile; headless no-ops) ------
@@ -21493,7 +21526,7 @@ fn call_enginedebugger_static(method: &str, args: &[Variant]) -> Result<Variant,
                 }
             };
             DEBUG_PROFILERS.with(|p| {
-                p.borrow_mut().entry(name).or_default().frames.push(data);
+                p.borrow_mut().entry(name).or_default().frames.push(data.to_vec());
             });
             Ok(Variant::Nil)
         }
@@ -21522,14 +21555,14 @@ fn call_enginedebugger_static(method: &str, args: &[Variant]) -> Result<Variant,
             let message = debug_name_arg(args, 0, "send_message")?;
             let data = match args.get(1) {
                 Some(Variant::Array(a)) => a.clone(),
-                None | Some(Variant::Nil) => Vec::new(),
+                None | Some(Variant::Nil) => Default::default(),
                 _ => {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "EngineDebugger.send_message() expects an Array of data".into(),
                     )))
                 }
             };
-            DEBUG_MESSAGES.with(|m| m.borrow_mut().push((message, data)));
+            DEBUG_MESSAGES.with(|m| m.borrow_mut().push((message, data.to_vec())));
             Ok(Variant::Nil)
         }
         // Godot polls the debugger between lines; with no live session there is
@@ -21836,17 +21869,17 @@ fn call_stream_peer_instance(
         }
         "put_partial_data" => {
             let (err, written) = b.put_partial_data(&bytes_arg(0));
-            Some(Variant::Array(vec![
+            Some(Variant::Array((vec![
                 Variant::Int(err),
                 Variant::Int(written as i64),
-            ]))
+            ]).into()))
         }
         "get_data" | "get_partial_data" => {
             let (err, data) = b.get_partial_data(int_arg(0).max(0) as usize);
             Some(Variant::Array(vec![
                 Variant::Int(err),
                 Variant::PackedByteArray(data),
-            ]))
+            ].into()))
         }
 
         "put_8" => {
@@ -22108,7 +22141,7 @@ fn call_gltf_state_instance(
     let array_or_empty = |key: &str| -> Variant {
         match prop(key) {
             Variant::Array(a) => Variant::Array(a),
-            _ => Variant::Array(Vec::new()),
+            _ => Variant::Array(Default::default()),
         }
     };
     match method {
@@ -22150,7 +22183,7 @@ fn call_gltf_state_instance(
                     .map(|name| {
                         let mut d = Dictionary::new();
                         d.insert("name", Variant::String(name));
-                        Variant::Dictionary(d)
+                        Variant::Dictionary(d.into())
                     })
                     .collect(),
             ))
@@ -22846,11 +22879,11 @@ fn wrap_decoded_object_ids(v: Variant) -> Variant {
     match v {
         Variant::ObjectId(id) => Variant::ObjectId(new_encoded_object_as_id_handle(id.raw())),
         Variant::Array(items) => {
-            Variant::Array(items.into_iter().map(wrap_decoded_object_ids).collect())
+            Variant::Array(items.to_vec().into_iter().map(wrap_decoded_object_ids).collect())
         }
         Variant::Dictionary(d) => {
             let mut out = gdvariant::dictionary::Dictionary::new();
-            for (k, val) in d.iter() {
+            for (k, val) in d.to_dict().iter() {
                 // Keys are wrapped too: a dictionary keyed by object is rare but
                 // legal, and a live key is just as reachable as a live value.
                 out.insert(
@@ -22858,7 +22891,7 @@ fn wrap_decoded_object_ids(v: Variant) -> Variant {
                     wrap_decoded_object_ids(val.clone()),
                 );
             }
-            Variant::Dictionary(out)
+            Variant::Dictionary(out.into())
         }
         other => other,
     }
@@ -24435,7 +24468,7 @@ fn xr_session_mode_str(m: gdplatform::WebXrSessionMode) -> &'static str {
 fn xr_string_list(v: Option<&Variant>) -> Vec<String> {
     match v {
         Some(Variant::PackedStringArray(items)) => items.clone(),
-        Some(Variant::Array(items)) => items.iter().map(arg_str).collect(),
+        Some(Variant::Array(items)) => items.to_vec().iter().map(arg_str).collect(),
         Some(other) => vec![arg_str(other)],
         None => Vec::new(),
     }
@@ -25640,7 +25673,7 @@ fn call_websocket_peer_instance(
             // `PackedStringArray` already holds `String`s; a plain `Array` holds
             // Variants that still need rendering.
             Some(Variant::PackedStringArray(items)) => items.clone(),
-            Some(Variant::Array(items)) => items.iter().map(|i| i.to_string_lossy()).collect(),
+            Some(Variant::Array(items)) => items.to_vec().iter().map(|i| i.to_string_lossy()).collect(),
             _ => Vec::new(),
         }
     }
@@ -25959,7 +25992,7 @@ fn call_stream_peer_tcp_instance(
                     Ok(Variant::Array(vec![
                         Variant::Int(code),
                         Variant::Int(if code == OK { written } else { 0 }),
-                    ]))
+                    ].into()))
                 }
             }
             "get_data" | "get_partial_data" => {
@@ -25967,7 +26000,7 @@ fn call_stream_peer_tcp_instance(
                 Ok(Variant::Array(vec![
                     Variant::Int(OK),
                     Variant::PackedByteArray(data),
-                ]))
+                ].into()))
             }
             "get_available_bytes" => Ok(Variant::Int(peer.get_available_bytes() as i64)),
             // Documented on the class but not backed by this transport. An
@@ -26447,7 +26480,7 @@ fn call_http_client_instance(
                 // reader would silently drop every header.
                 let headers: Vec<String> = match args.get(2) {
                     Some(Variant::PackedStringArray(h)) => h.clone(),
-                    Some(Variant::Array(a)) => a.iter().map(|v| v.to_string_lossy()).collect(),
+                    Some(Variant::Array(a)) => a.to_vec().iter().map(|v| v.to_string_lossy()).collect(),
                     _ => Vec::new(),
                 };
                 let body: Vec<u8> = match args.get(3) {
@@ -26513,7 +26546,7 @@ fn default_camera_format() -> Variant {
     d.insert("height", Variant::Int(0));
     d.insert("frame_numerator", Variant::Int(0));
     d.insert("frame_denominator", Variant::Int(0));
-    Variant::Dictionary(d)
+    Variant::Dictionary(d.into())
 }
 
 /// Reads argument `index` as an `Image` and copies its pixels out.
@@ -26692,7 +26725,7 @@ fn call_camera_feed_instance(
                 queue_camera_feed_signal(raw, "frame_changed");
                 Ok(Variant::Nil)
             }
-            "get_formats" => Ok(Variant::Array(feed.formats.clone())),
+            "get_formats" => Ok(Variant::Array(feed.formats.clone().into())),
             // `set_format(index, parameters)` selects one of `get_formats`.
             // Returns true and emits `format_changed` only on a real selection;
             // an out-of-range index is false and emits NOTHING, which is what
@@ -27562,7 +27595,7 @@ fn call_geometry_2d_static(method: &str, args: &[Variant]) -> Result<Variant, Ru
     ) -> Result<Vec<gdcore::math::Vector2>, RuntimeError> {
         match args.get(i) {
             Some(Variant::Array(a)) => Ok(a
-                .iter()
+                .to_vec().iter()
                 .filter_map(|v| match v {
                     Variant::Vector2(p) => Some(*p),
                     _ => None,
@@ -28311,7 +28344,7 @@ fn call_ip_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeErro
                         Variant::String("addresses".into()),
                         Variant::Array(iface.addresses.into_iter().map(Variant::String).collect()),
                     );
-                    Variant::Dictionary(d)
+                    Variant::Dictionary(d.into())
                 })
                 .collect(),
         )),
@@ -28536,7 +28569,7 @@ fn call_textservermanager_static(method: &str, args: &[Variant]) -> Result<Varia
                             Variant::Bool(gdrender2d::text_server::TextServerLite::new().has_ttf()),
                         );
                     }
-                    Variant::Dictionary(d)
+                    Variant::Dictionary(d.into())
                 })
                 .collect(),
         )),
@@ -28689,7 +28722,7 @@ fn navmesh_vertices(v: Option<&Variant>) -> Vec<gdcore::math::Vector3> {
     match v {
         Some(Variant::PackedVector3Array(vs)) => vs.clone(),
         Some(Variant::Array(items)) => items
-            .iter()
+            .to_vec().iter()
             .filter_map(|item| match item {
                 Variant::Vector3(p) => Some(*p),
                 _ => None,
@@ -28719,13 +28752,13 @@ fn call_navigationmeshgenerator_static(
             let source = args.get(1).or_else(|| args.first());
             let (vertices, indices) = match source {
                 Some(Variant::Dictionary(d)) => (
-                    navmesh_vertices(d.get(Variant::String("vertices".into()))),
+                    navmesh_vertices(d.get(Variant::String("vertices".into())).as_ref()),
                     match d.get(Variant::String("indices".into())) {
                         Some(Variant::PackedInt32Array(ix)) => {
                             ix.iter().map(|i| *i as i64).collect()
                         }
                         Some(Variant::Array(items)) => {
-                            items.iter().filter_map(|i| to_int(i).ok()).collect()
+                            items.to_vec().iter().filter_map(|i| to_int(i).ok()).collect()
                         }
                         _ => Vec::new(),
                     },
@@ -28758,8 +28791,8 @@ fn call_navigationmeshgenerator_static(
                 Variant::String("vertices".into()),
                 Variant::PackedVector3Array(vertices),
             );
-            out.insert(Variant::String("polygons".into()), Variant::Array(polygons));
-            Ok(Variant::Dictionary(out))
+            out.insert(Variant::String("polygons".into()), Variant::Array(polygons.into()));
+            Ok(Variant::Dictionary(out.into()))
         }
         // Godot `clear(navigation_mesh)` empties the mesh and returns void.
         //
@@ -28780,9 +28813,9 @@ fn call_navigationmeshgenerator_static(
             );
             out.insert(
                 Variant::String("polygons".into()),
-                Variant::Array(Vec::new()),
+                Variant::Array(Default::default()),
             );
-            Ok(Variant::Dictionary(out))
+            Ok(Variant::Dictionary(out.into()))
         }
         // Baking is synchronous here, so nothing is ever in flight.
         "is_baking" => Ok(Variant::Bool(false)),
@@ -28995,7 +29028,7 @@ fn call_engine_static(method: &str, args: &[Variant]) -> Result<Variant, Runtime
         // -- version info --
         "get_version_info" => {
             expect_engine_argc(method, args, 0)?;
-            Ok(Variant::Dictionary(engine_version_info()))
+            Ok(Variant::Dictionary(engine_version_info().into()))
         }
         // -- singleton registry --
         "has_singleton" => {
@@ -29332,7 +29365,7 @@ fn call_time_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeEr
                 return Ok(Variant::String("0".into()));
             }
             Ok(Variant::String(datetime_string(
-                &parts_from_dict(dict),
+                &parts_from_dict(&dict.to_dict()),
                 DatePart::DateTime,
                 time_bool_arg(args, 1, false),
             )))
@@ -29346,7 +29379,7 @@ fn call_time_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeEr
             if dict.is_empty() {
                 return Ok(Variant::Int(0));
             }
-            Ok(Variant::Int(compose_unix(&parts_from_dict(dict))))
+            Ok(Variant::Int(compose_unix(&parts_from_dict(&dict.to_dict()))))
         }
         "get_unix_time_from_datetime_string" => {
             let Some(Variant::String(s)) = args.first() else {
@@ -29375,7 +29408,7 @@ fn call_time_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeEr
                     format!("UTC{}", offset_string(bias))
                 }),
             );
-            Ok(Variant::Dictionary(dict))
+            Ok(Variant::Dictionary(dict.into()))
         }
 
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
@@ -29493,7 +29526,7 @@ fn datetime_dict(p: &DateTimeParts, part: DatePart, weekday: bool, dst: Option<b
     if let Some(dst) = dst {
         dict.insert("dst", Variant::Bool(dst));
     }
-    Variant::Dictionary(dict)
+    Variant::Dictionary(dict.into())
 }
 
 /// Formats the requested slice as ISO 8601.
@@ -29769,8 +29802,8 @@ fn json_from_native(v: &Variant) -> Variant {
     fn tagged(name: &str, args: Vec<Variant>) -> Variant {
         let mut d = gdvariant::Dictionary::new();
         d.insert("type", Variant::String(name.to_string()));
-        d.insert("args", Variant::Array(args));
-        Variant::Dictionary(d)
+        d.insert("args", Variant::Array(args.into()));
+        Variant::Dictionary(d.into())
     }
     match v {
         Variant::Vector2(p) => tagged(
@@ -29798,13 +29831,13 @@ fn json_from_native(v: &Variant) -> Variant {
                 Variant::Float(c.a as f64),
             ],
         ),
-        Variant::Array(items) => Variant::Array(items.iter().map(json_from_native).collect()),
+        Variant::Array(items) => Variant::Array(items.to_vec().iter().map(json_from_native).collect()),
         Variant::Dictionary(d) => {
             let mut out = gdvariant::Dictionary::new();
-            for (k, val) in d.iter() {
+            for (k, val) in d.to_dict().iter() {
                 out.insert(k.clone(), json_from_native(val));
             }
-            Variant::Dictionary(out)
+            Variant::Dictionary(out.into())
         }
         other => other.clone(),
     }
@@ -29823,15 +29856,15 @@ fn json_to_native(v: &Variant) -> Variant {
             if let (Some(Variant::String(name)), Some(Variant::Array(a))) = (ty, args) {
                 let f = |i: usize| -> f32 {
                     match a.get(i) {
-                        Some(Variant::Float(x)) => *x as f32,
-                        Some(Variant::Int(x)) => *x as f32,
+                        Some(Variant::Float(x)) => x as f32,
+                        Some(Variant::Int(x)) => x as f32,
                         _ => 0.0,
                     }
                 };
                 let i = |n: usize| -> i32 {
                     match a.get(n) {
-                        Some(Variant::Int(x)) => *x as i32,
-                        Some(Variant::Float(x)) => *x as i32,
+                        Some(Variant::Int(x)) => x as i32,
+                        Some(Variant::Float(x)) => x as i32,
                         _ => 0,
                     }
                 };
@@ -29850,12 +29883,12 @@ fn json_to_native(v: &Variant) -> Variant {
                 }
             }
             let mut out = gdvariant::Dictionary::new();
-            for (k, val) in d.iter() {
+            for (k, val) in d.to_dict().iter() {
                 out.insert(k.clone(), json_to_native(val));
             }
-            Variant::Dictionary(out)
+            Variant::Dictionary(out.into())
         }
-        Variant::Array(items) => Variant::Array(items.iter().map(json_to_native).collect()),
+        Variant::Array(items) => Variant::Array(items.to_vec().iter().map(json_to_native).collect()),
         other => other.clone(),
     }
 }
@@ -29882,7 +29915,7 @@ fn json_value_to_variant(v: &serde_json::Value) -> Variant {
             for (k, val) in map {
                 dict.insert(k.clone(), json_value_to_variant(val));
             }
-            Variant::Dictionary(dict)
+            Variant::Dictionary(dict.into())
         }
     }
 }
@@ -29895,11 +29928,11 @@ fn variant_to_json_value(v: &Variant) -> serde_json::Value {
         Variant::Float(f) => serde_json::json!(*f),
         Variant::String(s) => serde_json::Value::String(s.clone()),
         Variant::Array(items) => {
-            serde_json::Value::Array(items.iter().map(variant_to_json_value).collect())
+            serde_json::Value::Array(items.to_vec().iter().map(variant_to_json_value).collect())
         }
         Variant::Dictionary(map) => {
             let mut obj = serde_json::Map::new();
-            for (k, val) in map.iter() {
+            for (k, val) in map.to_dict().iter() {
                 // JSON object keys are strings; stringify non-string Variant keys.
                 let key = match k {
                     Variant::String(s) => s.clone(),
@@ -29941,7 +29974,8 @@ fn json_stringify_variant(value: &Variant, indent: &str, sort_keys: bool, depth:
 
     match value {
         Variant::Dictionary(map) => {
-            if map.iter().next().is_none() {
+            let map = map.to_dict();
+            if map.is_empty() {
                 return "{}".to_string();
             }
             let mut pairs: Vec<(String, &Variant)> = map
@@ -29975,7 +30009,7 @@ fn json_stringify_variant(value: &Variant, indent: &str, sort_keys: bool, depth:
                 return "[]".to_string();
             }
             let body = items
-                .iter()
+                .to_vec().iter()
                 .map(|v| json_stringify_variant(v, indent, sort_keys, depth + 1))
                 .collect::<Vec<_>>()
                 .join(&comma);
@@ -31760,7 +31794,7 @@ return out
                 Variant::Int(1),
                 Variant::Int(2),
                 Variant::Int(3),
-            ])
+            ].into())
         );
 
         // Non-positive int -> empty iteration (body never runs).
@@ -31995,7 +32029,7 @@ return d[\"b\"]
     fn builtin_range_single() {
         assert_eq!(
             run_val("return range(3)\n"),
-            Variant::Array(vec![Variant::Int(0), Variant::Int(1), Variant::Int(2)])
+            Variant::Array(vec![Variant::Int(0), Variant::Int(1), Variant::Int(2)].into())
         );
     }
 
@@ -32082,8 +32116,8 @@ return d[\"b\"]
                 Variant::Int(1),
                 Variant::String("x".into()),
                 Variant::Bool(false),
-            ]),
-            Variant::Dictionary(d),
+            ].into()),
+            Variant::Dictionary(d.into()),
         ];
         for v in cases {
             let text = variant_to_gd_string(&v);
@@ -32105,7 +32139,7 @@ return d[\"b\"]
         );
         assert_eq!(
             run_val("return bytes_to_var(var_to_bytes([1, 2, 3]))\n"),
-            Variant::Array(vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)])
+            Variant::Array(vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)].into())
         );
         // var_to_bytes yields a PackedByteArray.
         assert!(matches!(
@@ -33021,14 +33055,14 @@ var speed = 10
     fn array_sort_test() {
         assert_eq!(
             run_val("var a = [3, 1, 2]\na.sort()\nreturn a\n"),
-            Variant::Array(vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)])
+            Variant::Array(vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)].into())
         );
     }
     #[test]
     fn array_reverse_test() {
         assert_eq!(
             run_val("var a = [1, 2, 3]\na.reverse()\nreturn a\n"),
-            Variant::Array(vec![Variant::Int(3), Variant::Int(2), Variant::Int(1)])
+            Variant::Array(vec![Variant::Int(3), Variant::Int(2), Variant::Int(1)].into())
         );
     }
     #[test]
@@ -33047,21 +33081,21 @@ var speed = 10
     fn array_erase_test() {
         assert_eq!(
             run_val("var a = [1, 2, 3, 2]\na.erase(2)\nreturn a\n"),
-            Variant::Array(vec![Variant::Int(1), Variant::Int(3), Variant::Int(2)])
+            Variant::Array(vec![Variant::Int(1), Variant::Int(3), Variant::Int(2)].into())
         );
     }
     #[test]
     fn array_insert_test() {
         assert_eq!(
             run_val("var a = [1, 3]\na.insert(1, 2)\nreturn a\n"),
-            Variant::Array(vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)])
+            Variant::Array(vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)].into())
         );
     }
     #[test]
     fn array_slice_test() {
         assert_eq!(
             run_val("return [10, 20, 30, 40, 50].slice(1, 4)\n"),
-            Variant::Array(vec![Variant::Int(20), Variant::Int(30), Variant::Int(40)])
+            Variant::Array(vec![Variant::Int(20), Variant::Int(30), Variant::Int(40)].into())
         );
     }
     #[test]
@@ -33094,7 +33128,7 @@ var speed = 10
                 Variant::String("a".into()),
                 Variant::String("b".into()),
                 Variant::String("c".into())
-            ])
+            ].into())
         );
         assert_eq!(
             run_val("return \"-\".join([\"a\", \"b\", \"c\"])\n"),
@@ -33877,9 +33911,9 @@ var speed = 10
         };
         assert!(!list.is_empty(), "class_get_signal_list(\"Node\") is empty");
         assert!(
-            matches!(list[0], Variant::Dictionary(_)),
+            matches!(list.to_vec()[0], Variant::Dictionary(_)),
             "entries are Dictionaries, got {:?}",
-            list[0],
+            list.to_vec()[0],
         );
     }
 
@@ -34860,7 +34894,7 @@ func fade(alpha):
             .unwrap();
         assert_eq!(
             r.return_value,
-            Some(Variant::Array(vec![Variant::Int(0), Variant::Int(2)]))
+            Some(Variant::Array(vec![Variant::Int(0), Variant::Int(2)].into()))
         );
     }
 
@@ -36287,7 +36321,7 @@ match x:
         // Mutating method through an index base persists.
         assert_eq!(
             run_val("var m = {\"list\": [1]}\nm[\"list\"].append(2)\nreturn m[\"list\"]\n"),
-            Variant::Array(vec![Variant::Int(1), Variant::Int(2)])
+            Variant::Array(vec![Variant::Int(1), Variant::Int(2)].into())
         );
     }
 
@@ -36310,7 +36344,7 @@ match x:
                 Variant::Int(0),
                 Variant::Int(7),
                 Variant::Int(0)
-            ]))
+            ].into()))
         );
     }
 
@@ -36327,7 +36361,7 @@ match x:
         assert_eq!(r, Variant::Int(2));
         assert_eq!(
             inst.properties.get("items"),
-            Some(&Variant::Array(vec![Variant::Int(5), Variant::Int(6)]))
+            Some(&Variant::Array(vec![Variant::Int(5), Variant::Int(6)].into()))
         );
     }
 
@@ -36339,7 +36373,7 @@ match x:
     fn array_stack_and_queue_ops() {
         assert_eq!(
             run_val("var a = [1, 2]\na.push_front(0)\nreturn a\n"),
-            Variant::Array(vec![Variant::Int(0), Variant::Int(1), Variant::Int(2)])
+            Variant::Array(vec![Variant::Int(0), Variant::Int(1), Variant::Int(2)].into())
         );
         assert_eq!(
             run_val("var a = [1, 2, 3]\nreturn a.pop_front()\n"),
@@ -36375,11 +36409,11 @@ match x:
                 Variant::Int(2),
                 Variant::Nil,
                 Variant::Nil
-            ])
+            ].into())
         );
         assert_eq!(
             run_val("var a = [1, 2, 3]\na.fill(0)\nreturn a\n"),
-            Variant::Array(vec![Variant::Int(0), Variant::Int(0), Variant::Int(0)])
+            Variant::Array(vec![Variant::Int(0), Variant::Int(0), Variant::Int(0)].into())
         );
     }
 
@@ -36387,17 +36421,17 @@ match x:
     fn array_slice_step_and_negative() {
         assert_eq!(
             run_val("return [0, 1, 2, 3, 4, 5].slice(1, 5, 2)\n"),
-            Variant::Array(vec![Variant::Int(1), Variant::Int(3)])
+            Variant::Array(vec![Variant::Int(1), Variant::Int(3)].into())
         );
         // Negative indices.
         assert_eq!(
             run_val("return [0, 1, 2, 3, 4].slice(-2, 5)\n"),
-            Variant::Array(vec![Variant::Int(3), Variant::Int(4)])
+            Variant::Array(vec![Variant::Int(3), Variant::Int(4)].into())
         );
         // Single-arg slice to the end.
         assert_eq!(
             run_val("return [0, 1, 2, 3].slice(2)\n"),
-            Variant::Array(vec![Variant::Int(2), Variant::Int(3)])
+            Variant::Array(vec![Variant::Int(2), Variant::Int(3)].into())
         );
     }
 
@@ -36405,11 +36439,11 @@ match x:
     fn array_higher_order_methods() {
         assert_eq!(
             run_val("return [1, 2, 3].map(func(x): return x * 2)\n"),
-            Variant::Array(vec![Variant::Int(2), Variant::Int(4), Variant::Int(6)])
+            Variant::Array(vec![Variant::Int(2), Variant::Int(4), Variant::Int(6)].into())
         );
         assert_eq!(
             run_val("return [1, 2, 3, 4].filter(func(x): return x % 2 == 0)\n"),
-            Variant::Array(vec![Variant::Int(2), Variant::Int(4)])
+            Variant::Array(vec![Variant::Int(2), Variant::Int(4)].into())
         );
         assert_eq!(
             run_val("return [1, 2, 3, 4].reduce(func(a, b): return a + b)\n"),
@@ -36437,12 +36471,12 @@ match x:
     fn array_sort_custom() {
         assert_eq!(
             run_val("var a = [3, 1, 2]\na.sort_custom(func(x, y): return x < y)\nreturn a\n"),
-            Variant::Array(vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)])
+            Variant::Array(vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)].into())
         );
         // Descending.
         assert_eq!(
             run_val("var a = [3, 1, 2]\na.sort_custom(func(x, y): return x > y)\nreturn a\n"),
-            Variant::Array(vec![Variant::Int(3), Variant::Int(2), Variant::Int(1)])
+            Variant::Array(vec![Variant::Int(3), Variant::Int(2), Variant::Int(1)].into())
         );
     }
 
@@ -36955,12 +36989,12 @@ match x:
         };
         assert_eq!(
             arr.get(0),
-            Some(&Variant::Bool(true)),
+            Some(Variant::Bool(true)),
             "is_playing() true after play()"
         );
         assert_eq!(
             arr.get(1),
-            Some(&Variant::Bool(false)),
+            Some(Variant::Bool(false)),
             "is_playing() false after stop()"
         );
         // No lingering true state on the boundary.
@@ -37289,7 +37323,7 @@ match x:
 
         // Endpoints pin the sweep direction and the radius at once; a
         // transposed sin/cos or a half-open range would move one of them.
-        let (Variant::Vector2(first), Variant::Vector2(last)) = (&arr[0], &arr[2]) else {
+        let (Variant::Vector2(first), Variant::Vector2(last)) = (&arr.to_vec()[0], &arr.to_vec()[2]) else {
             panic!("every point must be a Vector2, got {arr:?}");
         };
         assert!(

@@ -55,10 +55,13 @@ fn l_shaped_region(enabled: bool, position: Vector2) -> SceneTree {
     );
     region.set_property(
         "__navmesh_polygons__",
-        Variant::Array(vec![
-            Variant::PackedInt32Array(vec![0, 1, 2, 3]),
-            Variant::PackedInt32Array(vec![1, 4, 5, 2]),
-        ]),
+        Variant::Array(
+            vec![
+                Variant::PackedInt32Array(vec![0, 1, 2, 3]),
+                Variant::PackedInt32Array(vec![1, 4, 5, 2]),
+            ]
+            .into(),
+        ),
     );
     tree.add_child(root, region).expect("region attaches");
     tree

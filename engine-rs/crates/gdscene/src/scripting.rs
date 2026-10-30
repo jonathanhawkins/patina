@@ -67,6 +67,7 @@ fn arg_vec2_array(args: &[Variant], index: usize) -> Option<Vec<Vector2>> {
         Variant::PackedVector2Array(pts) => Some(pts.clone()),
         Variant::Array(items) => Some(
             items
+                .to_vec()
                 .iter()
                 .filter_map(|v| match v {
                     Variant::Vector2(p) => Some(*p),
@@ -84,6 +85,7 @@ fn arg_color_array(args: &[Variant], index: usize) -> Vec<Color> {
     match args.get(index) {
         Some(Variant::PackedColorArray(cs)) => cs.clone(),
         Some(Variant::Array(items)) => items
+            .to_vec()
             .iter()
             .filter_map(|v| match v {
                 Variant::Color(c) => Some(*c),
@@ -1178,7 +1180,7 @@ fn collision_record(tree: &SceneTree, raw: u64) -> Option<gdvariant::Dictionary>
             .get_node(nid)
             .map(|n| n.get_property("_move_and_collide"))
         {
-            Some(Variant::Dictionary(d)) => Some(d),
+            Some(Variant::Dictionary(d)) => Some(d.to_dict()),
             _ => None,
         };
     }
@@ -1187,7 +1189,7 @@ fn collision_record(tree: &SceneTree, raw: u64) -> Option<gdvariant::Dictionary>
         .map(|n| n.get_property("_slide_collisions"))
     {
         Some(Variant::Array(items)) => match items.get(index) {
-            Some(Variant::Dictionary(d)) => Some(d.clone()),
+            Some(Variant::Dictionary(d)) => Some(d.clone().to_dict()),
             _ => None,
         },
         _ => None,
@@ -1671,7 +1673,7 @@ fn shape_mut<F: FnOnce(&mut gdphysics2d::shape::Shape2D)>(raw: u64, f: F) -> boo
 /// monitor. That is parity, not a missing read.
 fn body_contacts(tree: &SceneTree, nid: NodeId) -> Vec<Variant> {
     match tree.get_node(nid).map(|n| n.get_property("_body_contacts")) {
-        Some(Variant::Array(items)) => items,
+        Some(Variant::Array(items)) => items.to_vec(),
         _ => Vec::new(),
     }
 }
@@ -1802,6 +1804,7 @@ fn custom_headers_arg(args: &[Variant]) -> Vec<String> {
     match args.get(1) {
         Some(Variant::PackedStringArray(h)) => h.clone(),
         Some(Variant::Array(a)) => a
+            .to_vec()
             .iter()
             .filter_map(|v| match v {
                 Variant::String(s) => Some(s.clone()),
@@ -2096,6 +2099,7 @@ impl SceneAccess for SceneTreeAccessor {
                 "exclude" => {
                     let ids: Vec<u64> = match &value {
                         Variant::Array(items) => items
+                            .to_vec()
                             .iter()
                             .filter_map(|v| match v {
                                 Variant::ObjectId(id) => Some(id.raw()),
@@ -2439,7 +2443,7 @@ impl SceneAccess for SceneTreeAccessor {
             .tree_mut()
             .call_script_method(nid, "_get_property_list", &[])
         {
-            Some(Variant::Array(entries)) => entries,
+            Some(Variant::Array(entries)) => entries.to_vec(),
             _ => Vec::new(),
         }
     }
@@ -2980,7 +2984,7 @@ impl SceneAccess for SceneTreeAccessor {
                 let position = match params.properties.get("position") {
                     Some(Variant::Vector3(v)) => *v,
                     // No point to test: Godot answers an empty Array.
-                    _ => return Some(Variant::Array(Vec::new())),
+                    _ => return Some(Variant::Array(Default::default())),
                 };
                 let mut query = gdphysics3d::query::PhysicsPointQuery3D::new(position);
                 if let Some(Variant::Int(m)) = params.properties.get("collision_mask") {
@@ -2995,10 +2999,10 @@ impl SceneAccess for SceneTreeAccessor {
                         if let Some(nid) = server.node_for_body(body_id) {
                             d.insert("collider", Variant::ObjectId(nid.object_id()));
                         }
-                        Variant::Dictionary(d)
+                        Variant::Dictionary(d.into())
                     })
                     .collect();
-                Some(Variant::Array(out))
+                Some(Variant::Array(out.into()))
             }
             // The shape-based 3D queries (pat-s3rrv.107). All four decode
             // their parameters through `shape_query_3d_from_params`, so the
@@ -3013,7 +3017,7 @@ impl SceneAccess for SceneTreeAccessor {
                     return None;
                 };
                 let Some(query) = shape_query_3d_from_params(params) else {
-                    return Some(Variant::Array(Vec::new()));
+                    return Some(Variant::Array(Default::default()));
                 };
                 let server = self.physics_3d()?;
                 let hits = query.intersect(server.world().bodies());
@@ -3024,10 +3028,10 @@ impl SceneAccess for SceneTreeAccessor {
                         if let Some(nid) = server.node_for_body(hit.body_id) {
                             d.insert("collider", Variant::ObjectId(nid.object_id()));
                         }
-                        Variant::Dictionary(d)
+                        Variant::Dictionary(d.into())
                     })
                     .collect();
-                Some(Variant::Array(out))
+                Some(Variant::Array(out.into()))
             }
             // `cast_motion(params)` — `[safe, unsafe]` fractions of the
             // params' `motion`, which is Godot's return shape.
@@ -3038,20 +3042,18 @@ impl SceneAccess for SceneTreeAccessor {
                 let unobstructed = || {
                     // Godot answers `[1, 1]` when nothing blocks the motion —
                     // NOT an empty array, so `result[0]` is always indexable.
-                    Some(Variant::Array(vec![
-                        Variant::Float(1.0),
-                        Variant::Float(1.0),
-                    ]))
+                    Some(Variant::Array(
+                        vec![Variant::Float(1.0), Variant::Float(1.0)].into(),
+                    ))
                 };
                 let Some(query) = shape_query_3d_from_params(params) else {
                     return unobstructed();
                 };
                 let server = self.physics_3d()?;
                 let (safe, unsafe_) = query.cast_motion(server.world().bodies());
-                Some(Variant::Array(vec![
-                    Variant::Float(safe as f64),
-                    Variant::Float(unsafe_ as f64),
-                ]))
+                Some(Variant::Array(
+                    (vec![Variant::Float(safe as f64), Variant::Float(unsafe_ as f64)]).into(),
+                ))
             }
             // `collide_shape(params)` — contact points as PAIRS, flattened into
             // one Array exactly as Godot returns them (own point, then the
@@ -3061,7 +3063,7 @@ impl SceneAccess for SceneTreeAccessor {
                     return None;
                 };
                 let Some(query) = shape_query_3d_from_params(params) else {
-                    return Some(Variant::Array(Vec::new()));
+                    return Some(Variant::Array(Default::default()));
                 };
                 let server = self.physics_3d()?;
                 let pairs = query.collide_shape(server.world().bodies());
@@ -3070,7 +3072,7 @@ impl SceneAccess for SceneTreeAccessor {
                     out.push(Variant::Vector3(a));
                     out.push(Variant::Vector3(b));
                 }
-                Some(Variant::Array(out))
+                Some(Variant::Array(out.into()))
             }
             // `get_rest_info(params)` — the NEAREST contact as a Dictionary,
             // empty on a miss so `if info:` works unguarded.
@@ -3078,7 +3080,7 @@ impl SceneAccess for SceneTreeAccessor {
                 let Some(Variant::Resource(params)) = args.first() else {
                     return None;
                 };
-                let empty = || Some(Variant::Dictionary(gdvariant::Dictionary::new()));
+                let empty = || Some(Variant::Dictionary(gdvariant::Dictionary::new().into()));
                 let Some(query) = shape_query_3d_from_params(params) else {
                     return empty();
                 };
@@ -3093,7 +3095,7 @@ impl SceneAccess for SceneTreeAccessor {
                 if let Some(nid) = server.node_for_body(info.collider) {
                     d.insert("collider", Variant::ObjectId(nid.object_id()));
                 }
-                Some(Variant::Dictionary(d))
+                Some(Variant::Dictionary(d.into()))
             }
             "intersect_ray" if node == SPACE_STATE_3D_HANDLE => {
                 let params = match args.first() {
@@ -3110,7 +3112,7 @@ impl SceneAccess for SceneTreeAccessor {
                     // Without both endpoints there is no ray. Godot answers an
                     // empty Dictionary rather than erroring, so `if result:`
                     // works unguarded.
-                    _ => return Some(Variant::Dictionary(gdvariant::Dictionary::new())),
+                    _ => return Some(Variant::Dictionary(gdvariant::Dictionary::new().into())),
                 };
                 let mask = match params.properties.get("collision_mask") {
                     Some(Variant::Int(m)) => *m as u32,
@@ -3124,7 +3126,7 @@ impl SceneAccess for SceneTreeAccessor {
                     (b.collision_layer & mask) != 0
                 })) {
                     Some(hit) => hit,
-                    None => return Some(Variant::Dictionary(gdvariant::Dictionary::new())),
+                    None => return Some(Variant::Dictionary(gdvariant::Dictionary::new().into())),
                 };
                 let mut d = gdvariant::Dictionary::new();
                 d.insert("position", Variant::Vector3(hit.point));
@@ -3132,7 +3134,7 @@ impl SceneAccess for SceneTreeAccessor {
                 if let Some(nid) = self.physics_3d()?.node_for_body(hit.body_id) {
                     d.insert("collider", Variant::ObjectId(nid.object_id()));
                 }
-                Some(Variant::Dictionary(d))
+                Some(Variant::Dictionary(d.into()))
             }
             "intersect_ray" if node == SPACE_STATE_2D_HANDLE => {
                 let params = match args.first() {
@@ -3171,7 +3173,7 @@ impl SceneAccess for SceneTreeAccessor {
                 // script can test `if result:` and index it without a guard.
                 let hit = match world.intersect_ray(&query) {
                     Some(hit) => hit,
-                    None => return Some(Variant::Dictionary(gdvariant::Dictionary::new())),
+                    None => return Some(Variant::Dictionary(gdvariant::Dictionary::new().into())),
                 };
                 // `collider` is the hit NODE, which is what a script actually
                 // uses (`result.collider.queue_free()`). `node_for_body` is the
@@ -3193,7 +3195,7 @@ impl SceneAccess for SceneTreeAccessor {
                         Variant::ObjectId(node_id.object_id()),
                     );
                 }
-                Some(Variant::Dictionary(dict))
+                Some(Variant::Dictionary(dict.into()))
             }
             // `intersect_shape(params, max_results)` — every body overlapping
             // the parameters' shape at its transform, as an ARRAY of
@@ -3245,9 +3247,9 @@ impl SceneAccess for SceneTreeAccessor {
                     // Godot reports which shape OF THE COLLIDER was hit; Patina
                     // registers one shape per body, so it is always index 0.
                     entry.insert(Variant::String("shape".to_string()), Variant::Int(0));
-                    out.push(Variant::Dictionary(entry));
+                    out.push(Variant::Dictionary(entry.into()));
                 }
-                Some(Variant::Array(out))
+                Some(Variant::Array(out.into()))
             }
             // `collide_shape(params, max_results)` — contact points as PAIRS
             // (first on the query shape, second on the collider), per
@@ -3293,10 +3295,13 @@ impl SceneAccess for SceneTreeAccessor {
                     &exclude,
                     params.collision_mask,
                 );
-                Some(Variant::Array(vec![
-                    Variant::Float(fractions[0] as f64),
-                    Variant::Float(fractions[1] as f64),
-                ]))
+                Some(Variant::Array(
+                    (vec![
+                        Variant::Float(fractions[0] as f64),
+                        Variant::Float(fractions[1] as f64),
+                    ])
+                    .into(),
+                ))
             }
             // `get_rest_info(params)` — the NEAREST contact, as a Dictionary.
             // Godot answers an EMPTY Dictionary when nothing overlaps, the same
@@ -3315,7 +3320,7 @@ impl SceneAccess for SceneTreeAccessor {
                     params.collision_mask,
                 ) {
                     Some(hit) => hit,
-                    None => return Some(Variant::Dictionary(gdvariant::Dictionary::new())),
+                    None => return Some(Variant::Dictionary(gdvariant::Dictionary::new().into())),
                 };
                 let mut dict = gdvariant::Dictionary::new();
                 dict.insert(
@@ -3343,7 +3348,7 @@ impl SceneAccess for SceneTreeAccessor {
                     );
                 }
                 dict.insert(Variant::String("shape".to_string()), Variant::Int(0));
-                Some(Variant::Dictionary(dict))
+                Some(Variant::Dictionary(dict.into()))
             }
             // `intersect_point(params, max_results)` — Godot answers an ARRAY of
             // Dictionaries (one per overlapping body), not a single hit, and an
@@ -3374,9 +3379,9 @@ impl SceneAccess for SceneTreeAccessor {
                         Variant::String("collider".to_string()),
                         Variant::ObjectId(node_id.object_id()),
                     );
-                    out.push(Variant::Dictionary(entry));
+                    out.push(Variant::Dictionary(entry.into()));
                 }
-                Some(Variant::Array(out))
+                Some(Variant::Array(out.into()))
             }
             // -- Node3D transform API (pat-s3rrv.24) -------------------------
             //
@@ -3509,12 +3514,12 @@ impl SceneAccess for SceneTreeAccessor {
                                 Variant::String("to_port".into()),
                                 Variant::Int(c.to_port as i64),
                             );
-                            Variant::Dictionary(d)
+                            Variant::Dictionary(d.into())
                         })
                         .collect(),
                     None => Vec::new(),
                 };
-                Some(Variant::Array(list))
+                Some(Variant::Array(list.into()))
             }
             // `CharacterBody3D.apply_floor_snap()` (pat-s3rrv.103). Godot
             // exposes the snap as its own method, not only as an internal phase
@@ -3575,11 +3580,7 @@ impl SceneAccess for SceneTreeAccessor {
                 match method {
                     "get_resource" => {
                         let name = arg_str(0)?;
-                        Some(
-                            dict.get(Variant::String(name))
-                                .cloned()
-                                .unwrap_or(Variant::Nil),
-                        )
+                        Some(dict.get(Variant::String(name)).unwrap_or(Variant::Nil))
                     }
                     "has_resource" => {
                         let name = arg_str(0)?;
@@ -3587,7 +3588,8 @@ impl SceneAccess for SceneTreeAccessor {
                     }
                     // Godot returns a PackedStringArray of the resource names.
                     _ => Some(Variant::PackedStringArray(
-                        dict.keys()
+                        dict.to_dict()
+                            .keys()
                             .map(|k| match k {
                                 Variant::String(s) => s.clone(),
                                 other => format!("{other:?}"),
@@ -3693,11 +3695,11 @@ impl SceneAccess for SceneTreeAccessor {
                         // a stable answer across runs.
                         if !seen.contains(&id.raw()) {
                             seen.push(id.raw());
-                            out.push(Variant::ObjectId(*id));
+                            out.push(Variant::ObjectId(id));
                         }
                     }
                 }
-                Some(Variant::Array(out))
+                Some(Variant::Array(out.into()))
             }
             // Godot answers an Array of the excepted bodies — empty, never
             // null, so a script can `for b in ...` it without a guard.
@@ -3969,9 +3971,9 @@ impl SceneAccess for SceneTreeAccessor {
             "get_overlapping_bodies" => Some(match self.tree().get_node(nid) {
                 Some(n) => match n.get_property("_overlapping_bodies") {
                     Variant::Array(items) => Variant::Array(items),
-                    _ => Variant::Array(Vec::new()),
+                    _ => Variant::Array(Default::default()),
                 },
-                None => Variant::Array(Vec::new()),
+                None => Variant::Array(Default::default()),
             }),
             "has_overlapping_bodies" => {
                 let count = match self.tree().get_node(nid) {
@@ -3993,9 +3995,9 @@ impl SceneAccess for SceneTreeAccessor {
             "get_overlapping_areas" => Some(match self.tree().get_node(nid) {
                 Some(n) => match n.get_property("_overlapping_areas") {
                     Variant::Array(items) => Variant::Array(items),
-                    _ => Variant::Array(Vec::new()),
+                    _ => Variant::Array(Default::default()),
                 },
-                None => Variant::Array(Vec::new()),
+                None => Variant::Array(Default::default()),
             }),
             "has_overlapping_areas" => {
                 let count = match self.tree().get_node(nid) {
@@ -4025,6 +4027,7 @@ impl SceneAccess for SceneTreeAccessor {
                 let found = match self.tree().get_node(nid) {
                     Some(n) => match n.get_property(key) {
                         Variant::Array(items) => items
+                            .to_vec()
                             .iter()
                             .any(|v| matches!(v, Variant::ObjectId(id) if *id == target)),
                         _ => false,
@@ -4083,7 +4086,7 @@ impl SceneAccess for SceneTreeAccessor {
                     .into_iter()
                     .map(|n| Variant::ObjectId(n.object_id()))
                     .collect();
-                Some(Variant::Array(ids))
+                Some(Variant::Array(ids.into()))
             }
 
             // -- Node tree queries --------------------------------------------
@@ -7480,7 +7483,7 @@ impl SceneAccess for SceneTreeAccessor {
                     let penalties: Vec<f32> =
                         (0..points.len()).map(|i| f.get_point_penalty(i)).collect();
                     d.insert("points", Variant::PackedVector2Array(points));
-                    d.insert("connections", Variant::Array(adjacency));
+                    d.insert("connections", Variant::Array(adjacency.into()));
                     d.insert("segments", Variant::PackedInt32Array(segments));
                     d.insert(
                         "bounds",
@@ -7490,7 +7493,7 @@ impl SceneAccess for SceneTreeAccessor {
                         }),
                     );
                     d.insert("penalties", Variant::PackedFloat32Array(penalties));
-                    Variant::Dictionary(d)
+                    Variant::Dictionary(d.into())
                 }
                 "set_data" => {
                     let Some(Variant::Dictionary(d)) = args.first() else {
@@ -7840,10 +7843,9 @@ fn surface_tool_call(
             // Packing lives in `script_mesh` beside its inverse
             // (`mesh_from_mesh_array`) so the two can be round-trip tested
             // against each other rather than only through a script.
-            Some(Variant::Array(crate::script_mesh::mesh_to_mesh_array(
-                &tool.commit(),
-                tool.colors(),
-            )))
+            Some(Variant::Array(
+                crate::script_mesh::mesh_to_mesh_array(&tool.commit(), tool.colors()).into(),
+            ))
         }
         "set_smooth_group" => {
             let group = match args.first() {

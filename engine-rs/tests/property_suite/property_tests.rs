@@ -76,7 +76,7 @@ fn random_variant(rng: &mut Rng) -> Variant {
                     }
                 })
                 .collect();
-            Variant::Array(items)
+            Variant::Array(items.into())
         }
         10 => {
             let s = format!("sn_{}", rng.next_u64() % 1000);

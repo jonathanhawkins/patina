@@ -80,7 +80,7 @@ impl CodeHighlighter {
     pub fn from_keyword_dict(dict: &Variant, default_color: Color) -> Self {
         let mut hl = Self::new(default_color);
         if let Variant::Dictionary(d) = dict {
-            for (k, v) in d.iter() {
+            for (k, v) in d.to_dict().iter() {
                 if let (Variant::String(word), Variant::Color(color)) = (k, v) {
                     hl.add_keyword_color(word.clone(), *color);
                 }
@@ -255,7 +255,7 @@ mod tests {
     fn builds_from_keyword_dictionary() {
         let mut dict = gdvariant::Dictionary::new();
         dict.insert(Variant::String("func".into()), Variant::Color(blue()));
-        let hl = CodeHighlighter::from_keyword_dict(&Variant::Dictionary(dict), white());
+        let hl = CodeHighlighter::from_keyword_dict(&Variant::Dictionary(dict.into()), white());
 
         assert_eq!(hl.keyword_color("func"), Some(blue()));
         assert!(!hl.is_empty());
@@ -267,7 +267,7 @@ mod tests {
         dict.insert(Variant::String("ok".into()), Variant::Color(blue()));
         dict.insert(Variant::Int(7), Variant::Color(blue())); // non-string key
         dict.insert(Variant::String("bad".into()), Variant::Int(3)); // non-color value
-        let hl = CodeHighlighter::from_keyword_dict(&Variant::Dictionary(dict), white());
+        let hl = CodeHighlighter::from_keyword_dict(&Variant::Dictionary(dict.into()), white());
 
         assert_eq!(hl.keyword_color("ok"), Some(blue()));
         assert_eq!(hl.keyword_color("bad"), None);

@@ -229,7 +229,7 @@ fn compositor_effects_is_an_array() {
     register_3d_classes();
     assert_eq!(
         default_of("Compositor", "compositor_effects"),
-        Some(Variant::Array(Vec::new())),
+        Some(Variant::Array(Default::default())),
         "Compositor.compositor_effects must default to an empty array",
     );
 }

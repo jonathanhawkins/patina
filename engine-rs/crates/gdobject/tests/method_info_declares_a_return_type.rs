@@ -81,7 +81,7 @@ fn a_typed_array_return_names_its_element_type() {
 
     assert_eq!(
         ret.default_value,
-        Variant::Array(Vec::new()),
+        Variant::Array(Default::default()),
         "Godot reports `Dictionary[]` as an ARRAY"
     );
     assert_eq!(

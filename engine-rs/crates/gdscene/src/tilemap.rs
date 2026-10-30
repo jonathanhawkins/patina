@@ -151,6 +151,7 @@ pub fn tile_set_source_ids(value: &Variant) -> Vec<i32> {
     match value {
         Variant::PackedInt32Array(ids) => ids.clone(),
         Variant::Array(items) => items
+            .to_vec()
             .iter()
             .filter_map(|v| match v {
                 Variant::Int(i) => Some(*i as i32),

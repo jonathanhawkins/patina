@@ -239,6 +239,18 @@ fn primitive_marker_query(props: Option<&HashMap<String, Variant>>) -> String {
     format!("?{}", body.join("&"))
 }
 
+/// The value an instanced node receives for a property stored in the scene.
+///
+/// Arrays and dictionaries are handles to shared storage (pat-s3rrv.8), and a
+/// `PackedScene` is parsed once and instanced many times, so handing every
+/// instance the parsed handle would make two instances of one scene share
+/// their `Array`/`Dictionary` properties. Godot's `SceneState::instantiate`
+/// gives each instance its own shallow copy (`set_array.duplicate()` /
+/// `set_dict.duplicate()`, scene/resources/packed_scene.cpp), so do the same.
+fn instance_value(value: &Variant) -> Variant {
+    value.duplicate(false)
+}
+
 impl PackedScene {
     /// Parses a `.tscn` string into a `PackedScene`.
     pub fn from_tscn(source: &str) -> EngineResult<Self> {
@@ -365,7 +377,7 @@ impl PackedScene {
                                 to_path: to,
                                 method_name: method,
                                 flags,
-                                binds,
+                                binds: binds.to_vec(),
                                 unbinds,
                             });
                         }
@@ -816,7 +828,7 @@ impl PackedScene {
                     .get(&curve_id)
                     .and_then(|p| p.get("_data"))
                 {
-                    if let Some(samples) = bake_curve_samples(data) {
+                    if let Some(samples) = bake_curve_samples(&data.to_vec()) {
                         tmpl.properties.insert(
                             "__width_curve_samples".into(),
                             Variant::PackedFloat32Array(samples),
@@ -1065,7 +1077,7 @@ impl PackedScene {
                     }
                 });
                 if let Some(Variant::Array(data)) = data.and_then(|b| b.get("_data")) {
-                    if let Some(samples) = bake_curve_samples(data) {
+                    if let Some(samples) = bake_curve_samples(&data.to_vec()) {
                         tmpl.properties.insert(
                             "__scale_curve_samples".into(),
                             Variant::PackedFloat32Array(samples),
@@ -1352,7 +1364,7 @@ impl PackedScene {
             };
 
             let mut names: Vec<String> = Vec::new();
-            for entry in anims {
+            for entry in anims.to_vec().iter() {
                 let Variant::Dictionary(dict) = entry else {
                     continue;
                 };
@@ -1364,14 +1376,14 @@ impl PackedScene {
                     _ => continue,
                 };
                 let speed = match dict.get("speed") {
-                    Some(Variant::Float(f)) => *f,
-                    Some(Variant::Int(i)) => *i as f64,
+                    Some(Variant::Float(f)) => f,
+                    Some(Variant::Int(i)) => i as f64,
                     _ => 5.0,
                 };
                 let loops = !matches!(dict.get("loop"), Some(Variant::Bool(false)));
                 let mut frames: Vec<String> = Vec::new();
                 if let Some(Variant::Array(list)) = dict.get("frames") {
-                    for f in list {
+                    for f in list.to_vec() {
                         let Variant::Dictionary(fd) = f else { continue };
                         // The texture is an `ExtResource:<id>` reference; resolve
                         // it to the path the renderer can actually load.
@@ -2235,7 +2247,7 @@ impl PackedScene {
         // Create root node.
         let mut root_node = node_with_class_defaults(&root_tmpl.name, &root_tmpl.class_name);
         for (key, value) in &root_tmpl.properties {
-            root_node.set_property(key, value.clone());
+            root_node.set_property(key, instance_value(value));
         }
         for group in &root_tmpl.groups {
             root_node.add_to_group(group.clone());
@@ -2271,7 +2283,7 @@ impl PackedScene {
 
             let mut node = node_with_class_defaults(&tmpl.name, &tmpl.class_name);
             for (key, value) in &tmpl.properties {
-                node.set_property(key, value.clone());
+                node.set_property(key, instance_value(value));
             }
             for group in &tmpl.groups {
                 node.add_to_group(group.clone());
@@ -2417,7 +2429,7 @@ impl PackedScene {
             // The derived scene names the root and diffs its properties on top.
             nodes[0].set_name(&root_tmpl.name);
             for (key, value) in &root_tmpl.properties {
-                nodes[0].set_property(key, value.clone());
+                nodes[0].set_property(key, instance_value(value));
             }
             for group in &root_tmpl.groups {
                 nodes[0].add_to_group(group.clone());
@@ -2435,7 +2447,7 @@ impl PackedScene {
         } else {
             let mut root_node = node_with_class_defaults(&root_tmpl.name, &root_tmpl.class_name);
             for (key, value) in &root_tmpl.properties {
-                root_node.set_property(key, value.clone());
+                root_node.set_property(key, instance_value(value));
             }
             for group in &root_tmpl.groups {
                 root_node.add_to_group(group.clone());
@@ -2485,7 +2497,7 @@ impl PackedScene {
                                 sub_node.set_name(&tmpl.name);
                                 // Apply property overrides from parent scene.
                                 for (key, value) in &tmpl.properties {
-                                    sub_node.set_property(key, value.clone());
+                                    sub_node.set_property(key, instance_value(value));
                                 }
                                 for group in &tmpl.groups {
                                     sub_node.add_to_group(group.clone());
@@ -2531,7 +2543,7 @@ impl PackedScene {
             if let Some(&existing_idx) = path_to_index.get(&node_path) {
                 let existing = &mut nodes[existing_idx];
                 for (key, value) in &tmpl.properties {
-                    existing.set_property(key, value.clone());
+                    existing.set_property(key, instance_value(value));
                 }
                 for group in &tmpl.groups {
                     existing.add_to_group(group.clone());
@@ -2570,7 +2582,7 @@ impl PackedScene {
                     .into_iter()
                     .flat_map(|k| [Variant::String(k.clone()), tmpl.properties[k].clone()])
                     .collect();
-                node.set_property("_stored_values", Variant::Array(stored));
+                node.set_property("_stored_values", Variant::Array(stored.into()));
                 for group in &tmpl.groups {
                     node.add_to_group(group.clone());
                 }
@@ -2587,7 +2599,7 @@ impl PackedScene {
             // Regular (non-instanced) node.
             let mut node = node_with_class_defaults(&tmpl.name, &tmpl.class_name);
             for (key, value) in &tmpl.properties {
-                node.set_property(key, value.clone());
+                node.set_property(key, instance_value(value));
             }
             for group in &tmpl.groups {
                 node.add_to_group(group.clone());
@@ -2985,6 +2997,7 @@ fn collect_tile_navigation(
             // more forgiving than the engine we are matching.
             Variant::PackedVector2Array(p) => p.clone(),
             Variant::Array(items) => items
+                .to_vec()
                 .iter()
                 .filter_map(|v| match v {
                     Variant::Vector2(p) => Some(*p),
@@ -3057,6 +3070,7 @@ fn collect_tile_physics(
             let points = match value {
                 Variant::PackedVector2Array(p) => p.clone(),
                 Variant::Array(items) => items
+                    .to_vec()
                     .iter()
                     .filter_map(|v| match v {
                         Variant::Vector2(p) => Some(*p),
@@ -3278,7 +3292,7 @@ fn shortcut_event_pairs(
         return Vec::new();
     };
     let mut out = Vec::new();
-    for ev in events {
+    for ev in events.to_vec().iter() {
         let Variant::String(reference) = ev else {
             continue;
         };
@@ -3437,7 +3451,8 @@ pub fn placeholder_stored_values(
     let Variant::Array(flat) = node.get_property("_stored_values") else {
         return Vec::new();
     };
-    flat.chunks_exact(2)
+    flat.to_vec()
+        .chunks_exact(2)
         .filter_map(|pair| match &pair[0] {
             Variant::String(k) => Some((k.clone(), pair[1].clone())),
             _ => None,

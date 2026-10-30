@@ -89,7 +89,7 @@ fn int_prop(res: &gdresource::resource::Resource, key: &str) -> i64 {
 
 fn pixels(res: &gdresource::resource::Resource) -> Vec<Variant> {
     match res.get_property("pixels") {
-        Some(Variant::Array(a)) => a.clone(),
+        Some(Variant::Array(a)) => a.clone().to_vec(),
         other => panic!("pixels: expected Array, got {other:?}"),
     }
 }

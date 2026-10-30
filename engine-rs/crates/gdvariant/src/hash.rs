@@ -210,7 +210,7 @@ fn recursive_hash(v: &Variant, depth: u32) -> u32 {
         Variant::Array(items) => {
             // Seeded with the ARRAY type ordinal, so [] and {} differ.
             let mut h = hash_murmur3_one_32(VARIANT_TYPE_ARRAY, HASH_MURMUR3_SEED);
-            for item in items {
+            for item in items.to_vec().iter() {
                 h = hash_murmur3_one_32(recursive_hash(item, depth + 1), h);
             }
             hash_fmix32(h)
@@ -226,7 +226,7 @@ fn recursive_hash(v: &Variant, depth: u32) -> u32 {
             // dictionaries with the same pairs inserted in different orders hash
             // differently in Godot too.
             let mut h = hash_murmur3_one_32(VARIANT_TYPE_DICTIONARY, HASH_MURMUR3_SEED);
-            for (k, val) in d.iter() {
+            for (k, val) in d.to_dict().iter() {
                 h = hash_murmur3_one_32(recursive_hash(k, depth + 1), h);
                 h = hash_murmur3_one_32(recursive_hash(val, depth + 1), h);
             }
@@ -600,12 +600,12 @@ mod tests {
     fn golden_dictionary_matches_godot() {
         let mut d = crate::dictionary::Dictionary::new();
         d.insert(Variant::String("a".into()), Variant::Int(1));
-        assert_eq!(godot_hash(&Variant::Dictionary(d)), 120_477_264);
+        assert_eq!(godot_hash(&Variant::Dictionary(d.into())), 120_477_264);
     }
 
     #[test]
     fn golden_array_matches_godot() {
-        let arr = Variant::Array(vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)]);
+        let arr = Variant::Array(vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)].into());
         assert_eq!(godot_hash(&arr), 3_860_078_832);
     }
 
@@ -651,7 +651,7 @@ mod tests {
     /// separates an empty array from other empty things.
     #[test]
     fn distinct_values_hash_distinctly() {
-        let empty_arr = godot_hash(&Variant::Array(vec![]));
+        let empty_arr = godot_hash(&Variant::Array(Default::default()));
         assert_ne!(empty_arr, 0, "an empty array is seeded, not zero");
         assert_ne!(godot_hash(&Variant::Int(1)), godot_hash(&Variant::Int(2)));
         assert_ne!(
@@ -668,9 +668,9 @@ mod tests {
     /// Nested arrays recurse rather than hashing by identity.
     #[test]
     fn nested_arrays_recurse() {
-        let inner = Variant::Array(vec![Variant::Int(1)]);
-        let outer = Variant::Array(vec![inner.clone()]);
-        let flat = Variant::Array(vec![Variant::Int(1)]);
+        let inner = Variant::Array(vec![Variant::Int(1)].into());
+        let outer = Variant::Array(vec![inner.clone()].into());
+        let flat = Variant::Array(vec![Variant::Int(1)].into());
         assert_ne!(
             godot_hash(&outer),
             godot_hash(&flat),
@@ -678,7 +678,7 @@ mod tests {
         );
         assert_eq!(
             godot_hash(&outer),
-            godot_hash(&Variant::Array(vec![inner])),
+            godot_hash(&Variant::Array(vec![inner].into())),
             "and the same shape must hash the same"
         );
     }

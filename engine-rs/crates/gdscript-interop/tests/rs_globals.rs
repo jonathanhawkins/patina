@@ -139,9 +139,13 @@ func check():
     match call_check(src) {
         Variant::Array(vals) => {
             assert_eq!(vals.len(), 2);
-            assert_eq!(vals[0], Variant::Float(9.0), "override wins while active");
             assert_eq!(
-                vals[1],
+                vals.to_vec()[0],
+                Variant::Float(9.0),
+                "override wins while active"
+            );
+            assert_eq!(
+                vals.to_vec()[1],
                 Variant::Float(3.0),
                 "reverting restores the last set value, not the original default",
             );

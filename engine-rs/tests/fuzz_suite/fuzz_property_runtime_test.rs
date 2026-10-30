@@ -1028,7 +1028,10 @@ fn prop_variant_unsupported_arith_yields_nil() {
         (Variant::String("hello".into()), Variant::Int(42)),
         (Variant::Bool(true), Variant::Float(1.0)),
         (Variant::Nil, Variant::Int(1)),
-        (Variant::Array(vec![Variant::Int(1)]), Variant::Int(2)),
+        (
+            Variant::Array(vec![Variant::Int(1)].into()),
+            Variant::Int(2),
+        ),
     ];
     for (a, b) in &incompatible_pairs {
         let _ = a.clone() - b.clone();
@@ -1086,8 +1089,8 @@ fn prop_variant_bool_coercion_matches_truthiness() {
         (Variant::Float(1.0), true),
         (Variant::String("".into()), false),
         (Variant::String("hello".into()), true),
-        (Variant::Array(vec![]), false),
-        (Variant::Array(vec![Variant::Nil]), true),
+        (Variant::Array(Default::default()), false),
+        (Variant::Array(vec![Variant::Nil].into()), true),
     ];
     for (v, expected) in &test_cases {
         assert_eq!(v.to_bool(), *expected, "truthiness mismatch for {v:?}");
@@ -1672,7 +1675,7 @@ fn random_variant(rng: &mut Rng) -> Variant {
         4 => Variant::String(format!("s{}", rng.next_u64() % 100)),
         5 => Variant::Vector2(rng.next_vec2()),
         6 => Variant::Vector3(rng.next_vec3()),
-        7 => Variant::Array(vec![Variant::Int(rng.next_u64() as i64)]),
+        7 => Variant::Array((vec![Variant::Int(rng.next_u64() as i64)]).into()),
         8 => {
             let mut d = std::collections::HashMap::new();
             d.insert("k".to_string(), Variant::Int(rng.next_u64() as i64));

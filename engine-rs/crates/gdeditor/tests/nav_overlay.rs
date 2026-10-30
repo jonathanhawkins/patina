@@ -242,6 +242,7 @@ fn bake_writes_the_runtime_navmesh_properties() {
             assert!(!polys.is_empty(), "the bake must write polygons");
             assert!(
                 polys
+                    .to_vec()
                     .iter()
                     .all(|p| matches!(p, Variant::PackedInt32Array(_))),
                 "each polygon must be a PackedInt32Array of vertex indices"

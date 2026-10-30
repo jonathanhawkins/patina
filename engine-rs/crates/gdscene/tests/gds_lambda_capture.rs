@@ -35,6 +35,7 @@ fn prop(ml: &MainLoop, id: NodeId, name: &str) -> Option<Variant> {
 fn ints(v: Option<Variant>) -> Vec<i64> {
     match v {
         Some(Variant::Array(items)) => items
+            .to_vec()
             .iter()
             .map(|i| match i {
                 Variant::Int(n) => *n,

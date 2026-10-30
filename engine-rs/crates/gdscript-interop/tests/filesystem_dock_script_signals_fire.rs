@@ -144,14 +144,18 @@ fn a_connected_script_receives_files_moved_from_the_editor_server() {
         panic!("pump() should return an array, got {out:?}");
     };
     assert_eq!(
-        v[0],
+        v.to_vec()[0],
         Variant::String("res://old.tscn".into()),
         "the callback must receive the old path"
     );
-    assert_eq!(v[1], Variant::String("new.tscn".into()), "and the new one");
-    assert_eq!(v[2], Variant::Int(1), "fired exactly once");
     assert_eq!(
-        v[3],
+        v.to_vec()[1],
+        Variant::String("new.tscn".into()),
+        "and the new one"
+    );
+    assert_eq!(v.to_vec()[2], Variant::Int(1), "fired exactly once");
+    assert_eq!(
+        v.to_vec()[3],
         Variant::String("res://scenes".into()),
         "navigate_to_path must record where the script asked the dock to go"
     );
@@ -176,7 +180,7 @@ fn an_unconnected_signal_reaches_nobody_and_does_not_raise() {
         panic!("expected an array, got {out:?}");
     };
     assert_eq!(
-        v[2],
+        v.to_vec()[2],
         Variant::Int(0),
         "a signal nobody connected must not invoke the files_moved callback"
     );

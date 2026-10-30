@@ -28,6 +28,7 @@ fn call_method(src: &str, method: &str) -> Variant {
 fn as_ints(v: Variant) -> Vec<i64> {
     match v {
         Variant::Array(items) => items
+            .to_vec()
             .into_iter()
             .map(|it| match it {
                 Variant::Int(i) => i,
@@ -84,7 +85,8 @@ typeof(true) == TYPE_BOOL]
             Variant::Bool(true),
             Variant::Bool(true),
             Variant::Bool(true),
-        ],
+        ]
+        .into(),
         "typeof(x) must equal the matching TYPE_* constant",
     );
 }

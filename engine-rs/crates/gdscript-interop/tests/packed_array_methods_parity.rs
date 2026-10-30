@@ -32,7 +32,7 @@ fn run(body: &[&str]) -> Variant {
 
 fn items(v: Variant) -> Vec<Variant> {
     match v {
-        Variant::Array(items) => items,
+        Variant::Array(items) => items.to_vec(),
         other => panic!("expected Array, got {other:?}"),
     }
 }
@@ -101,7 +101,7 @@ fn packed_array_methods_parity() {
     match &got[7] {
         Variant::Dictionary(d) => assert_eq!(
             d.get("hp"),
-            Some(&Variant::Int(7)),
+            Some(Variant::Int(7)),
             "decode_var must return the encoded dictionary"
         ),
         other => panic!("decode_var must return a Dictionary, got {other:?}"),

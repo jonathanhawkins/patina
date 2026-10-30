@@ -122,7 +122,7 @@ pub fn skinning_transforms(bones: &[GatheredBone]) -> Vec<Transform2D> {
 pub fn publish(tree: &mut SceneTree, skeleton: NodeId, xforms: &[Transform2D]) {
     let arr: Vec<Variant> = xforms.iter().map(|t| Variant::Transform2D(*t)).collect();
     if let Some(node) = tree.get_node_mut(skeleton) {
-        node.set_property(SKIN_XFORMS_PROP, Variant::Array(arr));
+        node.set_property(SKIN_XFORMS_PROP, Variant::Array(arr.into()));
     }
 }
 
@@ -133,6 +133,7 @@ pub fn published_skin_transforms(tree: &SceneTree, skeleton: NodeId) -> Vec<Tran
         .map(|n| n.get_property(SKIN_XFORMS_PROP))
     {
         Some(Variant::Array(items)) => items
+            .to_vec()
             .iter()
             .filter_map(|v| match v {
                 Variant::Transform2D(t) => Some(*t),

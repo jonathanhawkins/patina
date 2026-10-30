@@ -203,7 +203,7 @@ fn the_non_void_virtuals_declare_their_return_type() {
     assert_eq!(tooltip.hint_string, "Object");
 
     let parser = ret(&control, "_structured_text_parser");
-    assert_eq!(parser.default_value, Variant::Array(Vec::new()));
+    assert_eq!(parser.default_value, Variant::Array(Default::default()));
     assert_eq!(
         parser.hint_string, "Vector3i",
         "`Vector3i[]` without its element type is an untyped Array"

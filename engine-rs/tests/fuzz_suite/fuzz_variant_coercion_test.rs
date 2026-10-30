@@ -270,7 +270,7 @@ proptest! {
     #[test]
     fn array_truthiness(len in 0usize..10) {
         let arr: Vec<Variant> = (0..len).map(|i| Variant::Int(i as i64)).collect();
-        prop_assert_eq!(Variant::Array(arr).is_truthy(), len > 0);
+        prop_assert_eq!(Variant::Array(arr.into()).is_truthy(), len > 0);
     }
 }
 

@@ -57,7 +57,7 @@ fn method_track(node_path: &str, track_name: &str, at: f64, method: &str, arg: V
     let mut t = AnimationTrack::with_type(node_path, track_name, TrackType::Method);
     t.add_keyframe(KeyFrame::linear(
         at,
-        Variant::Array(vec![Variant::String(method.into()), arg]),
+        Variant::Array(vec![Variant::String(method.into()), arg].into()),
     ));
     t
 }

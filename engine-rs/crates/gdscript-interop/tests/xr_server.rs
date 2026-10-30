@@ -78,8 +78,12 @@ func check():
 ";
     match call_check(src) {
         Variant::Array(v) => {
-            assert_eq!(v[0], Variant::Bool(true), "WebXR must resolve");
-            assert_eq!(v[1], Variant::Nil, "an unknown interface must be null");
+            assert_eq!(v.to_vec()[0], Variant::Bool(true), "WebXR must resolve");
+            assert_eq!(
+                v.to_vec()[1],
+                Variant::Nil,
+                "an unknown interface must be null"
+            );
         }
         other => panic!("expected an Array, got {other:?}"),
     }
@@ -119,8 +123,8 @@ func check():
 ";
     match call_check(src) {
         Variant::Array(v) => {
-            assert_eq!(v[0], Variant::String("immersive-ar".to_string()));
-            match &v[1] {
+            assert_eq!(v.to_vec()[0], Variant::String("immersive-ar".to_string()));
+            match &v.to_vec()[1] {
                 Variant::PackedStringArray(f) => {
                     assert_eq!(f, &vec!["local-floor".to_string()])
                 }
@@ -166,14 +170,18 @@ func check():
             // True here means "request accepted" — see the note on
             // `session_failed_delivers_its_message`. v[2] is what proves the
             // session actually started.
-            assert_eq!(v[0], Variant::Bool(true), "the request must be accepted");
             assert_eq!(
-                v[1],
+                v.to_vec()[0],
+                Variant::Bool(true),
+                "the request must be accepted"
+            );
+            assert_eq!(
+                v.to_vec()[1],
                 Variant::Int(1),
                 "the session_started callback must have fired exactly once",
             );
             assert_eq!(
-                v[2],
+                v.to_vec()[2],
                 Variant::Bool(true),
                 "the interface reports initialized"
             );
@@ -216,11 +224,11 @@ func check():
     match call_check(src) {
         Variant::Array(v) => {
             assert_eq!(
-                v[0],
+                v.to_vec()[0],
                 Variant::Bool(true),
                 "initialize() reports request acceptance, not session success",
             );
-            match &v[1] {
+            match &v.to_vec()[1] {
                 Variant::String(msg) => {
                     assert!(
                         !msg.is_empty(),
@@ -234,7 +242,7 @@ func check():
                 other => panic!("expected a String message, got {other:?}"),
             }
             assert_eq!(
-                v[2],
+                v.to_vec()[2],
                 Variant::Bool(false),
                 "a rejected request must leave NO live session behind",
             );
@@ -265,8 +273,8 @@ func check():
     install_backend(&["immersive-vr"], &[], None);
     match call_check(src) {
         Variant::Array(v) => {
-            assert_eq!(v[0], Variant::String("immersive-vr".to_string()));
-            assert_eq!(v[1], Variant::Bool(true));
+            assert_eq!(v.to_vec()[0], Variant::String("immersive-vr".to_string()));
+            assert_eq!(v.to_vec()[1], Variant::Bool(true));
         }
         other => panic!("expected an Array, got {other:?}"),
     }

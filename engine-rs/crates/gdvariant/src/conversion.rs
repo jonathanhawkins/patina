@@ -146,7 +146,7 @@ impl From<gdcore::NodePath> for Variant {
 
 impl From<Vec<Variant>> for Variant {
     fn from(v: Vec<Variant>) -> Self {
-        Self::Array(v)
+        Self::Array(v.into())
     }
 }
 
@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn try_from_bool_error_on_array() {
-        assert!(bool::try_from(Variant::Array(vec![])).is_err());
+        assert!(bool::try_from(Variant::Array(Default::default())).is_err());
     }
 
     #[test]

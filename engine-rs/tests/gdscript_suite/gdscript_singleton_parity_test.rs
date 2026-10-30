@@ -94,8 +94,8 @@ fn json_parse_and_stringify_roundtrip() {
     let parsed = run_val(r#"return JSON.parse("{\"hp\": 10, \"name\": \"hero\"}")"#);
     match parsed {
         Variant::Dictionary(d) => {
-            assert_eq!(d.get("hp"), Some(&Variant::Int(10)));
-            assert_eq!(d.get("name"), Some(&Variant::String("hero".into())));
+            assert_eq!(d.get("hp"), Some(Variant::Int(10)));
+            assert_eq!(d.get("name"), Some(Variant::String("hero".into())));
         }
         other => panic!("expected Dictionary, got {other:?}"),
     }

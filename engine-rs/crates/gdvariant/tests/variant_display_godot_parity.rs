@@ -17,19 +17,19 @@ use gdvariant::{Dictionary, Variant};
 
 #[test]
 fn containers_print_their_elements() {
-    let a = Variant::Array(vec![Variant::Int(1), Variant::Int(2)]);
+    let a = Variant::Array(vec![Variant::Int(1), Variant::Int(2)].into());
     assert_eq!(a.to_string(), "[1, 2]", "an Array prints its elements");
 
     // A string INSIDE a container keeps its quotes, while a bare string prints
     // unquoted — Godot's `print("hi")` is `hi` but `print(["hi"])` is `["hi"]`.
     assert_eq!(Variant::String("hi".into()).to_string(), "hi");
-    let quoted = Variant::Array(vec![Variant::String("hi".into())]);
+    let quoted = Variant::Array(vec![Variant::String("hi".into())].into());
     assert_eq!(quoted.to_string(), "[\"hi\"]");
 
     let mut d = Dictionary::new();
     d.insert("a".to_string(), Variant::Vector2(Vector2::new(1.0, 2.0)));
     assert_eq!(
-        Variant::Dictionary(d).to_string(),
+        Variant::Dictionary(d.into()).to_string(),
         "{ \"a\": (1, 2) }",
         "a Dictionary pads its braces and quotes string keys"
     );
@@ -37,7 +37,7 @@ fn containers_print_their_elements() {
     // The bead's headline example: nested container inside an array.
     let mut inner = Dictionary::new();
     inner.insert("a".to_string(), Variant::Vector2(Vector2::new(1.0, 2.0)));
-    let nested = Variant::Array(vec![Variant::Int(1), Variant::Dictionary(inner)]);
+    let nested = Variant::Array(vec![Variant::Int(1), Variant::Dictionary(inner.into())].into());
     assert_eq!(nested.to_string(), "[1, { \"a\": (1, 2) }]");
 
     // Packed arrays print elements too, not a length placeholder.

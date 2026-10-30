@@ -4,7 +4,7 @@
 //! This implementation covers the subset needed for Phase 3 (headless
 //! runtime): scalars, strings, math types, collections, and object refs.
 
-use crate::dictionary::Dictionary;
+use crate::shared::{SharedArray, SharedDictionary};
 use gdcore::id::ObjectId;
 use gdcore::id::Rid;
 use gdcore::math::{
@@ -333,10 +333,17 @@ pub enum Variant {
     Rid(Rid),
     /// A reference to an engine object by ID.
     ObjectId(ObjectId),
-    /// A heterogeneous ordered list.
-    Array(Vec<Variant>),
+    /// A heterogeneous ordered list (Godot `Array`).
+    ///
+    /// A handle to shared storage, like Godot's refcounted `ArrayPrivate`:
+    /// cloning the `Variant` shares the array (`var b = a; b.append(1)` is
+    /// visible through `a`). Use [`SharedArray::duplicate`] for a copy
+    /// (pat-s3rrv.8).
+    Array(SharedArray),
     /// A Variant-keyed, insertion-ordered map (Godot `Dictionary`).
-    Dictionary(Dictionary),
+    ///
+    /// Shared storage with the same contract as [`Variant::Array`].
+    Dictionary(SharedDictionary),
     /// A callable reference (method or lambda).
     Callable(Box<CallableRef>),
     /// A signal bound to the object that declares it (Godot's `Signal`
@@ -377,6 +384,21 @@ pub enum Variant {
 }
 
 impl Variant {
+    /// Godot's `Variant::duplicate(deep)`: a NEW Array/Dictionary handle with
+    /// the same contents (nested containers too when `deep`), and a plain
+    /// clone for every other kind.
+    ///
+    /// Plain `clone()` SHARES an Array or Dictionary (pat-s3rrv.8). Use this
+    /// wherever one stored value seeds many owners — class property defaults,
+    /// a parsed scene instanced repeatedly — so they do not alias each other.
+    pub fn duplicate(&self, deep: bool) -> Variant {
+        match self {
+            Variant::Array(a) => Variant::Array(a.duplicate(deep)),
+            Variant::Dictionary(d) => Variant::Dictionary(d.duplicate(deep)),
+            other => other.clone(),
+        }
+    }
+
     /// Returns the type tag for this value.
     pub fn variant_type(&self) -> VariantType {
         match self {
@@ -1376,14 +1398,14 @@ impl fmt::Display for Variant {
             // handle as `RID(<id>)`, NOT the bare number.
             Self::Rid(r) => write!(f, "RID({})", r.id()),
             Self::ObjectId(id) => write!(f, "<Object#{id}>"),
-            Self::Array(a) => write!(f, "[{}]", join_variants(a)),
+            Self::Array(a) => write!(f, "[{}]", join_variants(&a.to_vec())),
             // Godot pads a dictionary's braces: `{ "k": v }`.
             Self::Dictionary(d) => {
                 if d.is_empty() {
                     return write!(f, "{{  }}");
                 }
                 let body = d
-                    .iter()
+                    .to_dict().iter()
                     .map(|(k, v)| format!("{}: {}", display_key(k), v))
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -1557,6 +1579,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::dictionary::Dictionary;
 
     #[test]
     fn variant_type_tag() {
@@ -1579,8 +1602,8 @@ mod tests {
         assert!(Variant::Float(0.1).is_truthy());
         assert!(!Variant::String(String::new()).is_truthy());
         assert!(Variant::String("x".into()).is_truthy());
-        assert!(!Variant::Array(vec![]).is_truthy());
-        assert!(Variant::Array(vec![Variant::Nil]).is_truthy());
+        assert!(!Variant::Array(Default::default()).is_truthy());
+        assert!(Variant::Array(vec![Variant::Nil].into()).is_truthy());
         // Math types are always truthy (even zero vectors).
         assert!(Variant::Vector2(Vector2::ZERO).is_truthy());
     }
@@ -1702,7 +1725,7 @@ mod tests {
 
     #[test]
     fn display_array() {
-        let a = Variant::Array(vec![Variant::Int(1), Variant::Int(2)]);
+        let a = Variant::Array(vec![Variant::Int(1), Variant::Int(2)].into());
         assert_eq!(format!("{a}"), "[1, 2]");
     }
 
@@ -1710,7 +1733,7 @@ mod tests {
     fn display_dictionary() {
         let mut d = Dictionary::new();
         d.insert("key".to_string(), Variant::Int(1));
-        let v = Variant::Dictionary(d);
+        let v = Variant::Dictionary(d.into());
         assert_eq!(format!("{v}"), "{ \"key\": 1 }");
     }
 
@@ -1718,8 +1741,8 @@ mod tests {
 
     #[test]
     fn clone_nested_array() {
-        let inner = Variant::Array(vec![Variant::Int(1), Variant::Int(2)]);
-        let outer = Variant::Array(vec![inner.clone(), Variant::String("x".into())]);
+        let inner = Variant::Array(vec![Variant::Int(1), Variant::Int(2)].into());
+        let outer = Variant::Array(vec![inner.clone(), Variant::String("x".into())].into());
         let cloned = outer.clone();
         assert_eq!(outer, cloned);
     }
@@ -1728,7 +1751,7 @@ mod tests {
     fn clone_nested_dictionary() {
         let mut inner = Dictionary::new();
         inner.insert("a".to_string(), Variant::Int(1));
-        let outer = Variant::Dictionary(inner);
+        let outer = Variant::Dictionary(inner.into());
         let cloned = outer.clone();
         assert_eq!(outer, cloned);
     }
@@ -1737,10 +1760,10 @@ mod tests {
 
     #[test]
     fn dictionary_truthy() {
-        assert!(!Variant::Dictionary(Dictionary::new()).is_truthy());
+        assert!(!Variant::Dictionary(Default::default()).is_truthy());
         let mut d = Dictionary::new();
         d.insert("k", Variant::Nil);
-        assert!(Variant::Dictionary(d).is_truthy());
+        assert!(Variant::Dictionary(d.into()).is_truthy());
     }
 
     #[test]

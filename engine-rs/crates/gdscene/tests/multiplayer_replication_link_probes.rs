@@ -84,7 +84,7 @@ fn the_spawnable_scenes_array_reaches_the_node() {
         Variant::Array(items) => {
             assert_eq!(items.len(), 1, "the one authored path must be present");
             assert_eq!(
-                items[0],
+                items.to_vec()[0],
                 Variant::String("/tmp/player.tscn".into()),
                 "and must arrive as a String, not an unparsed literal"
             );

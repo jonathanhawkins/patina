@@ -118,11 +118,11 @@ fn c_lightmapgidata_members_match_the_doc_xml() {
     // The two texture arrays default to empty; the single texture is null.
     assert_eq!(
         prop("lightmap_textures").default_value,
-        Variant::Array(Vec::new())
+        Variant::Array(Default::default())
     );
     assert_eq!(
         prop("shadowmask_textures").default_value,
-        Variant::Array(Vec::new())
+        Variant::Array(Default::default())
     );
     assert_eq!(
         prop("light_texture").default_value,

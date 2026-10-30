@@ -70,12 +70,28 @@ func check():
     let Variant::Array(items) = got else {
         panic!("check() should return an array, got {got:?}");
     };
-    assert_eq!(items[0], Variant::String("10-20".to_string()), "full match");
+    assert_eq!(
+        items.to_vec()[0],
+        Variant::String("10-20".to_string()),
+        "full match"
+    );
     // "x " is two bytes, so the match starts at offset 2.
-    assert_eq!(items[1], Variant::Int(2), "byte offset of the match start");
-    assert_eq!(items[2], Variant::Int(2), "two capture groups");
-    assert_eq!(items[3], Variant::String("10".to_string()), "group 1");
-    assert_eq!(items[4], Variant::String("20".to_string()), "group 2");
+    assert_eq!(
+        items.to_vec()[1],
+        Variant::Int(2),
+        "byte offset of the match start"
+    );
+    assert_eq!(items.to_vec()[2], Variant::Int(2), "two capture groups");
+    assert_eq!(
+        items.to_vec()[3],
+        Variant::String("10".to_string()),
+        "group 1"
+    );
+    assert_eq!(
+        items.to_vec()[4],
+        Variant::String("20".to_string()),
+        "group 2"
+    );
 }
 
 /// A non-matching search returns null, which is what `if m:` branches on —
@@ -111,10 +127,14 @@ func check():
     let Variant::Array(items) = got else {
         panic!("check() should return an array, got {got:?}");
     };
-    assert_eq!(items[0], Variant::Int(3), "three runs of digits");
-    assert_eq!(items[1], Variant::String("22".to_string()), "second hit");
+    assert_eq!(items.to_vec()[0], Variant::Int(3), "three runs of digits");
     assert_eq!(
-        items[2],
+        items.to_vec()[1],
+        Variant::String("22".to_string()),
+        "second hit"
+    );
+    assert_eq!(
+        items.to_vec()[2],
         Variant::String("a#b#c#".to_string()),
         "sub(all=true) replaces every run",
     );
@@ -138,11 +158,19 @@ func check():
     let Variant::Array(items) = got else {
         panic!("check() should return an array, got {got:?}");
     };
-    assert_eq!(items[0], Variant::Int(0), "OK == 0 for a good pattern");
     assert_eq!(
-        items[1],
+        items.to_vec()[0],
+        Variant::Int(0),
+        "OK == 0 for a good pattern"
+    );
+    assert_eq!(
+        items.to_vec()[1],
         Variant::Bool(true),
         "is_valid after a good compile"
     );
-    assert_eq!(items[2], Variant::Int(1), "FAILED == 1 for a bad pattern");
+    assert_eq!(
+        items.to_vec()[2],
+        Variant::Int(1),
+        "FAILED == 1 for a bad pattern"
+    );
 }

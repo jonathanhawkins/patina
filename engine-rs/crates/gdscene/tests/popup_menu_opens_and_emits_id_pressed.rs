@@ -46,7 +46,7 @@ fn item(text: &str, id: i64, disabled: bool, separator: bool) -> Variant {
     if separator {
         d.insert(Variant::String("separator".into()), Variant::Bool(true));
     }
-    Variant::Dictionary(d)
+    Variant::Dictionary(d.into())
 }
 
 /// A MenuButton at (10,10) sized 80x24, owning a PopupMenu of
@@ -65,12 +65,15 @@ fn menu_scene() -> (SceneTree, NodeId, NodeId) {
     let popup = tree
         .add_child(btn, Node::new("Popup", "PopupMenu"))
         .unwrap();
-    let items = Variant::Array(vec![
-        item("Open", 10, false, false),
-        item("Save", 20, false, false),
-        item("", 0, false, true),
-        item("Quit", 30, true, false),
-    ]);
+    let items = Variant::Array(
+        vec![
+            item("Open", 10, false, false),
+            item("Save", 20, false, false),
+            item("", 0, false, true),
+            item("Quit", 30, true, false),
+        ]
+        .into(),
+    );
     tree.get_node_mut(popup)
         .unwrap()
         .set_property("items", items);

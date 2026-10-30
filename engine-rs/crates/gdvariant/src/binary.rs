@@ -420,14 +420,14 @@ fn encode_into(value: &Variant, out: &mut Vec<u8>, depth: u32) -> Result<(), Var
         Variant::Array(arr) => {
             put_u32(out, T_ARRAY);
             put_u32(out, arr.len() as u32);
-            for elem in arr {
+            for elem in arr.to_vec().iter() {
                 encode_into(elem, out, depth + 1)?;
             }
         }
         Variant::Dictionary(dict) => {
             put_u32(out, T_DICTIONARY);
             put_u32(out, dict.len() as u32);
-            for (key, val) in dict.iter() {
+            for (key, val) in dict.to_dict().iter() {
                 // Keys are full Variants (Godot binary format), preserving type.
                 encode_into(key, out, depth + 1)?;
                 encode_into(val, out, depth + 1)?;
@@ -918,7 +918,7 @@ fn decode_from(r: &mut Reader, depth: u32) -> Result<Variant, VariantDecodeError
             for _ in 0..count {
                 arr.push(decode_from(r, depth + 1)?);
             }
-            Ok(Variant::Array(arr))
+            Ok(Variant::Array(arr.into()))
         }
         T_DICTIONARY => {
             if header & (TYPED_DICT_KEY_MASK | TYPED_DICT_VALUE_MASK) != 0 {
@@ -932,7 +932,7 @@ fn decode_from(r: &mut Reader, depth: u32) -> Result<Variant, VariantDecodeError
                 // Keys keep their decoded Variant type, round-tripping exactly.
                 map.insert(key, value);
             }
-            Ok(Variant::Dictionary(map))
+            Ok(Variant::Dictionary(map.into()))
         }
         T_PACKED_BYTE_ARRAY => {
             let count = decode_container_count(r)? as usize;
@@ -1168,17 +1168,20 @@ mod tests {
 
     #[test]
     fn roundtrip_containers_and_nesting() {
-        roundtrip(Variant::Array(vec![]));
-        roundtrip(Variant::Array(vec![
-            Variant::Int(1),
-            Variant::String("x".into()),
-            Variant::Vector2(Vector2::new(1.0, 2.0)),
-        ]));
+        roundtrip(Variant::Array(Default::default()));
+        roundtrip(Variant::Array(
+            vec![
+                Variant::Int(1),
+                Variant::String("x".into()),
+                Variant::Vector2(Vector2::new(1.0, 2.0)),
+            ]
+            .into(),
+        ));
 
         let mut d = Dictionary::new();
         d.insert("pos".to_string(), Variant::Vector2(Vector2::new(1.0, 2.0)));
         d.insert("count".to_string(), Variant::Int(5));
-        roundtrip(Variant::Dictionary(d));
+        roundtrip(Variant::Dictionary(d.into()));
 
         // Array of dicts of vectors (deep nesting).
         let mut d1 = Dictionary::new();
@@ -1191,11 +1194,17 @@ mod tests {
             "b".to_string(),
             Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0)),
         );
-        d2.insert("nested".to_string(), Variant::Array(vec![Variant::Int(9)]));
-        roundtrip(Variant::Array(vec![
-            Variant::Dictionary(d1),
-            Variant::Dictionary(d2),
-        ]));
+        d2.insert(
+            "nested".to_string(),
+            Variant::Array(vec![Variant::Int(9)].into()),
+        );
+        roundtrip(Variant::Array(
+            vec![
+                Variant::Dictionary(d1.into()),
+                Variant::Dictionary(d2.into()),
+            ]
+            .into(),
+        ));
     }
 
     // -- Basis wire order is row-major (Godot fidelity, not just round-trip) --
@@ -1301,7 +1310,7 @@ mod tests {
     fn fixture_array_of_ints() {
         // header = ARRAY(28), u32 count(2), then INT(1), INT(2)
         assert_fixture(
-            Variant::Array(vec![Variant::Int(1), Variant::Int(2)]),
+            Variant::Array(vec![Variant::Int(1), Variant::Int(2)].into()),
             &[
                 28, 0, 0, 0, // ARRAY
                 2, 0, 0, 0, // count = 2
@@ -1322,11 +1331,14 @@ mod tests {
             Variant::Vector3(Vector3::new(1.0, 2.0, 3.0)),
         );
         d.insert("s".to_string(), Variant::String("hello".into()));
-        let v = Variant::Array(vec![
-            Variant::Dictionary(d),
-            Variant::NodePath(NodePath::new("/a/b:c")),
-            Variant::Transform3D(Transform3D::IDENTITY),
-        ]);
+        let v = Variant::Array(
+            vec![
+                Variant::Dictionary(d.into()),
+                Variant::NodePath(NodePath::new("/a/b:c")),
+                Variant::Transform3D(Transform3D::IDENTITY),
+            ]
+            .into(),
+        );
         let bytes = encode_variant(&v).unwrap();
 
         // Full buffer decodes and consumes everything.
@@ -1502,17 +1514,15 @@ mod tests {
             Err(VariantEncodeError::Unsupported(VariantType::Resource))
         );
         // The error still propagates out of nested containers.
-        let arr = Variant::Array(vec![Variant::Int(1), resource()]);
+        let arr = Variant::Array(vec![Variant::Int(1), resource()].into());
         assert_eq!(
             encode_variant(&arr),
             Err(VariantEncodeError::Unsupported(VariantType::Resource))
         );
         // ...and an ObjectId inside a container now encodes rather than
         // poisoning the whole array.
-        let arr = Variant::Array(vec![
-            Variant::Int(1),
-            Variant::ObjectId(ObjectId::from_raw(2)),
-        ]);
+        let arr =
+            Variant::Array(vec![Variant::Int(1), Variant::ObjectId(ObjectId::from_raw(2))].into());
         assert!(
             encode_variant(&arr).is_ok(),
             "an object-as-id is encodable inside a container"

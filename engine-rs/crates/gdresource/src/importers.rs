@@ -191,7 +191,7 @@ pub fn import_image_bytes(data: &[u8], path: &Path) -> EngineResult<Arc<Resource
             .into_iter()
             .map(|(r, g, b, a)| Variant::Color(gdcore::math::Color::new(r, g, b, a)))
             .collect();
-        res.set_property("pixels", Variant::Array(colors));
+        res.set_property("pixels", Variant::Array(colors.into()));
         res.set_property("has_pixel_data", Variant::Bool(true));
     } else {
         res.set_property("has_pixel_data", Variant::Bool(false));
@@ -248,7 +248,7 @@ pub fn import_webp_bytes(data: &[u8], path: &Path) -> EngineResult<Arc<Resource>
         })
         .collect();
     let has_pixels = !colors.is_empty();
-    res.set_property("pixels", Variant::Array(colors));
+    res.set_property("pixels", Variant::Array(colors.into()));
     res.set_property("has_pixel_data", Variant::Bool(has_pixels));
 
     Ok(Arc::new(res))
@@ -328,7 +328,7 @@ pub fn import_hdr(path: &Path) -> EngineResult<Arc<Resource>> {
         .map(|px| Variant::Color(gdcore::math::Color::new(px[0], px[1], px[2], 1.0)))
         .collect();
     let has_pixels = !colors.is_empty();
-    res.set_property("pixels", Variant::Array(colors));
+    res.set_property("pixels", Variant::Array(colors.into()));
     res.set_property("has_pixel_data", Variant::Bool(has_pixels));
     Ok(Arc::new(res))
 }
@@ -361,7 +361,7 @@ fn rgba8_texture_resource(width: usize, height: usize, rgba: &[u8], path: &Path)
         })
         .collect();
     let has_pixels = !colors.is_empty();
-    res.set_property("pixels", Variant::Array(colors));
+    res.set_property("pixels", Variant::Array(colors.into()));
     res.set_property("has_pixel_data", Variant::Bool(has_pixels));
     Arc::new(res)
 }
@@ -425,7 +425,7 @@ pub fn load_color_texture_linear(
     };
     let pixels: Vec<gdcore::math::Color> = match res.get_property("pixels") {
         Some(Variant::Array(arr)) => arr
-            .iter()
+            .to_vec().iter()
             .map(|v| match v {
                 // Decoders store normalized sRGB; linearize for source_color use.
                 Variant::Color(c) => c.srgb_to_linear(),
@@ -740,7 +740,7 @@ pub fn apply_texture_params(res: &Resource, params: &ImportParams) -> Resource {
     };
     let mut pixels: Vec<gdcore::math::Color> = match out.get_property("pixels") {
         Some(Variant::Array(a)) => a
-            .iter()
+            .to_vec().iter()
             .filter_map(|v| match v {
                 Variant::Color(c) => Some(*c),
                 _ => None,
@@ -1215,7 +1215,7 @@ pub fn import_font(path: &Path) -> EngineResult<Arc<Resource>> {
         .take(64)
         .map(|b| Variant::Int(*b as i64))
         .collect();
-    res.set_property("data_preview", Variant::Array(preview));
+    res.set_property("data_preview", Variant::Array(preview.into()));
 
     Ok(Arc::new(res))
 }
@@ -1529,7 +1529,7 @@ pub fn project_importer_defaults(
         return out;
     };
     if let Ok(Variant::Dictionary(dict)) = crate::loader::parse_variant_value(raw) {
-        for (key, value) in dict.iter() {
+        for (key, value) in dict.to_dict().iter() {
             if let Variant::String(k) = key {
                 out.insert(k.clone(), value.clone());
             }
@@ -2166,7 +2166,7 @@ mod tests {
         match res.get_property("pixels") {
             Some(Variant::Array(a)) => {
                 assert_eq!(a.len(), 1, "1x1 image");
-                match &a[0] {
+                match &a.to_vec()[0] {
                     Variant::Color(c) => {
                         assert!(c.r > 0.9, "red channel, got {}", c.r);
                         assert!(c.g < 0.1, "green should be low");
@@ -2623,7 +2623,7 @@ antialiased=true
         match res.get_property("pixels") {
             Some(Variant::Array(a)) => {
                 assert_eq!(a.len(), 1);
-                match &a[0] {
+                match &a.to_vec()[0] {
                     Variant::Color(c) => assert!(c.r > 0.9 && c.g < 0.1),
                     other => panic!("expected Color, got {other:?}"),
                 }

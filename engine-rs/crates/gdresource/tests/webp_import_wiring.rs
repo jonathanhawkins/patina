@@ -58,13 +58,13 @@ fn assert_icon_texture(res: &gdresource::resource::Resource) {
                 "one Color per pixel (256*256)",
             );
             assert!(
-                px.iter().all(|p| matches!(p, Variant::Color(_))),
+                px.to_vec().iter().all(|p| matches!(p, Variant::Color(_))),
                 "every pixel is a Color",
             );
             // A real decode is not uniformly transparent-black: at least one
             // pixel must carry visible colour/alpha.
             assert!(
-                px.iter().any(|p| match p {
+                px.to_vec().iter().any(|p| match p {
                     Variant::Color(c) => c.r > 0.01 || c.g > 0.01 || c.b > 0.01 || c.a > 0.01,
                     _ => false,
                 }),

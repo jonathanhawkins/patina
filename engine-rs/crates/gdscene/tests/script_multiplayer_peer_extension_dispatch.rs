@@ -135,7 +135,7 @@ fn prop(ml: &MainLoop, node: NodeId, name: &str) -> Variant {
 
 fn array_of(v: Variant) -> Vec<Variant> {
     match v {
-        Variant::Array(a) => a,
+        Variant::Array(a) => a.to_vec(),
         _ => Vec::new(),
     }
 }
@@ -217,7 +217,7 @@ fn script_multiplayer_peer_extension_dispatch() {
                 .expect("peer script attached");
         script.set_property(
             "inbox",
-            Variant::Array(vec![Variant::PackedByteArray(payload)]),
+            Variant::Array(vec![Variant::PackedByteArray(payload)].into()),
         );
     }
 

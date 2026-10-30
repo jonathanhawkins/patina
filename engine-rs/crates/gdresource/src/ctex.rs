@@ -637,8 +637,8 @@ pub fn slice_source_into_layers(
     };
     let width = int_of("width");
     let height = int_of("height");
-    let pixels: &Vec<Variant> = match source.get_property("pixels") {
-        Some(Variant::Array(a)) => a,
+    let pixels: Vec<Variant> = match source.get_property("pixels") {
+        Some(Variant::Array(a)) => a.to_vec(),
         _ => {
             return Err(EngineError::Parse(format!(
                 "{} has no decoded pixels to slice",
@@ -687,7 +687,7 @@ pub fn slice_source_into_layers(
             layer.set_property("width", Variant::Int(slice_w));
             layer.set_property("height", Variant::Int(slice_h));
             layer.set_property("has_pixel_data", Variant::Bool(true));
-            layer.set_property("pixels", Variant::Array(out));
+            layer.set_property("pixels", Variant::Array(out.into()));
             layers.push(Arc::new(layer));
         }
     }
@@ -919,7 +919,7 @@ fn build_raw_texture(
         colors.push(Variant::Color(color));
     }
     res.set_property("has_pixel_data", Variant::Bool(!colors.is_empty()));
-    res.set_property("pixels", Variant::Array(colors));
+    res.set_property("pixels", Variant::Array(colors.into()));
     Arc::new(res)
 }
 
@@ -1047,9 +1047,9 @@ mod tests {
         d
     }
 
-    fn pixels_of(res: &Resource) -> &[Variant] {
+    fn pixels_of(res: &Resource) -> Vec<Variant> {
         match res.get_property("pixels") {
-            Some(Variant::Array(a)) => a,
+            Some(Variant::Array(a)) => a.to_vec(),
             other => panic!("expected pixels array, got {other:?}"),
         }
     }
@@ -1267,8 +1267,8 @@ mod tests {
             other => panic!("expected a pixels Array, got {other:?}"),
         };
         assert_eq!(pixels.len(), 4);
-        let at = |i: usize| match &pixels[i] {
-            Variant::Color(c) => *c,
+        let at = |i: usize| match pixels.to_vec()[i].clone() {
+            Variant::Color(c) => c,
             other => panic!("pixel {i} is not a Color: {other:?}"),
         };
         // Channel-exact within one 8-bit step, in order, including alpha —

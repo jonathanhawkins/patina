@@ -36,9 +36,9 @@ fn run_val(src: &str) -> Variant {
         .expect("script returned a value")
 }
 
-fn arr(v: &Variant) -> &[Variant] {
+fn arr(v: &Variant) -> Vec<Variant> {
     match v {
-        Variant::Array(items) => items,
+        Variant::Array(items) => items.to_vec(),
         other => panic!("expected an array, got {other:?}"),
     }
 }

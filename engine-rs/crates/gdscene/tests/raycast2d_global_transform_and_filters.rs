@@ -169,7 +169,7 @@ size = Vector2(200, 10)
     if let Some(node) = tree.get_node_mut(ray) {
         node.set_property(
             "_exceptions",
-            Variant::Array(vec![Variant::Int(wall_raw as i64)]),
+            Variant::Array((vec![Variant::Int(wall_raw as i64)]).into()),
         );
     }
     let ml_excl = stepped(tree);

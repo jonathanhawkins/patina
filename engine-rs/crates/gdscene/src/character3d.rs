@@ -318,7 +318,7 @@ pub fn process_character_movement(tree: &mut SceneTree, physics: &PhysicsServer3
                         .map(|nid| Variant::ObjectId(nid.object_id()))
                         .unwrap_or(Variant::Nil),
                 );
-                Variant::Dictionary(rec)
+                Variant::Dictionary(rec.into())
             })
             .collect();
 
@@ -340,7 +340,7 @@ pub fn process_character_movement(tree: &mut SceneTree, physics: &PhysicsServer3
                 "_platform_angular_velocity",
                 Variant::Vector3(platform_angular_velocity),
             );
-            node.set_property("_slide_collisions", Variant::Array(slide_records));
+            node.set_property("_slide_collisions", Variant::Array(slide_records.into()));
         }
     }
 }

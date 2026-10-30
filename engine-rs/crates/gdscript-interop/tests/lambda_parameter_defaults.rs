@@ -70,7 +70,7 @@ fn only_the_missing_parameters_take_defaults() {
     };
     assert_eq!(
         items,
-        vec![Variant::Int(3), Variant::Int(101)],
+        vec![Variant::Int(3), Variant::Int(101)].into(),
         "supplying both args gives 1+2=3; omitting the second must fall back to \
          b=100 for 1+100=101"
     );

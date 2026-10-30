@@ -144,8 +144,8 @@ fn published_collider(ml: &MainLoop, body: NodeId) -> Variant {
         .get_node(body)
         .map(|n| n.get_property("_slide_collisions"))
     {
-        Some(Variant::Array(items)) => match items.first() {
-            Some(Variant::Dictionary(d)) => d.get("collider").cloned().unwrap_or(Variant::Nil),
+        Some(Variant::Array(items)) => match items.to_vec().first() {
+            Some(Variant::Dictionary(d)) => d.get("collider").unwrap_or(Variant::Nil),
             _ => Variant::Nil,
         },
         _ => Variant::Nil,

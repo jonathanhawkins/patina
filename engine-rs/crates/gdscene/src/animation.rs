@@ -1550,11 +1550,11 @@ pub struct MethodCall {
 /// element is a string method name.
 fn method_call_from_value(node_path: &str, value: &Variant) -> Option<MethodCall> {
     if let Variant::Array(items) = value {
-        let method = match items.first() {
+        let method = match items.to_vec().first() {
             Some(Variant::String(s)) => s.clone(),
             _ => return None,
         };
-        let args = items.iter().skip(1).cloned().collect();
+        let args = items.to_vec().iter().skip(1).cloned().collect();
         Some(MethodCall {
             node_path: node_path.to_owned(),
             method,
@@ -1899,12 +1899,12 @@ pub fn blend_animations(
 fn gltf_node_names(resource: &gdresource::Resource) -> HashMap<i64, String> {
     let mut out = HashMap::new();
     if let Some(Variant::Array(nodes)) = resource.get_property("nodes") {
-        for n in nodes {
+        for n in nodes.to_vec().iter() {
             if let Variant::Dictionary(d) = n {
                 if let (Some(Variant::Int(i)), Some(Variant::String(name))) =
                     (d.get("index"), d.get("name"))
                 {
-                    out.insert(*i, name.clone());
+                    out.insert(i, name.clone());
                 }
             }
         }
@@ -1916,6 +1916,7 @@ fn gltf_node_names(resource: &gdresource::Resource) -> HashMap<i64, String> {
 fn gltf_float_array(v: Option<&Variant>) -> Vec<f32> {
     match v {
         Some(Variant::Array(arr)) => arr
+            .to_vec()
             .iter()
             .filter_map(|x| match x {
                 Variant::Float(f) => Some(*f as f32),
@@ -1947,7 +1948,7 @@ pub fn animations_from_gltf_resource(resource: &gdresource::Resource) -> Vec<Ani
     };
 
     let mut out = Vec::new();
-    for clip in clips {
+    for clip in clips.to_vec().iter() {
         let Variant::Dictionary(clip) = clip else {
             continue;
         };
@@ -1956,7 +1957,7 @@ pub fn animations_from_gltf_resource(resource: &gdresource::Resource) -> Vec<Ani
             _ => format!("animation_{}", out.len()),
         };
         let length = match clip.get("length") {
-            Some(Variant::Float(f)) => *f,
+            Some(Variant::Float(f)) => f,
             _ => 0.0,
         };
         let mut anim = Animation::new(clip_name, length);
@@ -1965,12 +1966,12 @@ pub fn animations_from_gltf_resource(resource: &gdresource::Resource) -> Vec<Ani
             out.push(anim);
             continue;
         };
-        for ch in channels {
+        for ch in channels.to_vec() {
             let Variant::Dictionary(ch) = ch else {
                 continue;
             };
             let target = match ch.get("target_node") {
-                Some(Variant::Int(i)) => *i,
+                Some(Variant::Int(i)) => i,
                 _ => continue,
             };
             // A channel targeting a node the importer did not build cannot be
@@ -1980,15 +1981,16 @@ pub fn animations_from_gltf_resource(resource: &gdresource::Resource) -> Vec<Ani
                 continue;
             };
             let path = match ch.get("path") {
-                Some(Variant::String(s)) => s.as_str(),
+                Some(Variant::String(s)) => s,
                 _ => continue,
             };
+            let path = path.as_str();
             let components = match ch.get("components") {
-                Some(Variant::Int(i)) => (*i).max(1) as usize,
+                Some(Variant::Int(i)) => i.max(1) as usize,
                 _ => continue,
             };
-            let times = gltf_float_array(ch.get("times"));
-            let values = gltf_float_array(ch.get("values"));
+            let times = gltf_float_array(ch.get("times").as_ref());
+            let values = gltf_float_array(ch.get("values").as_ref());
             if times.is_empty() {
                 continue;
             }
@@ -2927,7 +2929,7 @@ mod root_motion_tests {
         let mut track = AnimationTrack::with_type("Enemy", "attack", TrackType::Method);
         track.add_keyframe(KeyFrame::linear(
             1.0,
-            Variant::Array(vec![Variant::String("on_hit".into()), Variant::Int(7)]),
+            Variant::Array(vec![Variant::String("on_hit".into()), Variant::Int(7)].into()),
         ));
         anim.tracks.push(track);
         let mut player = AnimationPlayer::new();

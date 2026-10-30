@@ -35,10 +35,11 @@ fn region(verts: &[(f32, f32)], polys: Option<Vec<Vec<i32>>>) -> Node {
         n.set_property(
             "__navmesh_polygons__",
             Variant::Array(
-                polys
+                (polys
                     .into_iter()
                     .map(Variant::PackedInt32Array)
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>())
+                .into(),
             ),
         );
     }

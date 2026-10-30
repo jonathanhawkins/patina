@@ -240,7 +240,7 @@ fn translation_from_resource(
     };
 
     let mut t = gdcore::translation::Translation::new(locale);
-    for (key, value) in messages.iter() {
+    for (key, value) in messages.to_dict().iter() {
         if let (gdvariant::Variant::String(k), gdvariant::Variant::String(v)) = (key, value) {
             t.add_message(k.clone(), v.clone());
         }
@@ -623,7 +623,7 @@ mod tests {
         );
 
         let mut res = Resource::new("Translation");
-        res.set_property("messages", Variant::Dictionary(msgs));
+        res.set_property("messages", Variant::Dictionary(msgs.into()));
         if let Some(l) = locale {
             res.set_property("locale", Variant::String(l.into()));
         }

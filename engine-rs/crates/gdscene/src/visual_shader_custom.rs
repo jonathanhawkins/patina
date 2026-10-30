@@ -241,7 +241,7 @@ impl CustomShaderNode {
         shader_type: i64,
     ) -> Option<String> {
         let to_array = |v: &[String]| {
-            Variant::Array(v.iter().cloned().map(Variant::String).collect::<Vec<_>>())
+            Variant::Array((v.iter().cloned().map(Variant::String).collect::<Vec<_>>()).into())
         };
         let code = self.call_string(
             "_get_code",

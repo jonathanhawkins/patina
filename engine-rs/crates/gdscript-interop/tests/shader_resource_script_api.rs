@@ -100,7 +100,7 @@ fn get_shader_uniform_list_reports_types_and_hints() {
     };
 
     let field = |i: usize, key: &str| -> String {
-        match &entries[i] {
+        match &entries.to_vec()[i] {
             Variant::Dictionary(d) => match d.get(key.to_string()) {
                 Some(Variant::String(s)) => s.clone(),
                 other => panic!("entry {i} field {key} should be a String, got {other:?}"),

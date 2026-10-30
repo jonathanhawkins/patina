@@ -2691,7 +2691,7 @@ mod tests {
     fn rpc_args_roundtrip_structured_variants_not_strings() {
         let args = vec![
             Variant::Vector2(gdcore::math::Vector2::new(1.5, -2.5)),
-            Variant::Array(vec![Variant::Int(7), Variant::Bool(true)]),
+            Variant::Array(vec![Variant::Int(7), Variant::Bool(true)].into()),
             Variant::Dictionary(
                 vec![(Variant::String("hp".into()), Variant::Int(42))]
                     .into_iter()

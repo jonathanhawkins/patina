@@ -186,15 +186,19 @@ fn the_controllers_script_surface_reads_the_tracker() {
     let Variant::Array(v) = probe else {
         panic!("probe() should return an array, got {probe:?}");
     };
-    assert_eq!(v[0], Variant::Bool(true), "get_has_tracking_data()");
-    assert_eq!(v[1], Variant::Bool(true), "get_is_active()");
     assert_eq!(
-        v[2],
+        v.to_vec()[0],
+        Variant::Bool(true),
+        "get_has_tracking_data()"
+    );
+    assert_eq!(v.to_vec()[1], Variant::Bool(true), "get_is_active()");
+    assert_eq!(
+        v.to_vec()[2],
         Variant::Bool(true),
         "is_button_pressed(\"trigger\") must reflect the tracker's input map"
     );
     assert_eq!(
-        v[3],
+        v.to_vec()[3],
         Variant::Bool(false),
         "an input the tracker never set must be false, not true-by-default"
     );

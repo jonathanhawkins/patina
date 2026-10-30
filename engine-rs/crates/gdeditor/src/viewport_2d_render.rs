@@ -1475,7 +1475,7 @@ fn skinned_polygon_points(
     };
     // Godot serializes `bones` as alternating path/weight pairs
     // (`Polygon2D::_get_bones`), so an odd-length array is malformed.
-    for pair in entries.chunks(2) {
+    for pair in entries.to_vec().chunks(2) {
         let [path, w] = pair else { continue };
         // `_get_bones` deliberately pushes the path as a **String** ("to avoid
         // errors due to invalid node path in editor"), so String is the normal
@@ -1489,6 +1489,7 @@ fn skinned_polygon_points(
             Variant::PackedFloat32Array(f) => f.clone(),
             Variant::PackedFloat64Array(f) => f.iter().map(|x| *x as f32).collect(),
             Variant::Array(items) => items
+                .to_vec()
                 .iter()
                 .filter_map(|v| match v {
                     Variant::Float(f) => Some(*f as f32),
@@ -1914,6 +1915,7 @@ fn read_points(tree: &SceneTree, id: gdscene::NodeId, key: &str) -> Vec<Vector2>
         // Polygon2D/Line2D rendered empty (pat-0q2kx.77).
         Some(Variant::PackedVector2Array(items)) => items,
         Some(Variant::Array(items)) => items
+            .to_vec()
             .into_iter()
             .filter_map(|v| match v {
                 Variant::Vector2(p) => Some(p),
@@ -1941,6 +1943,7 @@ fn read_f32_array(tree: &SceneTree, id: gdscene::NodeId, key: &str) -> Vec<f32> 
         Some(Variant::PackedFloat32Array(v)) => v,
         Some(Variant::PackedFloat64Array(v)) => v.into_iter().map(|f| f as f32).collect(),
         Some(Variant::Array(items)) => items
+            .to_vec()
             .into_iter()
             .filter_map(|v| match v {
                 Variant::Float(f) => Some(f as f32),
@@ -1957,6 +1960,7 @@ fn read_colors(tree: &SceneTree, id: gdscene::NodeId, key: &str) -> Vec<Color> {
     match tree.get_node(id).map(|n| n.get_property(key)) {
         Some(Variant::PackedColorArray(v)) => v,
         Some(Variant::Array(items)) => items
+            .to_vec()
             .into_iter()
             .filter_map(|v| match v {
                 Variant::Color(c) => Some(c),
@@ -4560,7 +4564,7 @@ mod tests {
         );
         region.set_property(
             "__navmesh_polygons__",
-            Variant::Array(vec![Variant::PackedInt32Array(vec![0, 1, 2, 3])]),
+            Variant::Array(vec![Variant::PackedInt32Array(vec![0, 1, 2, 3])].into()),
         );
         tree.add_child(root, region).expect("region attaches");
 
@@ -4622,7 +4626,7 @@ mod tests {
         );
         region.set_property(
             "__navmesh_polygons__",
-            Variant::Array(vec![Variant::PackedInt32Array(vec![0, 1, 2])]),
+            Variant::Array(vec![Variant::PackedInt32Array(vec![0, 1, 2])].into()),
         );
         tree.add_child(root, region).expect("region attaches");
 

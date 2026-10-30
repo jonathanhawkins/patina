@@ -106,7 +106,7 @@ fn published_overlaps(ml: &MainLoop, node: NodeId) -> Vec<Variant> {
         .get_node(node)
         .map(|n| n.get_property("_overlapping_areas"))
     {
-        Some(Variant::Array(items)) => items,
+        Some(Variant::Array(items)) => items.to_vec(),
         Some(Variant::Nil) | None => Vec::new(),
         Some(other) => panic!("_overlapping_areas must be an Array, got {other:?}"),
     }

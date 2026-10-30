@@ -27,7 +27,7 @@ fn source_image(w: i64, h: i64) -> Resource {
     let pixels: Vec<Variant> = (0..w * h)
         .map(|i| Variant::Color(Color::new(i as f32, 0.0, 0.0, 1.0)))
         .collect();
-    res.set_property("pixels", Variant::Array(pixels));
+    res.set_property("pixels", Variant::Array(pixels.into()));
     res
 }
 
@@ -38,6 +38,7 @@ fn layer_reds(res: &Resource, layer: usize) -> Vec<f32> {
         .unwrap_or_else(|| panic!("layer_{layer} exists"));
     match layer.get_property("pixels") {
         Some(Variant::Array(a)) => a
+            .to_vec()
             .iter()
             .map(|v| match v {
                 Variant::Color(c) => c.r,

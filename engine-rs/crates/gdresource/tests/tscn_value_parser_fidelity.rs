@@ -117,12 +117,12 @@ fn tscn_value_parser_fidelity() {
     // -- Object(Class, "prop": value) --------------------------------------
     let obj = parse("Object(LabelSettings, \"font_size\": 20)");
     assert_eq!(
-        object_literal_class(&obj),
+        object_literal_class(&obj).as_deref(),
         Some("LabelSettings"),
         "the Object literal's class must be recorded",
     );
     match &obj {
-        Variant::Dictionary(d) => assert_eq!(d.get("font_size"), Some(&Variant::Int(20))),
+        Variant::Dictionary(d) => assert_eq!(d.get("font_size"), Some(Variant::Int(20))),
         other => panic!("Object(...) becomes a tagged dictionary, got {other:?}"),
     }
 
@@ -135,7 +135,7 @@ fn tscn_value_parser_fidelity() {
     match value {
         Variant::Array(items) => assert_eq!(
             items,
-            vec![Variant::Int(1), Variant::Int(2)],
+            vec![Variant::Int(1), Variant::Int(2)].into(),
             "elements must survive",
         ),
         other => panic!("a typed array is still an Array, got {other:?}"),

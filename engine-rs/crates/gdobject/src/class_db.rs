@@ -1021,7 +1021,9 @@ pub fn instantiate(class_name: &str) -> Option<GenericObject> {
     for ancestor in chain.iter().rev() {
         if let Some(ancestor_info) = db.get_by_name(ancestor) {
             for prop in &ancestor_info.properties {
-                obj.set_property(&prop.name, prop.default_value.clone());
+                // Each object owns its default: a shared Array default would
+                // alias across every instance of the class (pat-s3rrv.8).
+                obj.set_property(&prop.name, prop.default_value.duplicate(false));
             }
         }
     }
@@ -3607,7 +3609,7 @@ pub fn register_3d_classes() {
                     .with_accessors("get_carve_navigation_mesh", "set_carve_navigation_mesh"),
             )
             .property(
-                PropertyInfo::new("vertices", Variant::Array(Vec::new()))
+                PropertyInfo::new("vertices", Variant::Array(Default::default()))
                     .with_accessors("get_vertices", "set_vertices"),
             )
             .property(PropertyInfo::new("use_3d_avoidance", Variant::Bool(false))),
@@ -6368,11 +6370,11 @@ pub fn register_3d_classes() {
                 .property(PropertyInfo::new("light_texture", Variant::Nil))
                 .property(PropertyInfo::new(
                     "lightmap_textures",
-                    Variant::Array(Vec::new()),
+                    Variant::Array(Default::default()),
                 ))
                 .property(PropertyInfo::new(
                     "shadowmask_textures",
-                    Variant::Array(Vec::new()),
+                    Variant::Array(Default::default()),
                 ))
                 .method(MethodInfo::new("add_user", 4))
                 .method(MethodInfo::new("clear_users", 0))
@@ -8165,7 +8167,7 @@ pub fn register_3d_classes() {
                         .with_accessors("get_shape", "set_shape"),
                 )
                 .property(
-                    PropertyInfo::new("exclude", Variant::Array(Vec::new()))
+                    PropertyInfo::new("exclude", Variant::Array(Default::default()))
                         .with_accessors("get_exclude", "set_exclude"),
                 )
                 .property(
@@ -8279,11 +8281,11 @@ pub fn register_3d_classes() {
                         ),
                 )
                 .property(
-                    PropertyInfo::new("exclude_bodies", Variant::Array(Vec::new()))
+                    PropertyInfo::new("exclude_bodies", Variant::Array(Default::default()))
                         .with_accessors("get_exclude_bodies", "set_exclude_bodies"),
                 )
                 .property(
-                    PropertyInfo::new("exclude_objects", Variant::Array(Vec::new()))
+                    PropertyInfo::new("exclude_objects", Variant::Array(Default::default()))
                         .with_accessors("get_exclude_objects", "set_exclude_objects"),
                 )
                 .property(
@@ -8322,11 +8324,11 @@ pub fn register_3d_classes() {
                         ),
                 )
                 .property(
-                    PropertyInfo::new("exclude_bodies", Variant::Array(Vec::new()))
+                    PropertyInfo::new("exclude_bodies", Variant::Array(Default::default()))
                         .with_accessors("get_exclude_bodies", "set_exclude_bodies"),
                 )
                 .property(
-                    PropertyInfo::new("exclude_objects", Variant::Array(Vec::new()))
+                    PropertyInfo::new("exclude_objects", Variant::Array(Default::default()))
                         .with_accessors("get_exclude_objects", "set_exclude_objects"),
                 )
                 .property(
@@ -8555,7 +8557,7 @@ pub fn register_3d_classes() {
                         .with_accessors("get_shape", "set_shape"),
                 )
                 .property(
-                    PropertyInfo::new("exclude", Variant::Array(Vec::new()))
+                    PropertyInfo::new("exclude", Variant::Array(Default::default()))
                         .with_accessors("get_exclude", "set_exclude"),
                 )
                 .property(
@@ -9030,7 +9032,7 @@ pub fn register_3d_classes() {
             ClassRegistration::new("Compositor")
                 .parent("Resource")
                 .property(
-                    PropertyInfo::new("compositor_effects", Variant::Array(Vec::new()))
+                    PropertyInfo::new("compositor_effects", Variant::Array(Default::default()))
                         .with_accessors("get_compositor_effects", "set_compositor_effects"),
                 ),
         );
@@ -9261,7 +9263,7 @@ pub fn register_3d_classes() {
             ))
             .property(PropertyInfo::new(
                 "structured_text_bidi_override_options",
-                Variant::Array(Vec::new()),
+                Variant::Array(Default::default()),
             )),
     );
     register_class(
@@ -9548,11 +9550,11 @@ pub fn register_3d_classes() {
             )
             .property(PropertyInfo::new(
                 "default_input_values",
-                Variant::Array(Vec::new()),
+                Variant::Array(Default::default()),
             ))
             .property(PropertyInfo::new(
                 "expanded_output_ports",
-                Variant::Array(Vec::new()),
+                Variant::Array(Default::default()),
             ))
             .method(MethodInfo::new("get_default_input_port", 1).const_method())
             .method(MethodInfo::new("set_output_port_for_preview", 1))
@@ -13552,7 +13554,7 @@ pub fn register_2d_classes() {
         register_class(
             ClassRegistration::new("SpriteFrames")
                 .parent("Resource")
-                .property(PropertyInfo::new("animations", Variant::Array(Vec::new()))),
+                .property(PropertyInfo::new("animations", Variant::Array(Default::default()))),
         );
     }
     if !class_exists("Camera2D") {
@@ -14496,7 +14498,7 @@ pub fn register_2d_classes() {
                         .with_accessors("get_polygon", "set_polygon"),
                 )
                 .property(
-                    PropertyInfo::new("polygons", Variant::Array(Vec::new()))
+                    PropertyInfo::new("polygons", Variant::Array(Default::default()))
                         .with_accessors("get_polygons", "set_polygons"),
                 )
                 .property(
@@ -14513,7 +14515,7 @@ pub fn register_2d_classes() {
                 // path/PackedFloat32Array, which is why the accessors are the
                 // underscore-prefixed pair rather than get_/set_bones.
                 .property(
-                    PropertyInfo::new("bones", Variant::Array(Vec::new()))
+                    PropertyInfo::new("bones", Variant::Array(Default::default()))
                         .with_accessors("_get_bones", "_set_bones"),
                 )
                 .property(
@@ -15641,7 +15643,7 @@ pub fn register_2d_classes() {
                         .with_accessors("is_hint_underlined", "set_hint_underline"),
                 )
                 .property(
-                    PropertyInfo::new("custom_effects", Variant::Array(Vec::new()))
+                    PropertyInfo::new("custom_effects", Variant::Array(Default::default()))
                         .with_accessors("get_effects", "set_effects"),
                 )
                 .property(
@@ -15658,7 +15660,7 @@ pub fn register_2d_classes() {
                 .property(
                     PropertyInfo::new(
                         "structured_text_bidi_override_options",
-                        Variant::Array(Vec::new()),
+                        Variant::Array(Default::default()),
                     )
                     .with_accessors(
                         "get_structured_text_bidi_override_options",
@@ -15867,7 +15869,7 @@ pub fn register_2d_classes() {
         register_class(
             ClassRegistration::new("ItemList")
                 .parent("Control")
-                .property(PropertyInfo::new("items", Variant::Array(Vec::new())))
+                .property(PropertyInfo::new("items", Variant::Array(Default::default())))
                 .property(PropertyInfo::new("allow_rmb_select", Variant::Bool(false)))
                 .property(PropertyInfo::new("allow_search", Variant::Bool(true)))
                 .property(PropertyInfo::new("auto_height", Variant::Bool(false)))
@@ -15927,7 +15929,7 @@ pub fn register_2d_classes() {
                 .signal(SignalInfo::new("tab_hovered").arg("tab"))
                 .signal(SignalInfo::new("tab_rmb_clicked").arg("tab"))
                 .parent("Control")
-                .property(PropertyInfo::new("tabs", Variant::Array(Vec::new())))
+                .property(PropertyInfo::new("tabs", Variant::Array(Default::default())))
                 .property(
                     PropertyInfo::new("tab_count", Variant::Int(0))
                         .with_accessors("get_tab_count", "set_tab_count"),
@@ -16428,7 +16430,7 @@ pub fn register_2d_classes() {
         register_class(
             ClassRegistration::new("OptionButton")
                 .parent("Button")
-                .property(PropertyInfo::new("items", Variant::Array(Vec::new())))
+                .property(PropertyInfo::new("items", Variant::Array(Default::default())))
                 .property(PropertyInfo::new("action_mode", Variant::Int(0)))
                 .property(PropertyInfo::new("alignment", Variant::Int(0)))
                 .property(PropertyInfo::new("allow_reselect", Variant::Bool(false)))
@@ -18215,7 +18217,7 @@ pub fn register_2d_classes() {
                         .with_accessors("get_carve_navigation_mesh", "set_carve_navigation_mesh"),
                 )
                 .property(
-                    PropertyInfo::new("vertices", Variant::Array(Vec::new()))
+                    PropertyInfo::new("vertices", Variant::Array(Default::default()))
                         .with_accessors("get_vertices", "set_vertices"),
                 ),
         );
@@ -18412,10 +18414,10 @@ pub fn register_2d_classes() {
                         .virtual_method()
                         .const_method()
                         .with_arguments(vec![
-                            PropertyInfo::new("args", Variant::Array(Vec::new())),
+                            PropertyInfo::new("args", Variant::Array(Default::default())),
                             PropertyInfo::new("text", Variant::String(String::new())),
                         ])
-                        .returns_of(Variant::Array(Vec::new()), "Vector3i"),
+                        .returns_of(Variant::Array(Default::default()), "Vector3i"),
                 )
                 .method(
                     MethodInfo::new("_accessibility_get_contextual_info", 0)
@@ -18638,7 +18640,7 @@ pub fn register_2d_classes() {
                 .property(
                     PropertyInfo::new(
                         "structured_text_bidi_override_options",
-                        Variant::Array(Vec::new()),
+                        Variant::Array(Default::default()),
                     )
                     .with_accessors(
                         "get_structured_text_bidi_override_options",
@@ -19002,7 +19004,7 @@ pub fn register_2d_classes() {
                             {
                                 pairs.insert(open, close);
                             }
-                            pairs
+                            pairs.into()
                         }),
                     )
                     .with_accessors(
@@ -19018,14 +19020,14 @@ pub fn register_2d_classes() {
                         ),
                 )
                 .property(
-                    PropertyInfo::new("code_completion_prefixes", Variant::Array(Vec::new()))
+                    PropertyInfo::new("code_completion_prefixes", Variant::Array(Default::default()))
                         .with_accessors(
                             "get_code_completion_prefixes",
                             "set_code_completion_prefixes",
                         ),
                 )
                 .property(
-                    PropertyInfo::new("delimiter_comments", Variant::Array(Vec::new()))
+                    PropertyInfo::new("delimiter_comments", Variant::Array(Default::default()))
                         .with_accessors("get_comment_delimiters", "set_comment_delimiters"),
                 )
                 .property(
@@ -19036,7 +19038,7 @@ pub fn register_2d_classes() {
                         Variant::Array(vec![
                             Variant::String("' '".to_string()),
                             Variant::String("\" \"".to_string()),
-                        ]),
+                        ].into()),
                     )
                     .with_accessors("get_string_delimiters", "set_string_delimiters"),
                 )
@@ -19092,7 +19094,7 @@ pub fn register_2d_classes() {
                             Variant::String("{".to_string()),
                             Variant::String("[".to_string()),
                             Variant::String("(".to_string()),
-                        ]),
+                        ].into()),
                     )
                     .with_accessors("get_auto_indent_prefixes", "set_auto_indent_prefixes"),
                 )
@@ -19109,7 +19111,7 @@ pub fn register_2d_classes() {
                         .with_accessors("is_line_folding_enabled", "set_line_folding_enabled"),
                 )
                 .property(
-                    PropertyInfo::new("line_length_guidelines", Variant::Array(Vec::new()))
+                    PropertyInfo::new("line_length_guidelines", Variant::Array(Default::default()))
                         .with_accessors("get_line_length_guidelines", "set_line_length_guidelines"),
                 )
                 .property(
@@ -21412,7 +21414,7 @@ pub fn register_2d_classes() {
                 // Array-of-Dictionaries shape `ItemList.items` uses, so a
                 // Tree round-trips through `.tscn` the same way
                 // (`gdscene::item_views::load_tree`/`store_tree`).
-                .property(PropertyInfo::new("items", Variant::Array(Vec::new())))
+                .property(PropertyInfo::new("items", Variant::Array(Default::default())))
                 .property(PropertyInfo::new("auto_tooltip", Variant::Bool(true)))
                 .property(PropertyInfo::new("clip_contents", Variant::Bool(true)))
                 .property(PropertyInfo::new("drop_mode_flags", Variant::Int(0)))
@@ -21557,7 +21559,7 @@ pub fn register_2d_classes() {
                         .with_accessors("get_access", "set_access"),
                 )
                 .property(
-                    PropertyInfo::new("filters", Variant::Array(Vec::new()))
+                    PropertyInfo::new("filters", Variant::Array(Default::default()))
                         .with_accessors("get_filters", "set_filters"),
                 )
                 .property(
@@ -22075,7 +22077,7 @@ pub fn register_root_window_chain() {
                 .method(
                     MethodInfo::new("class_get_method_list", 2)
                         .const_method()
-                        .returns_of(Variant::Array(Vec::new()), "Dictionary"),
+                        .returns_of(Variant::Array(Default::default()), "Dictionary"),
                 )
                 .method(
                     MethodInfo::new("class_get_property", 2)
@@ -22093,7 +22095,7 @@ pub fn register_root_window_chain() {
                 .method(
                     MethodInfo::new("class_get_property_list", 2)
                         .const_method()
-                        .returns_of(Variant::Array(Vec::new()), "Dictionary"),
+                        .returns_of(Variant::Array(Default::default()), "Dictionary"),
                 )
                 .method(
                     MethodInfo::new("class_get_property_setter", 2).returns(empty_string_name()),
@@ -22106,7 +22108,7 @@ pub fn register_root_window_chain() {
                 .method(
                     MethodInfo::new("class_get_signal_list", 2)
                         .const_method()
-                        .returns_of(Variant::Array(Vec::new()), "Dictionary"),
+                        .returns_of(Variant::Array(Default::default()), "Dictionary"),
                 )
                 .method(
                     MethodInfo::new("class_has_enum", 3)
@@ -23578,7 +23580,7 @@ fn register_camera_server_classes() {
                     .with_accessors("get_transform", "set_transform"),
                 )
                 .property(
-                    PropertyInfo::new("formats", Variant::Array(Vec::new()))
+                    PropertyInfo::new("formats", Variant::Array(Default::default()))
                         .with_accessors("get_formats", ""),
                 )
                 .enumeration(
@@ -23984,7 +23986,7 @@ fn register_rendering_device_classes() {
                     .with_accessors("get_blend_constant", "set_blend_constant"),
                 )
                 .property(
-                    PropertyInfo::new("attachments", Variant::Array(Vec::new()))
+                    PropertyInfo::new("attachments", Variant::Array(Default::default()))
                         .with_accessors("get_attachments", "set_attachments"),
                 ),
         );
@@ -24115,7 +24117,7 @@ fn register_rendering_device_classes() {
                 // Typed `int[]` in the docs, carried as a plain Array here like
                 // every other typed-array property in this file.
                 .property(
-                    PropertyInfo::new("sample_masks", Variant::Array(Vec::new()))
+                    PropertyInfo::new("sample_masks", Variant::Array(Default::default()))
                         .with_accessors("get_sample_masks", "set_sample_masks"),
                 ),
         );
@@ -25047,7 +25049,7 @@ pub fn register_audio_classes() {
                 // `typedarray::PackedByteArray`, i.e. a flat array of byte arrays,
                 // which loses the page grouping the granule positions index against.
                 // ADD_PROPERTY at modules/ogg/ogg_packet_sequence.cpp:131 is the truth.
-                .property(PropertyInfo::new("packet_data", Variant::Array(Vec::new())))
+                .property(PropertyInfo::new("packet_data", Variant::Array(Default::default())))
                 // ⚠️ Named `granule_positions`, but its accessors are
                 // `{set,get}_packet_granule_positions` — and the values are one per
                 // PAGE, not per packet, despite that name (`page_granule_positions`
@@ -25083,7 +25085,7 @@ pub fn register_audio_classes() {
                 .property(PropertyInfo::new("bar_beats", Variant::Int(4)))
                 .property(PropertyInfo::new(
                     "tags",
-                    Variant::Dictionary(gdvariant::Dictionary::new()),
+                    Variant::Dictionary(gdvariant::Dictionary::new().into()),
                 ))
                 .property(PropertyInfo::new("loop", Variant::Bool(false)))
                 .property(PropertyInfo::new("loop_offset", Variant::Float(0.0)))
@@ -26407,7 +26409,7 @@ fn register_gltf_classes() {
             ))
             .property(PropertyInfo::new(
                 "instance_materials",
-                Variant::Array(Vec::new()),
+                Variant::Array(Default::default()),
             )),
     );
     register_class(
@@ -26451,7 +26453,7 @@ fn register_gltf_classes() {
             .parent("RefCounted")
             .property(PropertyInfo::new("gltf_to_godot_expression", Variant::Nil))
             .property(PropertyInfo::new("godot_to_gltf_expression", Variant::Nil))
-            .property(PropertyInfo::new("node_paths", Variant::Array(Vec::new())))
+            .property(PropertyInfo::new("node_paths", Variant::Array(Default::default())))
             .property(PropertyInfo::new("object_model_type", Variant::Int(0)))
             .property(PropertyInfo::new(
                 "json_pointers",
@@ -26522,11 +26524,11 @@ fn register_gltf_classes() {
             ))
             .property(PropertyInfo::new(
                 "unique_names",
-                Variant::Array(Vec::new()),
+                Variant::Array(Default::default()),
             ))
             .property(PropertyInfo::new(
                 "godot_bone_node",
-                Variant::Dictionary(gdvariant::Dictionary::new()),
+                Variant::Dictionary(gdvariant::Dictionary::new().into()),
             )),
     );
     register_class(
@@ -26539,7 +26541,7 @@ fn register_gltf_classes() {
             ))
             .property(PropertyInfo::new(
                 "inverse_binds",
-                Variant::Array(Vec::new()),
+                Variant::Array(Default::default()),
             ))
             .property(PropertyInfo::new(
                 "joints",
@@ -26556,11 +26558,11 @@ fn register_gltf_classes() {
             .property(PropertyInfo::new("skeleton", Variant::Int(0)))
             .property(PropertyInfo::new(
                 "joint_i_to_bone_i",
-                Variant::Dictionary(gdvariant::Dictionary::new()),
+                Variant::Dictionary(gdvariant::Dictionary::new().into()),
             ))
             .property(PropertyInfo::new(
                 "joint_i_to_name",
-                Variant::Dictionary(gdvariant::Dictionary::new()),
+                Variant::Dictionary(gdvariant::Dictionary::new().into()),
             ))
             .property(PropertyInfo::new("godot_skin", Variant::Nil)),
     );
@@ -26584,7 +26586,7 @@ fn register_gltf_classes() {
             .parent("Resource")
             .property(PropertyInfo::new(
                 "json",
-                Variant::Dictionary(gdvariant::Dictionary::new()),
+                Variant::Dictionary(gdvariant::Dictionary::new().into()),
             ))
             .property(PropertyInfo::new("major_version", Variant::Int(0)))
             .property(PropertyInfo::new("minor_version", Variant::Int(0)))
@@ -26600,15 +26602,15 @@ fn register_gltf_classes() {
                 "use_named_skin_binds",
                 Variant::Bool(false),
             ))
-            .property(PropertyInfo::new("nodes", Variant::Array(Vec::new())))
-            .property(PropertyInfo::new("buffers", Variant::Array(Vec::new())))
+            .property(PropertyInfo::new("nodes", Variant::Array(Default::default())))
+            .property(PropertyInfo::new("buffers", Variant::Array(Default::default())))
             .property(PropertyInfo::new(
                 "buffer_views",
-                Variant::Array(Vec::new()),
+                Variant::Array(Default::default()),
             ))
-            .property(PropertyInfo::new("accessors", Variant::Array(Vec::new())))
-            .property(PropertyInfo::new("meshes", Variant::Array(Vec::new())))
-            .property(PropertyInfo::new("materials", Variant::Array(Vec::new())))
+            .property(PropertyInfo::new("accessors", Variant::Array(Default::default())))
+            .property(PropertyInfo::new("meshes", Variant::Array(Default::default())))
+            .property(PropertyInfo::new("materials", Variant::Array(Default::default())))
             .property(PropertyInfo::new(
                 "scene_name",
                 Variant::String(String::new()),
@@ -26625,30 +26627,30 @@ fn register_gltf_classes() {
                 "root_nodes",
                 Variant::PackedInt32Array(Vec::new()),
             ))
-            .property(PropertyInfo::new("textures", Variant::Array(Vec::new())))
+            .property(PropertyInfo::new("textures", Variant::Array(Default::default())))
             .property(PropertyInfo::new(
                 "texture_samplers",
-                Variant::Array(Vec::new()),
+                Variant::Array(Default::default()),
             ))
-            .property(PropertyInfo::new("images", Variant::Array(Vec::new())))
-            .property(PropertyInfo::new("skins", Variant::Array(Vec::new())))
-            .property(PropertyInfo::new("cameras", Variant::Array(Vec::new())))
-            .property(PropertyInfo::new("lights", Variant::Array(Vec::new())))
+            .property(PropertyInfo::new("images", Variant::Array(Default::default())))
+            .property(PropertyInfo::new("skins", Variant::Array(Default::default())))
+            .property(PropertyInfo::new("cameras", Variant::Array(Default::default())))
+            .property(PropertyInfo::new("lights", Variant::Array(Default::default())))
             .property(PropertyInfo::new(
                 "unique_names",
-                Variant::Array(Vec::new()),
+                Variant::Array(Default::default()),
             ))
             .property(PropertyInfo::new(
                 "unique_animation_names",
-                Variant::Array(Vec::new()),
+                Variant::Array(Default::default()),
             ))
-            .property(PropertyInfo::new("skeletons", Variant::Array(Vec::new())))
+            .property(PropertyInfo::new("skeletons", Variant::Array(Default::default())))
             .property(PropertyInfo::new("create_animations", Variant::Bool(false)))
             .property(PropertyInfo::new(
                 "import_as_skeleton_bones",
                 Variant::Bool(false),
             ))
-            .property(PropertyInfo::new("animations", Variant::Array(Vec::new())))
+            .property(PropertyInfo::new("animations", Variant::Array(Default::default())))
             .property(PropertyInfo::new(
                 "handle_binary_image_mode",
                 Variant::Int(0),
@@ -28026,11 +28028,11 @@ fn register_navigation_resource_classes() {
                         .with_accessors("get_simplify_epsilon", "set_simplify_epsilon"),
                 )
                 .property(
-                    PropertyInfo::new("excluded_regions", Variant::Array(Vec::new()))
+                    PropertyInfo::new("excluded_regions", Variant::Array(Default::default()))
                         .with_accessors("get_excluded_regions", "set_excluded_regions"),
                 )
                 .property(
-                    PropertyInfo::new("included_regions", Variant::Array(Vec::new()))
+                    PropertyInfo::new("included_regions", Variant::Array(Default::default()))
                         .with_accessors("get_included_regions", "set_included_regions"),
                 )
                 // ⚠️ Zero means "no limit" for all three of these, and 4096 is a
@@ -28118,11 +28120,11 @@ fn register_navigation_resource_classes() {
                         .with_accessors("get_simplify_epsilon", "set_simplify_epsilon"),
                 )
                 .property(
-                    PropertyInfo::new("excluded_regions", Variant::Array(Vec::new()))
+                    PropertyInfo::new("excluded_regions", Variant::Array(Default::default()))
                         .with_accessors("get_excluded_regions", "set_excluded_regions"),
                 )
                 .property(
-                    PropertyInfo::new("included_regions", Variant::Array(Vec::new()))
+                    PropertyInfo::new("included_regions", Variant::Array(Default::default()))
                         .with_accessors("get_included_regions", "set_included_regions"),
                 )
                 // ⚠️ Zero means "no limit" for all three of these, and 4096 is a
@@ -28166,7 +28168,7 @@ fn register_navigation_resource_classes() {
                         .with_accessors("get_path_types", "set_path_types"),
                 )
                 .property(
-                    PropertyInfo::new("path_rids", Variant::Array(Vec::new()))
+                    PropertyInfo::new("path_rids", Variant::Array(Default::default()))
                         .with_accessors("get_path_rids", "set_path_rids"),
                 )
                 .property(
@@ -28193,7 +28195,7 @@ fn register_navigation_resource_classes() {
                         .with_accessors("get_path_types", "set_path_types"),
                 )
                 .property(
-                    PropertyInfo::new("path_rids", Variant::Array(Vec::new()))
+                    PropertyInfo::new("path_rids", Variant::Array(Default::default()))
                         .with_accessors("get_path_rids", "set_path_rids"),
                 )
                 .property(
@@ -28222,7 +28224,7 @@ fn register_navigation_resource_classes() {
                 .parent("Resource")
                 .property(PropertyInfo::new(
                     "data",
-                    Variant::Dictionary(gdvariant::Dictionary::new()),
+                    Variant::Dictionary(gdvariant::Dictionary::new().into()),
                 ))
                 .method(MethodInfo::new("setup", 2))
                 .method(MethodInfo::new("find_path", 2))
@@ -28242,8 +28244,8 @@ fn register_navigation_resource_classes() {
                     "vertices",
                     Variant::PackedVector2Array(Vec::new()),
                 ))
-                .property(PropertyInfo::new("polygons", Variant::Array(Vec::new())))
-                .property(PropertyInfo::new("outlines", Variant::Array(Vec::new())))
+                .property(PropertyInfo::new("polygons", Variant::Array(Default::default())))
+                .property(PropertyInfo::new("outlines", Variant::Array(Default::default())))
                 .property(
                     PropertyInfo::new("sample_partition_type", Variant::Int(0))
                         .with_accessors("get_sample_partition_type", "set_sample_partition_type"),
@@ -28326,7 +28328,7 @@ fn register_navigation_resource_classes() {
                     "vertices",
                     Variant::PackedVector3Array(Vec::new()),
                 ))
-                .property(PropertyInfo::new("polygons", Variant::Array(Vec::new())))
+                .property(PropertyInfo::new("polygons", Variant::Array(Default::default())))
                 .property(
                     PropertyInfo::new("sample_partition_type", Variant::Int(0))
                         .with_accessors("get_sample_partition_type", "set_sample_partition_type"),
@@ -28473,15 +28475,15 @@ fn register_navigation_resource_classes() {
                 .parent("Resource")
                 .property(PropertyInfo::new(
                     "traversable_outlines",
-                    Variant::Array(Vec::new()),
+                    Variant::Array(Default::default()),
                 ))
                 .property(PropertyInfo::new(
                     "obstruction_outlines",
-                    Variant::Array(Vec::new()),
+                    Variant::Array(Default::default()),
                 ))
                 .property(PropertyInfo::new(
                     "projected_obstructions",
-                    Variant::Array(Vec::new()),
+                    Variant::Array(Default::default()),
                 )),
         );
     }
@@ -28499,7 +28501,7 @@ fn register_navigation_resource_classes() {
                 ))
                 .property(PropertyInfo::new(
                     "projected_obstructions",
-                    Variant::Array(Vec::new()),
+                    Variant::Array(Default::default()),
                 )),
         );
     }
@@ -28997,7 +28999,7 @@ pub fn register_input_event_classes() {
             ClassRegistration::new("Shortcut")
                 .parent("Resource")
                 .property(
-                    PropertyInfo::new("events", Variant::Array(Vec::new()))
+                    PropertyInfo::new("events", Variant::Array(Default::default()))
                         .with_accessors("get_events", "set_events"),
                 )
                 // Arities are TOTAL parameter counts from doc/classes/Shortcut.xml,
@@ -29761,21 +29763,21 @@ pub fn register_editor_classes() {
                 .property(
                     PropertyInfo::new(
                         "keyword_colors",
-                        Variant::Dictionary(gdvariant::Dictionary::new()),
+                        Variant::Dictionary(gdvariant::Dictionary::new().into()),
                     )
                     .with_accessors("get_keyword_colors", "set_keyword_colors"),
                 )
                 .property(
                     PropertyInfo::new(
                         "member_keyword_colors",
-                        Variant::Dictionary(gdvariant::Dictionary::new()),
+                        Variant::Dictionary(gdvariant::Dictionary::new().into()),
                     )
                     .with_accessors("get_member_keyword_colors", "set_member_keyword_colors"),
                 )
                 .property(
                     PropertyInfo::new(
                         "color_regions",
-                        Variant::Dictionary(gdvariant::Dictionary::new()),
+                        Variant::Dictionary(gdvariant::Dictionary::new().into()),
                     )
                     .with_accessors("get_color_regions", "set_color_regions"),
                 )

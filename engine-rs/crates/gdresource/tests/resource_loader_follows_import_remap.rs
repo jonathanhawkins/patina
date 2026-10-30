@@ -83,7 +83,7 @@ fn resource_loader_follows_import_remap() {
         other => panic!("expected pixels array, got {other:?}"),
     };
     assert_eq!(pixels.len(), 4, "2x2 pixels from the artifact");
-    match &pixels[0] {
+    match &pixels.to_vec()[0] {
         Variant::Color(c) => assert!(
             c.r > 0.9 && c.g < 0.1 && c.b < 0.1,
             "artifact's first pixel is red, got {c:?}"

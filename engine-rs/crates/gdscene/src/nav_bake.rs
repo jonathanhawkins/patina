@@ -172,7 +172,7 @@ pub fn bake_region_3d(tree: &mut SceneTree, region: NodeId) -> usize {
             "__navmesh_vertices__",
             Variant::PackedVector3Array(vertices),
         );
-        node.set_property("__navmesh_polygons__", Variant::Array(polygons));
+        node.set_property("__navmesh_polygons__", Variant::Array(polygons.into()));
     }
     count
 }

@@ -50,7 +50,10 @@ fn text_edit_with(text: &str, keyword_colors: Option<Dictionary>) -> (SceneTree,
         let n = tree.get_node_mut(node).unwrap();
         n.set_property("text", Variant::String(text.to_owned()));
         if let Some(kw) = keyword_colors {
-            n.set_property("syntax_highlighter/keyword_colors", Variant::Dictionary(kw));
+            n.set_property(
+                "syntax_highlighter/keyword_colors",
+                Variant::Dictionary(kw.into()),
+            );
         }
     }
 

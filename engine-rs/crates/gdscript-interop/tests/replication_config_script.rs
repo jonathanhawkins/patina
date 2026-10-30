@@ -84,13 +84,16 @@ fn get_properties_returns_the_paths_in_order() {
     ));
     match v {
         Variant::Array(items) => {
-            let paths: Vec<String> = items.iter().map(|i| i.to_string_lossy()).collect();
+            let paths: Vec<String> = items.to_vec().iter().map(|i| i.to_string_lossy()).collect();
             assert_eq!(
                 paths,
                 vec![".:position".to_string(), ".:health".to_string()]
             );
             assert!(
-                items.iter().all(|i| matches!(i, Variant::NodePath(_))),
+                items
+                    .to_vec()
+                    .iter()
+                    .all(|i| matches!(i, Variant::NodePath(_))),
                 "entries must be NodePaths, as Godot returns; got {items:?}"
             );
         }

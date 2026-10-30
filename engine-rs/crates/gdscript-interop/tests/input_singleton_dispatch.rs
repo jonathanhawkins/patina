@@ -81,7 +81,11 @@ fn poll(
         .call_instance_method(inst, "poll", &[])
         .expect("poll() dispatches");
     match r {
-        Variant::Array(a) => (num(&a[0]), num(&a[1]), matches!(a[2], Variant::Bool(true))),
+        Variant::Array(a) => (
+            num(&a.to_vec()[0]),
+            num(&a.to_vec()[1]),
+            matches!(a.to_vec()[2], Variant::Bool(true)),
+        ),
         o => panic!("poll() must return an Array, got {o:?}"),
     }
 }
@@ -217,17 +221,17 @@ fn input_get_action_raw_strength_dispatches_to_its_own_accessor() {
     };
 
     assert!(
-        (num(&a[0]) - DEADZONED as f64).abs() < 1e-6,
+        (num(&a.to_vec()[0]) - DEADZONED as f64).abs() < 1e-6,
         "get_action_strength must return the DEADZONED value, got {}",
-        num(&a[0])
+        num(&a.to_vec()[0])
     );
     // The load-bearing assertion: reading 0.56 here would mean raw is aliased
     // to the deadzoned accessor.
     assert!(
-        (num(&a[1]) - RAW as f64).abs() < 1e-6,
+        (num(&a.to_vec()[1]) - RAW as f64).abs() < 1e-6,
         "get_action_raw_strength must return the RAW value {RAW}, got {} — the \
          deadzoned value here means the two are aliased, which is invisible on \
          a keyboard and wrong on every gamepad",
-        num(&a[1])
+        num(&a.to_vec()[1])
     );
 }

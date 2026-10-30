@@ -1528,8 +1528,8 @@ pub fn default_variant(vtype: VariantType) -> Variant {
         VariantType::Int => Variant::Int(0),
         VariantType::Float => Variant::Float(0.0),
         VariantType::String => Variant::String(String::new()),
-        VariantType::Array => Variant::Array(Vec::new()),
-        VariantType::Dictionary => Variant::Dictionary(Dictionary::new()),
+        VariantType::Array => Variant::Array(Default::default()),
+        VariantType::Dictionary => Variant::Dictionary(Default::default()),
         _ => Variant::Nil,
     }
 }
@@ -1558,11 +1558,11 @@ impl TypedArrayEditor {
     pub fn from_variant(element_type: VariantType, value: &Variant) -> Self {
         let elements = match value {
             Variant::Array(items) => items.clone(),
-            _ => Vec::new(),
+            _ => Default::default(),
         };
         Self {
             element_type,
-            elements,
+            elements: elements.to_vec(),
         }
     }
 
@@ -1648,7 +1648,7 @@ impl TypedArrayEditor {
 
     /// Serializes the array back to a `Variant::Array`.
     pub fn to_variant(&self) -> Variant {
-        Variant::Array(self.elements.clone())
+        Variant::Array(self.elements.clone().into())
     }
 }
 
@@ -1736,7 +1736,7 @@ impl TypedDictionaryEditor {
 
     /// Serializes the dictionary back to a `Variant::Dictionary`.
     pub fn to_variant(&self) -> Variant {
-        Variant::Dictionary(Dictionary::from(self.entries.clone()))
+        Variant::Dictionary(Dictionary::from(self.entries.clone()).into())
     }
 }
 

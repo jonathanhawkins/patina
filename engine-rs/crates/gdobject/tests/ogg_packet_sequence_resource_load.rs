@@ -65,7 +65,7 @@ fn ogg_packet_sequence_resource_load() {
     // The sequence exposes its data, with Godot's defaults.
     assert_eq!(
         default_of("OggPacketSequence", "packet_data"),
-        Variant::Array(Vec::new()),
+        Variant::Array(Default::default()),
     );
     assert_eq!(
         default_of("OggPacketSequence", "sampling_rate"),

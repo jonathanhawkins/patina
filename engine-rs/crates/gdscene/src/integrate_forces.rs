@@ -149,13 +149,14 @@ fn contacts_of(
         return Vec::new();
     };
     items
+        .to_vec()
         .iter()
         .filter_map(|item| {
             let Variant::Dictionary(rec) = item else {
                 return None;
             };
             let vec2 = |k: &str| match rec.get(k) {
-                Some(Variant::Vector2(v)) => *v,
+                Some(Variant::Vector2(v)) => v,
                 _ => Vector2::new(0.0, 0.0),
             };
             Some(gdobject::physics_direct_body_state::BodyContact2D {
@@ -303,13 +304,14 @@ fn contacts_of_3d(
         return Vec::new();
     };
     items
+        .to_vec()
         .iter()
         .filter_map(|item| {
             let Variant::Dictionary(rec) = item else {
                 return None;
             };
             let vec3 = |k: &str| match rec.get(k) {
-                Some(Variant::Vector3(v)) => *v,
+                Some(Variant::Vector3(v)) => v,
                 _ => Vector3::ZERO,
             };
             Some(gdobject::physics_direct_body_state::BodyContact3D {

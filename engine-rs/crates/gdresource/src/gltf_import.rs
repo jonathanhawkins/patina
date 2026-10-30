@@ -220,13 +220,13 @@ fn build_document(
                 let uv_variants: Vec<Variant> = uvs
                     .iter()
                     .map(|uv| {
-                        Variant::Array(vec![
-                            Variant::Float(uv[0] as f64),
-                            Variant::Float(uv[1] as f64),
-                        ])
+                        Variant::Array(
+                            (vec![Variant::Float(uv[0] as f64), Variant::Float(uv[1] as f64)])
+                                .into(),
+                        )
                     })
                     .collect();
-                sub.set_property("uvs", Variant::Array(uv_variants));
+                sub.set_property("uvs", Variant::Array(uv_variants.into()));
             }
 
             // JOINTS_0 / WEIGHTS_0 (optional) — per-vertex skinning influences
@@ -308,8 +308,8 @@ fn build_document(
                             d.iter().map(|p| Variant::Vector3(*p)).collect(),
                         ));
                     }
-                    sub.set_property("blend_shape_names", Variant::Array(names));
-                    sub.set_property("blend_shape_deltas", Variant::Array(deltas));
+                    sub.set_property("blend_shape_names", Variant::Array(names.into()));
+                    sub.set_property("blend_shape_deltas", Variant::Array(deltas.into()));
                 }
             }
 
@@ -323,7 +323,7 @@ fn build_document(
             } else {
                 let n = positions.len() as i64;
                 let indices: Vec<Variant> = (0..n).map(Variant::Int).collect();
-                sub.set_property("indices", Variant::Array(indices));
+                sub.set_property("indices", Variant::Array(indices.into()));
             }
 
             // material
@@ -377,37 +377,46 @@ fn build_document(
                 .iter()
                 .filter_map(|c| c.as_u64().map(|u| Variant::Int(u as i64)))
                 .collect();
-            d.insert("children", Variant::Array(kids));
+            d.insert("children", Variant::Array(kids.into()));
         }
         let (t, r, s) = node_trs(node);
         d.insert(
             "translation",
-            Variant::Array(vec![
-                Variant::Float(t[0] as f64),
-                Variant::Float(t[1] as f64),
-                Variant::Float(t[2] as f64),
-            ]),
+            Variant::Array(
+                (vec![
+                    Variant::Float(t[0] as f64),
+                    Variant::Float(t[1] as f64),
+                    Variant::Float(t[2] as f64),
+                ])
+                .into(),
+            ),
         );
         d.insert(
             "rotation",
-            Variant::Array(vec![
-                Variant::Float(r[0] as f64),
-                Variant::Float(r[1] as f64),
-                Variant::Float(r[2] as f64),
-                Variant::Float(r[3] as f64),
-            ]),
+            Variant::Array(
+                (vec![
+                    Variant::Float(r[0] as f64),
+                    Variant::Float(r[1] as f64),
+                    Variant::Float(r[2] as f64),
+                    Variant::Float(r[3] as f64),
+                ])
+                .into(),
+            ),
         );
         d.insert(
             "scale",
-            Variant::Array(vec![
-                Variant::Float(s[0] as f64),
-                Variant::Float(s[1] as f64),
-                Variant::Float(s[2] as f64),
-            ]),
+            Variant::Array(
+                (vec![
+                    Variant::Float(s[0] as f64),
+                    Variant::Float(s[1] as f64),
+                    Variant::Float(s[2] as f64),
+                ])
+                .into(),
+            ),
         );
-        node_dicts.push(Variant::Dictionary(d));
+        node_dicts.push(Variant::Dictionary(d.into()));
     }
-    doc.set_property("nodes", Variant::Array(node_dicts));
+    doc.set_property("nodes", Variant::Array(node_dicts.into()));
     doc.set_property("node_count", Variant::Int(nodes.len() as i64));
     doc.set_property("mesh_count", Variant::Int(mesh_count));
     doc.set_property("primitive_count", Variant::Int(prim_total));
@@ -416,10 +425,10 @@ fn build_document(
     if let Some(cameras) = json.get("cameras").and_then(|v| v.as_array()) {
         let cam_dicts: Vec<Variant> = cameras
             .iter()
-            .map(|c| Variant::Dictionary(camera_dict(c)))
+            .map(|c| Variant::Dictionary(camera_dict(c).into()))
             .collect();
         doc.set_property("camera_count", Variant::Int(cam_dicts.len() as i64));
-        doc.set_property("cameras", Variant::Array(cam_dicts));
+        doc.set_property("cameras", Variant::Array(cam_dicts.into()));
     }
 
     // --- lights (KHR_lights_punctual) ---
@@ -431,10 +440,10 @@ fn build_document(
     {
         let light_dicts: Vec<Variant> = lights
             .iter()
-            .map(|l| Variant::Dictionary(light_dict(l)))
+            .map(|l| Variant::Dictionary(light_dict(l).into()))
             .collect();
         doc.set_property("light_count", Variant::Int(light_dicts.len() as i64));
-        doc.set_property("lights", Variant::Array(light_dicts));
+        doc.set_property("lights", Variant::Array(light_dicts.into()));
     }
     doc.set_property(
         "unsupported_extensions",
@@ -455,7 +464,7 @@ fn build_document(
                     .iter()
                     .filter_map(|n| n.as_u64().map(|u| Variant::Int(u as i64)))
                     .collect();
-                doc.set_property("scene_roots", Variant::Array(root_ids));
+                doc.set_property("scene_roots", Variant::Array(root_ids.into()));
             }
         }
     }
@@ -528,15 +537,15 @@ fn build_document(
                                     .collect(),
                             ),
                         );
-                        Variant::Dictionary(c)
+                        Variant::Dictionary(c.into())
                     })
                     .collect();
-                clip.insert("channels", Variant::Array(channels));
-                Variant::Dictionary(clip)
+                clip.insert("channels", Variant::Array(channels.into()));
+                Variant::Dictionary(clip.into())
             })
             .collect();
         doc.set_property("animation_count", Variant::Int(clips.len() as i64));
-        doc.set_property("animations", Variant::Array(clips));
+        doc.set_property("animations", Variant::Array(clips.into()));
     }
 
     Ok(Arc::new(doc))
@@ -1701,34 +1710,31 @@ mod tests {
             Some(Variant::Array(a)) => a,
             other => panic!("nodes: {other:?}"),
         };
-        let cam_node = match &nodes[0] {
+        let cam_node = match nodes.to_vec()[0].clone() {
             Variant::Dictionary(d) => d,
             other => panic!("cam node: {other:?}"),
         };
-        assert_eq!(cam_node.get("camera"), Some(&Variant::Int(0)));
-        let lamp_node = match &nodes[1] {
+        assert_eq!(cam_node.get("camera"), Some(Variant::Int(0)));
+        let lamp_node = match nodes.to_vec()[1].clone() {
             Variant::Dictionary(d) => d,
             other => panic!("lamp node: {other:?}"),
         };
-        assert_eq!(lamp_node.get("light"), Some(&Variant::Int(0)));
+        assert_eq!(lamp_node.get("light"), Some(Variant::Int(0)));
 
         // light dict carries type + cone angles.
         let lights = match res.get_property("lights") {
             Some(Variant::Array(a)) => a,
             other => panic!("lights: {other:?}"),
         };
-        let light = match &lights[0] {
+        let light = match lights.to_vec()[0].clone() {
             Variant::Dictionary(d) => d,
             other => panic!("light: {other:?}"),
         };
-        assert_eq!(
-            light.get("type"),
-            Some(&Variant::String("spot".to_string()))
-        );
-        assert_eq!(light.get("intensity"), Some(&Variant::Float(3.0)));
+        assert_eq!(light.get("type"), Some(Variant::String("spot".to_string())));
+        assert_eq!(light.get("intensity"), Some(Variant::Float(3.0)));
         assert_eq!(
             light.get("spot_outer_cone_angle"),
-            Some(&Variant::Float(0.5))
+            Some(Variant::Float(0.5))
         );
     }
 
@@ -1836,9 +1842,18 @@ mod tests {
             other => panic!("vertices missing: {other:?}"),
         };
         assert_eq!(verts.len(), 3);
-        assert_eq!(verts[0], Variant::Vector3(Vector3::new(0.0, 0.0, 0.0)));
-        assert_eq!(verts[1], Variant::Vector3(Vector3::new(1.0, 0.0, 0.0)));
-        assert_eq!(verts[2], Variant::Vector3(Vector3::new(0.0, 1.0, 0.0)));
+        assert_eq!(
+            verts.to_vec()[0],
+            Variant::Vector3(Vector3::new(0.0, 0.0, 0.0))
+        );
+        assert_eq!(
+            verts.to_vec()[1],
+            Variant::Vector3(Vector3::new(1.0, 0.0, 0.0))
+        );
+        assert_eq!(
+            verts.to_vec()[2],
+            Variant::Vector3(Vector3::new(0.0, 1.0, 0.0))
+        );
 
         match sub.get_property("material_albedo") {
             Some(Variant::Color(c)) => {
@@ -1866,17 +1881,17 @@ mod tests {
             Some(Variant::Array(a)) => a,
             _ => panic!("nodes"),
         };
-        let node0 = match &nodes[0] {
+        let node0 = match nodes.to_vec()[0].clone() {
             Variant::Dictionary(d) => d,
             _ => panic!("node dict"),
         };
-        assert_eq!(node0.get("name"), Some(&Variant::String("TriNode".into())));
-        assert_eq!(node0.get("mesh"), Some(&Variant::Int(0)));
+        assert_eq!(node0.get("name"), Some(Variant::String("TriNode".into())));
+        assert_eq!(node0.get("mesh"), Some(Variant::Int(0)));
         match node0.get("translation") {
             Some(Variant::Array(t)) => {
-                assert_eq!(t[0], Variant::Float(1.0));
-                assert_eq!(t[1], Variant::Float(2.0));
-                assert_eq!(t[2], Variant::Float(3.0));
+                assert_eq!(t.to_vec()[0], Variant::Float(1.0));
+                assert_eq!(t.to_vec()[1], Variant::Float(2.0));
+                assert_eq!(t.to_vec()[2], Variant::Float(3.0));
             }
             other => panic!("translation: {other:?}"),
         }
@@ -1928,7 +1943,10 @@ mod tests {
             _ => panic!("no verts"),
         };
         assert_eq!(verts.len(), 3);
-        assert_eq!(verts[1], Variant::Vector3(Vector3::new(2.0, 0.0, 0.0)));
+        assert_eq!(
+            verts.to_vec()[1],
+            Variant::Vector3(Vector3::new(2.0, 0.0, 0.0))
+        );
     }
 
     /// glTF `JOINTS_0` / `WEIGHTS_0` reach the imported surface as flattened
@@ -2005,6 +2023,7 @@ mod tests {
         match sub.get_property("bone_indices") {
             Some(Variant::Array(a)) => {
                 let got: Vec<i64> = a
+                    .to_vec()
                     .iter()
                     .map(|v| match v {
                         Variant::Int(i) => *i,
@@ -2018,6 +2037,7 @@ mod tests {
         match sub.get_property("bone_weights") {
             Some(Variant::Array(a)) => {
                 let got: Vec<f64> = a
+                    .to_vec()
                     .iter()
                     .map(|v| match v {
                         Variant::Float(f) => *f,
@@ -2063,6 +2083,7 @@ mod tests {
         match res.get_property("unsupported_extensions") {
             Some(Variant::Array(a)) => {
                 assert!(a
+                    .to_vec()
                     .iter()
                     .any(|v| matches!(v, Variant::String(s) if s.contains("draco"))));
             }

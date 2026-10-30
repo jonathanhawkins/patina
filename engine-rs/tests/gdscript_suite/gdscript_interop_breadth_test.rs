@@ -424,13 +424,16 @@ return doubled
     );
     assert_eq!(
         val,
-        Variant::Array(vec![
-            Variant::Int(2),
-            Variant::Int(4),
-            Variant::Int(6),
-            Variant::Int(8),
-            Variant::Int(10),
-        ])
+        Variant::Array(
+            vec![
+                Variant::Int(2),
+                Variant::Int(4),
+                Variant::Int(6),
+                Variant::Int(8),
+                Variant::Int(10),
+            ]
+            .into()
+        )
     );
 }
 

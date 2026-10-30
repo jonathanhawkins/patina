@@ -28,7 +28,7 @@ fn grid_node(tree: &mut SceneTree, mesh_library: Option<(&str, &str)>) -> gdscen
     node.set_property("cell_size", Variant::Vector3(Vector3::new(4.0, 4.0, 4.0)));
     let mut data = Dictionary::new();
     data.insert("cells", Variant::PackedInt32Array(CELLS.to_vec()));
-    node.set_property("data", Variant::Dictionary(data));
+    node.set_property("data", Variant::Dictionary(data.into()));
     if let Some((key, value)) = mesh_library {
         node.set_property(key, Variant::String(value.to_string()));
     }

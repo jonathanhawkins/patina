@@ -684,14 +684,14 @@ pub fn texture_button_click_mask(tree: &SceneTree, node_id: NodeId) -> Option<Bi
         return None;
     }
     if let Variant::Dictionary(d) = node.get_property("__click_mask__data") {
-        return BitMap::from_data_dict(&d);
+        return BitMap::from_data_dict(&d.to_dict());
     }
     match node.get_property("texture_click_mask") {
         Variant::Resource(r) if r.class_name == "BitMap" => match r.properties.get("data") {
-            Some(Variant::Dictionary(d)) => BitMap::from_data_dict(d),
+            Some(Variant::Dictionary(d)) => BitMap::from_data_dict(&d.to_dict()),
             _ => None,
         },
-        Variant::Dictionary(d) => BitMap::from_data_dict(&d),
+        Variant::Dictionary(d) => BitMap::from_data_dict(&d.to_dict()),
         _ => None,
     }
 }

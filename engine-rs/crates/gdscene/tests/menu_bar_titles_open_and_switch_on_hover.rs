@@ -55,7 +55,7 @@ fn item(text: &str, id: i64) -> Variant {
     let mut d = Dictionary::new();
     d.insert(Variant::String("text".into()), Variant::String(text.into()));
     d.insert(Variant::String("id".into()), Variant::Int(id));
-    Variant::Dictionary(d)
+    Variant::Dictionary(d.into())
 }
 
 /// A MenuBar at the origin with two menus, each holding one uniquely-named row
@@ -76,7 +76,7 @@ fn bar_scene() -> (SceneTree, NodeId) {
         let popup = tree.add_child(bar, Node::new(name, "PopupMenu")).unwrap();
         tree.get_node_mut(popup)
             .unwrap()
-            .set_property("items", Variant::Array(vec![item(row, id)]));
+            .set_property("items", Variant::Array(vec![item(row, id)].into()));
     }
     (tree, bar)
 }

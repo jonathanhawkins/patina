@@ -149,7 +149,7 @@ fn pixel_count(res: &Resource) -> usize {
 
 fn first_pixel(res: &Resource) -> gdcore::math::Color {
     match res.get_property("pixels") {
-        Some(Variant::Array(a)) => match a.first() {
+        Some(Variant::Array(a)) => match a.to_vec().first() {
             Some(Variant::Color(c)) => *c,
             other => panic!("first pixel is not a Color: {other:?}"),
         },

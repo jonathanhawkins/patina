@@ -21,12 +21,11 @@
 //! Godot's, not a slip: `find_custom` **bails** on a negative `from`, while
 //! `rfind_custom` treats it as an offset from the end. Both are pinned below.
 //!
-//! **Scope note:** this covers the subset of pat-s3rrv.8's method-table gap that
-//! does not depend on reshaping `Variant::Array`/`Variant::Dictionary`. The
-//! typed-container queries (`is_typed`, `get_typed_builtin`, …), the read-only
-//! flags (`make_read_only`, `is_read_only`) and `duplicate_deep` all need
-//! per-value state or `Resource.DeepDuplicateMode`, which arrive with the
-//! shared-storage refactor — see the bead's `remaining_scope`.
+//! **Scope note:** this covers the methods that are pure functions of the
+//! elements. The ones that need per-container state (`is_typed`,
+//! `get_typed_builtin`, `make_read_only`, `is_read_only`, `duplicate_deep`, …)
+//! arrived with the pat-s3rrv.8 shared-storage flip and are pinned in
+//! `container_typed_and_read_only.rs`.
 //!
 //! ⚠️ **Correction.** An earlier revision of this note listed `assign` in that
 //! blocked set. That was wrong, and wrong in the direction that costs coverage:
@@ -182,11 +181,14 @@ fn bsearch_custom_before_flag_picks_the_side_of_a_run_of_equals() {
 fn dictionary_sort_orders_entries_by_key_in_place() {
     assert_eq!(
         run("var d = {\"c\": 2, \"a\": 0, \"b\": 1}\nd.sort()\nreturn d.keys()"),
-        Ok(Variant::Array(vec![
-            Variant::String("a".into()),
-            Variant::String("b".into()),
-            Variant::String("c".into()),
-        ]))
+        Ok(Variant::Array(
+            vec![
+                Variant::String("a".into()),
+                Variant::String("b".into()),
+                Variant::String("c".into()),
+            ]
+            .into()
+        ))
     );
 }
 
@@ -195,11 +197,9 @@ fn dictionary_sort_keeps_each_key_with_its_own_value() {
     // Sorting must move the pairs, not just the key column.
     assert_eq!(
         run("var d = {\"c\": 2, \"a\": 0, \"b\": 1}\nd.sort()\nreturn d.values()"),
-        Ok(Variant::Array(vec![
-            Variant::Int(0),
-            Variant::Int(1),
-            Variant::Int(2),
-        ]))
+        Ok(Variant::Array(
+            vec![Variant::Int(0), Variant::Int(1), Variant::Int(2),].into()
+        ))
     );
 }
 
@@ -266,7 +266,9 @@ fn assign_resizes_the_receiver_to_match_the_source() {
 fn assign_replaces_every_element() {
     assert_eq!(
         run("var a = [1, 2, 3]\nvar b = [9, 8]\na.assign(b)\nreturn a"),
-        Ok(Variant::Array(vec![Variant::Int(9), Variant::Int(8)]))
+        Ok(Variant::Array(
+            vec![Variant::Int(9), Variant::Int(8)].into()
+        ))
     );
 }
 
@@ -276,11 +278,9 @@ fn assign_grows_a_shorter_receiver() {
     // the source must take all of it, not just as many as it had room for.
     assert_eq!(
         run("var a = [1]\nvar b = [7, 8, 9]\na.assign(b)\nreturn a"),
-        Ok(Variant::Array(vec![
-            Variant::Int(7),
-            Variant::Int(8),
-            Variant::Int(9)
-        ]))
+        Ok(Variant::Array(
+            vec![Variant::Int(7), Variant::Int(8), Variant::Int(9)].into()
+        ))
     );
 }
 
@@ -293,7 +293,9 @@ fn assign_leaves_the_source_alone() {
     // so the flip must not be allowed to land without this staying green.
     assert_eq!(
         run("var a = [1]\nvar b = [2, 3]\na.assign(b)\na.push_back(4)\nreturn b"),
-        Ok(Variant::Array(vec![Variant::Int(2), Variant::Int(3)]))
+        Ok(Variant::Array(
+            vec![Variant::Int(2), Variant::Int(3)].into()
+        ))
     );
 }
 

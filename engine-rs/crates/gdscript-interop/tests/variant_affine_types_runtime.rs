@@ -43,7 +43,7 @@ fn run(body: &[&str]) -> Variant {
 
 fn items(v: Variant) -> Vec<Variant> {
     match v {
-        Variant::Array(items) => items,
+        Variant::Array(items) => items.to_vec(),
         other => panic!("expected Array, got {other:?}"),
     }
 }

@@ -107,10 +107,10 @@ fn variant_color_round_trip() {
 
 #[test]
 fn variant_array_round_trip() {
-    let v = Variant::Array(vec![Variant::Int(1), Variant::Bool(true)]);
+    let v = Variant::Array(vec![Variant::Int(1), Variant::Bool(true)].into());
     assert_eq!(v.variant_type(), gdvariant::VariantType::Array);
     assert!(v.is_truthy());
-    assert!(!Variant::Array(vec![]).is_truthy());
+    assert!(!Variant::Array(Default::default()).is_truthy());
 }
 
 #[test]
@@ -120,7 +120,7 @@ fn variant_dictionary_round_trip() {
     let v = Variant::Dictionary(d.into());
     assert_eq!(v.variant_type(), gdvariant::VariantType::Dictionary);
     assert!(v.is_truthy());
-    assert!(!Variant::Dictionary(gdvariant::Dictionary::new()).is_truthy());
+    assert!(!Variant::Dictionary(gdvariant::Dictionary::new().into()).is_truthy());
 }
 
 #[test]
@@ -767,8 +767,8 @@ fn variant_truthiness_godot_rules() {
     assert!(!Variant::Int(0).is_truthy());
     assert!(!Variant::Float(0.0).is_truthy());
     assert!(!Variant::String(String::new()).is_truthy());
-    assert!(!Variant::Array(vec![]).is_truthy());
-    assert!(!Variant::Dictionary(gdvariant::Dictionary::new()).is_truthy());
+    assert!(!Variant::Array(Default::default()).is_truthy());
+    assert!(!Variant::Dictionary(gdvariant::Dictionary::new().into()).is_truthy());
 
     // Truthy values.
     assert!(Variant::Bool(true).is_truthy());
@@ -776,7 +776,7 @@ fn variant_truthiness_godot_rules() {
     assert!(Variant::Int(-1).is_truthy());
     assert!(Variant::Float(0.001).is_truthy());
     assert!(Variant::String("x".into()).is_truthy());
-    assert!(Variant::Array(vec![Variant::Nil]).is_truthy());
+    assert!(Variant::Array(vec![Variant::Nil].into()).is_truthy());
 
     let mut d = HashMap::new();
     d.insert("k".into(), Variant::Nil);

@@ -224,10 +224,10 @@ fn import_publishes_animation_data_on_the_document() {
     let Some(Variant::Array(clips)) = doc.get_property("animations") else {
         panic!("the imported document must carry an `animations` array");
     };
-    let Some(Variant::Dictionary(clip)) = clips.first() else {
+    let Some(Variant::Dictionary(clip)) = clips.to_vec().first().cloned() else {
         panic!("the clip must be a dictionary");
     };
-    assert_eq!(clip.get("name"), Some(&Variant::String("Slide".into())));
+    assert_eq!(clip.get("name"), Some(Variant::String("Slide".into())));
     let Some(Variant::Array(channels)) = clip.get("channels") else {
         panic!("the clip must carry its channels");
     };

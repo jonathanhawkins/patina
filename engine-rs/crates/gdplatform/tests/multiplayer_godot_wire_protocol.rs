@@ -19,7 +19,7 @@ const NODE: u64 = 0xDEAD_BEEF;
 fn structured_args() -> Vec<Variant> {
     vec![
         Variant::Vector2(gdcore::math::Vector2::new(1.5, -2.25)),
-        Variant::Array(vec![Variant::Int(7), Variant::Bool(true)]),
+        Variant::Array(vec![Variant::Int(7), Variant::Bool(true)].into()),
         Variant::Dictionary(
             vec![(Variant::String("hp".into()), Variant::Int(42))]
                 .into_iter()

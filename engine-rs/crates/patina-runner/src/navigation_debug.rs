@@ -81,7 +81,7 @@ mod tests {
             );
             n.set_property(
                 "__navmesh_polygons__",
-                Variant::Array(vec![Variant::PackedInt32Array(vec![0, 1, 2])]),
+                Variant::Array(vec![Variant::PackedInt32Array(vec![0, 1, 2])].into()),
             );
         }
         n

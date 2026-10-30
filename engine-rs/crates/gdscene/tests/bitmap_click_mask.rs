@@ -144,7 +144,7 @@ fn bitmap_resource_and_click_mask_test() {
         size,
         (
             "texture_click_mask",
-            Variant::Dictionary(mask.to_data_dict()),
+            Variant::Dictionary(mask.to_data_dict().into()),
         ),
     );
     let resolved = texture_button_click_mask(&tree, button)
@@ -208,7 +208,7 @@ fn click_mask_scales_from_the_control_rect() {
         Vector2::new(16.0, 16.0),
         (
             "texture_click_mask",
-            Variant::Dictionary(mask.to_data_dict()),
+            Variant::Dictionary(mask.to_data_dict().into()),
         ),
     );
 
@@ -237,7 +237,7 @@ fn scene_authored_mask_resolves_from_the_companion() {
         Vector2::new(8.0, 8.0),
         (
             "__click_mask__data",
-            Variant::Dictionary(mask.to_data_dict()),
+            Variant::Dictionary(mask.to_data_dict().into()),
         ),
     );
     // The real property keeps the reference, exactly as the scene round-trip
@@ -295,7 +295,7 @@ fn mask_is_ignored_on_non_texture_button_controls() {
         .set_property("size", Variant::Vector2(Vector2::new(8.0, 8.0)));
     tree.get_node_mut(panel).unwrap().set_property(
         "texture_click_mask",
-        Variant::Dictionary(half_opaque_mask().to_data_dict()),
+        Variant::Dictionary(half_opaque_mask().to_data_dict().into()),
     );
 
     assert!(
@@ -384,7 +384,7 @@ fn hand_built_mask_drives_the_click_path() {
         Vector2::new(4.0, 4.0),
         (
             "texture_click_mask",
-            Variant::Dictionary(mask.to_data_dict()),
+            Variant::Dictionary(mask.to_data_dict().into()),
         ),
     );
     assert_eq!(

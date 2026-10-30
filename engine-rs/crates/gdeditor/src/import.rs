@@ -726,6 +726,7 @@ fn opt_index(dict: &gdvariant::Dictionary, key: &str) -> Option<usize> {
 fn floats(dict: &gdvariant::Dictionary, key: &str) -> Vec<f32> {
     match dict.get(key) {
         Some(Variant::Array(items)) => items
+            .to_vec()
             .iter()
             .map(|v| match v {
                 Variant::Float(f) => *f as f32,
@@ -742,6 +743,7 @@ fn decode_gltf_nodes(doc: &Resource) -> Vec<GltfNode> {
         return Vec::new();
     };
     entries
+        .to_vec()
         .iter()
         .map(|entry| {
             let Variant::Dictionary(d) = entry else {
@@ -760,6 +762,7 @@ fn decode_gltf_nodes(doc: &Resource) -> Vec<GltfNode> {
             };
             let children = match d.get("children") {
                 Some(Variant::Array(kids)) => kids
+                    .to_vec()
                     .iter()
                     .filter_map(|k| match k {
                         Variant::Int(i) if *i >= 0 => Some(*i as usize),
@@ -768,9 +771,9 @@ fn decode_gltf_nodes(doc: &Resource) -> Vec<GltfNode> {
                     .collect(),
                 _ => Vec::new(),
             };
-            let t = floats(d, "translation");
-            let r = floats(d, "rotation");
-            let s = floats(d, "scale");
+            let t = floats(&d.to_dict(), "translation");
+            let r = floats(&d.to_dict(), "rotation");
+            let s = floats(&d.to_dict(), "scale");
             let rotation = Quaternion::new(
                 r.first().copied().unwrap_or(0.0),
                 r.get(1).copied().unwrap_or(0.0),
@@ -789,9 +792,9 @@ fn decode_gltf_nodes(doc: &Resource) -> Vec<GltfNode> {
             );
             GltfNode {
                 name,
-                mesh: opt_index(d, "mesh"),
-                camera: opt_index(d, "camera"),
-                light: opt_index(d, "light"),
+                mesh: opt_index(&d.to_dict(), "mesh"),
+                camera: opt_index(&d.to_dict(), "camera"),
+                light: opt_index(&d.to_dict(), "light"),
                 children,
                 transform: Transform3D {
                     basis: Basis::from_quaternion_scale(rotation, scale),
@@ -833,6 +836,7 @@ fn mesh_primitives(doc: &Resource, mesh_index: usize) -> Vec<(Vec<Vector3>, Vec<
             let sub = doc.subresources.get(key)?;
             let vertices = match sub.get_property("vertices") {
                 Some(Variant::Array(items)) => items
+                    .to_vec()
                     .iter()
                     .filter_map(|v| match v {
                         Variant::Vector3(p) => Some(*p),
@@ -843,6 +847,7 @@ fn mesh_primitives(doc: &Resource, mesh_index: usize) -> Vec<(Vec<Vector3>, Vec<
             };
             let indices = match sub.get_property("indices") {
                 Some(Variant::Array(items)) => items
+                    .to_vec()
                     .iter()
                     .filter_map(|v| match v {
                         Variant::Int(i) if *i >= 0 => Some(*i as usize),
@@ -1040,7 +1045,7 @@ fn build_gltf_animations(doc: &Resource, paths: &HashMap<usize, String>) -> Vec<
     };
 
     let mut out = Vec::new();
-    for clip in clips {
+    for clip in clips.to_vec().iter() {
         let Variant::Dictionary(clip) = clip else {
             continue;
         };
@@ -1050,17 +1055,18 @@ fn build_gltf_animations(doc: &Resource, paths: &HashMap<usize, String>) -> Vec<
         };
         let (name, loop_mode) = split_animation_loop_suffix(&raw_name);
         let duration = match clip.get("length") {
-            Some(Variant::Float(f)) => *f,
-            Some(Variant::Int(i)) => *i as f64,
+            Some(Variant::Float(f)) => f,
+            Some(Variant::Int(i)) => i as f64,
             _ => 0.0,
         };
 
         let mut tracks = Vec::new();
         if let Some(Variant::Array(channels)) = clip.get("channels") {
-            for channel in channels {
+            for channel in channels.to_vec() {
                 let Variant::Dictionary(ch) = channel else {
                     continue;
                 };
+                let ch = &ch.to_dict();
                 let Some(target) = opt_index(ch, "target_node") else {
                     continue;
                 };
@@ -1140,6 +1146,7 @@ fn build_scene_from_gltf_document(
     // claims as a child.
     let declared: Vec<usize> = match doc.get_property("scene_roots") {
         Some(Variant::Array(items)) => items
+            .to_vec()
             .iter()
             .filter_map(|v| match v {
                 Variant::Int(i) if *i >= 0 => Some(*i as usize),

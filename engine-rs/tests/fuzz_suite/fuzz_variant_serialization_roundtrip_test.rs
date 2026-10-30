@@ -111,7 +111,7 @@ fn arb_variant() -> impl Strategy<Value = Variant> {
         8,  // items per collection
         |inner| {
             prop_oneof![
-                prop::collection::vec(inner.clone(), 0..8).prop_map(Variant::Array),
+                prop::collection::vec(inner.clone(), 0..8).prop_map(|v| Variant::Array(v.into())),
                 prop::collection::hash_map("[a-z]{1,8}", inner.clone(), 0..6)
                     .prop_map(|m| Variant::Dictionary(m.into())),
             ]
@@ -203,12 +203,19 @@ fn variant_approx_eq(a: &Variant, b: &Variant) -> bool {
         }
         (Variant::ObjectId(a), Variant::ObjectId(b)) => a.raw() == b.raw(),
         (Variant::Array(a), Variant::Array(b)) => {
-            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| variant_approx_eq(x, y))
+            a.len() == b.len()
+                && a.to_vec()
+                    .iter()
+                    .zip(b.to_vec().iter())
+                    .all(|(x, y)| variant_approx_eq(x, y))
         }
         (Variant::Dictionary(a), Variant::Dictionary(b)) => {
             a.len() == b.len()
-                && a.iter()
-                    .all(|(k, v)| b.get(k).map(|bv| variant_approx_eq(v, bv)).unwrap_or(false))
+                && a.to_dict().iter().all(|(k, v)| {
+                    b.get(k)
+                        .map(|bv| variant_approx_eq(v, &bv))
+                        .unwrap_or(false)
+                })
         }
         _ => false,
     }
@@ -301,11 +308,11 @@ proptest! {
     /// Empty containers round-trip correctly.
     #[test]
     fn empty_containers_roundtrip(_dummy in Just(())) {
-        let empty_arr = Variant::Array(vec![]);
+        let empty_arr = Variant::Array(Default::default());
         let rt_arr = roundtrip(&empty_arr).expect("empty array roundtrip failed");
         prop_assert_eq!(empty_arr, rt_arr);
 
-        let empty_dict = Variant::Dictionary(gdvariant::Dictionary::new());
+        let empty_dict = Variant::Dictionary(gdvariant::Dictionary::new().into());
         let rt_dict = roundtrip(&empty_dict).expect("empty dict roundtrip failed");
         prop_assert_eq!(empty_dict, rt_dict);
     }
@@ -351,7 +358,7 @@ fn deeply_nested_array_roundtrip() {
     // Build a 10-deep nested array.
     let mut v = Variant::Int(42);
     for _ in 0..10 {
-        v = Variant::Array(vec![v]);
+        v = Variant::Array(vec![v].into());
     }
     let rt = roundtrip(&v).expect("deep roundtrip failed");
     assert_eq!(v, rt);

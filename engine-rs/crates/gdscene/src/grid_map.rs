@@ -484,7 +484,7 @@ impl GridMap {
         // data = { "cells": PackedInt32Array(...) }
         if let Variant::Dictionary(dict) = node.get_property("data") {
             if let Some(Variant::PackedInt32Array(cells)) = dict.get("cells") {
-                grid.load_cells(cells);
+                grid.load_cells(&cells);
             }
         }
 
@@ -539,7 +539,7 @@ impl GridMap {
         // `data = { "cells": PackedInt32Array(...) }`.
         if let Variant::Dictionary(dict) = node.get_property("data") {
             if let Some(Variant::PackedInt32Array(cells)) = dict.get("cells") {
-                grid.load_cells(cells);
+                grid.load_cells(&cells);
             }
         }
 

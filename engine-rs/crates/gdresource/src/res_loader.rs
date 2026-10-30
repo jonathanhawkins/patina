@@ -658,7 +658,7 @@ impl BinaryResourceReader<'_> {
                 for _ in 0..len {
                     arr.push(self.parse_variant(depth + 1)?);
                 }
-                Ok(Variant::Array(arr))
+                Ok(Variant::Array(arr.into()))
             }
             V_PACKED_BYTE_ARRAY => {
                 let len = self.packed_len(1)?;
@@ -755,7 +755,7 @@ impl BinaryResourceReader<'_> {
                     // Keys keep their decoded Variant type (typed dictionary keys).
                     map.insert(key, value);
                 }
-                Ok(Variant::Dictionary(map))
+                Ok(Variant::Dictionary(map.into()))
             }
             // The integer vectors and the pat-s3rrv.59 builtins. Before these
             // arms existed a single such property aborted the whole binary
@@ -1485,15 +1485,13 @@ mod binary_tests {
         let res = load_res_binary(&data, "res://d.res").unwrap();
         assert_eq!(
             res.get_property("items"),
-            Some(&Variant::Array(vec![
-                Variant::Int(1),
-                Variant::Int(2),
-                Variant::Int(3)
-            ]))
+            Some(&Variant::Array(
+                vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)].into()
+            ))
         );
         match res.get_property("map") {
             Some(Variant::Dictionary(d)) => {
-                assert_eq!(d.get("k"), Some(&Variant::Vector2(Vector2::new(1.0, 2.0))));
+                assert_eq!(d.get("k"), Some(Variant::Vector2(Vector2::new(1.0, 2.0))));
             }
             other => panic!("expected dictionary, got {other:?}"),
         }
@@ -1714,7 +1712,9 @@ mod binary_tests {
         let res = load_res_binary(&data, "res://nest.res").unwrap();
         assert_eq!(
             res.get_property("arr"),
-            Some(&Variant::Array(vec![Variant::PackedInt32Array(vec![1, 2])]))
+            Some(&Variant::Array(
+                vec![Variant::PackedInt32Array(vec![1, 2])].into()
+            ))
         );
         assert!(matches!(
             res.get_property("dict"),

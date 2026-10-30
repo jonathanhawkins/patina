@@ -72,7 +72,7 @@ fn b_shape_and_exclude_are_carried() {
         let exclude = prop(class, "exclude");
         assert_eq!(
             exclude.default_value,
-            Variant::Array(Vec::new()),
+            Variant::Array(Default::default()),
             "{class}.exclude is an empty RID array"
         );
         assert_eq!(exclude.getter, "get_exclude");

@@ -1902,6 +1902,7 @@ pub fn mesh3d_from_gltf_resource(resource: &gdresource::Resource) -> Option<Mesh
         first_sub.get_property("blend_shape_deltas"),
     ) {
         (Some(gdvariant::Variant::Array(names)), Some(gdvariant::Variant::Array(deltas))) => names
+            .to_vec()
             .iter()
             .enumerate()
             .map(|(k, n)| gdserver3d::mesh::BlendShape3D {
@@ -1911,6 +1912,7 @@ pub fn mesh3d_from_gltf_resource(resource: &gdresource::Resource) -> Option<Mesh
                 },
                 vertex_deltas: deltas
                     .get(k)
+                    .as_ref()
                     .and_then(extract_vector3_array)
                     .unwrap_or_default(),
             })
@@ -2523,7 +2525,7 @@ pub fn sync_light_properties(node: &crate::node::Node, light: &mut Light3D) {
 fn extract_vector3_array(v: &gdvariant::Variant) -> Option<Vec<Vector3>> {
     if let gdvariant::Variant::Array(arr) = v {
         let mut out = Vec::with_capacity(arr.len());
-        for item in arr {
+        for item in arr.to_vec().iter() {
             if let gdvariant::Variant::Vector3(vec) = item {
                 out.push(*vec);
             } else {
@@ -2540,8 +2542,9 @@ fn extract_vector3_array(v: &gdvariant::Variant) -> Option<Vec<Vector3>> {
 fn extract_uv_array(v: &gdvariant::Variant) -> Option<Vec<[f32; 2]>> {
     if let gdvariant::Variant::Array(arr) = v {
         let mut out = Vec::with_capacity(arr.len());
-        for item in arr {
+        for item in arr.to_vec().iter() {
             if let gdvariant::Variant::Array(pair) = item {
+                let pair = pair.to_vec();
                 if pair.len() == 2 {
                     if let (gdvariant::Variant::Float(u), gdvariant::Variant::Float(v)) =
                         (&pair[0], &pair[1])
@@ -2571,7 +2574,7 @@ fn extract_bone_index_array(v: &gdvariant::Variant) -> Option<Vec<[u32; 4]>> {
         return None;
     }
     let mut out = Vec::with_capacity(arr.len() / 4);
-    for quad in arr.chunks(4) {
+    for quad in arr.to_vec().chunks(4) {
         let mut q = [0u32; 4];
         for (slot, item) in q.iter_mut().zip(quad) {
             match item {
@@ -2596,7 +2599,7 @@ fn extract_bone_weight_array(v: &gdvariant::Variant) -> Option<Vec<[f32; 4]>> {
         return None;
     }
     let mut out = Vec::with_capacity(arr.len() / 4);
-    for quad in arr.chunks(4) {
+    for quad in arr.to_vec().chunks(4) {
         let mut q = [0f32; 4];
         for (slot, item) in q.iter_mut().zip(quad) {
             match item {
@@ -2614,7 +2617,7 @@ fn extract_bone_weight_array(v: &gdvariant::Variant) -> Option<Vec<[f32; 4]>> {
 fn extract_index_array(v: &gdvariant::Variant) -> Option<Vec<u32>> {
     if let gdvariant::Variant::Array(arr) = v {
         let mut out = Vec::with_capacity(arr.len());
-        for item in arr {
+        for item in arr.to_vec().iter() {
             if let gdvariant::Variant::Int(i) = item {
                 out.push(*i as u32);
             } else {

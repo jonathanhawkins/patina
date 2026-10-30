@@ -223,8 +223,16 @@ fn fill_bezier_track(track: &mut AnimationTrack, keys: &Variant) {
     let Variant::Dictionary(d) = keys else {
         return;
     };
-    let times = d.get("times").map(variant_to_f64_vec).unwrap_or_default();
-    let points = d.get("points").map(variant_to_f64_vec).unwrap_or_default();
+    let times = d
+        .get("times")
+        .as_ref()
+        .map(variant_to_f64_vec)
+        .unwrap_or_default();
+    let points = d
+        .get("points")
+        .as_ref()
+        .map(variant_to_f64_vec)
+        .unwrap_or_default();
 
     for (i, &time) in times.iter().enumerate() {
         let base = i * 5;
@@ -252,10 +260,15 @@ fn fill_animation_track(track: &mut AnimationTrack, keys: &Variant) {
     let Variant::Dictionary(d) = keys else {
         return;
     };
-    let times = d.get("times").map(variant_to_f64_vec).unwrap_or_default();
+    let times = d
+        .get("times")
+        .as_ref()
+        .map(variant_to_f64_vec)
+        .unwrap_or_default();
     let clips: Vec<String> = match d.get("clips") {
         Some(Variant::PackedStringArray(v)) => v.clone(),
         Some(Variant::Array(items)) => items
+            .to_vec()
             .iter()
             .map(|v| match v {
                 Variant::String(s) => s.clone(),
@@ -290,10 +303,14 @@ fn fill_dictionary_track(
     let Variant::Dictionary(d) = keys else {
         return;
     };
-    let times = d.get("times").map(variant_to_f64_vec).unwrap_or_default();
+    let times = d
+        .get("times")
+        .as_ref()
+        .map(variant_to_f64_vec)
+        .unwrap_or_default();
     let values: Vec<Variant> = match d.get("values") {
-        Some(Variant::Array(items)) => items.clone(),
-        Some(other) => variant_to_f64_vec(other)
+        Some(Variant::Array(items)) => items.clone().to_vec(),
+        Some(other) => variant_to_f64_vec(&other)
             .into_iter()
             .map(Variant::Float)
             .collect(),
@@ -306,7 +323,7 @@ fn fill_dictionary_track(
 
     // `update` only applies to value tracks (Godot writes it there only).
     if track_type == TrackType::Property {
-        track.update_mode = match d.get("update").and_then(variant_to_i64) {
+        track.update_mode = match d.get("update").as_ref().and_then(variant_to_i64) {
             // 1 = discrete, 2 = trigger (fires at the key, never interpolates).
             Some(1) | Some(2) => TrackUpdateMode::Discrete,
             Some(3) => TrackUpdateMode::Capture,
@@ -341,9 +358,9 @@ fn method_key_to_array(value: &Variant) -> Option<Variant> {
             };
             let mut items = vec![Variant::String(method)];
             if let Some(Variant::Array(args)) = d.get("args") {
-                items.extend(args.iter().cloned());
+                items.extend(args.to_vec().iter().cloned());
             }
-            Some(Variant::Array(items))
+            Some(Variant::Array(items.into()))
         }
         _ => None,
     }
@@ -410,7 +427,7 @@ fn animations_from_library(
     };
 
     let mut out = Vec::new();
-    for (clip, anim_ref) in data.iter() {
+    for (clip, anim_ref) in data.to_dict().iter() {
         let Variant::String(clip) = clip else {
             continue;
         };
@@ -474,7 +491,7 @@ pub fn build_animation_player(
 
     let mut any = false;
     if let Some(Variant::Dictionary(libraries)) = props.get("libraries") {
-        for (lib_name, lib_ref) in libraries.iter() {
+        for (lib_name, lib_ref) in libraries.to_dict().iter() {
             let lib_name = match lib_name {
                 Variant::String(s) => s.as_str(),
                 _ => continue,
@@ -585,7 +602,7 @@ fn variant_to_f64_vec(v: &Variant) -> Vec<f64> {
         Variant::PackedFloat64Array(a) => a.clone(),
         Variant::PackedInt32Array(a) => a.iter().map(|i| *i as f64).collect(),
         Variant::PackedInt64Array(a) => a.iter().map(|i| *i as f64).collect(),
-        Variant::Array(items) => items.iter().filter_map(variant_to_f64).collect(),
+        Variant::Array(items) => items.to_vec().iter().filter_map(variant_to_f64).collect(),
         _ => Vec::new(),
     }
 }
@@ -654,9 +671,12 @@ tracks/0/keys = {
         keys.insert("times", Variant::PackedFloat32Array(vec![0.0, 1.0]));
         keys.insert(
             "values",
-            Variant::Array(vec![Variant::Float(1.0), Variant::Float(2.0)]),
+            Variant::Array(vec![Variant::Float(1.0), Variant::Float(2.0)].into()),
         );
-        props.insert("tracks/0/keys".to_string(), Variant::Dictionary(keys));
+        props.insert(
+            "tracks/0/keys".to_string(),
+            Variant::Dictionary(keys.into()),
+        );
 
         let anim = animation_from_tscn_props("a", &props);
         assert_eq!(anim.loop_mode, LoopMode::Linear);
@@ -678,8 +698,11 @@ tracks/0/keys = {
         );
         let mut keys = gdvariant::Dictionary::new();
         keys.insert("times", Variant::PackedFloat32Array(vec![0.0]));
-        keys.insert("values", Variant::Array(vec![Variant::Float(1.0)]));
-        props.insert("tracks/0/keys".to_string(), Variant::Dictionary(keys));
+        keys.insert("values", Variant::Array(vec![Variant::Float(1.0)].into()));
+        props.insert(
+            "tracks/0/keys".to_string(),
+            Variant::Dictionary(keys.into()),
+        );
 
         assert!(animation_from_tscn_props("a", &props).tracks.is_empty());
     }
@@ -690,11 +713,11 @@ tracks/0/keys = {
     fn method_track_dictionary_becomes_call_array() {
         let mut call = gdvariant::Dictionary::new();
         call.insert("method", Variant::String("on_step".to_string()));
-        call.insert("args", Variant::Array(vec![Variant::Int(7)]));
-        let converted = method_key_to_array(&Variant::Dictionary(call)).expect("converted");
+        call.insert("args", Variant::Array(vec![Variant::Int(7)].into()));
+        let converted = method_key_to_array(&Variant::Dictionary(call.into())).expect("converted");
         assert_eq!(
             converted,
-            Variant::Array(vec![Variant::String("on_step".into()), Variant::Int(7)])
+            Variant::Array(vec![Variant::String("on_step".into()), Variant::Int(7)].into())
         );
     }
 

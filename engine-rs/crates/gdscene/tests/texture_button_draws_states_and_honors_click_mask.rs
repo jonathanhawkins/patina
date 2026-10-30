@@ -197,7 +197,7 @@ fn a_masked_out_pixel_is_still_not_inside_the_button() {
     if let Some(n) = tree.get_node_mut(id) {
         n.set_property(
             "__click_mask__data",
-            Variant::Dictionary(mask.to_data_dict()),
+            Variant::Dictionary(mask.to_data_dict().into()),
         );
     }
 

@@ -109,13 +109,14 @@ pub fn to_json(v: &Variant) -> Value {
         }),
         Variant::ObjectId(id) => json!({ "type": "ObjectId", "value": id.raw() }),
         Variant::Array(arr) => {
-            let items: Vec<Value> = arr.iter().map(to_json).collect();
+            let items: Vec<Value> = arr.to_vec().iter().map(to_json).collect();
             json!({ "type": "Array", "value": items })
         }
         Variant::Dictionary(dict) => {
             // JSON object keys must be strings, so non-string Variant keys are
             // rendered to their string form (matching Godot's JSON output).
             let entries: serde_json::Map<String, Value> = dict
+                .to_dict()
                 .iter()
                 .map(|(k, v)| (dict_key_json_string(k), to_json(v)))
                 .collect();
@@ -456,7 +457,7 @@ pub fn from_json(val: &Value) -> Option<Variant> {
         "Array" => {
             let items = obj.get("value")?.as_array()?;
             let variants: Option<Vec<Variant>> = items.iter().map(from_json).collect();
-            Some(Variant::Array(variants?))
+            Some(Variant::Array(variants?.into()))
         }
         "Dictionary" => {
             let entries = obj.get("value")?.as_object()?;
@@ -464,7 +465,7 @@ pub fn from_json(val: &Value) -> Option<Variant> {
             for (k, v) in entries {
                 map.insert(k.clone(), from_json(v)?);
             }
-            Some(Variant::Dictionary(map))
+            Some(Variant::Dictionary(map.into()))
         }
         "Resource" => {
             let v = obj.get("value")?.as_object()?;
@@ -649,11 +650,14 @@ mod tests {
 
     #[test]
     fn roundtrip_array() {
-        let v = Variant::Array(vec![
-            Variant::Int(1),
-            Variant::String("two".into()),
-            Variant::Bool(false),
-        ]);
+        let v = Variant::Array(
+            vec![
+                Variant::Int(1),
+                Variant::String("two".into()),
+                Variant::Bool(false),
+            ]
+            .into(),
+        );
         assert_eq!(roundtrip(v.clone()), v);
     }
 
@@ -662,7 +666,7 @@ mod tests {
         let mut dict = Dictionary::new();
         dict.insert("name", Variant::String("Patina".into()));
         dict.insert("version", Variant::Int(1));
-        let v = Variant::Dictionary(dict);
+        let v = Variant::Dictionary(dict.into());
         assert_eq!(roundtrip(v.clone()), v);
     }
 
@@ -773,8 +777,8 @@ mod tests {
 
     #[test]
     fn roundtrip_nested_array() {
-        let inner = Variant::Array(vec![Variant::Int(1), Variant::Int(2)]);
-        let outer = Variant::Array(vec![inner, Variant::String("x".into())]);
+        let inner = Variant::Array(vec![Variant::Int(1), Variant::Int(2)].into());
+        let outer = Variant::Array(vec![inner, Variant::String("x".into())].into());
         assert_eq!(roundtrip(outer.clone()), outer);
     }
 
@@ -783,8 +787,8 @@ mod tests {
         let mut inner = Dictionary::new();
         inner.insert("nested", Variant::Bool(true));
         let mut outer = Dictionary::new();
-        outer.insert("child", Variant::Dictionary(inner));
-        let v = Variant::Dictionary(outer);
+        outer.insert("child", Variant::Dictionary(inner.into()));
+        let v = Variant::Dictionary(outer.into());
         assert_eq!(roundtrip(v.clone()), v);
     }
 

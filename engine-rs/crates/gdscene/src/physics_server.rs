@@ -165,6 +165,7 @@ fn vec2array_prop(tree: &SceneTree, id: NodeId, key: &str) -> Vec<Vector2> {
         .map(|n| match n.get_property(key) {
             Variant::PackedVector2Array(v) => v,
             Variant::Array(items) => items
+                .to_vec()
                 .into_iter()
                 .filter_map(|it| match it {
                     Variant::Vector2(v) => Some(v),
@@ -2716,7 +2717,7 @@ impl PhysicsServer {
                 .map(|nid| Variant::ObjectId(nid.object_id()))
                 .collect();
             if let Some(node) = tree.get_node_mut(area_node) {
-                node.set_property("_overlapping_bodies", Variant::Array(bodies));
+                node.set_property("_overlapping_bodies", Variant::Array(bodies.into()));
             }
         }
     }
@@ -2743,7 +2744,7 @@ impl PhysicsServer {
                 .map(|nid| Variant::ObjectId(nid.object_id()))
                 .collect();
             if let Some(node) = tree.get_node_mut(area_node) {
-                node.set_property("_overlapping_areas", Variant::Array(areas));
+                node.set_property("_overlapping_areas", Variant::Array(areas.into()));
             }
         }
     }
@@ -2971,14 +2972,14 @@ impl PhysicsServer {
                 rec.insert("normal", Variant::Vector2(normal));
                 rec.insert("position", Variant::Vector2(event.contact_point));
                 rec.insert("collider", Variant::ObjectId(other_node.object_id()));
-                entry.push(Variant::Dictionary(rec));
+                entry.push(Variant::Dictionary(rec.into()));
             }
         }
 
         for node in monitoring {
             let recs = per_node.remove(&node).unwrap_or_default();
             if let Some(n) = tree.get_node_mut(node) {
-                n.set_property("_body_contacts", Variant::Array(recs));
+                n.set_property("_body_contacts", Variant::Array(recs.into()));
             }
         }
     }
@@ -3130,7 +3131,7 @@ impl PhysicsServer {
                         .map(|nid| Variant::ObjectId(nid.object_id()))
                         .unwrap_or(Variant::Nil),
                 );
-                Variant::Dictionary(rec)
+                Variant::Dictionary(rec.into())
             }
             // Cleared rather than left stale, so a later call that hits nothing
             // cannot hand back the previous call's contact.
@@ -3303,7 +3304,7 @@ impl PhysicsServer {
                             .map(|nid| Variant::ObjectId(nid.object_id()))
                             .unwrap_or(Variant::Nil),
                     );
-                    Variant::Dictionary(rec)
+                    Variant::Dictionary(rec.into())
                 })
                 .collect();
 
@@ -3325,7 +3326,7 @@ impl PhysicsServer {
 
             if let Some(node) = tree.get_node_mut(node_id) {
                 node.set_property("_real_velocity", Variant::Vector2(real_velocity));
-                node.set_property("_slide_collisions", Variant::Array(slide_records));
+                node.set_property("_slide_collisions", Variant::Array(slide_records.into()));
                 node.set_property("velocity", Variant::Vector2(result_velocity));
                 node.set_property("platform_velocity", Variant::Vector2(result_platform_vel));
                 node.set_property("is_on_floor", Variant::Bool(on_floor));
@@ -4718,7 +4719,7 @@ mod tests {
         let body_id = tree.add_child(root, body).unwrap();
 
         let mut poly = Node::new("Poly", "CollisionPolygon2D");
-        poly.set_property("polygon", Variant::Array(ramp_points()));
+        poly.set_property("polygon", Variant::Array(ramp_points().into()));
         if let Some(bm) = build_mode {
             poly.set_property("build_mode", Variant::Int(bm));
         }
@@ -4808,7 +4809,7 @@ mod tests {
         let mut poly = Node::new("Poly", "CollisionPolygon2D");
         poly.set_property(
             "polygon",
-            Variant::Array(vec![Variant::Vector2(Vector2::ZERO)]),
+            Variant::Array(vec![Variant::Vector2(Vector2::ZERO)].into()),
         );
         tree.add_child(body_id, poly).unwrap();
 

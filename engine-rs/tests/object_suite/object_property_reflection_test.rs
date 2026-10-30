@@ -45,7 +45,7 @@ fn cde_node_set_get_roundtrip_all_variant_types() {
         ("nil_prop", Variant::Nil),
         (
             "array_prop",
-            Variant::Array(vec![Variant::Int(1), Variant::Bool(false)]),
+            Variant::Array(vec![Variant::Int(1), Variant::Bool(false)].into()),
         ),
     ];
 

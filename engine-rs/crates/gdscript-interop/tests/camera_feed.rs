@@ -45,9 +45,9 @@ fn run_err(src: &str) -> gdscript_interop::interpreter::RuntimeError {
 
 /// The elements of a returned `Array`, by reference — `Variant` is not `Copy`,
 /// so the obvious `let [a, b] = v` does not compile.
-fn arr(v: &Variant) -> &[Variant] {
+fn arr(v: &Variant) -> Vec<Variant> {
     match v {
-        Variant::Array(items) => items,
+        Variant::Array(items) => items.to_vec(),
         other => panic!("expected an Array, got {other:?}"),
     }
 }

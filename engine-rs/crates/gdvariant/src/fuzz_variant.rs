@@ -89,9 +89,10 @@ mod tests {
             8,  // items per collection
             |inner| {
                 prop_oneof![
-                    prop::collection::vec(inner.clone(), 0..8).prop_map(Variant::Array),
+                    prop::collection::vec(inner.clone(), 0..8)
+                        .prop_map(|v| Variant::Array(v.into())),
                     prop::collection::hash_map("[a-z]{1,8}", inner, 0..6)
-                        .prop_map(|m| Variant::Dictionary(Dictionary::from(m))),
+                        .prop_map(|m| Variant::Dictionary(Dictionary::from(m).into())),
                 ]
             },
         )
@@ -210,13 +211,13 @@ mod tests {
     proptest! {
         #[test]
         fn fuzz_array_roundtrip(items in prop::collection::vec(arb_leaf_variant(), 0..10)) {
-            let v = Variant::Array(items);
+            let v = Variant::Array(items.into());
             assert_roundtrip_eq(&v, &roundtrip(&v));
         }
 
         #[test]
         fn fuzz_dictionary_roundtrip(entries in prop::collection::hash_map("[a-z]{1,8}", arb_leaf_variant(), 0..8)) {
-            let v = Variant::Dictionary(Dictionary::from(entries));
+            let v = Variant::Dictionary(Dictionary::from(entries).into());
             assert_roundtrip_eq(&v, &roundtrip(&v));
         }
 
@@ -337,7 +338,7 @@ mod tests {
     fn edge_deeply_nested_arrays() {
         let mut v = Variant::Int(42);
         for _ in 0..10 {
-            v = Variant::Array(vec![v]);
+            v = Variant::Array(vec![v].into());
         }
         assert_roundtrip_eq(&v, &roundtrip(&v));
     }
@@ -348,20 +349,20 @@ mod tests {
         for i in 0..10 {
             let mut map = Dictionary::new();
             map.insert(format!("level_{i}"), v);
-            v = Variant::Dictionary(map);
+            v = Variant::Dictionary(map.into());
         }
         assert_roundtrip_eq(&v, &roundtrip(&v));
     }
 
     #[test]
     fn edge_empty_array_roundtrip() {
-        let v = Variant::Array(vec![]);
+        let v = Variant::Array(Default::default());
         assert_roundtrip_eq(&v, &roundtrip(&v));
     }
 
     #[test]
     fn edge_empty_dictionary_roundtrip() {
-        let v = Variant::Dictionary(Dictionary::new());
+        let v = Variant::Dictionary(Default::default());
         assert_roundtrip_eq(&v, &roundtrip(&v));
     }
 
@@ -377,7 +378,7 @@ mod tests {
             Variant::Vector3(Vector3::new(1.0, 2.0, 3.0)),
             Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0)),
         ];
-        let v = Variant::Array(items);
+        let v = Variant::Array(items.into());
         assert_roundtrip_eq(&v, &roundtrip(&v));
     }
 
@@ -445,11 +446,11 @@ mod tests {
         let mut v = Variant::Int(99);
         for i in 0..10 {
             if i % 2 == 0 {
-                v = Variant::Array(vec![v]);
+                v = Variant::Array(vec![v].into());
             } else {
                 let mut map = Dictionary::new();
                 map.insert(format!("k{i}"), v);
-                v = Variant::Dictionary(map);
+                v = Variant::Dictionary(map.into());
             }
         }
         assert_roundtrip_eq(&v, &roundtrip(&v));

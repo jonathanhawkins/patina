@@ -31,7 +31,7 @@ fn audio_key(at: f64, stream: &str, start_offset: f64) -> KeyFrame {
     d.insert("stream", Variant::String(stream.to_string()));
     d.insert("start_offset", Variant::Float(start_offset));
     d.insert("end_offset", Variant::Float(0.0));
-    KeyFrame::linear(at, Variant::Dictionary(d))
+    KeyFrame::linear(at, Variant::Dictionary(d.into()))
 }
 
 /// A ramp so a seek is observable: sample `i` has amplitude `i / len`, i.e.

@@ -180,6 +180,7 @@ fn read_exceptions(tree: &SceneTree, node_id: NodeId) -> Vec<u64> {
     tree.get_node(node_id)
         .map(|n| match n.get_property("_exceptions") {
             Variant::Array(items) => items
+                .to_vec()
                 .iter()
                 .filter_map(|v| match v {
                     Variant::Int(i) => Some(*i as u64),
@@ -194,7 +195,7 @@ fn read_exceptions(tree: &SceneTree, node_id: NodeId) -> Vec<u64> {
 fn write_exceptions(tree: &mut SceneTree, node_id: NodeId, raws: &[u64]) {
     let arr: Vec<Variant> = raws.iter().map(|&r| Variant::Int(r as i64)).collect();
     if let Some(node) = tree.get_node_mut(node_id) {
-        node.set_property("_exceptions", Variant::Array(arr));
+        node.set_property("_exceptions", Variant::Array(arr.into()));
     }
 }
 
@@ -348,9 +349,9 @@ fn store_hit(
             .collect();
         let points: Vec<Variant> = hits.iter().map(|h| Variant::Vector3(h.point)).collect();
         let normals: Vec<Variant> = hits.iter().map(|h| Variant::Vector3(h.normal)).collect();
-        node.set_property("_hit_colliders", Variant::Array(colliders));
-        node.set_property("_hit_points", Variant::Array(points));
-        node.set_property("_hit_normals", Variant::Array(normals));
+        node.set_property("_hit_colliders", Variant::Array(colliders.into()));
+        node.set_property("_hit_points", Variant::Array(points.into()));
+        node.set_property("_hit_normals", Variant::Array(normals.into()));
         node.set_property("_safe_fraction", Variant::Float(safe_fraction as f64));
         node.set_property("_unsafe_fraction", Variant::Float(unsafe_fraction as f64));
     }
@@ -360,9 +361,9 @@ fn clear_hit(tree: &mut SceneTree, node_id: NodeId) {
     if let Some(node) = tree.get_node_mut(node_id) {
         node.set_property("_hit_colliding", Variant::Bool(false));
         node.set_property("_hit_count", Variant::Int(0));
-        node.set_property("_hit_colliders", Variant::Array(Vec::new()));
-        node.set_property("_hit_points", Variant::Array(Vec::new()));
-        node.set_property("_hit_normals", Variant::Array(Vec::new()));
+        node.set_property("_hit_colliders", Variant::Array(Default::default()));
+        node.set_property("_hit_points", Variant::Array(Default::default()));
+        node.set_property("_hit_normals", Variant::Array(Default::default()));
         node.set_property("_safe_fraction", Variant::Float(1.0));
         node.set_property("_unsafe_fraction", Variant::Float(1.0));
     }
@@ -399,7 +400,7 @@ pub fn get_collider(tree: &SceneTree, node_id: NodeId, index: usize) -> Option<N
         _ => return None,
     };
     match arr.get(index)? {
-        Variant::ObjectId(id) => Some(NodeId::from_object_id(*id)),
+        Variant::ObjectId(id) => Some(NodeId::from_object_id(id)),
         _ => None,
     }
 }
@@ -409,7 +410,7 @@ pub fn get_collision_point(tree: &SceneTree, node_id: NodeId, index: usize) -> V
     tree.get_node(node_id)
         .map(|n| match n.get_property("_hit_points") {
             Variant::Array(arr) => match arr.get(index) {
-                Some(Variant::Vector3(v)) => *v,
+                Some(Variant::Vector3(v)) => v,
                 _ => Vector3::ZERO,
             },
             _ => Vector3::ZERO,
@@ -422,7 +423,7 @@ pub fn get_collision_normal(tree: &SceneTree, node_id: NodeId, index: usize) -> 
     tree.get_node(node_id)
         .map(|n| match n.get_property("_hit_normals") {
             Variant::Array(arr) => match arr.get(index) {
-                Some(Variant::Vector3(v)) => *v,
+                Some(Variant::Vector3(v)) => v,
                 _ => Vector3::ZERO,
             },
             _ => Vector3::ZERO,

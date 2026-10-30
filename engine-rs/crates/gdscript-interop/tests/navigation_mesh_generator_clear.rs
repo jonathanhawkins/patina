@@ -34,7 +34,7 @@ fn run_val(src: &str) -> Variant {
 
 fn dict(v: Variant) -> gdvariant::Dictionary {
     match v {
-        Variant::Dictionary(d) => d,
+        Variant::Dictionary(d) => d.to_dict(),
         other => panic!("expected a navmesh dictionary, got {other:?}"),
     }
 }

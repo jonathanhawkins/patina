@@ -366,7 +366,7 @@ fn variant_nil_arithmetic_returns_nil() {
 
 #[test]
 fn variant_dict_not_comparable() {
-    let a = Variant::Dictionary(gdvariant::Dictionary::new());
-    let b = Variant::Dictionary(gdvariant::Dictionary::new());
+    let a = Variant::Dictionary(gdvariant::Dictionary::new().into());
+    let b = Variant::Dictionary(gdvariant::Dictionary::new().into());
     assert!(a.partial_cmp(&b).is_none());
 }

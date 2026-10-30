@@ -31,9 +31,9 @@ fn call_check(src: &str) -> Variant {
         .unwrap_or_else(|e| panic!("check() failed: {e:?}\n--- source ---\n{src}"))
 }
 
-fn array_of(value: &Variant) -> &Vec<Variant> {
+fn array_of(value: &Variant) -> Vec<Variant> {
     match value {
-        Variant::Array(v) => v,
+        Variant::Array(v) => v.to_vec(),
         other => panic!("check() should return an Array, got {other:?}"),
     }
 }

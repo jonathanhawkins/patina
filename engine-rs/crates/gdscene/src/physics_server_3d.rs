@@ -222,6 +222,7 @@ fn pinned_point_indices_3d(tree: &SceneTree, id: NodeId) -> Vec<usize> {
             v.iter().filter(|&&i| i >= 0).map(|&i| i as usize).collect()
         }
         Variant::Array(v) => v
+            .to_vec()
             .iter()
             .filter_map(|e| match e {
                 Variant::Int(i) if *i >= 0 => Some(*i as usize),
@@ -299,6 +300,7 @@ fn vec3_array_prop_3d(node: &crate::node::Node, key: &str) -> Vec<Vector3> {
     match node.get_property(key) {
         Variant::PackedVector3Array(pts) => pts,
         Variant::Array(items) => items
+            .to_vec()
             .into_iter()
             .filter_map(|v| match v {
                 Variant::Vector3(p) => Some(p),
@@ -318,6 +320,7 @@ fn float_array_prop_3d(node: &crate::node::Node, key: &str) -> Vec<f32> {
         Variant::PackedFloat64Array(v) => v.into_iter().map(|f| f as f32).collect(),
         Variant::PackedInt32Array(v) => v.into_iter().map(|i| i as f32).collect(),
         Variant::Array(items) => items
+            .to_vec()
             .into_iter()
             .filter_map(|v| match v {
                 Variant::Float(f) => Some(f as f32),
@@ -2132,7 +2135,7 @@ impl PhysicsServer3D {
                                 .map(|n| Variant::ObjectId(n.object_id()))
                                 .unwrap_or(Variant::Nil),
                         );
-                        Variant::Dictionary(rec)
+                        Variant::Dictionary(rec.into())
                     })
                     .collect();
                 Some((nid, list))
@@ -2141,7 +2144,7 @@ impl PhysicsServer3D {
 
         for (nid, list) in records {
             if let Some(node) = tree.get_node_mut(nid) {
-                node.set_property("_body_contacts", Variant::Array(list));
+                node.set_property("_body_contacts", Variant::Array(list.into()));
             }
         }
     }
@@ -2345,7 +2348,7 @@ impl PhysicsServer3D {
                 .map(|nid| Variant::ObjectId(nid.object_id()))
                 .collect();
             if let Some(node) = tree.get_node_mut(area_node) {
-                node.set_property("_overlapping_bodies", Variant::Array(bodies));
+                node.set_property("_overlapping_bodies", Variant::Array(bodies.into()));
             }
         }
     }
@@ -2376,7 +2379,7 @@ impl PhysicsServer3D {
                 .map(|nid| Variant::ObjectId(nid.object_id()))
                 .collect();
             if let Some(node) = tree.get_node_mut(area_node) {
-                node.set_property("_overlapping_areas", Variant::Array(areas));
+                node.set_property("_overlapping_areas", Variant::Array(areas.into()));
             }
         }
     }

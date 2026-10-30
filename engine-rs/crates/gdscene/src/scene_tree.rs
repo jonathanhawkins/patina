@@ -189,6 +189,7 @@ fn replication_paths_from_node(node: &crate::node::Node, flag_name: &str) -> Vec
     }
     match node.get_property("_sync_properties") {
         Variant::Array(items) => items
+            .to_vec()
             .iter()
             .filter_map(|v| match v {
                 Variant::String(s) if !s.is_empty() => Some(s.clone()),
@@ -1027,7 +1028,7 @@ impl SceneTree {
             Variant::Int(peer),
             object,
             Variant::String(method.to_string()),
-            Variant::Array(args.to_vec()),
+            Variant::Array(args.to_vec().into()),
         ];
         let Some(script) = self.get_script_mut(api) else {
             return false;
@@ -1160,6 +1161,7 @@ impl SceneTree {
                     // also accepted so a minimal scene needs no array.
                     let scenes = match node.get_property("_spawnable_scenes") {
                         Variant::Array(items) => items
+                            .to_vec()
                             .iter()
                             .filter_map(variant_as_path_string)
                             .collect::<Vec<_>>(),
@@ -4978,7 +4980,7 @@ impl SceneTree {
         };
         match script.call_method("_get_configuration_warnings", &[]) {
             Ok(Variant::Array(items)) => {
-                warnings.extend(items.into_iter().filter_map(|v| match v {
+                warnings.extend(items.to_vec().into_iter().filter_map(|v| match v {
                     Variant::String(s) if !s.is_empty() => Some(s),
                     _ => None,
                 }))
@@ -8284,8 +8286,8 @@ fn audio_keys_in_range(
                 _ => continue,
             };
             let start_offset = match d.get("start_offset") {
-                Some(Variant::Float(f)) => *f,
-                Some(Variant::Int(i)) => *i as f64,
+                Some(Variant::Float(f)) => f,
+                Some(Variant::Int(i)) => i as f64,
                 _ => 0.0,
             };
             out.push((track.node_path.clone(), stream, start_offset));
@@ -10434,7 +10436,7 @@ mod tests {
             let mut track = AnimationTrack::with_type("", "hit", TrackType::Method);
             track.add_keyframe(KeyFrame::linear(
                 1.0,
-                Variant::Array(vec![Variant::String("on_footstep".into()), Variant::Int(3)]),
+                Variant::Array(vec![Variant::String("on_footstep".into()), Variant::Int(3)].into()),
             ));
             anim.tracks.push(track);
             player.add_animation(anim);

@@ -233,7 +233,7 @@ func _on_selected(index):
     // The selection moved...
     assert_eq!(
         gdscene::item_views::call_item_view_method(&mut tree, list, "get_selected_items", &[]),
-        Some(Variant::Array(vec![Variant::Int(1)])),
+        Some(Variant::Array(vec![Variant::Int(1)].into())),
         "select(1) must move the selection"
     );
     // ...without a signal.

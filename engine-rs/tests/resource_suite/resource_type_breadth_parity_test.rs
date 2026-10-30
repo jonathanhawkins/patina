@@ -506,19 +506,22 @@ fn roundtrip_array() {
     let mut r = Resource::new("Resource");
     r.set_property(
         "items",
-        Variant::Array(vec![
-            Variant::Int(1),
-            Variant::String("hello".into()),
-            Variant::Bool(true),
-        ]),
+        Variant::Array(
+            vec![
+                Variant::Int(1),
+                Variant::String("hello".into()),
+                Variant::Bool(true),
+            ]
+            .into(),
+        ),
     );
     let reloaded = roundtrip(&r);
     match reloaded.get_property("items") {
         Some(Variant::Array(arr)) => {
             assert_eq!(arr.len(), 3);
-            assert_eq!(arr[0], Variant::Int(1));
-            assert_eq!(arr[1], Variant::String("hello".into()));
-            assert_eq!(arr[2], Variant::Bool(true));
+            assert_eq!(arr.to_vec()[0], Variant::Int(1));
+            assert_eq!(arr.to_vec()[1], Variant::String("hello".into()));
+            assert_eq!(arr.to_vec()[2], Variant::Bool(true));
         }
         other => panic!("expected Array, got {other:?}"),
     }
@@ -535,8 +538,8 @@ fn roundtrip_dictionary() {
     let reloaded = roundtrip(&r);
     match reloaded.get_property("meta") {
         Some(Variant::Dictionary(d)) => {
-            assert_eq!(d.get("key1"), Some(&Variant::Int(42)));
-            assert_eq!(d.get("key2"), Some(&Variant::String("val".into())));
+            assert_eq!(d.get("key1"), Some(Variant::Int(42)));
+            assert_eq!(d.get("key2"), Some(Variant::String("val".into())));
         }
         other => panic!("expected Dictionary, got {other:?}"),
     }
@@ -687,7 +690,7 @@ fn saver_formats_array_correctly() {
     let mut r = Resource::new("Resource");
     r.set_property(
         "arr",
-        Variant::Array(vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)]),
+        Variant::Array(vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)].into()),
     );
     let saver = TresSaver::new();
     let output = saver.save_to_string(&r).unwrap();
@@ -889,11 +892,11 @@ metadata = {"name": "Player", "health": 100, "speed": 5.5, "alive": true}
     );
     match res.get_property("metadata") {
         Some(Variant::Dictionary(dict)) => {
-            assert_eq!(dict.get("name"), Some(&Variant::String("Player".into())));
-            assert_eq!(dict.get("health"), Some(&Variant::Int(100)));
-            assert_eq!(dict.get("alive"), Some(&Variant::Bool(true)));
+            assert_eq!(dict.get("name"), Some(Variant::String("Player".into())));
+            assert_eq!(dict.get("health"), Some(Variant::Int(100)));
+            assert_eq!(dict.get("alive"), Some(Variant::Bool(true)));
             match dict.get("speed") {
-                Some(Variant::Float(f)) => assert!((*f - 5.5).abs() < 1e-6),
+                Some(Variant::Float(f)) => assert!((f - 5.5).abs() < 1e-6),
                 other => panic!("expected Float for speed, got {other:?}"),
             }
         }
@@ -906,14 +909,14 @@ fn roundtrip_packed_int_array_via_array() {
     let mut r = Resource::new("Resource");
     r.set_property(
         "ids",
-        Variant::Array(vec![Variant::Int(10), Variant::Int(20), Variant::Int(30)]),
+        Variant::Array(vec![Variant::Int(10), Variant::Int(20), Variant::Int(30)].into()),
     );
     let reloaded = roundtrip(&r);
     match reloaded.get_property("ids") {
         Some(Variant::Array(arr)) => {
             assert_eq!(arr.len(), 3);
-            assert_eq!(arr[0], Variant::Int(10));
-            assert_eq!(arr[2], Variant::Int(30));
+            assert_eq!(arr.to_vec()[0], Variant::Int(10));
+            assert_eq!(arr.to_vec()[2], Variant::Int(30));
         }
         other => panic!("expected Array, got {other:?}"),
     }
@@ -931,9 +934,9 @@ fn roundtrip_dictionary_mixed() {
     let reloaded = roundtrip(&r);
     match reloaded.get_property("stats") {
         Some(Variant::Dictionary(d)) => {
-            assert_eq!(d.get("score"), Some(&Variant::Int(9001)));
-            assert_eq!(d.get("tag"), Some(&Variant::String("elite".into())));
-            assert_eq!(d.get("active"), Some(&Variant::Bool(true)));
+            assert_eq!(d.get("score"), Some(Variant::Int(9001)));
+            assert_eq!(d.get("tag"), Some(Variant::String("elite".into())));
+            assert_eq!(d.get("active"), Some(Variant::Bool(true)));
         }
         other => panic!("expected Dictionary, got {other:?}"),
     }
@@ -1170,11 +1173,11 @@ items = [1, "two", Vector2(3, 4), true, null]
     match res.get_property("items") {
         Some(Variant::Array(arr)) => {
             assert_eq!(arr.len(), 5);
-            assert_eq!(arr[0], Variant::Int(1));
-            assert_eq!(arr[1], Variant::String("two".into()));
-            assert!(matches!(&arr[2], Variant::Vector2(v) if v.x == 3.0 && v.y == 4.0));
-            assert_eq!(arr[3], Variant::Bool(true));
-            assert_eq!(arr[4], Variant::Nil);
+            assert_eq!(arr.to_vec()[0], Variant::Int(1));
+            assert_eq!(arr.to_vec()[1], Variant::String("two".into()));
+            assert!(matches!(&arr.to_vec()[2], Variant::Vector2(v) if v.x == 3.0 && v.y == 4.0));
+            assert_eq!(arr.to_vec()[3], Variant::Bool(true));
+            assert_eq!(arr.to_vec()[4], Variant::Nil);
         }
         other => panic!("expected Array, got {other:?}"),
     }

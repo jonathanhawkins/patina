@@ -200,16 +200,17 @@ fn array_properties_independent_across_instances() {
     }
 
     // Overwrite tags on instance 1 with a different array.
-    tree.get_node_mut(inst1)
-        .unwrap()
-        .set_property("tags", Variant::Array(vec![Variant::String("boss".into())]));
+    tree.get_node_mut(inst1).unwrap().set_property(
+        "tags",
+        Variant::Array(vec![Variant::String("boss".into())].into()),
+    );
 
     // Instance 2 must still have the original.
     let tags2_after = tree.get_node(inst2).unwrap().get_property("tags");
     match &tags2_after {
         Variant::Array(a) => {
             assert_eq!(a.len(), 2, "instance 2 array length must be unchanged");
-            assert_eq!(a[0], Variant::String("enemy".into()));
+            assert_eq!(a.to_vec()[0], Variant::String("enemy".into()));
         }
         _ => panic!(
             "expected Array variant after mutation, got {:?}",
@@ -702,8 +703,8 @@ fn variant_types_preserved_across_instances() {
         match node.get_property("tags") {
             Variant::Array(ref a) => {
                 assert_eq!(a.len(), 2, "[{label}] tags array length");
-                assert_eq!(a[0], Variant::String("player".into()));
-                assert_eq!(a[1], Variant::String("team_a".into()));
+                assert_eq!(a.to_vec()[0], Variant::String("player".into()));
+                assert_eq!(a.to_vec()[1], Variant::String("team_a".into()));
             }
             other => panic!("[{label}] tags must be Array, got {:?}", other),
         }
@@ -738,7 +739,7 @@ fn varied_type_mutation_isolated_across_instances() {
         .set_property("name_tag", Variant::String("dead".into()));
     tree.get_node_mut(inst1)
         .unwrap()
-        .set_property("tags", Variant::Array(vec![]));
+        .set_property("tags", Variant::Array(Default::default()));
 
     // Instance 2 must retain all original values.
     let node2 = tree.get_node(inst2).unwrap();

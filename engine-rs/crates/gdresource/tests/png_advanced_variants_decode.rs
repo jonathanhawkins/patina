@@ -39,7 +39,7 @@ fn dims(res: &Resource) -> (i64, i64) {
 fn pixels(res: &Resource) -> Vec<Color> {
     match res.get_property("pixels") {
         Some(Variant::Array(a)) => a
-            .iter()
+            .to_vec().iter()
             .map(|v| match v {
                 Variant::Color(c) => *c,
                 other => panic!("pixels entry not a Color: {other:?}"),

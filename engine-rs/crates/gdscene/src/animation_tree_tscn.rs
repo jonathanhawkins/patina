@@ -278,7 +278,7 @@ fn build_state_machine(
     // Transitions: [from, to, SubResource(transition), ...].
     let mut start_target = None;
     if let Some(Variant::Array(items)) = props.get("transitions") {
-        for triple in items.chunks(3) {
+        for triple in items.to_vec().chunks(3) {
             if triple.len() < 3 {
                 break;
             }
@@ -493,7 +493,7 @@ fn build_blend_tree(
     // (destination node, input index) -> source node
     let mut inputs: HashMap<(String, usize), String> = HashMap::new();
     if let Some(Variant::Array(items)) = props.get("node_connections") {
-        for triple in items.chunks(3) {
+        for triple in items.to_vec().chunks(3) {
             if triple.len() < 3 {
                 break;
             }
@@ -657,6 +657,7 @@ fn packed_ints(value: &Variant) -> Vec<i64> {
         Variant::PackedInt32Array(a) => a.iter().map(|i| *i as i64).collect(),
         Variant::PackedInt64Array(a) => a.clone(),
         Variant::Array(items) => items
+            .to_vec()
             .iter()
             .filter_map(|v| match v {
                 Variant::Int(i) => Some(*i),

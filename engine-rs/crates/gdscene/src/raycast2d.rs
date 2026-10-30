@@ -108,6 +108,7 @@ fn read_exceptions(tree: &SceneTree, node_id: NodeId) -> Vec<u64> {
     tree.get_node(node_id)
         .map(|n| match n.get_property("_exceptions") {
             Variant::Array(items) => items
+                .to_vec()
                 .iter()
                 .filter_map(|v| match v {
                     Variant::Int(i) => Some(*i as u64),

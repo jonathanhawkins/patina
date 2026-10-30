@@ -61,9 +61,9 @@ fn contains_unparsed(v: &Variant) -> bool {
     match v {
         Variant::Dictionary(d) => {
             d.get("__gd_unparsed_type__").is_some()
-                || d.iter().any(|(_, val)| contains_unparsed(val))
+                || d.to_dict().iter().any(|(_, val)| contains_unparsed(val))
         }
-        Variant::Array(items) => items.iter().any(contains_unparsed),
+        Variant::Array(items) => items.to_vec().iter().any(contains_unparsed),
         _ => false,
     }
 }

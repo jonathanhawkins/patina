@@ -82,7 +82,7 @@ fn run(body: &[&str]) -> Vec<Variant> {
         .call_instance_method(&mut inst, "check", &[])
         .unwrap_or_else(|e| panic!("check() failed: {e:?}"));
     match got {
-        Variant::Array(items) => items,
+        Variant::Array(items) => items.to_vec(),
         other => panic!("expected an Array, got {other:?}"),
     }
 }

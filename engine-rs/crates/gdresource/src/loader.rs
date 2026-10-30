@@ -261,7 +261,7 @@ pub const UNPARSED_CLASS_KEY: &str = "__gd_object_class__";
 ///
 /// The saver uses this to re-emit the original text; a consumer uses it to tell
 /// "this really was a `Rect2i`" from "someone stored a dictionary".
-pub fn unparsed_literal(v: &Variant) -> Option<(&str, &str)> {
+pub fn unparsed_literal(v: &Variant) -> Option<(String, String)> {
     let Variant::Dictionary(d) = v else {
         return None;
     };
@@ -270,16 +270,16 @@ pub fn unparsed_literal(v: &Variant) -> Option<(&str, &str)> {
     else {
         return None;
     };
-    Some((ty.as_str(), lit.as_str()))
+    Some((ty, lit))
 }
 
 /// If `v` is a parsed `Object(Class, ...)` literal, returns its class name.
-pub fn object_literal_class(v: &Variant) -> Option<&str> {
+pub fn object_literal_class(v: &Variant) -> Option<String> {
     let Variant::Dictionary(d) = v else {
         return None;
     };
     match d.get(UNPARSED_CLASS_KEY) {
-        Some(Variant::String(c)) => Some(c.as_str()),
+        Some(Variant::String(c)) => Some(c),
         _ => None,
     }
 }
@@ -714,7 +714,7 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
             let key = key.trim().trim_matches('"').to_string();
             dict.insert(key, parse_variant_value(value)?);
         }
-        return Ok(Variant::Dictionary(dict));
+        return Ok(Variant::Dictionary(dict.into()));
     }
 
     // Builtins that `Variant` has no kind for yet: Vector4/Vector4i, Rect2i,
@@ -741,8 +741,8 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
                     Err(_) => Variant::String(a.trim().to_string()),
                 })
                 .collect();
-            dict.insert(UNPARSED_ARGS_KEY, Variant::Array(args));
-            return Ok(Variant::Dictionary(dict));
+            dict.insert(UNPARSED_ARGS_KEY, Variant::Array(args.into()));
+            return Ok(Variant::Dictionary(dict.into()));
         }
     }
 
@@ -927,14 +927,14 @@ fn unescape_string(s: &str) -> String {
 fn parse_array(s: &str) -> EngineResult<Variant> {
     let s = s.trim();
     if s.is_empty() {
-        return Ok(Variant::Array(Vec::new()));
+        return Ok(Variant::Array(Default::default()));
     }
     let elements = split_args(s);
     let mut result = Vec::with_capacity(elements.len());
     for elem in &elements {
         result.push(parse_variant_value(elem)?);
     }
-    Ok(Variant::Array(result))
+    Ok(Variant::Array(result.into()))
 }
 
 /// Parses a dictionary body (content between `{` and `}`) into `Variant::Dictionary`.
@@ -943,7 +943,7 @@ fn parse_array(s: &str) -> EngineResult<Variant> {
 fn parse_dictionary(s: &str) -> EngineResult<Variant> {
     let s = s.trim();
     if s.is_empty() {
-        return Ok(Variant::Dictionary(Dictionary::new()));
+        return Ok(Variant::Dictionary(Default::default()));
     }
     let pairs = split_args(s);
     let mut map = Dictionary::new();
@@ -969,7 +969,7 @@ fn parse_dictionary(s: &str) -> EngineResult<Variant> {
         let value = parse_variant_value(rest)?;
         map.insert(key, value);
     }
-    Ok(Variant::Dictionary(map))
+    Ok(Variant::Dictionary(map.into()))
 }
 
 /// Parses a `PackedByteArray` body in either form Godot writes.
@@ -1518,12 +1518,12 @@ mod tests {
         match v {
             Variant::Array(ref items) => {
                 assert_eq!(items.len(), 6);
-                assert_eq!(items[0], Variant::Int(1));
-                assert_eq!(items[1], Variant::Float(2.5));
-                assert_eq!(items[2], Variant::String("three".into()));
-                assert_eq!(items[3], Variant::Vector2(Vector2::new(1.0, 2.0)));
-                assert_eq!(items[4], Variant::Bool(true));
-                assert_eq!(items[5], Variant::Nil);
+                assert_eq!(items.to_vec()[0], Variant::Int(1));
+                assert_eq!(items.to_vec()[1], Variant::Float(2.5));
+                assert_eq!(items.to_vec()[2], Variant::String("three".into()));
+                assert_eq!(items.to_vec()[3], Variant::Vector2(Vector2::new(1.0, 2.0)));
+                assert_eq!(items.to_vec()[4], Variant::Bool(true));
+                assert_eq!(items.to_vec()[5], Variant::Nil);
             }
             other => panic!("expected Array, got {other:?}"),
         }
@@ -1531,7 +1531,10 @@ mod tests {
 
     #[test]
     fn parse_empty_array() {
-        assert_eq!(parse_variant_value("[]").unwrap(), Variant::Array(vec![]));
+        assert_eq!(
+            parse_variant_value("[]").unwrap(),
+            Variant::Array(Default::default())
+        );
     }
 
     #[test]
@@ -1540,9 +1543,9 @@ mod tests {
         match v {
             Variant::Dictionary(ref map) => {
                 assert_eq!(map.len(), 3);
-                assert_eq!(map["name"], Variant::String("Player".into()));
-                assert_eq!(map["health"], Variant::Int(100));
-                assert_eq!(map["alive"], Variant::Bool(true));
+                assert_eq!(map.to_dict()["name"], Variant::String("Player".into()));
+                assert_eq!(map.to_dict()["health"], Variant::Int(100));
+                assert_eq!(map.to_dict()["alive"], Variant::Bool(true));
             }
             other => panic!("expected Dictionary, got {other:?}"),
         }
@@ -1552,7 +1555,7 @@ mod tests {
     fn parse_empty_dictionary() {
         assert_eq!(
             parse_variant_value("{}").unwrap(),
-            Variant::Dictionary(Dictionary::new())
+            Variant::Dictionary(Default::default())
         );
     }
 
@@ -1562,8 +1565,8 @@ mod tests {
         match v {
             Variant::Array(ref items) => {
                 assert_eq!(items.len(), 2);
-                assert_eq!(items[0], Variant::String("ExtResource:1".into()));
-                assert_eq!(items[1], Variant::String("ExtResource:2".into()));
+                assert_eq!(items.to_vec()[0], Variant::String("ExtResource:1".into()));
+                assert_eq!(items.to_vec()[1], Variant::String("ExtResource:2".into()));
             }
             other => panic!("expected Array, got {other:?}"),
         }
@@ -1787,9 +1790,9 @@ nothing = null
         match res.get_property("items") {
             Some(Variant::Array(items)) => {
                 assert_eq!(items.len(), 3);
-                assert_eq!(items[0], Variant::Int(1));
-                assert_eq!(items[1], Variant::String("two".into()));
-                assert_eq!(items[2], Variant::Vector2(Vector2::new(3.0, 4.0)));
+                assert_eq!(items.to_vec()[0], Variant::Int(1));
+                assert_eq!(items.to_vec()[1], Variant::String("two".into()));
+                assert_eq!(items.to_vec()[2], Variant::Vector2(Vector2::new(3.0, 4.0)));
             }
             other => panic!("expected Array, got {other:?}"),
         }
@@ -1798,8 +1801,8 @@ nothing = null
         match res.get_property("metadata") {
             Some(Variant::Dictionary(map)) => {
                 assert_eq!(map.len(), 2);
-                assert_eq!(map["version"], Variant::Int(2));
-                assert_eq!(map["label"], Variant::String("test".into()));
+                assert_eq!(map.to_dict()["version"], Variant::Int(2));
+                assert_eq!(map.to_dict()["label"], Variant::String("test".into()));
             }
             other => panic!("expected Dictionary, got {other:?}"),
         }

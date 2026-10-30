@@ -132,6 +132,7 @@ fn load_via_format_loader(fs_path: &str) -> Option<Texture2D> {
     let (width, height) = (int_prop("width")?, int_prop("height")?);
     let pixels: Vec<Color> = match resource.get_property("pixels") {
         Some(Variant::Array(items)) => items
+            .to_vec()
             .iter()
             .filter_map(|v| match v {
                 Variant::Color(c) => Some(*c),

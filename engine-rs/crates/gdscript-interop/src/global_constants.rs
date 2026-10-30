@@ -1183,7 +1183,13 @@ pub fn global_enum_member(enum_name: &str, member: &str) -> Option<Variant> {
 /// `TYPE_VECTOR2 == 5`). Patina's [`VariantType`] discriminants are ordered
 /// differently from Godot's, so the mapping is explicit. (pat-nzgdu.7)
 pub fn variant_type_code(v: &Variant) -> i64 {
-    match v.variant_type() {
+    variant_type_code_of(v.variant_type())
+}
+
+/// [`variant_type_code`] for a bare [`VariantType`] — what a typed container
+/// reports from `get_typed_builtin()` (pat-s3rrv.8).
+pub fn variant_type_code_of(t: VariantType) -> i64 {
+    match t {
         VariantType::Nil => 0,
         VariantType::Bool => 1,
         VariantType::Int => 2,

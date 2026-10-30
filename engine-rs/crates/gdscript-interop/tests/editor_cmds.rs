@@ -72,14 +72,22 @@ func check():
 ";
     match call_check(src) {
         Variant::Array(v) => {
-            assert_eq!(v[0], Variant::Bool(true), "the command must be found");
-            assert_eq!(v[1], Variant::Bool(true), "removing it reports success");
             assert_eq!(
-                v[2],
+                v.to_vec()[0],
+                Variant::Bool(true),
+                "the command must be found"
+            );
+            assert_eq!(
+                v.to_vec()[1],
+                Variant::Bool(true),
+                "removing it reports success"
+            );
+            assert_eq!(
+                v.to_vec()[2],
                 Variant::Bool(false),
                 "removing a second time is a no-op, not a success",
             );
-            assert_eq!(v[3], Variant::Bool(false));
+            assert_eq!(v.to_vec()[3], Variant::Bool(false));
         }
         other => panic!("expected an Array, got {other:?}"),
     }

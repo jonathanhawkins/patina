@@ -147,16 +147,16 @@ s.get_class(), s.length_seconds, s.sample_rate]
 
     // -- the remapped texture ------------------------------------------------
     assert_eq!(
-        got[0],
+        got.to_vec()[0],
         Variant::Int(2),
         "width must come from the .ctex artifact, not be Nil from the extension guess",
     );
     assert_eq!(
-        got[1],
+        got.to_vec()[1],
         Variant::Int(2),
         "height must come from the artifact"
     );
-    let pixels = match &got[2] {
+    let pixels = match got.to_vec()[2].clone() {
         Variant::Array(px) => px,
         other => panic!("pixels must be an Array of decoded colors, got {other:?}"),
     };
@@ -166,7 +166,7 @@ s.get_class(), s.length_seconds, s.sample_rate]
         "a 2x2 artifact must decode to 4 pixels, got {}",
         pixels.len(),
     );
-    match &pixels[0] {
+    match pixels.to_vec()[0].clone() {
         Variant::Color(c) => assert!(
             c.r > 0.9 && c.g < 0.1 && c.b < 0.1,
             "the artifact's first pixel is red, got {c:?}",
@@ -174,24 +174,24 @@ s.get_class(), s.length_seconds, s.sample_rate]
         other => panic!("expected a Color pixel, got {other:?}"),
     }
     assert_eq!(
-        got[3],
+        got.to_vec()[3],
         Variant::String("Texture2D".to_string()),
         "an imported image must still report Texture2D",
     );
 
     // -- the audio stream ----------------------------------------------------
     assert_eq!(
-        got[4],
+        got.to_vec()[4],
         Variant::String("AudioStreamWAV".to_string()),
         "a .wav must report the decoder's concrete class, not the bare 'AudioStream' guess",
     );
     assert_eq!(
-        got[5],
+        got.to_vec()[5],
         Variant::Float(0.5),
         "4000 frames at 8 kHz is a half-second stream; Nil here means the file was never read",
     );
     assert_eq!(
-        got[6],
+        got.to_vec()[6],
         Variant::Int(8000),
         "sample_rate must come from the WAV fmt chunk",
     );
@@ -238,22 +238,22 @@ func check() -> Array:
         other => panic!("expected Array, got {other:?}"),
     };
     assert_eq!(
-        got[0],
+        got.to_vec()[0],
         Variant::String("Texture2D".to_string()),
         "an undecodable .png keeps its extension-guessed class",
     );
     assert_eq!(
-        got[1],
+        got.to_vec()[1],
         Variant::String("res://gone.png".to_string()),
         "the placeholder still carries the requested path",
     );
     assert_eq!(
-        got[2],
+        got.to_vec()[2],
         Variant::String("Resource".to_string()),
         "an unclaimed extension falls back to the generic Resource",
     );
     assert_eq!(
-        got[3],
+        got.to_vec()[3],
         Variant::Nil,
         "no data means no properties, not a runtime error",
     );

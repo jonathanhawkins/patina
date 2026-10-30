@@ -946,6 +946,27 @@ impl From<Dictionary> for SharedDictionary {
     }
 }
 
+// The same constructors `Dictionary` offers, so building a fresh
+// `Variant::Dictionary` reads the same before and after pat-s3rrv.8. Each
+// creates NEW storage, never an alias.
+impl From<std::collections::HashMap<String, Variant>> for SharedDictionary {
+    fn from(map: std::collections::HashMap<String, Variant>) -> Self {
+        Self::from_dict(Dictionary::from(map))
+    }
+}
+
+impl FromIterator<(Variant, Variant)> for SharedDictionary {
+    fn from_iter<I: IntoIterator<Item = (Variant, Variant)>>(iter: I) -> Self {
+        Self::from_dict(iter.into_iter().collect())
+    }
+}
+
+impl FromIterator<(String, Variant)> for SharedDictionary {
+    fn from_iter<I: IntoIterator<Item = (String, Variant)>>(iter: I) -> Self {
+        Self::from_dict(iter.into_iter().collect())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Recursive Variant helpers
 // ---------------------------------------------------------------------------
@@ -963,6 +984,7 @@ fn deep_copy_variant(v: &Variant, depth: u32) -> Variant {
     match v {
         Variant::Array(items) => Variant::Array(
             items
+                .to_vec()
                 .iter()
                 .map(|item| deep_copy_variant(item, depth + 1))
                 .collect(),
@@ -981,8 +1003,9 @@ fn variant_recursive_equal(a: &Variant, b: &Variant, depth: u32) -> bool {
     match (a, b) {
         (Variant::Array(x), Variant::Array(y)) => {
             x.len() == y.len()
-                && x.iter()
-                    .zip(y.iter())
+                && x.to_vec()
+                    .iter()
+                    .zip(y.to_vec().iter())
                     .all(|(l, r)| variant_recursive_equal(l, r, depth + 1))
         }
         _ => a == b,
@@ -1412,7 +1435,7 @@ mod tests {
 
     #[test]
     fn deep_duplicate_preserves_nested_container_contents() {
-        let a = SharedArray::from_vec(vec![Variant::Array(vec![Variant::Int(1)])]);
+        let a = SharedArray::from_vec(vec![Variant::Array(vec![Variant::Int(1)].into())]);
         let deep = a.duplicate(true);
         assert_eq!(deep.to_vec(), a.to_vec(), "a deep copy must compare equal");
         assert!(!a.is_same_instance(&deep));
@@ -1436,7 +1459,7 @@ mod tests {
         // will replace, or every dictionary keyed on an array changes meaning.
         let items = vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)];
         let shared = SharedArray::from_vec(items.clone());
-        assert_eq!(shared.hash(), godot_hash(&Variant::Array(items)));
+        assert_eq!(shared.hash(), godot_hash(&Variant::Array(items.into())));
     }
 
     #[test]
@@ -1488,9 +1511,9 @@ mod tests {
     fn deeply_nested_duplicate_terminates() {
         // Build a chain deeper than MAX_RECURSION and confirm duplicate(true)
         // returns instead of blowing the stack.
-        let mut v = Variant::Array(vec![Variant::Int(0)]);
+        let mut v = Variant::Array(vec![Variant::Int(0)].into());
         for _ in 0..(MAX_RECURSION + 20) {
-            v = Variant::Array(vec![v]);
+            v = Variant::Array(vec![v].into());
         }
         let a = SharedArray::from_vec(vec![v]);
         let _ = a.duplicate(true);

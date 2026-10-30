@@ -116,7 +116,7 @@ fn ip_reports_no_local_addresses_or_interfaces() {
     );
     assert_eq!(
         run_val("return IP.get_local_interfaces()\n"),
-        Variant::Array(vec![]),
+        Variant::Array(Default::default()),
         "IPWeb::get_local_interfaces has an empty body"
     );
 }
@@ -356,7 +356,7 @@ fn baking_source_geometry_produces_polygons() {
         Some(Variant::Array(polys)) => {
             assert_eq!(polys.len(), 1, "one triangle in, one polygon out");
             assert_eq!(
-                polys[0],
+                polys.to_vec()[0],
                 Variant::PackedInt32Array(vec![0, 1, 2]),
                 "the polygon must carry the source triangle's corners"
             );

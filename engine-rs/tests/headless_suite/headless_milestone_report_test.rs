@@ -73,8 +73,8 @@ fn gate2_variant_type_coverage() {
         Variant::Vector3(Vector3::new(1.0, 2.0, 3.0)),
         Variant::Transform2D(gdcore::math::Transform2D::IDENTITY),
         Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0)),
-        Variant::Array(vec![]),
-        Variant::Dictionary(gdvariant::Dictionary::new()),
+        Variant::Array(Default::default()),
+        Variant::Dictionary(gdvariant::Dictionary::new().into()),
         Variant::ObjectId(gdcore::id::ObjectId::from_raw(1)),
     ];
     assert!(variants.len() >= 14, "must cover at least 14 variant types");

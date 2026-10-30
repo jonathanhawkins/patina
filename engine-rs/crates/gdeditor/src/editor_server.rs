@@ -4553,7 +4553,7 @@ fn api_navigation_bake(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
             "__navmesh_vertices__",
             Variant::PackedVector2Array(vertices),
         );
-        node.set_property("__navmesh_polygons__", Variant::Array(polygons));
+        node.set_property("__navmesh_polygons__", Variant::Array(polygons.into()));
     }
     state.scene_modified = true;
     state.add_log(
@@ -5443,7 +5443,7 @@ fn plugin_breakpoint_lines(state: &mut EditorState, path: &str) -> Vec<u32> {
         let entries: Vec<String> = match value {
             Variant::PackedStringArray(v) => v,
             Variant::Array(items) => items
-                .iter()
+                .to_vec().iter()
                 .filter_map(|i| match i {
                     Variant::String(s) => Some(s.clone()),
                     _ => None,
@@ -5521,7 +5521,7 @@ pub fn canvas_button_event(x: f32, y: f32, pressed: bool) -> Variant {
         Variant::String("pressed".to_string()),
         Variant::Bool(pressed),
     );
-    Variant::Dictionary(d)
+    Variant::Dictionary(d.into())
 }
 
 /// The editor camera a 3D plugin receives as `_forward_3d_gui_input`'s first
@@ -5558,7 +5558,7 @@ fn editor_camera_3d_value(camera: &crate::viewport_3d::ViewportCamera3D) -> Vari
             crate::viewport_3d::Projection::Orthographic => 1,
         }),
     );
-    Variant::Dictionary(d)
+    Variant::Dictionary(d.into())
 }
 
 /// The plugin's own name, from `_get_plugin_name()`, falling back to its folder
@@ -16877,7 +16877,7 @@ fn read_point_list(tree: &SceneTree, node_id: NodeId, property: &str) -> Vec<Vec
     match tree.get_node(node_id).map(|n| n.get_property(property)) {
         Some(Variant::PackedVector2Array(v)) => v,
         Some(Variant::Array(items)) => items
-            .into_iter()
+            .to_vec().into_iter()
             .filter_map(|v| match v {
                 Variant::Vector2(p) => Some(p),
                 _ => None,
@@ -18792,7 +18792,7 @@ fn tileset_custom_data_layers(node: &Node) -> Vec<String> {
     match node.get_property(tilemap::TILE_CUSTOM_DATA_LAYERS) {
         Variant::PackedStringArray(v) => v,
         Variant::Array(items) => items
-            .iter()
+            .to_vec().iter()
             .filter_map(|v| match v {
                 Variant::String(s) => Some(s.clone()),
                 _ => None,
@@ -23760,9 +23760,9 @@ fn reimport_texture(
         _ => return Err("source image has no pixel data to import".into()),
     };
     let mut rgba = Vec::with_capacity(pixels.len() * 4);
-    for v in pixels {
+    for v in pixels.to_vec().iter() {
         let c = match v {
-            Variant::Color(c) => *c,
+            Variant::Color(c) => c,
             _ => return Err("decoded pixel is not a Color".into()),
         };
         for channel in [c.r, c.g, c.b, c.a] {

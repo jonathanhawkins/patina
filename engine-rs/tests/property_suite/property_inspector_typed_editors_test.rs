@@ -770,7 +770,8 @@ fn validated_set_rejects_incompatible() {
     panel.inspect(node_id);
 
     // visible is Bool, setting Array should fail
-    let result = panel.set_property_validated(&mut tree, "visible", Variant::Array(vec![]));
+    let result =
+        panel.set_property_validated(&mut tree, "visible", Variant::Array(Default::default()));
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("expected"));
 }

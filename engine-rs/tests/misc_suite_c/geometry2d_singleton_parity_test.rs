@@ -52,7 +52,7 @@ fn singleton_build_arc_returns_array() {
 fn singleton_build_arc_points_are_vector2() {
     let result = run_val("return Geometry2D.build_arc(Vector2(0, 0), 5.0, 0.0, 1.5708, 4)\n");
     if let Variant::Array(arr) = &result {
-        for (i, v) in arr.iter().enumerate() {
+        for (i, v) in arr.to_vec().iter().enumerate() {
             assert!(
                 matches!(v, Variant::Vector2(_)),
                 "point {i} should be Vector2, got {v:?}"
@@ -68,12 +68,12 @@ fn singleton_build_arc_first_last_angles() {
     // Quarter-circle: start at 0, end at PI/2, radius 1, center origin.
     let result = run_val("return Geometry2D.build_arc(Vector2(0, 0), 1.0, 0.0, 1.5707963, 10)\n");
     if let Variant::Array(arr) = result {
-        let first = match &arr[0] {
-            Variant::Vector2(v) => *v,
+        let first = match arr.to_vec()[0].clone() {
+            Variant::Vector2(v) => v,
             other => panic!("expected Vector2, got {other:?}"),
         };
-        let last = match arr.last().unwrap() {
-            Variant::Vector2(v) => *v,
+        let last = match arr.to_vec().last().cloned().unwrap() {
+            Variant::Vector2(v) => v,
             other => panic!("expected Vector2, got {other:?}"),
         };
         // First: angle=0 → (1, 0)
@@ -199,12 +199,12 @@ fn singleton_build_arc_even_angular_spacing() {
         assert_eq!(arr.len(), 5);
         let expected_step: f32 = std::f32::consts::FRAC_PI_2 / 4.0;
         for i in 0..4 {
-            let p0 = match &arr[i] {
-                Variant::Vector2(v) => *v,
+            let p0 = match arr.to_vec()[i].clone() {
+                Variant::Vector2(v) => v,
                 other => panic!("point {i}: expected Vector2, got {other:?}"),
             };
-            let p1 = match &arr[i + 1] {
-                Variant::Vector2(v) => *v,
+            let p1 = match arr.to_vec()[i + 1].clone() {
+                Variant::Vector2(v) => v,
                 other => panic!("point {}: expected Vector2, got {other:?}", i + 1),
             };
             let a0 = p0.y.atan2(p0.x);
@@ -232,7 +232,7 @@ fn singleton_build_arc_radius_invariant() {
     );
     if let Variant::Array(dists) = result {
         assert_eq!(dists.len(), 32);
-        for (i, d) in dists.iter().enumerate() {
+        for (i, d) in dists.to_vec().iter().enumerate() {
             let dist = match d {
                 Variant::Float(f) => *f as f32,
                 other => panic!("dist {i}: expected Float, got {other:?}"),
@@ -251,12 +251,12 @@ fn singleton_build_arc_offset_center() {
         run_val("return Geometry2D.build_arc(Vector2(100, 200), 10.0, 0.0, 1.5707963, 2)\n");
     if let Variant::Array(arr) = result {
         assert_eq!(arr.len(), 2);
-        let p0 = match &arr[0] {
-            Variant::Vector2(v) => *v,
+        let p0 = match arr.to_vec()[0].clone() {
+            Variant::Vector2(v) => v,
             other => panic!("expected Vector2, got {other:?}"),
         };
-        let p1 = match &arr[1] {
-            Variant::Vector2(v) => *v,
+        let p1 = match arr.to_vec()[1].clone() {
+            Variant::Vector2(v) => v,
             other => panic!("expected Vector2, got {other:?}"),
         };
         // First: center + (10, 0) = (110, 200)
@@ -276,12 +276,12 @@ fn singleton_build_arc_reverse_sweep() {
     let result = run_val("return Geometry2D.build_arc(Vector2(0, 0), 1.0, 3.14159265, 0.0, 3)\n");
     if let Variant::Array(arr) = result {
         assert_eq!(arr.len(), 3);
-        let first = match &arr[0] {
-            Variant::Vector2(v) => *v,
+        let first = match arr.to_vec()[0].clone() {
+            Variant::Vector2(v) => v,
             other => panic!("expected Vector2, got {other:?}"),
         };
-        let last = match &arr[2] {
-            Variant::Vector2(v) => *v,
+        let last = match arr.to_vec()[2].clone() {
+            Variant::Vector2(v) => v,
             other => panic!("expected Vector2, got {other:?}"),
         };
         // First at PI → (-1, ~0)
@@ -299,12 +299,12 @@ fn singleton_build_arc_full_circle_wraps() {
     let result = run_val("return Geometry2D.build_arc(Vector2(0, 0), 5.0, 0.0, 6.2831853, 64)\n");
     if let Variant::Array(arr) = result {
         assert_eq!(arr.len(), 64);
-        let first = match &arr[0] {
-            Variant::Vector2(v) => *v,
+        let first = match arr.to_vec()[0].clone() {
+            Variant::Vector2(v) => v,
             other => panic!("expected Vector2, got {other:?}"),
         };
-        let last = match arr.last().unwrap() {
-            Variant::Vector2(v) => *v,
+        let last = match arr.to_vec().last().cloned().unwrap() {
+            Variant::Vector2(v) => v,
             other => panic!("expected Vector2, got {other:?}"),
         };
         assert_near(first.x, last.x, 1e-3, "full circle x wrap");

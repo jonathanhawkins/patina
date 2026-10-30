@@ -49,7 +49,7 @@ fn scripted_sync_loop(src: &str) -> (MainLoop, NodeId) {
         n.set_property("replication_interval", Variant::Float(0.0));
         n.set_property(
             "_sync_properties",
-            Variant::Array(vec![Variant::String("position".to_string())]),
+            Variant::Array(vec![Variant::String("position".to_string())].into()),
         );
     }
 

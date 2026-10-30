@@ -71,10 +71,15 @@ fn stream_packet_peer_var_e2e() {
     match positions {
         Variant::Array(v) => {
             assert_eq!(
-                v[0], v[1],
+                v.to_vec()[0],
+                v.to_vec()[1],
                 "reading a record must consume exactly what writing it produced"
             );
-            assert_eq!(v[0], v[2], "the write cursor must end at the buffer size");
+            assert_eq!(
+                v.to_vec()[0],
+                v.to_vec()[2],
+                "the write cursor must end at the buffer size"
+            );
         }
         other => panic!("expected an Array, got {other:?}"),
     }
@@ -94,17 +99,21 @@ fn big_endian_changes_put_32_byte_order() {
     );
     match bytes {
         Variant::Array(v) => {
-            let le = match &v[0] {
+            let le = match &v.to_vec()[0] {
                 Variant::PackedByteArray(b) => b.clone(),
                 other => panic!("expected PackedByteArray, got {other:?}"),
             };
-            let be = match &v[1] {
+            let be = match &v.to_vec()[1] {
                 Variant::PackedByteArray(b) => b.clone(),
                 other => panic!("expected PackedByteArray, got {other:?}"),
             };
             assert_eq!(le, vec![1, 0, 0, 0], "little-endian 1 is 01 00 00 00");
             assert_eq!(be, vec![0, 0, 0, 1], "big-endian 1 is 00 00 00 01");
-            assert_eq!(v[2], Variant::Bool(true), "the flag must read back");
+            assert_eq!(
+                v.to_vec()[2],
+                Variant::Bool(true),
+                "the flag must read back"
+            );
         }
         other => panic!("expected an Array, got {other:?}"),
     }
@@ -126,15 +135,15 @@ fn typed_accessors_and_cursor() {
     );
     match vals {
         Variant::Array(v) => {
-            assert_eq!(v[0], Variant::Int(7), "put_32/get_32 round-trips");
+            assert_eq!(v.to_vec()[0], Variant::Int(7), "put_32/get_32 round-trips");
             assert_eq!(
-                v[1],
+                v.to_vec()[1],
                 Variant::Int(255),
                 "put_u8/get_u8 round-trips unsigned"
             );
-            assert_eq!(v[2], Variant::Int(5), "4 bytes + 1 byte");
+            assert_eq!(v.to_vec()[2], Variant::Int(5), "4 bytes + 1 byte");
             assert_eq!(
-                v[3],
+                v.to_vec()[3],
                 Variant::Int(1),
                 "get_available_bytes reports what remains AFTER the cursor"
             );
@@ -156,9 +165,13 @@ fn a_truncated_record_does_not_move_the_cursor() {
     );
     match vals {
         Variant::Array(v) => {
-            assert_eq!(v[0], Variant::Bool(true), "a bad record must read as null");
             assert_eq!(
-                v[1],
+                v.to_vec()[0],
+                Variant::Bool(true),
+                "a bad record must read as null"
+            );
+            assert_eq!(
+                v.to_vec()[1],
                 Variant::Int(0),
                 "a failed get_var must restore the cursor, not leave it mid-record"
             );

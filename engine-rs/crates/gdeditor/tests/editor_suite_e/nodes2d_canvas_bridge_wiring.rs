@@ -56,7 +56,7 @@ fn nodes2d_canvas_bridge_wiring() {
         Variant::Array(vec![
             Variant::Vector2(Vector2::new(10.0, 10.0)),
             Variant::Vector2(Vector2::new(10.0, 90.0)),
-        ]),
+        ].into()),
     );
     set_prop(&mut tree, line, "width", Variant::Float(4.0));
     set_prop(

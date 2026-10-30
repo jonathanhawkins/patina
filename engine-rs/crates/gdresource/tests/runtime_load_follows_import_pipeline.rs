@@ -46,6 +46,7 @@ fn int_prop(res: &Resource, key: &str) -> i64 {
 fn pixels_of(res: &Resource) -> Vec<Color> {
     match res.get_property("pixels") {
         Some(Variant::Array(items)) => items
+            .to_vec()
             .iter()
             .filter_map(|v| match v {
                 Variant::Color(c) => Some(*c),

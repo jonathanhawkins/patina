@@ -79,19 +79,19 @@ res.get(\"adjustment_brightness\"), res.get(\"sky_name\"), res.get_class()]
     // Each value must come from the parsed file, with its .tres type preserved
     // (Float/Bool/Int/String), not the placeholder's empty property map.
     assert_eq!(
-        got[0],
+        got.to_vec()[0],
         Variant::Float(0.75),
         "load() must return the .tres float property, not null",
     );
-    assert_eq!(got[1], Variant::Bool(true), "bool property must parse");
-    assert_eq!(got[2], Variant::Int(2), "int property must parse");
+    assert_eq!(got.to_vec()[1], Variant::Bool(true), "bool property must parse");
+    assert_eq!(got.to_vec()[2], Variant::Int(2), "int property must parse");
     assert_eq!(
-        got[3],
+        got.to_vec()[3],
         Variant::String("dusk".to_string()),
         "string property must parse",
     );
     assert_eq!(
-        got[4],
+        got.to_vec()[4],
         Variant::String("Environment".to_string()),
         "get_class() must report the .tres declared type, not the extension guess",
     );
@@ -157,9 +157,9 @@ func check() -> Array:
         Variant::Array(items) => items,
         other => panic!("expected Array, got {other:?}"),
     };
-    assert_eq!(got[0], Variant::Nil, "malformed .tres must not yield values");
+    assert_eq!(got.to_vec()[0], Variant::Nil, "malformed .tres must not yield values");
     assert_eq!(
-        got[1],
+        got.to_vec()[1],
         Variant::String("res://bad.tres".to_string()),
         "the placeholder must still carry the requested path",
     );

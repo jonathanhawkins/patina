@@ -130,9 +130,21 @@ fn seeded_rng_sequence_is_still_reproducible() {
     );
     match seq {
         Variant::Array(v) => {
-            assert_eq!(v[0], Variant::Bool(true), "same seed replays draw 1");
-            assert_eq!(v[1], Variant::Bool(true), "same seed replays draw 2");
-            assert_eq!(v[2], Variant::Bool(true), "the generator actually advances");
+            assert_eq!(
+                v.to_vec()[0],
+                Variant::Bool(true),
+                "same seed replays draw 1"
+            );
+            assert_eq!(
+                v.to_vec()[1],
+                Variant::Bool(true),
+                "same seed replays draw 2"
+            );
+            assert_eq!(
+                v.to_vec()[2],
+                Variant::Bool(true),
+                "the generator actually advances"
+            );
         }
         other => panic!("expected an Array, got {other:?}"),
     }

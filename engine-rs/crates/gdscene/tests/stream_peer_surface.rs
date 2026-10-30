@@ -48,9 +48,9 @@ fn run_in_scene(body: &str) -> Variant {
         .unwrap_or_else(|e| panic!("run() raised: {e:?}\n--- source ---\n{src}"))
 }
 
-fn array(v: &Variant) -> &[Variant] {
+fn array(v: &Variant) -> Vec<Variant> {
     match v {
-        Variant::Array(items) => items,
+        Variant::Array(items) => items.to_vec(),
         other => panic!("expected an Array, got {other:?}"),
     }
 }

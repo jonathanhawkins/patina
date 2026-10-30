@@ -115,9 +115,10 @@ fn int_prop(tree: &SceneTree, node_id: NodeId, key: &str) -> Option<i64> {
 fn item_dicts(tree: &SceneTree, node_id: NodeId, key: &str) -> Vec<Dictionary> {
     match prop(tree, node_id, key) {
         Variant::Array(items) => items
+            .to_vec()
             .into_iter()
             .filter_map(|v| match v {
-                Variant::Dictionary(d) => Some(d),
+                Variant::Dictionary(d) => Some(d.to_dict()),
                 // A bare string is accepted as shorthand for `{"text": s}` so a
                 // hand-written `.tscn` can say `items = ["A", "B"]`.
                 Variant::String(s) => {
@@ -282,10 +283,10 @@ pub fn store_item_list(tree: &mut SceneTree, node_id: NodeId, list: &ItemList) {
                 Variant::String("selected".into()),
                 Variant::Bool(it.selected),
             );
-            Variant::Dictionary(d)
+            Variant::Dictionary(d.into())
         })
         .collect();
-    set_prop(tree, node_id, "items", Variant::Array(items));
+    set_prop(tree, node_id, "items", Variant::Array(items.into()));
 }
 
 // -- Tree -------------------------------------------------------------------
@@ -584,7 +585,7 @@ pub fn load_tree(tree: &SceneTree, node_id: NodeId) -> TreeControl {
         let idx = model.create_item(parent);
         match d.get(Variant::String("texts".into())) {
             Some(Variant::Array(cells)) => {
-                for (col, cell) in cells.iter().enumerate() {
+                for (col, cell) in cells.to_vec().iter().enumerate() {
                     if let Variant::String(s) = cell {
                         model.set_text(idx, col, s.clone());
                     }
@@ -618,7 +619,7 @@ pub fn load_tree(tree: &SceneTree, node_id: NodeId) -> TreeControl {
             let Some(Variant::Array(values)) = d.get(Variant::String(key.into())) else {
                 continue;
             };
-            for (col, v) in values.iter().enumerate() {
+            for (col, v) in values.to_vec().iter().enumerate() {
                 match apply {
                     0 => model.set_cell_mode(
                         i,
@@ -697,10 +698,10 @@ pub fn store_tree(tree: &mut SceneTree, node_id: NodeId, model: &TreeControl) {
                 Variant::String("selected".into()),
                 Variant::Bool(selected == Some(i)),
             );
-            Variant::Dictionary(d)
+            Variant::Dictionary(d.into())
         })
         .collect();
-    set_prop(tree, node_id, "items", Variant::Array(items));
+    set_prop(tree, node_id, "items", Variant::Array(items.into()));
     set_prop(
         tree,
         node_id,
@@ -724,10 +725,15 @@ pub fn store_tree(tree: &mut SceneTree, node_id: NodeId, model: &TreeControl) {
                 Variant::Int(info.expand_ratio as i64),
             );
             d.insert(Variant::String("expand".into()), Variant::Bool(info.expand));
-            Variant::Dictionary(d)
+            Variant::Dictionary(d.into())
         })
         .collect();
-    set_prop(tree, node_id, "column_info", Variant::Array(column_info));
+    set_prop(
+        tree,
+        node_id,
+        "column_info",
+        Variant::Array(column_info.into()),
+    );
 }
 
 /// The visible rows of the Tree at `node_id`, top to bottom, in viewport-global
@@ -1138,10 +1144,10 @@ pub fn store_option_button(tree: &mut SceneTree, node_id: NodeId, ob: &OptionBut
                 Variant::String("disabled".into()),
                 Variant::Bool(it.disabled),
             );
-            Variant::Dictionary(d)
+            Variant::Dictionary(d.into())
         })
         .collect();
-    set_prop(tree, node_id, "items", Variant::Array(items));
+    set_prop(tree, node_id, "items", Variant::Array(items.into()));
     set_prop(tree, node_id, "selected", Variant::Int(ob.get_selected()));
     let text = if ob.get_selected() >= 0 {
         ob.get_item(ob.get_selected() as usize)
@@ -1173,10 +1179,11 @@ pub fn tab_titles(tree: &SceneTree, node_id: NodeId) -> Vec<String> {
         }
         _ => match prop(tree, node_id, "tabs") {
             Variant::Array(items) => items
+                .to_vec()
                 .into_iter()
                 .map(|v| match v {
                     Variant::String(s) => s,
-                    Variant::Dictionary(d) => dict_string(&d, "title"),
+                    Variant::Dictionary(d) => dict_string(&d.to_dict(), "title"),
                     _ => String::new(),
                 })
                 .collect(),
@@ -1209,7 +1216,7 @@ pub fn store_tab_bar(tree: &mut SceneTree, node_id: NodeId, bar: &TabBar) {
         let tabs: Vec<Variant> = (0..bar.tab_count())
             .map(|i| Variant::String(bar.get_tab_title(i).unwrap_or_default().to_string()))
             .collect();
-        set_prop(tree, node_id, "tabs", Variant::Array(tabs));
+        set_prop(tree, node_id, "tabs", Variant::Array(tabs.into()));
         set_prop(
             tree,
             node_id,
@@ -1797,7 +1804,7 @@ mod tests {
         run(&mut tree, id, "select", &[Variant::Int(1)]);
         assert_eq!(
             call(&mut tree, id, "get_selected_items", &[]),
-            Some(Variant::Array(vec![Variant::Int(1)]))
+            Some(Variant::Array(vec![Variant::Int(1)].into()))
         );
         assert_eq!(
             call(&mut tree, id, "get_item_text", &[Variant::Int(1)]),
@@ -1849,7 +1856,7 @@ mod tests {
         ));
         assert_eq!(
             call(&mut tree, id, "get_selected_items", &[]),
-            Some(Variant::Array(vec![Variant::Int(1)]))
+            Some(Variant::Array(vec![Variant::Int(1)].into()))
         );
         // Below the last row is empty space, not row 1 again.
         assert!(!item_view_click(
@@ -1873,7 +1880,7 @@ mod tests {
         item_view_click(&mut tree, id, Vector2::new(10.0, 5.0), false);
         assert_eq!(
             call(&mut tree, id, "get_selected_items", &[]),
-            Some(Variant::Array(Vec::new()))
+            Some(Variant::Array(Default::default()))
         );
     }
 

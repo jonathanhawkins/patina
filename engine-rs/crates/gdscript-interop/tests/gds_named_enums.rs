@@ -149,7 +149,7 @@ fn enum_name_is_a_dictionary_of_its_variants() {
     match values {
         Variant::Array(items) => assert_eq!(
             items,
-            vec![Variant::Int(0), Variant::Int(5), Variant::Int(6)],
+            vec![Variant::Int(0), Variant::Int(5), Variant::Int(6)].into(),
             "values() yields the variant values in declaration order"
         ),
         other => panic!("values() should return an Array, got {other:?}"),
@@ -163,7 +163,8 @@ fn enum_name_is_a_dictionary_of_its_variants() {
                 Variant::String("IDLE".to_string()),
                 Variant::String("RUN".to_string()),
                 Variant::String("DONE".to_string()),
-            ],
+            ]
+            .into(),
             "keys() yields the variant names in declaration order"
         ),
         other => panic!("keys() should return an Array, got {other:?}"),

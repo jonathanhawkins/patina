@@ -130,7 +130,7 @@ fn gltf_state_carries_the_parse_output_collections() {
         .expect("GLTFState has nodes");
     assert_eq!(
         nodes.default_value,
-        Variant::Array(Vec::new()),
+        Variant::Array(Default::default()),
         "an unparsed state has an empty node array, not null"
     );
 }

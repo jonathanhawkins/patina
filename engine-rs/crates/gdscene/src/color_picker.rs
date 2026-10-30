@@ -322,6 +322,7 @@ pub fn get_presets(
         // way. Accepted rather than discarded, because dropping it would look
         // exactly like "the round-trip lost my presets".
         Some(Variant::Array(items)) => items
+            .to_vec()
             .iter()
             .filter_map(|v| match v {
                 Variant::Color(c) => Some(*c),

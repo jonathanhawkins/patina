@@ -293,8 +293,8 @@ fn variant_all_types_serialize() {
         Variant::Aabb(Aabb::new(Vector3::ZERO, Vector3::new(1.0, 1.0, 1.0))),
         Variant::Plane(Plane::new(Vector3::new(0.0, 1.0, 0.0), 0.0)),
         Variant::ObjectId(gdcore::id::ObjectId::from_raw(1)),
-        Variant::Array(vec![Variant::Int(1)]),
-        Variant::Dictionary(gdvariant::Dictionary::new()),
+        Variant::Array(vec![Variant::Int(1)].into()),
+        Variant::Dictionary(gdvariant::Dictionary::new().into()),
     ];
 
     for v in &variants {

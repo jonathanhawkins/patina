@@ -147,7 +147,11 @@ fn object_ids_round_trip_inside_containers() {
         Variant::ObjectId(ObjectId::from_raw(42)),
         Variant::String("x".to_string()),
     ];
-    let bytes = encode_variant(&Variant::Array(inner.clone())).expect("array encodes");
+    let bytes = encode_variant(&Variant::Array(inner.clone().into())).expect("array encodes");
     let (decoded, _) = decode_variant(&bytes).expect("array decodes");
-    assert_eq!(decoded, Variant::Array(inner), "the id survives nesting");
+    assert_eq!(
+        decoded,
+        Variant::Array(inner.into()),
+        "the id survives nesting"
+    );
 }

@@ -145,7 +145,7 @@ fn engine_profiler_subclass_receives_toggle_and_frame() {
     );
     assert_eq!(
         prop(&tree, prof, "last_frame"),
-        Variant::Array(vec![Variant::Int(7), Variant::Int(8)]),
+        Variant::Array(vec![Variant::Int(7), Variant::Int(8)].into()),
         "_add_frame receives the DATA array — dispatching with the profiler \
          name, or an empty array, would still increment the counter above"
     );

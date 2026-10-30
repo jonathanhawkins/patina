@@ -114,7 +114,7 @@ fn signal_with_vector2_and_dict_args() {
     tree.connect_signal(emitter_id, "complex", conn);
 
     let vec_arg = Variant::Vector2(gdcore::math::Vector2::new(3.14, 2.71));
-    let array_arg = Variant::Array(vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)]);
+    let array_arg = Variant::Array(vec![Variant::Int(1), Variant::Int(2), Variant::Int(3)].into());
     let nil_arg = Variant::Nil;
     let bool_arg = Variant::Bool(false);
 
@@ -156,11 +156,14 @@ fn signal_with_nested_array_arg() {
     });
     tree.connect_signal(emitter_id, "nested", conn);
 
-    let nested = Variant::Array(vec![
-        Variant::Array(vec![Variant::Int(1), Variant::Int(2)]),
-        Variant::String("middle".into()),
-        Variant::Array(vec![Variant::Bool(true)]),
-    ]);
+    let nested = Variant::Array(
+        vec![
+            Variant::Array(vec![Variant::Int(1), Variant::Int(2)].into()),
+            Variant::String("middle".into()),
+            Variant::Array(vec![Variant::Bool(true)].into()),
+        ]
+        .into(),
+    );
     tree.emit_signal(emitter_id, "nested", &[nested.clone()]);
 
     let args = received.lock().unwrap();

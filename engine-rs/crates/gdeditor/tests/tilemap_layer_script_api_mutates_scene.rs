@@ -145,7 +145,9 @@ fn tilemap_layer_script_api_mutates_scene() {
     // -- the script's own view of the map ------------------------------------
     assert_eq!(
         script_var(&ml, layer, "used"),
-        Some(Variant::Array(vec![Variant::Vector2i(Vector2i::new(2, 3))])),
+        Some(Variant::Array(
+            vec![Variant::Vector2i(Vector2i::new(2, 3))].into()
+        )),
         "get_used_cells() must report exactly the cell _ready painted"
     );
     assert_eq!(
@@ -189,7 +191,7 @@ fn tilemap_layer_script_api_mutates_scene() {
     );
     assert_eq!(
         script_var(&ml, layer, "used"),
-        Some(Variant::Array(Vec::new())),
+        Some(Variant::Array(Default::default())),
         "after erase_cell the layer must report no used cells"
     );
     assert_eq!(

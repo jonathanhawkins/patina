@@ -192,7 +192,7 @@ fn the_base_exposes_godots_full_surface() {
     );
     assert_eq!(
         default_of("VisualShaderNode", "default_input_values"),
-        Variant::Array(Vec::new())
+        Variant::Array(Default::default())
     );
 }
 

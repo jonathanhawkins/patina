@@ -44,7 +44,7 @@ fn grid_scene(library_path: Option<&str>) -> SceneTree {
     node.set_property("cell_size", Variant::Vector3(Vector3::new(2.0, 2.0, 2.0)));
     let mut data = Dictionary::new();
     data.insert("cells", Variant::PackedInt32Array(CELLS.to_vec()));
-    node.set_property("data", Variant::Dictionary(data));
+    node.set_property("data", Variant::Dictionary(data.into()));
     if let Some(path) = library_path {
         node.set_property("__extres__mesh_library", Variant::String(path.to_string()));
     }

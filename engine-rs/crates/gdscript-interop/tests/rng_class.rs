@@ -36,6 +36,7 @@ fn run_val(src: &str) -> Variant {
 fn ints(v: Variant) -> Vec<i64> {
     match v {
         Variant::Array(a) => a
+            .to_vec()
             .into_iter()
             .map(|x| match x {
                 Variant::Int(i) => i,
