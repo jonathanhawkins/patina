@@ -508,6 +508,7 @@ pub fn parse_fragment_body(source: &str) -> Vec<FragmentInstruction> {
     };
 
     // Parse statements line-by-line (simplified).
+    let mut skipped_any = false;
     for line in body.lines() {
         let trimmed = line.trim().trim_end_matches(';').trim();
         if trimmed.is_empty() || trimmed.starts_with("//") {
@@ -516,21 +517,25 @@ pub fn parse_fragment_body(source: &str) -> Vec<FragmentInstruction> {
 
         if let Some(inst) = parse_fragment_statement(trimmed) {
             instructions.push(inst);
+        } else {
+            skipped_any = true;
         }
     }
 
-    // pat-s3rrv.36: when the line matcher above understood NOTHING, hand the
-    // whole source to the real GDShader front end.
+    // pat-s3rrv.36: when the line matcher above did not understand EVERY
+    // statement, hand the whole source to the real GDShader front end.
     //
     // Deliberately a fallback rather than a replacement. A shader the matcher
-    // already handles keeps its exact existing path, so this cannot regress
-    // anything that renders correctly today; a shader that yields ZERO
-    // instructions — the reported bug, e.g. the repo's own
-    // fixtures/shaders/outline.gdshader — gets real evaluation instead of
-    // rendering unshaded and silent. Letting the AST preempt the matcher
-    // outright is the end state, but only once every built-in the matcher
-    // implies is populated for the AST path.
-    if instructions.is_empty() {
+    // fully handles keeps its exact existing path, so this cannot regress
+    // anything that renders correctly today. A shader it only PARTLY handles
+    // is already wrong: fixtures/shaders/outline.gdshader declares locals and
+    // ends in `COLOR = vec4(final.rgb, alpha)`, which the matcher accepts as a
+    // SetColor whose locals it cannot resolve while silently dropping the six
+    // lines that compute them. Falling back only on an EMPTY result let that
+    // one bogus instruction mask the whole shader. Letting the AST preempt the
+    // matcher outright is the end state, but only once every built-in the
+    // matcher implies is populated for the AST path.
+    if instructions.is_empty() || skipped_any {
         if let Ok(program) = gdresource::shader_ast::parse_shader(source) {
             if program.function("fragment").is_some() {
                 return vec![FragmentInstruction::Program(Arc::new(program))];

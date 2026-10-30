@@ -59,8 +59,7 @@ fn uniforms() -> HashMap<String, Variant> {
 
 fn render_with(source: &str) -> FrameBuffer {
     let instructions = parse_fragment_body(source);
-    let mut fb = FrameBuffer::new(W, H);
-    fb.clear(Color::new(0.0, 0.0, 0.0, 1.0));
+    let mut fb = FrameBuffer::new(W, H, Color::new(0.0, 0.0, 0.0, 1.0));
     draw_texture_rect_shaded(
         &mut fb,
         &blob_texture(),
@@ -116,8 +115,7 @@ fn outline_shader_draws_a_ring_through_the_render_path() {
     // Fixture guard: an EMPTY instruction list over the same texture must NOT
     // produce green. Without this, a bug that tinted everything green would
     // satisfy the assertion above.
-    let mut plain = FrameBuffer::new(W, H);
-    plain.clear(Color::new(0.0, 0.0, 0.0, 1.0));
+    let mut plain = FrameBuffer::new(W, H, Color::new(0.0, 0.0, 0.0, 1.0));
     draw_texture_rect_shaded(
         &mut plain,
         &blob_texture(),
