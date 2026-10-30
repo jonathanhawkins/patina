@@ -45,6 +45,7 @@ pub mod web_request_driver;
 pub mod webrtc_peer;
 pub mod websocket_multiplayer;
 pub mod websocket_peer;
+pub mod websocket_web;
 pub mod window;
 pub mod xr;
 /// Real `navigator.xr` bindings for [`xr`] (pat-s3rrv.218). wasm32 only — the

@@ -925,6 +925,11 @@ fn render_node(
         // Cheap for the common case: the scan finds no `__resscript__`
         // companion on an ordinary control and returns without running anything.
         tree.flush_scripted_resources(&[(node_id, rect)]);
+        // Same reason, same place: a script-defined RichTextEffect has to run
+        // before the label is drawn and running it needs `&mut` (pat-fk17e.2).
+        // Returns immediately unless this node is a RichTextLabel carrying
+        // `custom_effects`.
+        flush_custom_char_fx(tree, node_id);
         draw_control(tree, node_id, theme, rect, &mut item.commands);
         if !item.commands.is_empty() {
             viewport.add_canvas_item(item);
@@ -1362,6 +1367,20 @@ struct TextSpan {
 ///
 /// Unknown `[...]` tags are dropped. `default` colors untagged text.
 fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
+    parse_bbcode_with_effects(src, default, &[])
+}
+
+/// [`parse_bbcode`] plus the label's script-defined effects (pat-fk17e.2).
+///
+/// `custom` is `(effect object id, its `bbcode` tag)`. A tag that is not a
+/// built-in is looked up here, so `[mytag]` becomes a
+/// [`BuiltinEffect::Custom`] span instead of being stripped.
+///
+/// Kept as a separate entry point rather than widening [`parse_bbcode`]: that
+/// name has three production callers and several in tests, and only the layout
+/// path has a node to read `custom_effects` from. The others genuinely have no
+/// effects to pass and should not have to say so.
+fn parse_bbcode_with_effects(src: &str, default: Color, custom: &[(u64, String)]) -> Vec<TextSpan> {
     let mut spans: Vec<TextSpan> = Vec::new();
     // Color stack so nested `[color]` tags restore the outer color on `[/color]`.
     let mut color_stack: Vec<Color> = vec![default];
@@ -1787,9 +1806,38 @@ fn parse_bbcode(src: &str, default: Color) -> Vec<TextSpan> {
                     );
                     span_start = char_index;
                     effect_stack.push((name.to_string(), effect, char_index));
+                } else if let Some(id) = crate::char_fx::match_custom_effect(name, custom) {
+                    // A script-defined effect from `custom_effects`
+                    // (pat-fk17e.2). Identical bookkeeping to a built-in —
+                    // the span machinery does not care which kind it is, only
+                    // the draw path does — so this opens a span and pushes the
+                    // same stack entry, carrying the effect's object id.
+                    flush(
+                        &mut cur,
+                        cur_color,
+                        cur_effect,
+                        span_start,
+                        meta_stack.last().cloned(),
+                        bg_stack.last().copied(),
+                        u_depth > 0,
+                        s_depth > 0,
+                        b_depth > 0,
+                        i_depth > 0,
+                        line,
+                        *align_stack.last().unwrap(),
+                        &mut spans,
+                    );
+                    span_start = char_index;
+                    effect_stack.push((
+                        name.to_string(),
+                        BuiltinEffect::Custom { effect: id },
+                        char_index,
+                    ));
                 }
-                // b/i/u/s, unknown tags, and script-defined effect tags (which
-                // cannot be dispatched yet — see `char_fx`): strip, no change.
+                // b/i/u/s and unknown tags: strip, no change. A script-defined
+                // tag whose effect is NOT installed in `custom_effects` lands
+                // here too and degrades to plain text, which is Godot's
+                // behaviour for an unregistered tag.
             }
         } else if c == '\n' {
             // A literal newline breaks the line. Before this the arm advanced x
@@ -2174,6 +2222,147 @@ pub const RICHTEXT_DEFAULT_FONT_SIZE: i64 = 16;
 /// The BBCode source of a `RichTextLabel`: `bbcode_text` when set, else `text`.
 ///
 /// Shared so the hit-test and the draw pass can never read different strings.
+/// Runs this label's script-defined effects and caches the per-glyph result
+/// (pat-fk17e.2).
+///
+/// The pre-pass half of the custom-effect feature. Running GDScript needs
+/// `&mut SceneTree` and the draw path holds the tree immutably by design, so
+/// the result is computed here and read back from the node during the draw —
+/// the same shape as [`SceneTree::flush_scripted_resources`] and
+/// [`SceneTree::flush_pending_redraws`]. See [`crate::char_fx`] for why a
+/// `draw_control` signature change is not the answer.
+///
+/// Returns immediately for a label with no `custom_effects`, which is every
+/// label in almost every scene.
+fn flush_custom_char_fx(tree: &mut SceneTree, node_id: NodeId) {
+    let effects = richtext_custom_effects(tree, node_id);
+    if effects.is_empty() {
+        return;
+    }
+    let raw = richtext_source(tree, node_id);
+    if raw.is_empty() {
+        return;
+    }
+    // Same inputs the draw path will use, so the cache lines up glyph for
+    // glyph. `fx_elapsed_time` is the clock the built-ins read too.
+    let elapsed = float_prop(tree, node_id, "fx_elapsed_time").unwrap_or(0.0) as f32;
+    let spans = parse_bbcode_with_effects(&raw, Color::WHITE, &effects);
+    let total: usize = spans.iter().map(|s| s.text.chars().count()).sum();
+    if total == 0 {
+        return;
+    }
+
+    // ⚠️ One phantom node for the whole pass, created here and removed before
+    // returning. This is what `char_fx` means by carrying a `CharFXTransform`
+    // as a node: the script mutates `char_fx.offset`, that write lands on this
+    // node through the ordinary property path, and `read_back` collects it.
+    // Creating one per glyph — or leaving this one behind — would add a node to
+    // the tree on every frame of every label that has an effect.
+    let root = tree.root_id();
+    let Ok(charfx) = tree.add_child(
+        root,
+        crate::node::Node::new("CharFXTransform", "CharFXTransform"),
+    ) else {
+        return;
+    };
+    let charfx_arg = Variant::ObjectId(charfx.object_id());
+
+    // Dense and indexed by absolute glyph index, matching `CharFXCache::get`.
+    // Every glyph gets its span's own color, so even a read that should not
+    // happen cannot repaint a glyph.
+    let mut results: Vec<CharFXTransform> = (0..total)
+        .map(|i| CharFXTransform::new(i, (0, total), elapsed, Color::WHITE))
+        .collect();
+
+    for span in &spans {
+        for (i, _) in span.text.chars().enumerate() {
+            let abs = span.char_offset + i;
+            if abs >= results.len() {
+                continue;
+            }
+            let mut fx = CharFXTransform::new(abs, span.effect_range, elapsed, span.color);
+            if let Some(BuiltinEffect::Custom { effect }) = span.effect {
+                let effect_node = NodeId::from_object_id(gdcore::id::ObjectId::from_raw(effect));
+                for (key, value) in fx.to_properties() {
+                    if let Some(node) = tree.get_node_mut(charfx) {
+                        node.set_property(&key, value);
+                    }
+                }
+                // Takes the script out of the arena for the call, which is what
+                // lets the handler mutate the tree (including `charfx`) while we
+                // hold `&mut tree`; see `SceneTree::call_script_method`.
+                let returned = tree.call_script_method(
+                    effect_node,
+                    "_process_custom_fx",
+                    &[charfx_arg.clone()],
+                );
+                fx.read_back(|key| {
+                    tree.get_node(charfx)
+                        .map(|node| node.get_property(key))
+                        .unwrap_or(Variant::Nil)
+                });
+                // ⚠️ Godot hides the glyph when the handler RETURNS false, which
+                // is separate from it clearing `char_fx.visible`. Honouring only
+                // the property would implement half of this and look correct,
+                // because a handler that does both is the common case.
+                if matches!(returned, Some(Variant::Bool(false))) {
+                    fx.visible = false;
+                }
+            }
+            results[abs] = fx;
+        }
+    }
+
+    let _ = tree.remove_node(charfx);
+    for (key, value) in crate::char_fx::cache_to_properties(&results) {
+        if let Some(node) = tree.get_node_mut(node_id) {
+            node.set_property(&key, value);
+        }
+    }
+}
+
+/// The label's installed script-defined effects, as `(object id, bbcode tag)`
+/// in `custom_effects` order (pat-fk17e.2).
+///
+/// An entry that is not an object, or whose effect declares no `bbcode`, is
+/// skipped rather than defaulted: an effect with no tag can never be named by
+/// any BBCode, so giving it `""` would let `[]` reach it.
+fn richtext_custom_effects(tree: &SceneTree, node_id: NodeId) -> Vec<(u64, String)> {
+    let Some(node) = tree.get_node(node_id) else {
+        return Vec::new();
+    };
+    let Variant::Array(items) = node.get_property("custom_effects") else {
+        return Vec::new();
+    };
+    items
+        .to_vec()
+        .into_iter()
+        .filter_map(|entry| {
+            let Variant::ObjectId(oid) = entry else {
+                return None;
+            };
+            let effect_node = NodeId::from_object_id(oid);
+            // ⚠️ `bbcode` is declared by the effect's SCRIPT (`var bbcode =
+            // "mytag"`), and `Node::get_property` reads only the node's own
+            // property bag — it does not consult the attached script. Reading
+            // it as a node property finds nothing, the effect is skipped, and
+            // the whole feature silently no-ops. The script is asked first for
+            // that reason; the node is still a fallback, because a `.tres`
+            // -loaded effect can carry `bbcode` as a stored property instead.
+            let bbcode = tree
+                .get_script(effect_node)
+                .and_then(|script| script.get_property("bbcode"))
+                .and_then(|value| match value {
+                    Variant::String(tag) => Some(tag),
+                    _ => None,
+                })
+                .or_else(|| string_prop(tree, effect_node, "bbcode"))
+                .filter(|tag| !tag.is_empty())?;
+            Some((oid.raw(), bbcode))
+        })
+        .collect()
+}
+
 fn richtext_source(tree: &SceneTree, node_id: NodeId) -> String {
     string_prop(tree, node_id, "bbcode_text")
         .filter(|s| !s.is_empty())
@@ -2284,7 +2473,11 @@ fn richtext_placements(
         return Vec::new();
     }
     let scale = text_scale(font_size);
-    let mut spans = parse_bbcode(&raw, default_color);
+    // The layout path is the only one with a node to read `custom_effects`
+    // from, so it is the only one that can resolve a script-defined tag
+    // (pat-fk17e.2). An empty list makes this identical to `parse_bbcode`.
+    let mut spans =
+        parse_bbcode_with_effects(&raw, default_color, &richtext_custom_effects(tree, node_id));
 
     // The visible-character budget is applied BEFORE placement so the widths a
     // line is centred by are the widths actually drawn — trimming afterwards
@@ -3117,6 +3310,22 @@ fn draw_control(
                         // The whole tag's range, not this run's — a nested tag
                         // splits the run but must not restart the phase.
                         let range = span.effect_range;
+                        // A script-defined effect's result was produced by the
+                        // pre-pass (`flush_custom_char_fx`) and cached on the
+                        // node, because running GDScript needs `&mut` and this
+                        // path holds the tree immutably (pat-fk17e.2). Empty
+                        // for every label without custom effects, which is the
+                        // common case and costs three property reads.
+                        let custom_cache = match effect {
+                            BuiltinEffect::Custom { .. } => {
+                                Some(crate::char_fx::CharFXCache::from_properties(|key| {
+                                    tree.get_node(node_id)
+                                        .map(|n| n.get_property(key))
+                                        .unwrap_or(Variant::Nil)
+                                }))
+                            }
+                            _ => None,
+                        };
                         let mut gx = x;
                         for (i, ch) in span.text.chars().enumerate() {
                             let mut fx = CharFXTransform::new(
@@ -3125,7 +3334,24 @@ fn draw_control(
                                 elapsed,
                                 span.color,
                             );
-                            effect.apply(&mut fx);
+                            // ⚠️ `apply` is inert for `Custom`, so the cache is
+                            // the ONLY source for it. A glyph the pre-pass did
+                            // not reach (missing, short or stale cache) keeps
+                            // the transform it was constructed with and draws
+                            // normally — visible and unmoved — rather than
+                            // vanishing.
+                            match &custom_cache {
+                                Some(cache) => {
+                                    if let Some((offset, color, visible)) =
+                                        cache.get(span.char_offset + i)
+                                    {
+                                        fx.offset = offset;
+                                        fx.color = color;
+                                        fx.visible = visible;
+                                    }
+                                }
+                                None => effect.apply(&mut fx),
+                            }
                             let gw = text_width(&ch.to_string(), scale);
                             if fx.visible {
                                 out.push(DrawCommand::DrawString {

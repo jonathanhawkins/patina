@@ -14,7 +14,7 @@ use gdcore::math3d::{Aabb, Basis, Plane, Projection, Quaternion, Transform3D};
 use gdcore::node_path::NodePath;
 use gdcore::string_name::StringName;
 use gdcore::ResourceUid;
-use gdvariant::{Dictionary, Variant};
+use gdvariant::{ContainerType, Dictionary, SharedArray, Variant};
 
 use crate::resource::{ExtResource, Resource};
 
@@ -284,12 +284,17 @@ pub fn object_literal_class(v: &Variant) -> Option<String> {
     }
 }
 
-/// Parses a value, additionally reporting a typed array's element type.
+/// Parses a value, additionally reporting a typed array's element type *as a
+/// name*.
 ///
-/// `parse_variant_value` returns a plain [`Variant::Array`] for `Array[int](…)`
-/// so every existing consumer keeps working; the element annotation is real
-/// information Godot round-trips, so it is offered here rather than discarded
-/// (pat-0q2kx.136). Returns `None` for anything that is not a typed array.
+/// ⚠️ The note that used to sit here said `parse_variant_value` returns a
+/// *plain* array for `Array[int](…)` so the annotation had to be offered
+/// separately (pat-0q2kx.136). That is no longer true: as of pat-s3rrv.265 the
+/// array itself carries the element type, so `parse_variant_value` alone is
+/// enough for a caller that wants typed data, and this function is only useful
+/// to a caller that needs the element type's *spelling* — a writer
+/// round-tripping the literal, say. Returns `None` for anything that is not a
+/// typed array.
 pub fn parse_variant_value_typed(s: &str) -> EngineResult<(Variant, Option<String>)> {
     let trimmed = s.trim();
     let elem = trimmed
@@ -746,15 +751,17 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
         }
     }
 
-    // Typed array: `Array[Type]([elem, ...])`. The element type annotation is
-    // accepted but not retained (stored as a plain Variant::Array).
+    // Typed array: `Array[Type]([elem, ...])`. The element type is retained on
+    // the array itself, so a scene property loads as a genuinely typed array
+    // and `is_typed()` answers true (pat-s3rrv.265).
     if let Some(rest) = s.strip_prefix("Array[") {
         if let Some(close) = rest.find(']') {
+            let elem_name = rest[..close].trim();
             let after = rest[close + 1..].trim();
             if let Some(call) = after.strip_prefix('(').and_then(|c| c.strip_suffix(')')) {
                 let call = call.trim();
                 if let Some(elems) = call.strip_prefix('[').and_then(|c| c.strip_suffix(']')) {
-                    return parse_array(elems);
+                    return as_typed_array(elem_name, parse_array(elems)?);
                 }
             }
         }
@@ -935,6 +942,35 @@ fn parse_array(s: &str) -> EngineResult<Variant> {
         result.push(parse_variant_value(elem)?);
     }
     Ok(Variant::Array(result.into()))
+}
+
+/// Re-homes an `Array[T](…)` literal's elements into an array that actually
+/// carries the element type `T` (pat-s3rrv.265).
+///
+/// The element type has to be applied by *constructing* a typed array and
+/// assigning into it, not by tagging the parsed one: `SharedArray::set_typed`
+/// refuses a non-empty array, exactly as Godot's `array.cpp` does.
+///
+/// ⚠️ Element equality is unaffected — `SharedArray`'s `PartialEq` is Godot's
+/// structural `recursive_equal`, which compares elements and not the type — so
+/// `Array[int]([1, 2])` still compares equal to `[1, 2]`.
+fn as_typed_array(elem_name: &str, parsed: Variant) -> EngineResult<Variant> {
+    let Variant::Array(items) = parsed else {
+        return Ok(parsed);
+    };
+    let want = ContainerType::from_hint_name(elem_name);
+    // `Array[Variant](…)` and an unreadable element name leave the array
+    // untyped rather than inventing a constraint the scene never asked for.
+    if !want.is_typed() {
+        return Ok(Variant::Array(items));
+    }
+    let typed = SharedArray::typed(want);
+    // A scene whose declared element type disagrees with its own literal is a
+    // corrupt file; reporting it beats loading a silently untyped array.
+    typed
+        .assign(&items)
+        .map_err(|err| EngineError::Parse(format!("Array[{elem_name}]: {err}")))?;
+    Ok(Variant::Array(typed))
 }
 
 /// Parses a dictionary body (content between `{` and `}`) into `Variant::Dictionary`.

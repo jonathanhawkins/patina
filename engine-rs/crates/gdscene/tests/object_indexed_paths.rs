@@ -9,6 +9,21 @@
 //! The unit tests next to the helpers cover the subname resolution itself. These
 //! cover the part unit tests cannot: that a running script reaches the arms at
 //! all, through both receiver forms.
+//!
+//! ⚠️ These must be driven through [`SceneTree::call_script_method`], NOT through
+//! `get_script_mut(id).call_method(..)` (pat-21oab). Only the former installs a
+//! `SceneTreeAccessor`, and `set_scene_access` is what sets **both**
+//! `scene_access` and `current_node_id` (`interpreter.rs:906-909`). The
+//! `self.set_indexed` route this file exists to cover is gated on
+//! `current_node_id` being `Some` (`interpreter.rs:3677`), so driving the script
+//! directly skipped the route and failed as `MethodNotFound("set_indexed")` —
+//! with the engine behaving correctly the whole time. The node-receiver test
+//! failed one layer later, as `get_node() requires scene access`, from the same
+//! single cause.
+//!
+//! `call_script_method` returns `Option<Variant>` and logs a `RuntimeError` at
+//! debug level rather than returning it, so a raise shows up here as `None`. Run
+//! with `RUST_LOG=debug` to read the error text.
 
 use gdcore::math::Vector2;
 use gdscene::node::Node;
@@ -53,10 +68,10 @@ fn self_set_indexed_writes_a_component() {
         "extends Node2D\nfunc run():\n    self.set_indexed(\"position:x\", 5.0)\n",
     );
 
-    tree.get_script_mut(main)
-        .expect("script attached")
-        .call_method("run", &[])
-        .expect("self.set_indexed must not raise");
+    assert!(
+        tree.call_script_method(main, "run", &[]).is_some(),
+        "self.set_indexed must not raise"
+    );
 
     let p = pos(&tree, main);
     assert_eq!(p.x, 5.0, "position:x must be written through self");
@@ -70,10 +85,10 @@ fn self_get_indexed_reads_a_component() {
         "extends Node2D\nvar got = -1.0\nfunc run():\n    self.set_indexed(\"position:x\", 7.5)\n    self.got = self.get_indexed(\"position:x\")\n",
     );
 
-    tree.get_script_mut(main)
-        .expect("script attached")
-        .call_method("run", &[])
-        .expect("self.get_indexed must not raise");
+    assert!(
+        tree.call_script_method(main, "run", &[]).is_some(),
+        "self.get_indexed must not raise"
+    );
 
     let got = tree
         .get_script(main)
@@ -97,10 +112,10 @@ fn node_receiver_set_indexed_still_works() {
         "extends Node2D\nfunc run():\n    var c = get_node(\"Child\")\n    c.set_indexed(\"position:y\", 3.0)\n",
     );
 
-    tree.get_script_mut(_main)
-        .expect("script attached")
-        .call_method("run", &[])
-        .expect("node.set_indexed must not raise");
+    assert!(
+        tree.call_script_method(_main, "run", &[]).is_some(),
+        "node.set_indexed must not raise"
+    );
 
     let p = pos(&tree, child);
     assert_eq!(p.y, 3.0, "position:y must be written on the child");
@@ -115,10 +130,10 @@ fn set_indexed_without_a_chain_is_a_plain_property_write() {
         "extends Node2D\nfunc run():\n    self.set_indexed(\"position\", Vector2(9.0, 8.0))\n",
     );
 
-    tree.get_script_mut(main)
-        .expect("script attached")
-        .call_method("run", &[])
-        .expect("plain set_indexed must not raise");
+    assert!(
+        tree.call_script_method(main, "run", &[]).is_some(),
+        "plain set_indexed must not raise"
+    );
 
     let p = pos(&tree, main);
     assert_eq!(

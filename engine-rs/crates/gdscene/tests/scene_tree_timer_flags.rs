@@ -58,6 +58,47 @@ fn prop(ml: &MainLoop, id: gdscene::node::NodeId, name: &str) -> Variant {
         .unwrap_or(Variant::Nil)
 }
 
+/// Serializes every test in this file, because `Engine.time_scale` is a
+/// PROCESS-GLOBAL atomic (`ENGINE_TIME_SCALE_MICRO`, behind
+/// `gdscript_interop::set_engine_time_scale`) and not per-`MainLoop` state.
+///
+/// Each test here opens by setting the scale, and
+/// `ignore_time_scale_timers_are_unaffected_by_engine_time_scale` holds it at
+/// 0.5 for its whole body. Under the default parallel harness that 0.5 window
+/// overlaps the others, so whichever test is mid-`step` reads a scale it never
+/// set — which is why a DIFFERENT one of these four failed on every run while
+/// all four passed under `--test-threads=1` (pat-21oab.3). Re-setting the value
+/// at the top of each test is a *rearm*, not isolation: the writes interleave,
+/// and nothing in the test can tell that it happened.
+///
+/// `--test-threads=1` is not the fix: it would serialize the whole binary and
+/// leave the next test that touches this global flaky all over again.
+static TIME_SCALE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Holds [`TIME_SCALE_LOCK`] for the rest of the test and restores Godot's
+/// default `time_scale` of 1.0 on drop — including on an unwind, so a failing
+/// test cannot leave 0.5 behind for whichever test runs next.
+struct TimeScale(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+impl Drop for TimeScale {
+    fn drop(&mut self) {
+        gdscript_interop::set_engine_time_scale(1.0);
+    }
+}
+
+/// Takes the lock, then sets `Engine.time_scale`. Bind it with
+/// `let _scale = time_scale(x);` — binding to plain `_` would drop the guard
+/// immediately and release the lock before the test body ran.
+///
+/// Poison-tolerant, matching `gdcore::file_access`'s `ROOTS_LOCK`: a panicking
+/// test must fail on its own rather than poison the mutex and cascade into
+/// every other test in the binary.
+fn time_scale(scale: f64) -> TimeScale {
+    let lock = TIME_SCALE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    gdscript_interop::set_engine_time_scale(scale);
+    TimeScale(lock)
+}
+
 /// **The acceptance test.** A 1-second timer must resume near frame 60, not 30.
 ///
 /// ⚠️ The firing frame is counted **in Rust**, by stepping one frame at a time
@@ -75,7 +116,7 @@ fn prop(ml: &MainLoop, id: gdscene::node::NodeId, name: &str) -> Variant {
 /// and "never fired" becomes a distinct outcome from "fired on frame 0".
 #[test]
 fn scene_tree_timer_advances_once_per_frame_with_flags() {
-    gdscript_interop::set_engine_time_scale(1.0);
+    let _scale = time_scale(1.0);
 
     let (mut ml, main) = scene_with_script(
         "\
@@ -127,7 +168,7 @@ func _ready():
 /// them under identical stepping rather than across two runs.
 #[test]
 fn paused_tree_freezes_only_non_process_always_timers() {
-    gdscript_interop::set_engine_time_scale(1.0);
+    let _scale = time_scale(1.0);
     let mut ml = MainLoop::new(SceneTree::new());
 
     let pausable = ml
@@ -174,7 +215,7 @@ fn paused_tree_freezes_only_non_process_always_timers() {
 /// `physics_ticks_per_second` — the check the bead names explicitly.
 #[test]
 fn process_in_physics_timers_follow_the_physics_rate() {
-    gdscript_interop::set_engine_time_scale(1.0);
+    let _scale = time_scale(1.0);
 
     // At 10 ticks/second, 40 frames of 1/60 s yields 6 physics ticks = 0.6 s of
     // physics time, so a 0.4 s timer fires and a 0.9 s one does not.
@@ -231,7 +272,7 @@ fn process_in_physics_timers_follow_the_physics_rate() {
 /// does not stretch it.
 #[test]
 fn ignore_time_scale_timers_are_unaffected_by_engine_time_scale() {
-    gdscript_interop::set_engine_time_scale(0.5);
+    let _scale = time_scale(0.5);
     let mut ml = MainLoop::new(SceneTree::new());
 
     let unscaled = ml
@@ -257,8 +298,4 @@ fn ignore_time_scale_timers_are_unaffected_by_engine_time_scale() {
          still be running. If this one also fired, the unscaled delta is being \
          applied to every timer."
     );
-
-    // Restored so a later test in this binary is not affected — `time_scale`
-    // lives in process-global interpreter state.
-    gdscript_interop::set_engine_time_scale(1.0);
 }

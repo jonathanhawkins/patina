@@ -5,18 +5,51 @@
 //! `_set_input_names_callback` :71).
 //!
 //! ⚠️ The store is **process-global**, which is deliberate (writer and reader
-//! run on different threads — see the module docs). Each test therefore calls
-//! `reset()` first. Under nextest every test gets its own process so they
-//! cannot collide, but `cargo test` shares one, and a test that silently
-//! inherited another's ports would pass for the wrong reason.
+//! run on different threads — see the module docs).
+//!
+//! The note that used to sit here said calling `reset()` at the top of each
+//! test was enough because "under nextest every test gets its own process so
+//! they cannot collide". The first half is true and the conclusion is wrong:
+//! `cargo test` runs all six of these as THREADS in one process, so the resets
+//! and `set_input_names` writes interleave and a test reads ports it never set.
+//! That is a *rearm*, not isolation, and it is why a different subset failed on
+//! every `cargo test` run (pat-21oab.3). nextest passing says nothing about it.
+//! The tests now serialize on [`MIDI_LOCK`], which holds under both harnesses.
 
 use gdscript_interop::midi_ports;
+
+/// Serializes every test in this file against the process-global port store.
+static MIDI_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Holds [`MIDI_LOCK`] for the rest of the test and empties the port store on
+/// drop — including on an unwind, so a failing test cannot leave its ports
+/// behind for whichever test runs next.
+struct MidiGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+impl Drop for MidiGuard {
+    fn drop(&mut self) {
+        midi_ports::reset();
+    }
+}
+
+/// Takes the lock and clears the store. Bind it with
+/// `let _guard = midi_guard();` — binding to plain `_` would drop the guard
+/// immediately and release the lock before the test body ran.
+///
+/// Poison-tolerant, matching `gdcore::file_access`'s `ROOTS_LOCK`: a panicking
+/// test must fail on its own rather than poison the mutex and cascade into the
+/// other five.
+fn midi_guard() -> MidiGuard {
+    let lock = MIDI_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    midi_ports::reset();
+    MidiGuard(lock)
+}
 
 /// The client's report is what `OS.get_connected_midi_inputs()` returns, in
 /// the order it was reported.
 #[test]
 fn reported_ports_are_returned_in_order() {
-    midi_ports::reset();
+    let _guard = midi_guard();
     assert!(midi_ports::connected_inputs().is_empty());
 
     midi_ports::set_input_names(["Launchkey 25", "IAC Driver Bus 1"]);
@@ -32,7 +65,7 @@ fn reported_ports_are_returned_in_order() {
 /// appending would grow the list monotonically and never lose a port.
 #[test]
 fn a_second_report_replaces_rather_than_appends() {
-    midi_ports::reset();
+    let _guard = midi_guard();
     midi_ports::set_input_names(["Launchkey 25", "IAC Driver Bus 1"]);
     midi_ports::set_input_names(["IAC Driver Bus 1"]);
     assert_eq!(
@@ -56,7 +89,7 @@ fn a_second_report_replaces_rather_than_appends() {
 /// gets an empty array in Godot too.
 #[test]
 fn open_sets_the_flag_without_inventing_ports() {
-    midi_ports::reset();
+    let _guard = midi_guard();
     assert!(!midi_ports::is_open(), "closed until asked");
 
     midi_ports::open_inputs();
@@ -73,7 +106,7 @@ fn open_sets_the_flag_without_inventing_ports() {
 /// that nothing is listening to.
 #[test]
 fn close_clears_the_ports_not_just_the_flag() {
-    midi_ports::reset();
+    let _guard = midi_guard();
     midi_ports::open_inputs();
     midi_ports::set_input_names(["Launchkey 25"]);
     assert_eq!(midi_ports::connected_inputs().len(), 1);
@@ -91,7 +124,7 @@ fn close_clears_the_ports_not_just_the_flag() {
 /// only `close()` empties it. Gating here would be a stricter API than Godot's.
 #[test]
 fn listing_is_not_gated_on_open() {
-    midi_ports::reset();
+    let _guard = midi_guard();
     midi_ports::set_input_names(["Launchkey 25"]);
     assert!(!midi_ports::is_open());
     assert_eq!(
@@ -105,7 +138,7 @@ fn listing_is_not_gated_on_open() {
 /// the old ports — the client has to report again.
 #[test]
 fn reopening_does_not_resurrect_stale_ports() {
-    midi_ports::reset();
+    let _guard = midi_guard();
     midi_ports::open_inputs();
     midi_ports::set_input_names(["Launchkey 25"]);
     midi_ports::close_inputs();

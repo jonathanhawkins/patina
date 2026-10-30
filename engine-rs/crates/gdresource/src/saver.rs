@@ -52,10 +52,23 @@ impl TresSaver {
             ext_ids.sort();
             for id in ext_ids {
                 let ext = &resource.ext_resources[id];
+                // ⚠️ The `uid` attribute is OMITTED when we have none, not
+                // written as `uid=""` (pat-fk17e.1). Godot's
+                // `resource_format_text.cpp` only emits the attribute for a
+                // resource that actually carries a UID, and `uid=""` is not
+                // merely untidy — it is a claim. `ResourceUID` treats an empty
+                // text id as invalid, so a re-save of a file whose UID we never
+                // knew would stamp an attribute asserting "this reference has
+                // no UID", which is different from "we did not record one".
+                let uid_attr = if ext.uid.is_empty() {
+                    String::new()
+                } else {
+                    format!(" uid=\"{}\"", ext.uid)
+                };
                 writeln!(
                     out,
-                    "[ext_resource type=\"{}\" uid=\"{}\" path=\"{}\" id=\"{}\"]",
-                    ext.resource_type, ext.uid, ext.path, ext.id
+                    "[ext_resource type=\"{}\"{} path=\"{}\" id=\"{}\"]",
+                    ext.resource_type, uid_attr, ext.path, ext.id
                 )
                 .map_err(|e| EngineError::Parse(e.to_string()))?;
             }
@@ -107,7 +120,20 @@ impl ResourceSaver for TresSaver {
 
 /// Writes sorted property lines for a resource section.
 fn write_properties(out: &mut String, resource: &Resource) -> EngineResult<()> {
-    let keys = resource.sorted_property_keys();
+    let mut keys = resource.sorted_property_keys();
+    // `script` goes FIRST, ahead of the alphabetical body (pat-fk17e.1).
+    //
+    // Godot's `resource_format_text.cpp` walks `get_property_list()`, where the
+    // `script` slot comes from `Object` and so precedes everything the script
+    // itself declares. The ordering is not cosmetic for a script-backed
+    // resource: the script line is what decides which class the following lines
+    // are properties *of*, so a reader that applies lines in order needs it
+    // before them. Sorting put it after every exported var whose name begins
+    // a-r, which is most of them.
+    if let Some(pos) = keys.iter().position(|k| k.as_str() == "script") {
+        let script_key = keys.remove(pos);
+        keys.insert(0, script_key);
+    }
     for key in keys {
         if let Some(value) = resource.get_property(key) {
             writeln!(out, "{} = {}", key, format_variant(value))
@@ -305,6 +331,7 @@ fn format_f32(f: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::ExtResource;
     use gdcore::math::{Color, Vector2};
     use gdcore::ResourceUid;
 
@@ -417,5 +444,90 @@ mod tests {
 
         assert!(output.contains("[sub_resource type=\"StyleBoxFlat\" id=\"StyleBoxFlat_abc\"]"));
         assert!(output.contains("bg_color = Color(0.2, 0.3, 0.4, 1)"));
+    }
+
+    /// 🔑 pat-fk17e.1 — A SCRIPT-BACKED RESOURCE WRITES ITS SCRIPT LINE FIRST.
+    ///
+    /// `script` sorts after every exported var whose name starts a–r, which is
+    /// most of them, so the plain alphabetical body put the line that decides
+    /// *which class these properties belong to* after the properties. Godot's
+    /// `resource_format_text.cpp` emits it first, from `Object`'s own property
+    /// slot.
+    ///
+    /// ⚠️ Asserts on the ORDER, with an index comparison, not on both lines
+    /// being present. `contains` for each line passes under either ordering —
+    /// it is invariant under exactly the swap this guards.
+    #[test]
+    fn script_backed_resource_writes_script_line_before_exported_vars() {
+        let mut r = Resource::new("Resource");
+        // `armour` and `damage` both sort BEFORE `script`.
+        r.set_property("armour", Variant::Int(2));
+        r.set_property("damage", Variant::Int(7));
+        r.set_property("script", Variant::String("ExtResource:1_item".into()));
+        r.ext_resources.insert(
+            "1_item".to_string(),
+            ExtResource {
+                resource_type: "Script".to_string(),
+                uid: String::new(),
+                path: "res://item.gd".to_string(),
+                id: "1_item".to_string(),
+            },
+        );
+
+        let output = TresSaver::new().save_to_string(&r).unwrap();
+
+        let script_at = output
+            .find("script = ExtResource(\"1_item\")")
+            .expect("the script reference is re-emitted as an ExtResource call");
+        let damage_at = output
+            .find("damage = 7")
+            .expect("exported vars are written");
+        let armour_at = output
+            .find("armour = 2")
+            .expect("exported vars are written");
+        assert!(
+            script_at < damage_at && script_at < armour_at,
+            "`script` must precede the exported vars; got:\n{output}"
+        );
+    }
+
+    /// 🔑 pat-fk17e.1 — AN UNKNOWN UID IS AN ABSENT ATTRIBUTE, NOT `uid=""`.
+    ///
+    /// `uid=""` is a claim, not a blank: `ResourceUID` treats an empty text id
+    /// as invalid, so re-saving a file whose UID was never recorded would stamp
+    /// an attribute asserting the reference *has* no UID.
+    #[test]
+    fn ext_resource_without_a_uid_omits_the_attribute() {
+        let mut r = Resource::new("Resource");
+        r.set_property("value", Variant::Int(1));
+        r.ext_resources.insert(
+            "1_item".to_string(),
+            ExtResource {
+                resource_type: "Script".to_string(),
+                uid: String::new(),
+                path: "res://item.gd".to_string(),
+                id: "1_item".to_string(),
+            },
+        );
+        let output = TresSaver::new().save_to_string(&r).unwrap();
+        assert!(
+            output.contains("[ext_resource type=\"Script\" path=\"res://item.gd\" id=\"1_item\"]"),
+            "no uid recorded => no uid attribute; got:\n{output}"
+        );
+        assert!(
+            !output.contains("uid=\"\""),
+            "an empty uid attribute must never be written; got:\n{output}"
+        );
+
+        // A UID we DO have still round-trips — the omission is conditional, not
+        // a removal.
+        r.ext_resources.get_mut("1_item").unwrap().uid = "uid://abc123".to_string();
+        let output = TresSaver::new().save_to_string(&r).unwrap();
+        assert!(
+            output.contains(
+                "[ext_resource type=\"Script\" uid=\"uid://abc123\" path=\"res://item.gd\" id=\"1_item\"]"
+            ),
+            "a known uid is still emitted; got:\n{output}"
+        );
     }
 }

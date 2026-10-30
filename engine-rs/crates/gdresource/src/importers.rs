@@ -2515,18 +2515,67 @@ antialiased=true
         assert!(rfl.can_load(".ctex"));
         assert!(rfl.can_load(".gdshader"));
         assert!(rfl.can_load(".gdshaderinc"));
-        // pat-s3rrv.51 added .tga/.bmp/.hdr/.gltf/.glb. This number was ALREADY
-        // stale before that — it read 12 while `with_defaults` registered 14 —
-        // so it was red at HEAD; the extension list and this count have to move
-        // together. `format_loader_covers_source_asset_extensions` pins the
-        // full list beside it.
         assert!(rfl.can_load(".tga"));
         assert!(rfl.can_load(".bmp"));
         assert!(rfl.can_load(".hdr"));
         assert!(rfl.can_load(".gltf"));
         assert!(rfl.can_load(".glb"));
-        assert_eq!(rfl.extension_count(), 19);
+
+        // ⚠️ This bare count has now gone stale three times (12 while 14 were
+        // registered, then 19 while 25 are), and each time it sat red at HEAD
+        // and failed an unrelated bead's verify — `--lib loader` matches this
+        // test's *name*, so anyone touching `loader.rs` inherits the failure.
+        //
+        // A count alone cannot say WHICH extension went missing, and the
+        // `format_loader_covers_source_asset_extensions` the old note pointed
+        // at was never written. So the list is asserted here instead: a
+        // registration added or dropped now names itself in the diff.
+        let mut extensions: Vec<&str> = EXPECTED_DEFAULT_EXTENSIONS.to_vec();
+        extensions.sort_unstable();
+        for ext in &extensions {
+            assert!(rfl.can_load(ext), "{ext} must have a default loader");
+        }
+        assert_eq!(
+            rfl.extension_count(),
+            extensions.len(),
+            "`with_defaults` registers {} loaders but EXPECTED_DEFAULT_EXTENSIONS lists {} — \
+             the two have to move together",
+            rfl.extension_count(),
+            extensions.len()
+        );
     }
+
+    /// Every extension `ResourceFormatLoader::with_defaults` registers.
+    ///
+    /// Kept beside the test rather than derived from the loader, so that
+    /// losing a registration is a failure instead of a silently smaller list.
+    const EXPECTED_DEFAULT_EXTENSIONS: &[&str] = &[
+        ".bmp",
+        ".ccube",
+        ".ccubearray",
+        ".ctex",
+        ".ctex3d",
+        ".ctexarray",
+        ".gdshader",
+        ".gdshaderinc",
+        ".glb",
+        ".gltf",
+        ".hdr",
+        ".otf",
+        ".png",
+        ".res",
+        ".scn",
+        ".svg",
+        ".tga",
+        ".tres",
+        ".tscn",
+        ".ttf",
+        ".vs",
+        ".wav",
+        ".webp",
+        ".woff",
+        ".woff2",
+    ];
 
     #[test]
     fn format_loader_unknown_extension_fails() {

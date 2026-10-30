@@ -180,6 +180,50 @@ fn load_text_resource(path: &str) -> Option<ResourceRef> {
     })
 }
 
+/// Reads a `.tres` that carries `script = ExtResource("<id>")` on its
+/// `[resource]` section and resolves it into `(script_path, saved_values)`
+/// (pat-fk17e.1).
+///
+/// This is the file shape Godot writes for a custom data resource — a
+/// `.gd` that `extends Resource`, plus one line per exported var:
+///
+/// ```text
+/// [gd_resource type="Resource" script_class="Item" format=3]
+/// [ext_resource type="Script" path="res://item.gd" id="1_item"]
+/// [resource]
+/// script = ExtResource("1_item")
+/// damage = 7
+/// ```
+///
+/// Returns `None` for an ordinary `.tres`, so the caller keeps its existing
+/// `Variant::Resource` reading of the file. The `script` line itself is
+/// stripped from `saved_values`: it is the instance's *identity*, carried by
+/// the script attachment, not one of its properties.
+///
+/// ⚠️ The id must be resolved here, against `ext_resources`, and not deferred.
+/// `load_text_resource` keeps only the property bag, so by the time a
+/// `ResourceRef` exists the `ExtResource:<id>` string has nothing left to
+/// resolve against — the id→path table has been dropped.
+fn script_backed_tres(path: &str) -> Option<(String, Vec<(String, Variant)>)> {
+    let source = read_resource_source(path)?;
+    let resource = gdresource::TresLoader::new()
+        .parse_str(&source, path)
+        .ok()?;
+    // `parse_variant_value` rewrites `ExtResource("id")` to the string
+    // `"ExtResource:id"` (gdresource loader.rs), which is the form stored here.
+    let ext_id = match resource.get_property("script")? {
+        Variant::String(s) => s.strip_prefix("ExtResource:")?,
+        _ => return None,
+    };
+    let script_path = resource.ext_resources.get(ext_id)?.path.clone();
+    let values = resource
+        .properties()
+        .filter(|(k, _)| k.as_str() != "script")
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    Some((script_path, values))
+}
+
 /// Loads a resource through the engine-wide format loaders
 /// (`gdresource::importers::UnifiedLoader`) so a script's `load()` sees the
 /// same bytes the editor and the renderer do: `.import` sidecars are followed
@@ -956,10 +1000,25 @@ impl Interpreter {
 
     fn exec_stmt(&mut self, stmt: &Stmt) -> Result<Option<ControlFlow>, RuntimeError> {
         match stmt {
-            Stmt::VarDecl { name, value, .. } => {
+            Stmt::VarDecl {
+                name,
+                type_hint,
+                value,
+                ..
+            } => {
                 let v = match value {
                     Some(expr) => self.eval_expr(expr)?,
                     None => Variant::Nil,
+                };
+                // `var a: Array[int] = []` binds a *typed* array, and an
+                // element that does not fit is a runtime error rather than a
+                // silently untyped container (pat-s3rrv.265). Godot does this
+                // by building a new typed array and copying into it
+                // (`OPCODE_ASSIGN_TYPED_ARRAY`), which is what the helper does.
+                let v = match type_hint {
+                    Some(hint) => crate::container_typing::coerce_to_declared_type(v, hint)
+                        .map_err(container_error)?,
+                    None => v,
                 };
                 self.environment.define(name.clone(), v);
                 Ok(None)
@@ -967,6 +1026,11 @@ impl Interpreter {
 
             Stmt::ConstDecl { name, value, .. } => {
                 let v = self.eval_expr(value)?;
+                // Godot's analyzer calls `make_read_only()` on every constant,
+                // so `const DIRS = [...]` refuses `DIRS.append(..)`
+                // (pat-s3rrv.265). ⚠️ `define_const` only stops the *name*
+                // being rebound; without this the container stays mutable.
+                crate::container_typing::freeze_const_value(&v);
                 self.environment.define_const(name.clone(), v);
                 Ok(None)
             }
@@ -3891,6 +3955,23 @@ impl Interpreter {
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "ResourceUID") {
                             return call_resourceuid_static(member, &evaluated_args);
                         }
+                        // `ResourceSaver.save(resource, path)` — the write half
+                        // of the script-backed Resource round-trip
+                        // (pat-fk17e.1).
+                        //
+                        // ⚠️ Deliberately NOT added to `BUILTIN_SINGLETONS`.
+                        // That list drives `Engine.has_singleton` and, per
+                        // `engine_singletons_are_classdb_classes`, a name there
+                        // is expected to be a ClassDB class too; `ResourceSaver`
+                        // is neither registered nor method-transcribed yet, and
+                        // claiming the singleton on the strength of one method
+                        // would make `get_singleton_list()` advertise a surface
+                        // that is one method deep. The dispatch-arm guard is
+                        // one-directional, so an unlisted arm is exactly as
+                        // intended: `save()` works, `has_singleton` stays honest.
+                        if matches!(object.as_ref(), Expr::Ident(n) if n == "ResourceSaver") {
+                            return self.call_resource_saver_static(member, &evaluated_args);
+                        }
                         // The eight remaining Godot 4.6.1 singletons
                         // (pat-s3rrv.211). Each name must also appear in
                         // BUILTIN_SINGLETONS, and `builtin_singletons_all_have_a_dispatch_arm`
@@ -6071,6 +6152,43 @@ impl Interpreter {
                         // unreadable or malformed file falls through to the
                         // path-only placeholder below.
                         if path.ends_with(".tres") || path.ends_with(".res") {
+                            // A script-backed resource is an OBJECT, not a
+                            // property bag: `script = ExtResource(..)` means the
+                            // file's state belongs to a live `ScriptInstance`,
+                            // so `load()` yields the instance id and the
+                            // script's own methods and vars answer on it
+                            // (pat-fk17e.1).
+                            //
+                            // Falls through to the plain reading when the host
+                            // has no scene access (nothing to attach a script
+                            // to) or the `.gd` will not load — a usable
+                            // `Resource` beats nothing, and it is what every
+                            // caller got before.
+                            //
+                            // ⚠️ Two inherited limits of the phantom-node model
+                            // `instantiate_script` uses, both carried here and
+                            // neither introduced here:
+                            //
+                            // * NOT cached by path. Godot's `ResourceLoader`
+                            //   hands the SAME instance to every `load()` of a
+                            //   path; this builds a fresh one per call, so two
+                            //   loads of one `.tres` do not share mutations.
+                            // * The instance is a node parented under the scene
+                            //   root, so it is visible to `root.get_children()`.
+                            //
+                            // Both want a real resource-object carrier rather
+                            // than a node, which is the parent epic's work.
+                            if let Some((script_path, values)) = script_backed_tres(path) {
+                                if let Some(access) = self.scene_access.as_mut() {
+                                    if let Some(raw) =
+                                        access.instantiate_script_resource(&script_path, &values)
+                                    {
+                                        return Ok(Some(Variant::ObjectId(
+                                            gdcore::id::ObjectId::from_raw(raw),
+                                        )));
+                                    }
+                                }
+                            }
                             if let Some(loaded) = load_text_resource(path) {
                                 return Ok(Some(Variant::Resource(Box::new(loaded))));
                             }
@@ -10439,7 +10557,15 @@ impl Interpreter {
     {
         let mut items = arr.to_vec();
         let ret = f(&mut items);
-        arr.with_mut(|a| *a = items).map_err(container_error)?;
+        // ⚠️ `with_mut` checks only the read-only flag, so storing the mutated
+        // snapshot through it would let `a.append("x")` succeed on an
+        // `Array[int]` — every mutation here bypasses `SharedArray::push`'s
+        // type check. `assign` is the same store plus the element validation
+        // Godot applies to every array write (pat-s3rrv.265). The temporary is
+        // an untyped array, so it contributes no constraint of its own, and an
+        // untyped `arr` accepts everything exactly as before.
+        arr.assign(&SharedArray::from_vec(items))
+            .map_err(container_error)?;
         Ok(ret)
     }
 
@@ -12706,6 +12832,89 @@ impl Interpreter {
                                 "no scene access".into(),
                             )))
                         }
+                    }
+                    // `Object.is_class(name)` — true for the object's own class
+                    // and every ancestor of it (core/object/object.cpp
+                    // `Object::is_class`). pat-fk17e.1.
+                    //
+                    // ⚠️ This arm's ABSENCE was not a missing-method error. The
+                    // ClassDB registration for `Object` already lists
+                    // `is_class` (class_db.rs), so `node_has_method` answered
+                    // true and `call_object_method`'s `responds` branch returned
+                    // **`Nil`** — a falsy value, silently, for every object in
+                    // the engine. `if res.is_class("Resource")` therefore took
+                    // the else branch and nothing reported a failure.
+                    //
+                    // ⚠️ The `cls == name` fallback is load-bearing: the ClassDB
+                    // tables are populated by `register_*` entry points, and a
+                    // chain lookup on an unregistered class comes back EMPTY,
+                    // which would make `is_class` false for an object that
+                    // demonstrably has that exact class.
+                    "is_class" => {
+                        let name = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            Some(Variant::StringName(s)) => s.as_str().to_string(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "is_class() takes a class name string".into(),
+                                )))
+                            }
+                        };
+                        let cls = match self.scene_access.as_ref() {
+                            Some(access) => access.get_class(id),
+                            None => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "no scene access".into(),
+                                )))
+                            }
+                        };
+                        Ok(Variant::Bool(match cls {
+                            Some(cls) => {
+                                cls == name || gdobject::class_db::is_parent_class(&cls, &name)
+                            }
+                            None => false,
+                        }))
+                    }
+                    // `Object.get_script()` — the Script resource driving this
+                    // object, or null when it has none (pat-fk17e.1).
+                    //
+                    // The value is a `GDScript` resource naming the `.gd` file,
+                    // so it is already *instantiable* rather than an opaque
+                    // marker: the existing `Resource.new()` arm keys off
+                    // `class_name == "GDScript"` plus the path, which makes
+                    // `get_script().new()` work.
+                    //
+                    // `resource_path` is seeded explicitly because a member read
+                    // on a `Variant::Resource` answers out of `properties` only
+                    // (the `shader.code` arm above) — the `ResourceRef.path`
+                    // FIELD is not reachable from script, so `path` alone would
+                    // leave `get_script().resource_path` Nil.
+                    //
+                    // ⚠️ Answers for objects built through
+                    // `instantiate_script`/`instantiate_script_resource` —
+                    // `Script.new()` and a script-backed `.tres`. The other
+                    // `attach_script` call sites (`.tscn` loading in `gdeditor`,
+                    // `autoload.rs`) do not record a path yet, so `get_script()`
+                    // on a scene-attached node is still null. That is the honest
+                    // answer for a path nothing recorded; widening it means
+                    // touching every attachment site, which is a separate pass.
+                    "get_script" => {
+                        let path = self.scene_access.as_ref().and_then(|a| a.get_script_path(id));
+                        Ok(match path {
+                            Some(path) => {
+                                let mut properties = HashMap::new();
+                                properties.insert(
+                                    "resource_path".to_string(),
+                                    Variant::String(path.clone()),
+                                );
+                                Variant::Resource(Box::new(ResourceRef {
+                                    path,
+                                    class_name: "GDScript".to_string(),
+                                    properties,
+                                }))
+                            }
+                            None => Variant::Nil,
+                        })
                     }
                     // -- Object introspection (pat-0q2kx.64) --------------
                     //
@@ -15284,6 +15493,121 @@ impl Interpreter {
         }
     }
 
+    /// `ResourceSaver.save(resource, path, flags = 0)` → a Godot `Error`
+    /// (`OK` = 0, `FAILED` = 1). pat-fk17e.1.
+    ///
+    /// Two receiver shapes, because a Resource has two representations here:
+    ///
+    /// * `Variant::ObjectId` — a **script-backed** resource. Its state lives in
+    ///   the attached `ScriptInstance`, so the file is rebuilt from the script's
+    ///   path plus its `@export` values: one `[ext_resource type="Script"]`, a
+    ///   `script = ExtResource(..)` line, then one line per exported var. This
+    ///   is the write half of the `load()` path in `script_backed_tres`.
+    /// * `Variant::Resource` — an ordinary property bag, written back as-is.
+    ///
+    /// ⚠️ `path` is required, where Godot falls back to `resource.resource_path`
+    /// for an empty one. A script-backed instance does not carry the `.tres`
+    /// path it came from (the instance id is its whole identity — see
+    /// [`SceneAccess::instantiate_script_resource`]), so the fallback would have
+    /// to invent a destination. Returning `FAILED` says "nowhere to write"
+    /// instead of writing somewhere unintended.
+    fn call_resource_saver_static(
+        &mut self,
+        method: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        // Godot's `Error` enum (core/error/error_list.h).
+        const OK: i64 = 0;
+        const FAILED: i64 = 1;
+
+        match method {
+            "save" => {
+                let path = match args.get(1) {
+                    Some(Variant::String(s)) if !s.is_empty() => s.clone(),
+                    _ => return Ok(Variant::Int(FAILED)),
+                };
+                let resource = match args.first() {
+                    Some(Variant::ObjectId(oid)) => {
+                        let id = oid.raw();
+                        let Some(access) = self.scene_access.as_ref() else {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "ResourceSaver.save() of an object requires scene access".into(),
+                            )));
+                        };
+                        // No script means this object is not a script-backed
+                        // resource; there is nothing for a `.tres` to reference.
+                        let Some(script_path) = access.get_script_path(id) else {
+                            return Ok(Variant::Int(FAILED));
+                        };
+                        let values = access.script_exported_values(id);
+                        let class_name = access
+                            .get_class(id)
+                            .unwrap_or_else(|| "Resource".to_string());
+
+                        // Godot names the section `1_<5 random chars>`; the
+                        // script's file stem is stable instead, so a save of the
+                        // same resource twice produces the same bytes and a
+                        // round-trip is diffable.
+                        let stem = script_path
+                            .rsplit('/')
+                            .next()
+                            .and_then(|f| f.strip_suffix(".gd"))
+                            .unwrap_or("script");
+                        let ext_id = format!("1_{stem}");
+
+                        let mut out = gdresource::Resource::new(class_name);
+                        out.path = path.clone();
+                        out.ext_resources.insert(
+                            ext_id.clone(),
+                            gdresource::ExtResource {
+                                resource_type: "Script".to_string(),
+                                // We never knew one; the saver omits the
+                                // attribute rather than claiming `uid=""`.
+                                uid: String::new(),
+                                path: script_path,
+                                id: ext_id.clone(),
+                            },
+                        );
+                        out.set_property(
+                            "script",
+                            Variant::String(format!("ExtResource:{ext_id}")),
+                        );
+                        for (key, value) in values {
+                            out.set_property(key, value);
+                        }
+                        out
+                    }
+                    Some(Variant::Resource(res)) => {
+                        let mut out = gdresource::Resource::new(res.class_name.clone());
+                        out.path = path.clone();
+                        for (key, value) in &res.properties {
+                            out.set_property(key.clone(), value.clone());
+                        }
+                        out
+                    }
+                    _ => return Ok(Variant::Int(FAILED)),
+                };
+
+                let contents = match gdresource::TresSaver::new().save_to_string(&resource) {
+                    Ok(c) => c,
+                    Err(_) => return Ok(Variant::Int(FAILED)),
+                };
+                // `res://`/`user://` resolve against the configured roots, the
+                // same way `load()` reads them back.
+                let Ok(fs_path) = gdcore::resolve_path(&path) else {
+                    return Ok(Variant::Int(FAILED));
+                };
+                Ok(Variant::Int(match std::fs::write(&fs_path, contents) {
+                    Ok(()) => OK,
+                    Err(_) => FAILED,
+                }))
+            }
+            other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                format!("ResourceSaver.{other}"),
+            ))),
+        }
+    }
+
     fn call_object_method(
         &mut self,
         id: u64,
@@ -16002,6 +16326,11 @@ impl Interpreter {
         let class_constants = instance.class_def.constants.clone();
         for (name, expr) in &class_constants {
             let val = self.eval_expr(expr)?;
+            // A class-level `const` is read-only too, exactly as one declared
+            // inside a function is (pat-s3rrv.265) — class constants are
+            // evaluated here rather than at collection time, so this is the
+            // only point that sees the value.
+            crate::container_typing::freeze_const_value(&val);
             self.environment.define_const(name.clone(), val);
         }
         // Seed each named `enum Name { … }` as a Dictionary constant, the way
@@ -25573,9 +25902,10 @@ fn call_multiplayer_peer_instance(
 ) -> Result<Variant, RuntimeError> {
     use gdplatform::multiplayer_peer_handles::with_multiplayer_peer;
 
-    // Godot's @GlobalScope `Error`: OK = 0, FAILED = 1.
+    // Godot's @GlobalScope `Error`: OK = 0. The failure codes come from
+    // `NetworkError::godot_error_code` so that `ERR_UNAVAILABLE` survives
+    // (pat-s3rrv.264).
     const OK: i64 = 0;
-    const FAILED: i64 = 1;
 
     let int_arg = |i: usize| -> i64 {
         match args.get(i) {
@@ -25596,18 +25926,22 @@ fn call_multiplayer_peer_instance(
     // released). Godot answers a freed Ref with null rather than erroring.
     let result = with_multiplayer_peer(id, |peer| -> Result<Variant, RuntimeError> {
         match method {
+            // ⚠️ The error code comes from the error itself, not a blanket
+            // `FAILED`: a browser build has no server role at all and owes the
+            // script `ERR_UNAVAILABLE` (2), as Godot's web platform does
+            // (pat-s3rrv.264). Everything else still maps to `FAILED`.
             "create_server" => {
                 let port = int_arg(0).clamp(0, i64::from(u16::MAX)) as u16;
                 Ok(Variant::Int(match peer.create_server(port) {
                     Ok(()) => OK,
-                    Err(_) => FAILED,
+                    Err(e) => e.godot_error_code(),
                 }))
             }
             "create_client" => {
                 let url = str_arg(0);
                 Ok(Variant::Int(match peer.create_client(&url) {
                     Ok(()) => OK,
-                    Err(_) => FAILED,
+                    Err(e) => e.godot_error_code(),
                 }))
             }
             "poll" => {

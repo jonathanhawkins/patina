@@ -5,6 +5,7 @@
 mod ci_3d_crate_boundary_audit_test;
 mod ci_build_matrix_platform_test;
 mod ci_domain_coverage_validation_test;
+mod ci_golden_bless_gate_test;
 mod ci_render_golden_gate_test;
 mod ci_repin_lane_validation_test;
 mod ci_runtime_slice_coverage_test;

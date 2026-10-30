@@ -88,7 +88,15 @@ impl PhysicsWorld3D {
         }
 
         // Phase 2 & 3: Collision detection and resolution
-        let ids: Vec<BodyId3D> = self.bodies.keys().copied().collect();
+        //
+        // ⚠️ SORTED by id for the same reason as `PhysicsWorld2D::step_inner`:
+        // `bodies` is a randomly seeded `HashMap`, and `separate_bodies_3d`
+        // below mutates both bodies the moment a pair overlaps, so a later pair
+        // sees positions the earlier pair already moved. Unsorted, the sweep
+        // order — and therefore the result — changes from run to run
+        // (pat-21oab.1).
+        let mut ids: Vec<BodyId3D> = self.bodies.keys().copied().collect();
+        ids.sort_unstable_by_key(|id| id.0);
 
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
@@ -461,5 +469,88 @@ mod tests {
         let run1 = run_sim();
         let run2 = run_sim();
         assert_eq!(run1, run2, "3D physics must be deterministic");
+    }
+}
+
+#[cfg(test)]
+mod determinism_order_tests {
+    use super::*;
+
+    fn sphere(pos: Vector3, radius: f32, vel: Vector3) -> PhysicsBody3D {
+        let mut b = PhysicsBody3D::new(
+            BodyId3D(0),
+            BodyType3D::Rigid,
+            pos,
+            Shape3D::Sphere { radius },
+            1.0,
+        );
+        b.linear_velocity = vel;
+        b
+    }
+
+    /// pat-21oab.1 regression: `step` resolved overlaps in `HashMap` key order,
+    /// and `separate_bodies_3d` mutates both bodies as each pair is visited —
+    /// so a later pair saw positions an earlier pair had already moved, and the
+    /// answer depended on the map's random seed.
+    ///
+    /// Sixteen identically built worlds in ONE process: every `HashMap` gets a
+    /// fresh `RandomState`, so under the bug these disagree. `azsj_determinism
+    /// _collision_scenario` compares only two runs and passed about 3 times in
+    /// 5 — this repeats enough to make a chance agreement implausible, and
+    /// asserts bit equality rather than an epsilon.
+    #[test]
+    fn repeated_runs_in_one_process_are_bit_identical() {
+        fn run() -> Vec<(f32, f32, f32)> {
+            let mut world = PhysicsWorld3D::new();
+            world.gravity = Vector3::ZERO;
+            let ids = vec![
+                world.add_body(sphere(
+                    Vector3::new(-5.0, 0.0, 0.0),
+                    2.0,
+                    Vector3::new(3.0, 0.0, 0.0),
+                )),
+                world.add_body(sphere(
+                    Vector3::new(5.0, 0.0, 0.0),
+                    2.0,
+                    Vector3::new(-3.0, 0.0, 0.0),
+                )),
+                world.add_body(sphere(
+                    Vector3::new(0.0, 5.0, 0.0),
+                    2.0,
+                    Vector3::new(0.0, -2.0, 0.0),
+                )),
+                world.add_body(sphere(
+                    Vector3::new(0.0, -5.0, 0.0),
+                    2.0,
+                    Vector3::new(0.0, 2.0, 0.0),
+                )),
+                world.add_body(sphere(
+                    Vector3::new(0.0, 0.0, 5.0),
+                    2.0,
+                    Vector3::new(0.0, 0.0, -2.0),
+                )),
+            ];
+
+            for _ in 0..60 {
+                world.step(1.0 / 60.0);
+            }
+
+            ids.into_iter()
+                .map(|id| {
+                    let p = world.get_body(id).unwrap().position;
+                    (p.x, p.y, p.z)
+                })
+                .collect()
+        }
+
+        let first = run();
+        for attempt in 1..16 {
+            assert_eq!(
+                run(),
+                first,
+                "run {attempt} diverged from run 0 — 3D overlap resolution is \
+                 iterating bodies in HashMap order again (pat-21oab.1)"
+            );
+        }
     }
 }

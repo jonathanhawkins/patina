@@ -856,16 +856,80 @@ mod tests {
         );
     }
 
+    /// 🔑 `ping_pong` folds **non-negative** `t` into `[0, 1]`, and that is the
+    /// whole of the guarantee (pat-21oab).
+    ///
+    /// ⚠️ This test used to sweep `t` from **-6.0** and assert `[0, 1]` over the
+    /// lot. 461 of its 1000 samples failed, so it was red at every commit. The
+    /// implementation was never wrong — the claim was. Upstream's
+    /// `FastNoiseLite::PingPong`
+    /// (`upstream/godot/thirdparty/misc/FastNoiseLite.h:469-473`) is
+    ///
+    /// ```text
+    /// t -= (int)(t * 0.5f) * 2;
+    /// return t < 1 ? t : 2 - t;
+    /// ```
+    ///
+    /// and `(int)` truncates toward **zero**, not downward. For `t = -5.987`
+    /// that subtracts `-4` instead of `-6`, leaving `-1.987` — outside the
+    /// range, by design, and our `as i32` reproduces it exactly.
+    ///
+    /// Negative `t` is unreachable from the engine anyway: both call sites pass
+    /// `(gen_single(..) + 1.0) * ping_pong_strength`, and `gen_single` returns
+    /// `[-1, 1]`, so `t ∈ [0, 2 · strength]` — `[0, 4]` at the default strength
+    /// of `2.0` (upstream's `mPingPongStrength = 2.0f`).
     #[test]
     fn ping_pong_folds_into_unit_triangle() {
-        for i in 0..1000 {
-            let t = i as f32 * 0.013 - 6.0;
+        // The real domain, swept densely: 0 through 20 covers the default
+        // strength's [0, 4] five times over.
+        for i in 0..20_001 {
+            let t = i as f32 * 0.001;
             let p = ping_pong(t);
-            assert!((0.0..=1.0).contains(&p), "ping_pong({t}) = {p}");
+            assert!(
+                (0.0..=1.0).contains(&p),
+                "ping_pong({t}) = {p} is outside [0, 1]"
+            );
         }
-        assert!((ping_pong(0.0) - 0.0).abs() < 1e-6);
-        assert!((ping_pong(1.0) - 1.0).abs() < 1e-6);
-        assert!((ping_pong(2.0) - 0.0).abs() < 1e-6);
+
+        // The fold's shape: up to 1 at odd integers, back to 0 at even ones.
+        // `gen_ping_pong_2d` maps this with `(noise - 0.5) * 2.0`, so these
+        // exact endpoints are what make its output span [-1, 1].
+        for (t, want) in [
+            (0.0, 0.0),
+            (0.5, 0.5),
+            (1.0, 1.0),
+            (1.5, 0.5),
+            (2.0, 0.0),
+            (2.5, 0.5),
+            (3.0, 1.0),
+            (4.0, 0.0),
+        ] {
+            assert!(
+                (ping_pong(t) - want).abs() < 1e-6,
+                "ping_pong({t}) = {}, want {want}",
+                ping_pong(t)
+            );
+        }
+
+        // 🔑 Negative `t` is PINNED to upstream's truncation, not asserted to be
+        // in range. Swapping `as i32` for `.floor()` would look like a tidy fix
+        // for the range violation above and would silently diverge from Godot
+        // for every one of these: a floor variant gives 0.5 / 1.0 / 0.5 / 0.0 /
+        // 1.0 where upstream gives the values below.
+        for (t, want) in [
+            (-0.5, -0.5),
+            (-1.0, -1.0),
+            (-1.5, -1.5),
+            (-2.0, 0.0),
+            (-3.0, -1.0),
+        ] {
+            assert!(
+                (ping_pong(t) - want).abs() < 1e-6,
+                "ping_pong({t}) = {}, want {want} — upstream truncates toward \
+                 zero; a `.floor()` rewrite breaks this and diverges from Godot",
+                ping_pong(t)
+            );
+        }
     }
 
     #[test]

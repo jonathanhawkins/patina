@@ -37,10 +37,23 @@ fn animation_player_advances_through_mainloop_step() {
     let sprite = Node::new("Sprite", "Sprite2D");
     let sprite_id = tree.add_child(root, sprite).unwrap();
 
-    // Set initial property
-    tree.get_node_mut(sprite_id)
-        .unwrap()
-        .set_property("modulate:a", Variant::Float(0.0));
+    // 🔑 `modulate` is deliberately NOT seeded, and that absence is the test
+    // (pat-21oab).
+    //
+    // This used to seed a flat `"modulate:a"` key and then assert on it. That
+    // spelling inserts a key nothing ever reads — `set_animated_property_path`
+    // says so in its own doc — so it seeded a decoy, left the real `modulate`
+    // at `Nil`, and asserted on the decoy. No correct engine can satisfy it:
+    // it would have to maintain a flat shadow of every compound property
+    // beside the real one, which Godot has no notion of.
+    //
+    // ⚠️ Seeding `modulate` as a Color instead would make this pass whether or
+    // not the engine seeds a `Nil` base from the ClassDB default — it would
+    // re-arm the exact condition it is meant to measure. Leaving it unset is
+    // what keeps the `Nil` base in play, which is the bug: a component write
+    // onto `Nil` was DROPPED, so a fresh `Sprite2D` could not be faded at all.
+    // In Godot every CanvasItem starts at `modulate = Color(1, 1, 1, 1)`, so
+    // animating `modulate:a` on an untouched node is entirely ordinary.
 
     // Build animation: fade alpha from 0 to 1 over 1 second
     let mut track = AnimationTrack::new("modulate:a");
@@ -63,15 +76,25 @@ fn animation_player_advances_through_mainloop_step() {
         main_loop.step(0.1);
     }
 
-    let alpha = main_loop
+    // Read the COMPOUND property and take the component, which is both Godot's
+    // shape and the convention every other test in this repo uses.
+    //
+    // 🔑 This catches MORE than the old spelling did, not less. With
+    // `modulate` left unseeded, a dropped component write leaves the property
+    // `Nil` and the match arm panics with "Expected Color, got Nil" — so the
+    // test fails without the engine's `Nil`-base seeding and passes with it.
+    // The old flat-key version could only ever report `got 0`.
+    let modulate = main_loop
         .tree()
         .get_node(sprite_id)
         .unwrap()
-        .get_property("modulate:a");
+        .get_property("modulate");
     // After 1.0s of a 1.0s animation, alpha should be ~1.0
-    match alpha {
-        Variant::Float(v) => assert!((v - 1.0).abs() < 0.01, "Expected alpha ~1.0, got {v}"),
-        other => panic!("Expected Float, got {other:?}"),
+    match modulate {
+        Variant::Color(c) => {
+            assert!((c.a - 1.0).abs() < 0.01, "Expected alpha ~1.0, got {}", c.a)
+        }
+        other => panic!("Expected Color, got {other:?}"),
     }
 }
 

@@ -118,6 +118,84 @@ impl ContainerType {
         }
         value.variant_type() == want
     }
+
+    /// The constraint a GDScript type-hint *name* describes — `"int"`,
+    /// `"String"`, `"Node2D"`, `"Array[int]"` (pat-s3rrv.265).
+    ///
+    /// This lives here rather than beside either caller because two
+    /// independent readers need the same answer: the interpreter, for
+    /// `var a: Array[int]`, and the `.tscn` loader, for `Array[int]([1, 2])`.
+    /// A second copy of the table would let the two disagree about what
+    /// `Array[AABB]` means, and nothing would catch it.
+    ///
+    /// A parameterised name constrains on its *outer* type only
+    /// (`Array[Array[int]]` is an array of arrays), because a `ContainerType`
+    /// holds one type rather than a tree — which is what Godot stores too.
+    pub fn from_hint_name(name: &str) -> Self {
+        let base = match name.find('[') {
+            Some(open) => name[..open].trim(),
+            None => name.trim(),
+        };
+        // `Array[Variant]` is how Godot spells "no constraint".
+        if base.is_empty() || base == "Variant" {
+            return Self::untyped();
+        }
+        match builtin_type_named(base) {
+            Some(builtin) => Self::builtin(builtin),
+            // Anything else is an engine or script class, which Godot stores
+            // as OBJECT plus the class name.
+            None => Self::object(base),
+        }
+    }
+}
+
+/// GDScript's builtin type-hint spellings.
+///
+/// ⚠️ Transcribed, never derived from the [`VariantType`] variant names: the
+/// two disagree (`AABB` vs `Aabb`, `RID` vs `Rid`), and a derived mapping
+/// silently yields an *object* constraint for those, which then rejects every
+/// legitimate element.
+fn builtin_type_named(name: &str) -> Option<VariantType> {
+    Some(match name {
+        "bool" => VariantType::Bool,
+        "int" => VariantType::Int,
+        "float" => VariantType::Float,
+        "String" => VariantType::String,
+        "StringName" => VariantType::StringName,
+        "NodePath" => VariantType::NodePath,
+        "Vector2" => VariantType::Vector2,
+        "Vector2i" => VariantType::Vector2i,
+        "Vector3" => VariantType::Vector3,
+        "Vector3i" => VariantType::Vector3i,
+        "Vector4" => VariantType::Vector4,
+        "Vector4i" => VariantType::Vector4i,
+        "Rect2" => VariantType::Rect2,
+        "Rect2i" => VariantType::Rect2i,
+        "Transform2D" => VariantType::Transform2D,
+        "Transform3D" => VariantType::Transform3D,
+        "Color" => VariantType::Color,
+        "Basis" => VariantType::Basis,
+        "Projection" => VariantType::Projection,
+        "Quaternion" => VariantType::Quaternion,
+        "AABB" => VariantType::Aabb,
+        "Plane" => VariantType::Plane,
+        "RID" => VariantType::Rid,
+        "Array" => VariantType::Array,
+        "Dictionary" => VariantType::Dictionary,
+        "Callable" => VariantType::Callable,
+        "Signal" => VariantType::Signal,
+        "PackedByteArray" => VariantType::PackedByteArray,
+        "PackedInt32Array" => VariantType::PackedInt32Array,
+        "PackedInt64Array" => VariantType::PackedInt64Array,
+        "PackedFloat32Array" => VariantType::PackedFloat32Array,
+        "PackedFloat64Array" => VariantType::PackedFloat64Array,
+        "PackedStringArray" => VariantType::PackedStringArray,
+        "PackedVector2Array" => VariantType::PackedVector2Array,
+        "PackedVector3Array" => VariantType::PackedVector3Array,
+        "PackedColorArray" => VariantType::PackedColorArray,
+        "PackedVector4Array" => VariantType::PackedVector4Array,
+        _ => return None,
+    })
 }
 
 /// Why a container write was refused.

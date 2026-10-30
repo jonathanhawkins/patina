@@ -8,6 +8,15 @@
 //!
 //! Named with `bench_` prefix → Tier 3 (full suite).
 //! Determinism tests always assert; timing tests always pass but report regressions.
+//!
+//! pat-21oab.2: the baseline file is COMMITTED reference data, and the report
+//! test used to overwrite it on every run — so `bench_render_fixtures_regression_check`
+//! was comparing this machine's timings against this machine's timings from
+//! seconds earlier and could never see a regression. The write now needs
+//! `PATINA_BLESS=1`.
+
+#[path = "../support/golden_bless.rs"]
+mod golden_bless;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -322,18 +331,30 @@ fn bench_render_fixtures_baseline_report() {
         "fixtures": results,
     });
 
-    // Write baseline JSON to golden directory
+    // Write baseline JSON to the golden directory — only when blessing.
+    //
+    // ⚠️ No golden COMPARISON here, deliberately: every number in this report
+    // is a wall-clock timing, so comparing it byte-for-byte against the
+    // committed file would fail on any machine but the one that blessed it.
+    // `bench_render_fixtures_regression_check` is the test that reads the
+    // committed baseline, and it compares with a ratio threshold instead.
     let baselines = baselines_path();
     let report_json = serde_json::to_string_pretty(&report).unwrap();
-    std::fs::write(&baselines, &report_json).unwrap_or_else(|e| {
+    eprintln!("  ---");
+    if golden_bless::bless_enabled() {
+        std::fs::write(&baselines, &report_json).unwrap_or_else(|e| {
+            eprintln!(
+                "  [warn] Could not write baselines to {}: {e}",
+                baselines.display()
+            );
+        });
+        eprintln!("  Baseline written to: {}", baselines.display());
+    } else {
         eprintln!(
-            "  [warn] Could not write baselines to {}: {e}",
+            "  Baseline left untouched at {} (set PATINA_BLESS=1 to re-record).",
             baselines.display()
         );
-    });
-
-    eprintln!("  ---");
-    eprintln!("  Baseline written to: {}", baselines.display());
+    }
     eprintln!("\n{report_json}");
 }
 

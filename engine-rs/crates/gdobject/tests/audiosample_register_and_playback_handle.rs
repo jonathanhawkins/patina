@@ -15,6 +15,28 @@ use gdobject::{
 // `get_class` is a `GodotObject` trait method, not inherent on GenericObject.
 use gdobject::GodotObject;
 
+/// Serializes every test in this file against the process-global ClassDB.
+///
+/// `register_audio_classes` is a check-then-act sequence: `class_exists(..)`
+/// and `register_class(..)` take `global_db()`'s mutex SEPARATELY, so two
+/// threads can both see a class as absent and both go on to register it.
+/// `cargo test` runs these five as threads in one process, which is the only
+/// harness where that can happen — nextest gives each test its own process and
+/// therefore cannot show it at all (pat-21oab.3).
+///
+/// ⚠️ Bound once per test rather than taken inside a helper, because
+/// `registration_is_idempotent` deliberately calls the registrar twice and
+/// `std`'s `Mutex` is not reentrant — locking per call would deadlock.
+///
+/// Poison-tolerant, matching `gdcore::file_access`'s `ROOTS_LOCK`: a panicking
+/// test must fail on its own rather than poison the mutex and cascade into the
+/// other four.
+static CLASS_DB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn class_db_guard() -> std::sync::MutexGuard<'static, ()> {
+    CLASS_DB_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 fn props(class: &str) -> Vec<String> {
     get_property_list(class)
         .into_iter()
@@ -24,6 +46,7 @@ fn props(class: &str) -> Vec<String> {
 
 #[test]
 fn audiosample_classes_are_registered_as_refcounted() {
+    let _guard = class_db_guard();
     register_audio_classes();
 
     for class in ["AudioSample", "AudioSamplePlayback"] {
@@ -63,6 +86,7 @@ fn audiosample_classes_are_registered_as_refcounted() {
 /// work in Godot.
 #[test]
 fn both_classes_are_opaque_handles_with_no_bound_members() {
+    let _guard = class_db_guard();
     register_audio_classes();
 
     let base = props("RefCounted");
@@ -120,6 +144,7 @@ fn both_classes_are_opaque_handles_with_no_bound_members() {
 /// invisible to GDScript. Registering it would be inventing a ClassDB enum.
 #[test]
 fn loop_mode_is_not_a_classdb_enum() {
+    let _guard = class_db_guard();
     register_audio_classes();
     for name in [
         "LOOP_DISABLED",
@@ -148,6 +173,7 @@ fn loop_mode_is_not_a_classdb_enum() {
 /// see the notes.
 #[test]
 fn sample_handles_are_distinct_from_the_stream_playback_path() {
+    let _guard = class_db_guard();
     register_audio_classes();
 
     assert!(
@@ -171,6 +197,7 @@ fn sample_handles_are_distinct_from_the_stream_playback_path() {
 /// `assert_eq!([], [])` would pass even if the second call had deleted them.
 #[test]
 fn registration_is_idempotent() {
+    let _guard = class_db_guard();
     register_audio_classes();
     let count = gdobject::class_count();
 

@@ -170,6 +170,41 @@ pub trait ScriptInstance {
     /// Returns the human-readable name of this script.
     fn get_script_name(&self) -> &str;
 
+    /// The path of the `.gd` file this instance was built from, when the host
+    /// loaded it from one (pat-fk17e.1).
+    ///
+    /// This is the script's *identity*, which `Object.get_script()` has to hand
+    /// back and which a script-backed `.tres` has to write into its
+    /// `[ext_resource]` line. [`get_script_name`](Self::get_script_name) cannot
+    /// stand in for it: that reports the `class_name` declared *inside* the
+    /// source (`"GDScript"` when there is none), so two different files both
+    /// answer `"GDScript"` and neither names a loadable path.
+    ///
+    /// `None` for a script built straight from a source string, which is the
+    /// honest answer — Godot's `get_script()` on such an instance has no file
+    /// to point at either.
+    fn script_file_path(&self) -> Option<&str> {
+        None
+    }
+
+    /// Records the `.gd` path this instance was loaded from, for
+    /// [`script_file_path`](Self::script_file_path).
+    fn set_script_file_path(&mut self, _path: &str) {}
+
+    /// The `@export`-annotated variable names, in declaration order
+    /// (pat-fk17e.1).
+    ///
+    /// ⚠️ Deliberately NOT derivable from
+    /// [`list_properties`](Self::list_properties): that reports *every*
+    /// instance var with `hint: 0`, so an exported var and a plain one are
+    /// indistinguishable there. Saving a script-backed resource needs the
+    /// export set exactly — Godot's `.tres` carries only exported state, and
+    /// writing the private vars too would make the file re-load with values a
+    /// developer never chose to persist.
+    fn exported_property_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Returns `true` if the script defines a method with the given name.
     fn has_method(&self, name: &str) -> bool {
         self.list_methods().iter().any(|m| m.name == name)
@@ -1109,6 +1144,48 @@ pub trait SceneAccess {
     /// (Godot: `new()` on a bad script yields `null`).
     fn instantiate_script(&mut self, _path: &str) -> Option<u64> {
         None
+    }
+
+    /// Instantiate the GDScript at `script_path` as a **script-backed
+    /// Resource** and seed its exported vars from `values` (pat-fk17e.1).
+    ///
+    /// This is what `load("res://sword.tres")` resolves to when that file
+    /// carries `script = ExtResource("<id>")`: the saved property lines are the
+    /// `values`, applied over the script's own defaults, and the result is an
+    /// object whose script methods and vars are callable — not a
+    /// [`Variant::Resource`] property bag.
+    ///
+    /// 🔑 **The instance id IS the representation.** A script-backed Resource is
+    /// the object the host returns here; `ResourceRef` gets no `script` field.
+    /// Giving it one would put the exported values in two places at once — the
+    /// live `ScriptInstance` and the `ResourceRef.properties` map — and the two
+    /// would diverge the first time a script assigned to one of them, with the
+    /// value that got written back out depending on which copy the saver read.
+    ///
+    /// Returns `None` when the script cannot be loaded, so the caller falls back
+    /// to the plain-`Resource` reading of the file rather than yielding nothing.
+    fn instantiate_script_resource(
+        &mut self,
+        _script_path: &str,
+        _values: &[(String, Variant)],
+    ) -> Option<u64> {
+        None
+    }
+
+    /// The path of the `.gd` file backing `node`'s script, if any — the value
+    /// `Object.get_script()` reports (pat-fk17e.1).
+    fn get_script_path(&self, _node: u64) -> Option<String> {
+        None
+    }
+
+    /// `node`'s `@export`-annotated variables and their current values, in
+    /// declaration order (pat-fk17e.1).
+    ///
+    /// This is the state a script-backed `.tres` persists. See
+    /// [`ScriptInstance::exported_property_names`] for why the export set is
+    /// asked for by name rather than filtered out of the full property list.
+    fn script_exported_values(&self, _node: u64) -> Vec<(String, Variant)> {
+        Vec::new()
     }
 
     // -- Per-node process toggles (pat-nzgdu.137) ---------------------------

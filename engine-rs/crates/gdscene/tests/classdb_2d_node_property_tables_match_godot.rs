@@ -27,6 +27,35 @@ use gdcore::math::{Color, Rect2, Vector2, Vector2i};
 ///
 /// The *count* matters as much as the contents: it is what catches a table that
 /// silently loses a property to a later edit.
+/// Properties Godot **registers but does not document**, per class.
+///
+/// 🔑 The doc XML `<member>` list and `ClassDB.class_get_property_list()` are
+/// NOT the same set, and conflating them is what made this test fail on two
+/// correct registrations (pat-21oab). Godot omits a property from the docs when
+/// it carries `PROPERTY_USAGE_INTERNAL`/`NO_EDITOR`, or when it is pushed
+/// dynamically from `_get_property_list` rather than declared with
+/// `ADD_PROPERTY` — in both cases `class_get_property_list()` still returns it.
+///
+/// Every entry must cite the upstream line that registers it, so this stays an
+/// oracle rather than a place to park whatever ClassDB happens to contain.
+fn undocumented_but_registered(class: &str) -> &'static [&'static str] {
+    match class {
+        // scene/2d/polygon_2d.cpp:721 —
+        //   ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "bones", PROPERTY_HINT_NONE, "",
+        //       PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "_set_bones", "_get_bones");
+        // The underscore accessor pair is the tell: it is the serialization
+        // hook for the flat path/weights array, not an inspector knob.
+        "Polygon2D" => &["bones"],
+        // scene/2d/skeleton_2d.cpp:530-535 — pushed from
+        // `Skeleton2D::_get_property_list()` with
+        // `PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_ALWAYS_DUPLICATE`, so it is a
+        // DYNAMIC property. Godot's doc XML documents `get_modification_stack` /
+        // `set_modification_stack` as methods and lists no `<member>` at all.
+        "Skeleton2D" => &["modification_stack"],
+        _ => &[],
+    }
+}
+
 fn own_property_names() -> Vec<(&'static str, &'static [&'static str])> {
     vec![
         (
@@ -430,12 +459,39 @@ fn classdb_2d_node_property_tables_match_godot() {
                  table is populated"
             );
         }
+        // Documented members PLUS the undocumented-but-registered ones, and
+        // nothing else. An extra with no oracle citation still fails here —
+        // which is the property this assertion exists to protect.
+        let internal = undocumented_but_registered(class);
+        let mut allowed: Vec<&str> = expected.to_vec();
+        allowed.extend_from_slice(internal);
+        // `.copied()` first: `actual.iter()` yields `&&str`, and the closure
+        // would then hand `contains` a `&&&str` where it wants `&&str`.
+        let unexpected: Vec<&str> = actual
+            .iter()
+            .copied()
+            .filter(|n| !allowed.contains(n))
+            .collect();
+        assert!(
+            unexpected.is_empty(),
+            "{class} exposes {unexpected:?}, which Godot neither documents nor \
+             registers internally. Add it to `undocumented_but_registered` ONLY \
+             with the upstream line that registers it, or drop the registration."
+        );
+        for name in internal {
+            assert!(
+                actual.contains(name),
+                "{class} must still expose the internal property `{name}` that \
+                 Godot registers; got {actual:?}"
+            );
+        }
         assert_eq!(
             info.properties.len(),
+            allowed.len(),
+            "{class} must expose exactly the {} documented + {} internal \
+             properties, got {actual:?}",
             expected.len(),
-            "{class} must expose exactly the {} own properties Godot documents, \
-             got {actual:?}",
-            expected.len()
+            internal.len()
         );
 
         // The seeder is the other half of the claim: reflection knowing about a
@@ -469,16 +525,29 @@ fn classdb_2d_node_property_tables_match_godot() {
     }
 }
 
-/// `Skeleton2D` genuinely has no own members in Godot's docs — its surface is
-/// all inherited. Asserting that keeps a future "fill in the blanks" pass from
-/// inventing properties for it.
+/// `Skeleton2D` has **no documented members**, and exactly **one** property that
+/// Godot registers dynamically.
+///
+/// ⚠️ This used to assert the property list was *empty*, reading "no `<member>`
+/// in the doc XML" as "no properties at all" (pat-21oab). It is not:
+/// `Skeleton2D::_get_property_list()` pushes `modification_stack`
+/// (`scene/2d/skeleton_2d.cpp:530-535`), so Godot's
+/// `class_get_property_list()` returns it while the docs list only the
+/// `get_/set_modification_stack` METHOD pair. The emptiness assertion failed on
+/// a correct registration.
+///
+/// Pinning the exact one-element set still blocks a "fill in the blanks" pass
+/// from inventing properties, which is what the original was protecting.
 #[test]
 fn skeleton2d_has_no_own_properties_by_design() {
     class_db::register_2d_classes();
     let info = get_class_info("Skeleton2D").expect("Skeleton2D is registered");
-    assert!(
-        info.properties.is_empty(),
-        "Godot documents no own members for Skeleton2D, got {:?}",
+    let names: Vec<&str> = info.properties.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(
+        names,
+        undocumented_but_registered("Skeleton2D"),
+        "Skeleton2D must expose exactly the one property Godot registers \
+         dynamically (`modification_stack`) and no invented ones, got {:?}",
         info.properties.iter().map(|p| &p.name).collect::<Vec<_>>()
     );
 }

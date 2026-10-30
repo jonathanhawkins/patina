@@ -2038,13 +2038,44 @@ mod mount_tests {
         at + padded_len + 8 + 8 + 16
     }
 
-    fn reset() {
+    /// Serializes every test that touches the process-global pack mount table.
+    ///
+    /// The mount table lives in `gdcore::file_access` and is per-PROCESS, so the
+    /// old shape here — a bare `clear_mounted_packs()` at the top and bottom of
+    /// each test — was a *rearm*, not isolation. Under the default parallel
+    /// harness one test's clear wipes another's mounts mid-assertion while its
+    /// own mounts shadow theirs, which is why a DIFFERENT subset of these four
+    /// failed on every run and all four passed under `--test-threads=1`
+    /// (pat-21oab.3). Serializing is the fix; `--test-threads=1` only hides it.
+    static MOUNT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Holds [`MOUNT_LOCK`] for the rest of the test and clears the mount table
+    /// when it drops — including on an unwind, so one failing test cannot leak
+    /// its mounts into whichever test runs next.
+    struct MountGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    impl Drop for MountGuard {
+        fn drop(&mut self) {
+            gdcore::file_access::clear_mounted_packs();
+        }
+    }
+
+    /// Takes the lock, clears the table, and hands back the guard. Bind it with
+    /// `let _guard = mount_guard();` — binding to `_` would drop it immediately
+    /// and release the lock before the test body ran.
+    ///
+    /// Poison-tolerant, copied from `gdcore::file_access`'s `ROOTS_LOCK`: a
+    /// panicking test must fail alone instead of poisoning the mutex and
+    /// cascading into every other test in the binary.
+    fn mount_guard() -> MountGuard {
+        let lock = MOUNT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         gdcore::file_access::clear_mounted_packs();
+        MountGuard(lock)
     }
 
     #[test]
     fn mounted_pack_serves_res_reads_without_a_disk_file() {
-        reset();
+        let _guard = mount_guard();
         let mut packer = PckPacker::new();
         packer.add_file("res://icon.png", b"PNGDATA".to_vec());
         let bytes = packer.pack().expect("pack");
@@ -2064,12 +2095,11 @@ mod mount_tests {
             !FileAccess::file_exists("res://absent.png"),
             "a path in no pack must not report as existing",
         );
-        reset();
     }
 
     #[test]
     fn higher_priority_mount_overrides_a_lower_one() {
-        reset();
+        let _guard = mount_guard();
         let mut base = PckPacker::new();
         base.add_file("res://data.txt", b"base".to_vec());
         let mut patch = PckPacker::new();
@@ -2097,12 +2127,11 @@ mod mount_tests {
             "base",
             "unmounting the patch must fall back to the base pack",
         );
-        reset();
     }
 
     #[test]
     fn a_removal_entry_hides_a_lower_mounts_file() {
-        reset();
+        let _guard = mount_guard();
         let mut base = PckPacker::new();
         base.add_file("res://gone.txt", b"still here".to_vec());
         gdcore::file_access::mount_pack(
@@ -2129,12 +2158,11 @@ mod mount_tests {
             FileAccess::read_file_bytes("res://gone.txt").is_err(),
             "reading a removed path must fail rather than serve the stale bytes",
         );
-        reset();
     }
 
     #[test]
     fn non_res_paths_are_never_served_from_packs() {
-        reset();
+        let _guard = mount_guard();
         let mut packer = PckPacker::new();
         packer.add_file("res://x.txt", b"x".to_vec());
         gdcore::file_access::mount_pack(
@@ -2145,6 +2173,5 @@ mod mount_tests {
         // `user://` is writable state, never packed; a plain path is the host FS.
         assert!(gdcore::file_access::read_from_packs("user://x.txt").is_none());
         assert!(gdcore::file_access::read_from_packs("/tmp/x.txt").is_none());
-        reset();
     }
 }

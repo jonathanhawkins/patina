@@ -20,9 +20,40 @@ use gdeditor::feature_profile::{
 };
 use gdobject::class_db::{class_exists, class_has_method, is_parent_class, register_all_classes};
 
-/// Each test owns the process-global active profile, so clear it first.
-fn reset() {
+/// Serializes every test that touches the process-global active profile.
+///
+/// The old shape here was a bare `set_active_profile(None)` at the top and
+/// bottom of each test, under a comment claiming each test "owns" the global.
+/// It does not: under the default parallel harness one test's clear drops
+/// another's profile mid-assertion while its own profile filters theirs, which
+/// is why a DIFFERENT subset of these failed on every run and all of them
+/// passed under `--test-threads=1` (pat-21oab.3). Setting the global again on
+/// entry is a *rearm*, not isolation — the writes interleave and no assertion
+/// in the test can see that it happened.
+static PROFILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Holds [`PROFILE_LOCK`] for the rest of the test and clears the active
+/// profile on drop — including on an unwind, so a failing test cannot leave its
+/// profile installed for whichever test runs next.
+struct ProfileGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+impl Drop for ProfileGuard {
+    fn drop(&mut self) {
+        set_active_profile(None);
+    }
+}
+
+/// Takes the lock and clears the active profile. Bind it with
+/// `let _guard = profile_guard();` — binding to plain `_` would drop the guard
+/// immediately and release the lock before the test body ran.
+///
+/// Poison-tolerant, matching `gdcore::file_access`'s `ROOTS_LOCK`: a panicking
+/// test must fail on its own rather than poison the mutex and cascade into
+/// every other test in the binary.
+fn profile_guard() -> ProfileGuard {
+    let lock = PROFILE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     set_active_profile(None);
+    ProfileGuard(lock)
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +182,7 @@ fn a_file_that_is_not_a_profile_is_refused() {
 
 #[test]
 fn a_disabled_class_leaves_the_create_node_list() {
-    reset();
+    let _guard = profile_guard();
     let catalog = NodeCatalog2D::new();
     let target = catalog
         .entries()
@@ -192,12 +223,11 @@ fn a_disabled_class_leaves_the_create_node_list() {
         catalog.entries().iter().any(|e| e.class_name == target),
         "`entries()` stays unfiltered on purpose"
     );
-    reset();
 }
 
 #[test]
 fn a_disabled_feature_leaves_the_enabled_set() {
-    reset();
+    let _guard = profile_guard();
     let mut p = EditorFeatureProfile::new();
     p.set_disabled_feature(EditorFeature::ThreeD, true);
     set_active_profile(Some(p));
@@ -215,13 +245,12 @@ fn a_disabled_feature_leaves_the_enabled_set() {
         10,
         "the other ten features stay available — disabling one must not hide all"
     );
-    reset();
 }
 
 #[test]
 fn with_no_profile_selected_nothing_is_hidden() {
     // The control that keeps every pre-existing editor path unchanged.
-    reset();
+    let _guard = profile_guard();
     assert!(!is_class_disabled("Sprite2D"));
     for f in EditorFeature::ALL {
         assert!(!is_feature_disabled(f), "{f:?} must be enabled by default");
@@ -238,7 +267,7 @@ fn with_no_profile_selected_nothing_is_hidden() {
 fn a_saved_profile_still_filters_after_a_reload() {
     // The persistence half of the acceptance: save, drop the in-memory profile,
     // load it back, and the same class is still hidden.
-    reset();
+    let _guard = profile_guard();
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("restart.profile");
     let catalog = NodeCatalog2D::new();
@@ -267,5 +296,4 @@ fn a_saved_profile_still_filters_after_a_reload() {
             .any(|e| e.class_name == target),
         "the setting must survive a reload via the .profile file"
     );
-    reset();
 }

@@ -8,6 +8,34 @@
 //! The [`SceneTree`] stores attached scripts in a side map
 //! (`HashMap<NodeId, Box<dyn ScriptInstance>>`) and exposes methods to
 //! dispatch lifecycle callbacks to them.
+//!
+//! # How a script-backed Resource is represented (pat-fk17e.1)
+//!
+//! A GDScript that `extends Resource` — Godot's custom data resource, saved as
+//! a `.tres` carrying `script = ExtResource("<id>")` — becomes **an object with
+//! an instance id**, built by the scene accessor's
+//! `instantiate_script_resource` and reached from script as a
+//! `Variant::ObjectId`. It is the same carrier
+//! `load("x.gd").new()` already returned, and the exported-var values live in
+//! exactly one place: the attached [`ScriptInstance`].
+//!
+//! 🔑 **`gdvariant::ResourceRef` deliberately gets no `script` field.** The
+//! alternative the bead weighed was to keep `load()` returning
+//! `Variant::Resource` and hang a script on it. That stores the exported values
+//! twice — once in the live `ScriptInstance`, once in `ResourceRef.properties` —
+//! and `ResourceRef` is a `Clone`, `PartialEq` **value** type that is copied
+//! into node properties, compared, and written back out by the saver. Two
+//! copies of mutable state behind a value type diverge on the first assignment,
+//! and which one a save observed would depend on which copy the writer held.
+//! `ResourceRef` therefore stays a pure property bag, and a scripted resource is
+//! not one.
+//!
+//! The cost of that choice, inherited from [`SceneAccess::instantiate_script`]:
+//! the object is a `Node` parented under the scene root, so it is visible to
+//! `root.get_children()` and is not cached by path the way Godot's
+//! `ResourceLoader` caches. Replacing the node carrier with a real
+//! resource-object carrier is the parent epic's work, not a property of this
+//! representation choice.
 
 use std::collections::HashMap;
 
@@ -126,6 +154,10 @@ pub struct GDScriptNodeInstance {
     interpreter: Interpreter,
     instance: ClassInstance,
     node_id: NodeId,
+    /// The `.gd` file this was loaded from, when it came from one
+    /// (pat-fk17e.1). `from_source` cannot know it — the source arrives as a
+    /// string — so the loading path sets it afterwards.
+    script_file_path: Option<String>,
 }
 
 impl std::fmt::Debug for GDScriptNodeInstance {
@@ -150,7 +182,18 @@ impl GDScriptNodeInstance {
             interpreter,
             instance,
             node_id,
+            script_file_path: None,
         })
+    }
+
+    /// The `@export`-annotated variable names, in declaration order.
+    fn exported_property_names_impl(&self) -> Vec<String> {
+        self.instance
+            .class_def
+            .exports
+            .iter()
+            .map(|e| e.name.clone())
+            .collect()
     }
 
     /// Returns the node ID this script is attached to.
@@ -296,6 +339,18 @@ impl ScriptInstance for GDScriptNodeInstance {
             .name
             .as_deref()
             .unwrap_or("GDScript")
+    }
+
+    fn script_file_path(&self) -> Option<&str> {
+        self.script_file_path.as_deref()
+    }
+
+    fn set_script_file_path(&mut self, path: &str) {
+        self.script_file_path = Some(path.to_string());
+    }
+
+    fn exported_property_names(&self) -> Vec<String> {
+        self.exported_property_names_impl()
     }
 
     fn has_method(&self, name: &str) -> bool {
@@ -777,6 +832,67 @@ impl SceneTreeAccessor {
         // SAFETY: We hold `&mut self`, so no other accessor can alias this pointer.
         // The raw pointer validity is guaranteed by the caller of `new`/`with_input`.
         unsafe { &mut *self.tree }
+    }
+
+    /// Loads the GDScript at `path`, attaches it to a fresh object of the
+    /// script's `extends` class, seeds `values` over the script's own defaults
+    /// and returns the object's raw id.
+    ///
+    /// Shared by `load("x.gd").new()` (no `values`) and the script-backed
+    /// `.tres` load (the saved property lines as `values`) — see
+    /// [`SceneAccess::instantiate_script_resource`] for why the id, not a
+    /// `ResourceRef` with a script slot, is the representation.
+    ///
+    /// ⚠️ `values` are applied with `set_property`, i.e. **after**
+    /// `instantiate_class` has evaluated the declared defaults. A `.tres` that
+    /// omits a line therefore keeps the script's default, which is what Godot
+    /// does — it only writes properties that differ from the default.
+    fn instantiate_script_with_values(
+        &mut self,
+        path: &str,
+        values: &[(String, Variant)],
+    ) -> Option<u64> {
+        // `res://` resolves against the project root (mirrors
+        // `instantiate_packed_scene`); see the note there on why the previous
+        // CWD-relative mapping broke `load("res://enemy.gd").new()`.
+        // `resolved` is still needed for the instance name below, but the bytes
+        // come from `FileAccess` so a packed script loads too (pat-s3rrv.34).
+        let resolved = gdcore::resolve_path(path).ok()?;
+        let source = gdcore::file_access::FileAccess::read_file_string(path).ok()?;
+        let base_class = script_base_class(&source);
+        // Name the instance after the script file stem, matching how a
+        // developer thinks of `load("enemy.gd").new()`.
+        let name = resolved
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Script")
+            .to_string();
+        let tree = self.tree_mut();
+        let root = tree.root_id();
+        // Attach under the root; the script's follow-up `add_child` reparents
+        // it to the desired parent (see `add_child`), mirroring scenes.
+        let node_id = tree
+            .add_child(root, crate::node::Node::new(name, base_class))
+            .ok()?;
+        match GDScriptNodeInstance::from_source(&source, node_id) {
+            Ok(mut instance) => {
+                // Set before boxing so `get_script()` can name the file even if
+                // seeding a value below fails.
+                instance.set_script_file_path(path);
+                for (key, value) in values {
+                    // A `.tres` line naming a var the script no longer declares
+                    // is dropped rather than inventing a property — Godot's
+                    // loader also discards state the current script has no slot
+                    // for. `set_property`'s `false` return says exactly that.
+                    instance.set_property(key, value.clone());
+                }
+                tree.attach_script(node_id, Box::new(instance))
+            }
+            // Non-fatal: the node exists without a live script (Godot logs and
+            // still yields an object); behaviour tests use a parseable script.
+            Err(_) => {}
+        }
+        Some(node_id.raw())
     }
 
     /// The physics server bound to the tree for this script phase, or `None`
@@ -7310,35 +7426,35 @@ impl SceneAccess for SceneTreeAccessor {
     }
 
     fn instantiate_script(&mut self, path: &str) -> Option<u64> {
-        // `res://` resolves against the project root (mirrors
-        // `instantiate_packed_scene`); see the note there on why the previous
-        // CWD-relative mapping broke `load("res://enemy.gd").new()`.
-        // `resolved` is still needed for the instance name below, but the bytes
-        // come from `FileAccess` so a packed script loads too (pat-s3rrv.34).
-        let resolved = gdcore::resolve_path(path).ok()?;
-        let source = gdcore::file_access::FileAccess::read_file_string(path).ok()?;
-        let base_class = script_base_class(&source);
-        // Name the instance after the script file stem, matching how a
-        // developer thinks of `load("enemy.gd").new()`.
-        let name = resolved
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("Script")
-            .to_string();
-        let tree = self.tree_mut();
-        let root = tree.root_id();
-        // Attach under the root; the script's follow-up `add_child` reparents
-        // it to the desired parent (see `add_child`), mirroring scenes.
-        let node_id = tree
-            .add_child(root, crate::node::Node::new(name, base_class))
-            .ok()?;
-        match GDScriptNodeInstance::from_source(&source, node_id) {
-            Ok(instance) => tree.attach_script(node_id, Box::new(instance)),
-            // Non-fatal: the node exists without a live script (Godot logs and
-            // still yields an object); behaviour tests use a parseable script.
-            Err(_) => {}
-        }
-        Some(node_id.raw())
+        self.instantiate_script_with_values(path, &[])
+    }
+
+    fn instantiate_script_resource(
+        &mut self,
+        script_path: &str,
+        values: &[(String, Variant)],
+    ) -> Option<u64> {
+        self.instantiate_script_with_values(script_path, values)
+    }
+
+    fn get_script_path(&self, node: u64) -> Option<String> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree()
+            .get_script(nid)?
+            .script_file_path()
+            .map(str::to_string)
+    }
+
+    fn script_exported_values(&self, node: u64) -> Vec<(String, Variant)> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let Some(script) = self.tree().get_script(nid) else {
+            return Vec::new();
+        };
+        script
+            .exported_property_names()
+            .into_iter()
+            .filter_map(|name| script.get_property(&name).map(|v| (name, v)))
+            .collect()
     }
 
     // -- AStar2D / AStar3D / AStarGrid2D (pat-s3rrv.19) --------------------
@@ -8446,6 +8562,15 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
     }
+
+    // pat-fk17e.1's two behaviour tests moved OUT of this module, to
+    // `crates/gdscene/tests/script_backed_resource_tres.rs`. The bead asks
+    // for them "through the scene/script path, not Rust-level APIs", and an
+    // in-crate `mod tests` cannot promise that: it sees `pub(crate)` items
+    // (`SceneTreeAccessor` among them) that a host embedding the engine
+    // never can, so it could pass against a surface no script could reach.
+    // The integration test drives `SceneTree::call_script_method`, which is
+    // the public entry point and installs the accessor itself.
 
     const PLAYER_SCRIPT: &str = "\
 extends Node2D

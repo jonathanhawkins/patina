@@ -32,6 +32,25 @@ use gdvariant::Variant;
 /// alongside the other `RefCounted` handle classes, despite the name.
 /// Registration is `class_exists`-guarded and therefore idempotent.
 fn call_check(src: &str) -> Variant {
+    // The backtrace store is PROCESS-global on purpose (`script_backtrace.rs`
+    // says so at its `store()`), so the `clear()` below wipes it for the whole
+    // process — not just for this test. Under the default parallel harness that
+    // means every test in this file clears every other test's captures
+    // mid-flight, which is why a DIFFERENT subset failed on every run while all
+    // six passed under `--test-threads=1` (pat-21oab.3). Clearing again at the
+    // top of each test is a *rearm*, not isolation.
+    //
+    // Serializing from the `clear()` until the script has finished reading its
+    // own capture is enough: everything that touches the store happens inside
+    // the GDScript below, and the Array handed back is plain scalars, so no
+    // assertion after this function returns needs the lock.
+    //
+    // Poison-tolerant, matching `gdcore::file_access`'s `ROOTS_LOCK`: a
+    // panicking test must fail on its own rather than poison the mutex and
+    // cascade into the other five.
+    static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
     gdobject::class_db::register_3d_classes();
     gdscript_interop::script_backtrace::clear();
     let mut interp = Interpreter::new();

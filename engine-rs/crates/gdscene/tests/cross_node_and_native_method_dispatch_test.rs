@@ -271,24 +271,49 @@ func _physics_process(delta):
     // the broken one instead of only reporting "it did not move".
     ml.step(1.0 / 60.0);
 
-    // Link 1 — the script's `self.velocity = ...` reached the *node*. (The
-    // physics phase runs before scripts, so nothing has overwritten it yet.)
+    // Link 1 — the script's `self.velocity = ...` reached the *node*. The
+    // character pass runs after the script phase now (pat-0q2kx.201) and writes
+    // the slid velocity back, but this body is in free air for its first step,
+    // so the authored (0, 400) survives unchanged.
     let vel = node_vec2(&ml, mover_id, "velocity");
     assert!(
         vel.y > 0.0,
         "link 1: `self.velocity = Vector2(0, 400)` must reach the node property, got {vel:?}"
     );
 
-    // Link 2 — the bare `move_and_slide()` call reached the native dispatch and
-    // recorded its one-shot request (the physics phase has not consumed it yet).
+    // Link 2 — the bare `move_and_slide()` call reached the native dispatch AND
+    // the character pass honoured it inside this same tick.
+    //
+    // ⚠️ Rewritten by pat-0q2kx.201. This used to assert the one-shot request
+    // was still `true` after the step: the character pass ran BEFORE the script
+    // phase, so it could not consume a request the script had not made yet. Now
+    // that `_physics_process` runs before the step (Godot's `Main::iteration`
+    // order) the request is raised and consumed in the same tick. The movement
+    // half is asserted too — `false` on its own would also hold if the bare
+    // call never reached dispatch.
     assert_eq!(
         ml.tree()
             .get_node(mover_id)
             .unwrap()
             .get_property("_move_and_slide_requested"),
-        Variant::Bool(true),
+        Variant::Bool(false),
+        "link 2: the one-shot request must be CONSUMED in the tick the script \
+         raised it (pat-0q2kx.201 ordering)"
+    );
+    let mover_after_one = node_vec2(&ml, mover_id, "position");
+    let idler_after_one = node_vec2(&ml, idler_id, "position");
+    assert!(
+        mover_after_one.y > start.y,
         "link 2: a bare move_and_slide() must reach SceneAccess::call_node_method \
-         and set the request flag"
+         and move the body within that SAME tick — under the old \
+         step-before-scripts order one step moved it nowhere, {start:?} -> \
+         {mover_after_one:?}"
+    );
+    assert!(
+        idler_after_one.y.abs() < 1e-6,
+        "link 2 control: the body whose script never calls move_and_slide must \
+         not have moved, so link 2 is measuring the call and not the clock, got \
+         {idler_after_one:?}"
     );
 
     // Link 3 — the physics phase honors the request and actually moves the body.

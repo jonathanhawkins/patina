@@ -80,6 +80,45 @@ pub fn write_subname(base: &Variant, sub: &str, component: &Variant) -> Option<V
         // the animation.
         (Variant::Nil, "x") => Variant::Vector2(Vector2 { x: f, y: 0.0 }),
         (Variant::Nil, "y") => Variant::Vector2(Vector2 { x: 0.0, y: f }),
+        // Same reasoning for a colour component, and NOT a guess at a default
+        // (pat-21oab): in Godot every `CanvasItem` has
+        // `modulate = Color(1, 1, 1, 1)` and `self_modulate` likewise from
+        // construction, so a `Nil` colour is an artefact of THIS engine's lazy
+        // property bag rather than a state Godot can be in. Materialising white
+        // restores what Godot would already have; dropping the write instead
+        // meant a fresh node could not be faded at all — `[animate modulate:a]`
+        // on an untouched Sprite2D was a silent no-op.
+        //
+        // ⚠️ Deliberately white rather than transparent-black. `Color::default()`
+        // would make an animation of `modulate:a` alone fade a node from
+        // invisible, and animating `modulate:r` would blacken it — in both
+        // cases the UNANIMATED channels would be wrong. White is the only
+        // seed for which touching one channel leaves the others at the value
+        // Godot already had.
+        (Variant::Nil, "r") => Variant::Color(Color {
+            r: f,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        }),
+        (Variant::Nil, "g") => Variant::Color(Color {
+            r: 1.0,
+            g: f,
+            b: 1.0,
+            a: 1.0,
+        }),
+        (Variant::Nil, "b") => Variant::Color(Color {
+            r: 1.0,
+            g: 1.0,
+            b: f,
+            a: 1.0,
+        }),
+        (Variant::Nil, "a") => Variant::Color(Color {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: f,
+        }),
         _ => return None,
     })
 }
@@ -1592,6 +1631,87 @@ mod tests {
         assert!(
             t.advance(1.0),
             "killed tween reports complete and does nothing"
+        );
+    }
+
+    // -- write_subname on an absent (Nil) base (pat-21oab) ------------------
+
+    /// 🔑 The bug: a component write onto a `Nil` base was DROPPED, so
+    /// animating `modulate:a` on a node whose `modulate` was never assigned
+    /// did nothing at all — `[animate modulate:a]` on a fresh Sprite2D was a
+    /// silent no-op.
+    #[test]
+    fn an_absent_colour_base_materialises_instead_of_dropping_the_write() {
+        let got = write_subname(&Variant::Nil, "a", &Variant::Float(0.25));
+        assert_eq!(
+            got,
+            Some(Variant::Color(Color {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 0.25
+            })),
+            "a Nil base must materialise, not return None"
+        );
+    }
+
+    /// ⚠️ White specifically, not `Color::default()`. This is the assertion
+    /// that matters: with a transparent-black seed, animating `modulate:a`
+    /// alone would fade the node in from invisible and animating `modulate:r`
+    /// would blacken it, because the UNANIMATED channels would be wrong.
+    /// White is the only seed for which touching one channel leaves the others
+    /// at the value Godot's CanvasItem already had.
+    #[test]
+    fn the_unanimated_colour_channels_seed_to_godots_canvasitem_default() {
+        for sub in ["r", "g", "b", "a"] {
+            let Some(Variant::Color(c)) = write_subname(&Variant::Nil, sub, &Variant::Float(0.5))
+            else {
+                panic!("{sub} on a Nil base must yield a Color");
+            };
+            let channels = [c.r, c.g, c.b, c.a];
+            let animated = match sub {
+                "r" => 0,
+                "g" => 1,
+                "b" => 2,
+                _ => 3,
+            };
+            for (i, v) in channels.iter().enumerate() {
+                if i == animated {
+                    assert_eq!(*v, 0.5, "{sub} is the animated channel");
+                } else {
+                    assert_eq!(*v, 1.0, "{sub}: channel {i} must stay at Godot's white");
+                }
+            }
+        }
+    }
+
+    /// The existing `x`/`y` behaviour is untouched — this change adds arms, it
+    /// does not alter the ones the vector paths rely on.
+    #[test]
+    fn an_absent_vector_base_still_materialises_as_before() {
+        assert_eq!(
+            write_subname(&Variant::Nil, "x", &Variant::Float(3.0)),
+            Some(Variant::Vector2(Vector2 { x: 3.0, y: 0.0 }))
+        );
+        assert_eq!(
+            write_subname(&Variant::Nil, "y", &Variant::Float(4.0)),
+            Some(Variant::Vector2(Vector2 { x: 0.0, y: 4.0 }))
+        );
+    }
+
+    /// ⚠️ The control: a subname that names no component of ANY base still
+    /// returns `None`. Without this, "materialise a Nil base" could have been
+    /// implemented as "materialise for anything", which would invent values for
+    /// genuine typos like `modulate:alpha`.
+    #[test]
+    fn an_unknown_subname_on_a_nil_base_is_still_refused() {
+        assert_eq!(
+            write_subname(&Variant::Nil, "alpha", &Variant::Float(1.0)),
+            None
+        );
+        assert_eq!(
+            write_subname(&Variant::Nil, "w", &Variant::Float(1.0)),
+            None
         );
     }
 }

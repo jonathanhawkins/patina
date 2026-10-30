@@ -32,6 +32,16 @@ pub enum NetworkError {
     /// Generic transport error.
     #[error("{0}")]
     Transport(String),
+    /// The operation does not exist on this platform (Godot `ERR_UNAVAILABLE`).
+    ///
+    /// ⚠️ Deliberately NOT a [`Transport`](Self::Transport): a transport error
+    /// means "this failed, retry or report it", while this means "this build
+    /// cannot do that at all". Godot distinguishes the two by error code —
+    /// `create_server` on a Web export returns `ERR_UNAVAILABLE`, not
+    /// `FAILED` (`platform/web/net_socket_web.h:51-60`) — and a script that
+    /// retries on failure must not retry this one.
+    #[error("unavailable on this platform: {0}")]
+    Unavailable(String),
     /// An RPC argument has no binary wire representation, so the call cannot be
     /// sent (pat-s3rrv.179).
     ///
@@ -46,6 +56,28 @@ pub enum NetworkError {
         /// Why the codec refused it.
         source: gdvariant::binary::VariantEncodeError,
     },
+}
+
+/// Godot's `Error.FAILED` — enum position 1.
+pub const FAILED: i64 = 1;
+/// Godot's `Error.ERR_UNAVAILABLE` — enum position 2, as in
+/// `udp_server.rs:36` and `stream_peer_gzip.rs:53`.
+pub const ERR_UNAVAILABLE: i64 = 2;
+
+impl NetworkError {
+    /// The Godot `Error` code a script sees when this error is returned from a
+    /// `MultiplayerPeer` method.
+    ///
+    /// Everything other than [`Unavailable`](Self::Unavailable) is `FAILED`,
+    /// which is what the interpreter reported for every variant before
+    /// pat-s3rrv.264 — so this only ever *narrows* a generic failure into a
+    /// more specific Godot code, never the reverse.
+    pub fn godot_error_code(&self) -> i64 {
+        match self {
+            NetworkError::Unavailable(_) => ERR_UNAVAILABLE,
+            _ => FAILED,
+        }
+    }
 }
 
 /// Convenience alias used throughout this module.

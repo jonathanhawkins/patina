@@ -11,6 +11,9 @@ pub mod autoload_registry;
 pub mod bindings;
 pub mod bridge;
 pub mod canvas_server;
+/// Typed containers from declarations: `Array[int]` / `Dictionary[K, V]` hints
+/// and read-only `const` containers (pat-s3rrv.265).
+pub mod container_typing;
 pub mod coroutine;
 pub mod editor_commands;
 pub mod fuzz_gdscript;

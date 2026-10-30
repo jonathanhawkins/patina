@@ -3835,58 +3835,19 @@ impl MainLoop {
         while self.physics_accumulator >= physics_dt
             && physics_steps < self.max_physics_steps_per_frame
         {
-            // Sync scene node positions to physics world before stepping.
-            // A script may have painted or erased cells since the last tick
-            // (pat-s3rrv.88). Tile collision is keyed off `tile_map_data`, which
-            // only `register_bodies` used to re-read — so a scripted `set_cell`
-            // showed up in pixels but never in physics. Fingerprinted per layer,
-            // so an unchanged map costs one comparison.
-            self.physics_server.refresh_tilemap_bodies(&self.tree);
-            // `_integrate_forces` runs BEFORE the sync, not after: the script's
-            // writes to the state land on the node, and `sync_to_physics` is
-            // what carries a rigid body's velocity and pending forces into the
-            // solver. Running it after would leave those writes on the node
-            // until the next tick — one frame late (pat-s3rrv.94).
-            crate::integrate_forces::run_integrate_forces_2d(
-                &mut self.tree,
-                self.physics_server.gravity(),
-                physics_dt as f32,
-            );
-            self.physics_server.sync_to_physics(&mut self.tree);
-            self.physics_server.step_physics(physics_dt as f32);
-            self.physics_server.sync_from_physics(&mut self.tree);
-
-            // Emit body_entered / body_exited signals on Area2D nodes.
-            self.physics_server.process_overlap_signals(&mut self.tree);
-
-            // Emit area_entered / area_exited signals between overlapping Area2D
-            // nodes (pat-u3l8c.51).
-            self.physics_server
-                .process_area_overlap_signals(&mut self.tree);
-
-            // Emit body_entered / body_exited signals on contact-monitoring
-            // RigidBody2D nodes (contact_monitor + max_contacts_reported).
-            self.physics_server
-                .process_body_contact_signals(&mut self.tree);
-
-            // Publish this step's contacts for `_integrate_forces(state)` to
-            // report (pat-s3rrv.94).
+            // -- registration pass (pat-0q2kx.201) --
+            // The 2D solver phase now runs at the END of the tick, after the
+            // script phase, so `sync_to_physics` — which is what adds a newly
+            // entered node to the world and drops a freed one — no longer runs
+            // before this tick's query phase. Registering here keeps a
+            // scene-loaded body visible to the RayCast2D/ShapeCast2D pass and
+            // to a `_physics_process` handler on the VERY FIRST tick, which is
+            // the one tick the previous tick's sync cannot cover.
             //
-            // ⚠️ Separate from the signal pass above, which reports enter/exit
-            // EDGES and skips persisting contacts — a body resting on a floor
-            // persists, so it would otherwise be visible for one frame only.
-            //
-            // The `_integrate_forces` callback runs BEFORE the step, so what a
-            // script reads is the previous step's contact set. That is Godot's
-            // behaviour too: the state reports the last solve, not one that has
-            // not happened yet.
-            self.physics_server.publish_body_contacts(&mut self.tree);
-
-            // Run move_and_slide for CharacterBody2D nodes with velocity.
-            self.physics_server
-                .process_character_movement(physics_dt as f32, &mut self.tree);
-
-            self.physics_server.record_trace(&self.tree);
+            // Registration only: `sync_to_physics` also applies `constant_force`
+            // and drains the one-shot `_pending_*` properties, so calling the
+            // whole thing twice in a tick would double every constant force.
+            self.physics_server.sync_registrations(&self.tree);
 
             // 3D physics: sync -> step -> sync (pat-u3l8c.1).
             // `_integrate_forces` runs before the sync for the same reason the
@@ -4015,6 +3976,76 @@ impl MainLoop {
             self.tree.clear_script_audio_server();
             self.tree.clear_script_physics_server();
             self.tree.clear_script_physics_server_3d();
+            // -- 2D solver phase (pat-0q2kx.201) --
+            // Godot's `Main::iteration` runs the scene tree's physics process —
+            // every `_physics_process`, and so every `move_and_slide`, impulse
+            // and velocity write a script makes — BEFORE
+            // `PhysicsServer2D::step` (`main.cpp`: physics_process, then
+            // end_sync + step). Stepping first, as this loop used to, left a
+            // scripted velocity sitting on the node until the NEXT tick: one
+            // tick of latency on every scripted body, and physics traces that
+            // could not match Godot's step for step.
+            //
+            // So the whole 2D phase — forces, sync, step, state publish,
+            // signals and character movement — now runs here, at the end of the
+            // tick, reading what the script phase above just wrote.
+            //
+            // ⚠️ A scene with no scripts is unaffected: the step still happens
+            // exactly once per tick with the same inputs, so the recorded
+            // traces are unchanged. Only a scripted body moves, and it moves
+            // one tick EARLIER — which is the bug.
+            // Sync scene node positions to physics world before stepping.
+            // A script may have painted or erased cells since the last tick
+            // (pat-s3rrv.88). Tile collision is keyed off `tile_map_data`, which
+            // only `register_bodies` used to re-read — so a scripted `set_cell`
+            // showed up in pixels but never in physics. Fingerprinted per layer,
+            // so an unchanged map costs one comparison.
+            self.physics_server.refresh_tilemap_bodies(&self.tree);
+            // `_integrate_forces` runs BEFORE the sync, not after: the script's
+            // writes to the state land on the node, and `sync_to_physics` is
+            // what carries a rigid body's velocity and pending forces into the
+            // solver. Running it after would leave those writes on the node
+            // until the next tick — one frame late (pat-s3rrv.94).
+            crate::integrate_forces::run_integrate_forces_2d(
+                &mut self.tree,
+                self.physics_server.gravity(),
+                physics_dt as f32,
+            );
+            self.physics_server.sync_to_physics(&mut self.tree);
+            self.physics_server.step_physics(physics_dt as f32);
+            self.physics_server.sync_from_physics(&mut self.tree);
+
+            // Emit body_entered / body_exited signals on Area2D nodes.
+            self.physics_server.process_overlap_signals(&mut self.tree);
+
+            // Emit area_entered / area_exited signals between overlapping Area2D
+            // nodes (pat-u3l8c.51).
+            self.physics_server
+                .process_area_overlap_signals(&mut self.tree);
+
+            // Emit body_entered / body_exited signals on contact-monitoring
+            // RigidBody2D nodes (contact_monitor + max_contacts_reported).
+            self.physics_server
+                .process_body_contact_signals(&mut self.tree);
+
+            // Publish this step's contacts for `_integrate_forces(state)` to
+            // report (pat-s3rrv.94).
+            //
+            // ⚠️ Separate from the signal pass above, which reports enter/exit
+            // EDGES and skips persisting contacts — a body resting on a floor
+            // persists, so it would otherwise be visible for one frame only.
+            //
+            // The `_integrate_forces` callback runs BEFORE the step, so what a
+            // script reads is the previous step's contact set. That is Godot's
+            // behaviour too: the state reports the last solve, not one that has
+            // not happened yet.
+            self.physics_server.publish_body_contacts(&mut self.tree);
+
+            // Run move_and_slide for CharacterBody2D nodes with velocity.
+            self.physics_server
+                .process_character_movement(physics_dt as f32, &mut self.tree);
+
+            self.physics_server.record_trace(&self.tree);
             // -- interpolation capture (pat-0q2kx.219) --
             // End of the tick: record the transforms this tick settled on,
             // rolling the previous ones back a slot. Runs after the script

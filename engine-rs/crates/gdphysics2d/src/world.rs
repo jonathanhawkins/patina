@@ -549,7 +549,18 @@ impl PhysicsWorld2D {
         // rather than resolved on the spot — resolving pair-by-pair means the
         // second pair undoes the first, which is exactly why a stack of boxes
         // could never settle (pat-0q2kx.116).
-        let ids: Vec<BodyId> = self.bodies.keys().copied().collect();
+        //
+        // ⚠️ SORTED by id, and that is load-bearing, not tidiness. `bodies` is a
+        // `HashMap` with `std`'s randomly seeded `RandomState`, so its key order
+        // differs between processes *and* between two maps built in the same
+        // process. This loop's order is the order constraints enter
+        // `constraints`, and the sequential-impulse solver below is
+        // order-dependent — so an unsorted sweep makes the whole step
+        // nondeterministic (pat-21oab.1: the platformer demo ended at three
+        // different player X values at random). Godot's broadphase hands the
+        // solver a stable pair order; ours has to sort to get one.
+        let mut ids: Vec<BodyId> = self.bodies.keys().copied().collect();
+        ids.sort_unstable_by_key(|id| id.0);
         let mut current_contacts = HashSet::new();
         let mut events = Vec::new();
         let mut constraints: Vec<ContactConstraint2D> = Vec::new();
@@ -753,12 +764,17 @@ impl PhysicsWorld2D {
         // Only moving RIGID bodies are swept: a static or kinematic body is
         // placed by the scene rather than integrated, and a sleeping one is not
         // moving at all.
-        let ccd_prev: Vec<(BodyId, Vector2)> = self
+        //
+        // Sorted for the same reason as the broadphase sweep above: `ccd_clamp`
+        // moves a body, so the order the sweeps run in is observable
+        // (pat-21oab.1).
+        let mut ccd_prev: Vec<(BodyId, Vector2)> = self
             .bodies
             .values()
             .filter(|b| b.continuous_cd && b.body_type == BodyType::Rigid && !b.sleeping)
             .map(|b| (b.id, b.position))
             .collect();
+        ccd_prev.sort_unstable_by_key(|(id, _)| id.0);
 
         // Phase 4: `integrate_velocities` — now that the solver has produced the
         // final velocities, advance the transforms. The depenetration
@@ -781,7 +797,12 @@ impl PhysicsWorld2D {
         // Phase 5: joint constraints (iterated for convergence), on the
         // integrated transforms — the same state they saw before the solver
         // rework, since `apply_joint_constraints` corrects positions.
-        let joint_ids: Vec<JointId> = self.joints.keys().copied().collect();
+        //
+        // Sorted: `apply_joint_constraints` corrects positions, so a chain of
+        // joints converges to a different place depending on the order they are
+        // relaxed in, and `joints` is an unordered map (pat-21oab.1).
+        let mut joint_ids: Vec<JointId> = self.joints.keys().copied().collect();
+        joint_ids.sort_unstable_by_key(|id| id.0);
         for _iter in 0..self.constraint_iterations {
             for &jid in &joint_ids {
                 let jt = &self.joints[&jid];
@@ -801,17 +822,27 @@ impl PhysicsWorld2D {
             }
         }
 
-        // Detect exited contacts
-        for &pair in &self.previous_contacts {
-            if !current_contacts.contains(&pair) {
-                events.push(CollisionEvent {
-                    body_a: pair.0,
-                    body_b: pair.1,
-                    contact_point: Vector2::ZERO,
-                    normal: Vector2::ZERO,
-                    state: ContactState::Exited,
-                });
-            }
+        // Detect exited contacts.
+        //
+        // Drained in id order: `previous_contacts` is a `HashSet`, so emitting
+        // straight from it would append the Exited events in a random order and
+        // make the returned event list — which callers forward on as
+        // `body_shape_exited` signals — differ run to run (pat-21oab.1).
+        let mut exited: Vec<(BodyId, BodyId)> = self
+            .previous_contacts
+            .iter()
+            .copied()
+            .filter(|pair| !current_contacts.contains(pair))
+            .collect();
+        exited.sort_unstable_by_key(|(a, b)| (a.0, b.0));
+        for (body_a, body_b) in exited {
+            events.push(CollisionEvent {
+                body_a,
+                body_b,
+                contact_point: Vector2::ZERO,
+                normal: Vector2::ZERO,
+                state: ContactState::Exited,
+            });
         }
 
         self.previous_contacts = current_contacts;
@@ -2611,5 +2642,143 @@ mod capsule_segment_ray_tests {
             ys[N - 1],
             ys[0]
         );
+    }
+}
+
+#[cfg(test)]
+mod determinism_order_tests {
+    use super::*;
+
+    fn static_rect(pos: Vector2, half: Vector2) -> PhysicsBody2D {
+        PhysicsBody2D::new(
+            BodyId(0),
+            BodyType::Static,
+            pos,
+            Shape2D::Rectangle { half_extents: half },
+            1.0,
+        )
+    }
+
+    /// pat-21oab.1 regression, the direct one: the broad-phase sweep in
+    /// `step_inner` built its id list straight out of `self.bodies.keys()`, a
+    /// randomly seeded `HashMap`, so the order contacts entered the constraint
+    /// list — and therefore the order the sequential-impulse solver relaxed
+    /// them in — changed from run to run.
+    ///
+    /// Twelve mutually overlapping bodies make all 66 pairs collide, and the
+    /// returned event list is the sweep order made observable. Asserting it is
+    /// strictly ascending in `(body_a, body_b)` catches the bug outright rather
+    /// than probabilistically: an unsorted sweep would have to hit the single
+    /// id-sorted permutation out of 12! to pass.
+    #[test]
+    fn broadphase_sweep_visits_pairs_in_id_order() {
+        const N: u64 = 12;
+        let mut world = PhysicsWorld2D::new();
+        let mut ids: Vec<BodyId> = Vec::new();
+        for i in 0..N {
+            // Staggered rather than coincident: every pair still overlaps (the
+            // spread is 11 px against 100 px half-extents) but no two centres
+            // share a point, so the narrow phase returns a well-defined normal.
+            ids.push(world.add_body(static_rect(
+                Vector2::new(i as f32, 0.0),
+                Vector2::new(100.0, 100.0),
+            )));
+        }
+        // Read the ids back rather than assuming a base: `add_body` hands them
+        // out from `next_id`, which starts at 1, not 0.
+        assert!(
+            ids.windows(2).all(|w| w[0].0 < w[1].0),
+            "add_body should hand out ascending ids; got {ids:?}"
+        );
+        let mut expected: Vec<(u64, u64)> = Vec::new();
+        for a in 0..ids.len() {
+            for b in (a + 1)..ids.len() {
+                expected.push((ids[a].0, ids[b].0));
+            }
+        }
+
+        let events = world.step(1.0 / 60.0);
+        let pairs: Vec<(u64, u64)> = events
+            .iter()
+            .filter(|e| e.state != ContactState::Exited)
+            .map(|e| (e.body_a.0, e.body_b.0))
+            .collect();
+
+        // Exact count, not `>= 1`: it proves the sweep really visited every
+        // unordered pair rather than bailing out early on one of them.
+        assert_eq!(
+            pairs.len(),
+            (N * (N - 1) / 2) as usize,
+            "every unordered pair of overlapping bodies should report a contact"
+        );
+        for w in pairs.windows(2) {
+            assert!(
+                w[0] < w[1],
+                "contact events must come out in ascending (body_a, body_b) \
+                 order; got {:?} before {:?} — the broad-phase sweep is \
+                 iterating bodies in HashMap order again (pat-21oab.1)",
+                w[0],
+                w[1]
+            );
+        }
+        // Ascending alone would still hold if the sweep dropped a pair and
+        // reported a different set; this pins the exact sequence.
+        assert_eq!(pairs, expected, "unexpected contact pair sequence");
+    }
+
+    /// pat-21oab.1 regression at the symptom level: the shape the platformer
+    /// demo failed in. Eight identically built worlds inside ONE process —
+    /// every `HashMap` gets its own `RandomState`, so under the bug these
+    /// disagree, which is why `deterministic_two_runs_identical` passed about 2
+    /// runs in 6. Bit equality, not an epsilon: physics fed identical inputs
+    /// must reproduce exactly.
+    #[test]
+    fn repeated_runs_in_one_process_are_bit_identical() {
+        fn run() -> Vec<(f32, f32)> {
+            let mut world = PhysicsWorld2D::new();
+            let player = world.add_body(PhysicsBody2D::new(
+                BodyId(0),
+                BodyType::Rigid,
+                Vector2::new(100.0, 400.0),
+                Shape2D::Circle { radius: 16.0 },
+                1.0,
+            ));
+            for pos in [
+                Vector2::new(200.0, 450.0),
+                Vector2::new(350.0, 380.0),
+                Vector2::new(500.0, 320.0),
+            ] {
+                world.add_body(static_rect(pos, Vector2::new(60.0, 10.0)));
+            }
+            world.add_body(static_rect(
+                Vector2::new(320.0, 550.0),
+                Vector2::new(320.0, 20.0),
+            ));
+
+            let mut history = Vec::new();
+            for frame in 0..120 {
+                if let Some(body) = world.get_body_mut(player) {
+                    body.linear_velocity.x = 200.0;
+                    if frame == 35 {
+                        body.apply_impulse(Vector2::new(0.0, -400.0));
+                    }
+                    body.apply_force(Vector2::new(0.0, 980.0));
+                }
+                world.step(1.0 / 60.0);
+                let p = world.get_body(player).unwrap().position;
+                history.push((p.x, p.y));
+            }
+            history
+        }
+
+        let first = run();
+        for attempt in 1..8 {
+            assert_eq!(
+                run(),
+                first,
+                "run {attempt} diverged from run 0 — physics is order-dependent \
+                 on HashMap iteration again (pat-21oab.1)"
+            );
+        }
     }
 }

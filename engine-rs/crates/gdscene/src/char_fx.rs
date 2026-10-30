@@ -18,23 +18,47 @@
 //! Script-defined custom effects are NOT dispatched here. The ClassDB surface
 //! for `RichTextEffect`/`CharFXTransform` is registered
 //! (`gdobject::register_2d_classes`) and this module is shaped to accept that
-//! call, but four things are missing before `_process_custom_fx` can run:
+//! call, but things are missing before `_process_custom_fx` can run. Two of the
+//! four originally listed below have since been struck off — 1 was never a
+//! blocker and 4 was cleared by pat-fk17e.1 — so **2 and 3 are the real
+//! remaining work** (pat-fk17e.2). The struck entries are kept rather than
+//! deleted because each was believed to be a blocker and the reason it is not
+//! is the useful part; a bare count here would go stale again.
 //!
-//! 1. `draw_control` takes `&SceneTree` — calling a script needs `&mut`.
+//! 1. ~~`draw_control` takes `&SceneTree` — calling a script needs `&mut`.~~
+//!    **NOT a blocker (pat-fk17e.2).** This reads as though the feature needs
+//!    `&mut` threaded through `draw_control`, which would reach every caller of
+//!    `control_draw_items` including the editor viewport. It does not: the
+//!    sanctioned shape is a PRE-PASS that runs the scripts with `&mut self`,
+//!    caches what they produced, and lets the immutable draw path read the
+//!    cache. There are already two of them —
+//!    [`SceneTree::flush_pending_redraws`](crate::scene_tree::SceneTree::flush_pending_redraws)
+//!    for a node's own `_draw`, and
+//!    [`SceneTree::flush_scripted_resources`](crate::scene_tree::SceneTree::flush_scripted_resources)
+//!    for scripted `StyleBox`/`Texture2D` (pat-s3rrv.160), whose doc-comment
+//!    spells out this exact argument. Custom effects want a third of the same
+//!    shape, not a signature change.
 //! 2. `RichTextLabel` has no `custom_effects` property to hold effect
 //!    instances, and nothing maps a BBCode tag to an effect's `bbcode`.
 //! 3. `CharFXTransform` has no `Variant` encoding, so it cannot cross
 //!    `ScriptInstance::call_method(&[Variant])` and come back mutated.
-//! 4. The one script-attachment path that exists (`instantiate_script`) models
-//!    a scripted "Resource" as a phantom `Node` parented under the scene root —
-//!    `ResourceRef { path, class_name, properties }` has no script slot of its
-//!    own — so there is no true Resource to hang an effect on.
+//! 4. ~~There is no script-backed Resource to hang an effect on.~~ **CLEARED by
+//!    pat-fk17e.1.** A GDScript that `extends Resource` now instantiates as an
+//!    object carrying a `ScriptInstance`, via the scene accessor's
+//!    `instantiate_script_resource`, and `load("res://effect.tres")` on a
+//!    `.tres` with `script = ExtResource(..)` yields that object. See
+//!    `crate::scripting`'s module doc for why the instance id — not a `script`
+//!    field on `ResourceRef` — is the representation. The object is still a
+//!    phantom `Node` under the scene root, which is a carrier limitation rather
+//!    than an absence of the thing.
 //!
-//! Any of those alone would block it; together they are a separate bead.
+//! Any of 1–3 alone would block it; together they are a separate bead
+//! (pat-fk17e.2).
 
 use std::collections::HashMap;
 
-use gdcore::math::{Color, Vector2};
+use gdcore::math::{Color, Vector2, Vector2i};
+use gdvariant::Variant;
 
 /// The mutable per-glyph payload an effect writes to — Godot's
 /// `CharFXTransform`, minus the fields that need a live font/RID.
@@ -83,6 +107,207 @@ impl CharFXTransform {
             glyph_count: range.1.saturating_sub(range.0),
         }
     }
+
+    // -- script-visible surface (pat-fk17e.2) -------------------------------
+
+    /// The property bag a script sees as the `char_fx` argument of
+    /// `_process_custom_fx`.
+    ///
+    /// This is how a `CharFXTransform` crosses into a script without a new
+    /// `Variant` type: it rides as the property bag of a phantom node, so the
+    /// script's `char_fx.offset = …` is serviced by the existing
+    /// `set_node_property` path and the mutation lands in the tree, where
+    /// [`read_back`](Self::read_back) collects it. See the module docs.
+    ///
+    /// ⚠️ The names come from the ClassDB registration, NOT from this struct's
+    /// fields. `glyph_flags` and `glyph_index` are registered with no field
+    /// here, and are seeded with their registered defaults so a script reading
+    /// one sees `0` rather than `Nil` — a `Nil` would make
+    /// `char_fx.glyph_index + 1` a hard runtime error in GDScript rather than
+    /// an unused value.
+    pub fn to_properties(&self) -> Vec<(String, Variant)> {
+        vec![
+            // Registered but not modelled: seeded at its default so arithmetic
+            // on it does not fault.
+            ("glyph_flags".to_string(), Variant::Int(0)),
+            // Godot types `range` as Vector2i (start, end).
+            (
+                "range".to_string(),
+                Variant::Vector2i(Vector2i::new(self.range.0 as i32, self.range.1 as i32)),
+            ),
+            // ⚠️ `Variant::Float` is f64 while this field is f32. The cast is
+            // mandatory, not cosmetic — mixing the two silently is how a
+            // previous sweep took the workspace down.
+            (
+                "elapsed_time".to_string(),
+                Variant::Float(f64::from(self.elapsed_time)),
+            ),
+            ("visible".to_string(), Variant::Bool(self.visible)),
+            ("outline".to_string(), Variant::Bool(self.outline)),
+            ("offset".to_string(), Variant::Vector2(self.offset)),
+            ("color".to_string(), Variant::Color(self.color)),
+            (
+                "env".to_string(),
+                Variant::Dictionary(
+                    self.env
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Variant::String(v.clone())))
+                        .collect::<HashMap<String, Variant>>()
+                        .into(),
+                ),
+            ),
+            ("glyph_index".to_string(), Variant::Int(0)),
+            (
+                "glyph_count".to_string(),
+                Variant::Int(self.glyph_count as i64),
+            ),
+            (
+                "relative_index".to_string(),
+                Variant::Int(self.relative_index as i64),
+            ),
+            (
+                "absolute_index".to_string(),
+                Variant::Int(self.absolute_index as i64),
+            ),
+        ]
+    }
+
+    /// Collects what `_process_custom_fx` wrote back onto the phantom node.
+    ///
+    /// Only `offset`, `color` and `visible` are read: those are the three the
+    /// draw path honours, and they are what Godot documents an effect as
+    /// setting. `get` is the node-property reader.
+    ///
+    /// ⚠️ A property the script did not touch must keep the value it was
+    /// SEEDED with, so each read falls through to the current field on a type
+    /// mismatch or `Nil`. Defaulting to `Vector2::ZERO`/`visible = true`
+    /// instead would silently discard a built-in effect's contribution when
+    /// both apply to the same glyph.
+    pub fn read_back(&mut self, get: impl Fn(&str) -> Variant) {
+        if let Variant::Vector2(v) = get("offset") {
+            self.offset = v;
+        }
+        if let Variant::Color(c) = get("color") {
+            self.color = c;
+        }
+        if let Variant::Bool(b) = get("visible") {
+            self.visible = b;
+        }
+    }
+}
+
+/// Resolves a BBCode opener to the installed custom effect that claims it.
+///
+/// `effects` is `(effect object id, its `bbcode` property)`, in the order they
+/// appear in `RichTextLabel.custom_effects`; the FIRST match wins, which is
+/// Godot's behaviour for two effects declaring the same tag.
+///
+/// ⚠️ Matched case-insensitively **because the BBCode parser lowercases the tag
+/// before it gets here** (`parse_tag_params(&lower)` in `control_render`). An
+/// exact compare would mean an effect whose `bbcode` is `"MyTag"` could never
+/// be reached by `[MyTag]` — it would silently degrade to plain text, which is
+/// indistinguishable from the tag not being registered at all.
+pub fn match_custom_effect(tag: &str, effects: &[(u64, String)]) -> Option<u64> {
+    effects
+        .iter()
+        .find(|(_, bbcode)| bbcode.eq_ignore_ascii_case(tag))
+        .map(|(id, _)| *id)
+}
+
+// ---------------------------------------------------------------------------
+// Pre-pass result cache (pat-fk17e.2)
+// ---------------------------------------------------------------------------
+
+/// Node-property key: per-glyph offsets the pre-pass produced.
+pub const CHARFX_CACHE_OFFSET: &str = "__charfx_offset__";
+/// Node-property key: per-glyph colors the pre-pass produced.
+pub const CHARFX_CACHE_COLOR: &str = "__charfx_color__";
+/// Node-property key: per-glyph visibility, `1` visible and `0` hidden.
+pub const CHARFX_CACHE_VISIBLE: &str = "__charfx_visible__";
+
+/// Packs the pre-pass's per-glyph results into node properties on the label.
+///
+/// The three arrays are DENSE and indexed by absolute glyph index, so the draw
+/// path can index straight in without carrying a map. `results[i]` is glyph `i`
+/// of the label's tag-stripped text.
+///
+/// ⚠️ Why node properties rather than a field on `SceneTree` (which is where
+/// `flush_pending_redraws` puts `custom_draw_commands`): the engine-internal
+/// `__`-prefixed node property is an established carrier in this crate — the
+/// `.tres` loader already hands the scripted-resource pre-pass its input as a
+/// `__resscript__<prop>` companion — and it keeps this change out of
+/// `scene_tree.rs`. A `SceneTree` field is the tidier home and is worth
+/// revisiting; it is avoided here only to stay out of a contended file.
+pub fn cache_to_properties(results: &[CharFXTransform]) -> Vec<(String, Variant)> {
+    vec![
+        (
+            CHARFX_CACHE_OFFSET.to_string(),
+            Variant::PackedVector2Array(results.iter().map(|fx| fx.offset).collect()),
+        ),
+        (
+            CHARFX_CACHE_COLOR.to_string(),
+            Variant::PackedColorArray(results.iter().map(|fx| fx.color).collect()),
+        ),
+        (
+            CHARFX_CACHE_VISIBLE.to_string(),
+            Variant::PackedByteArray(results.iter().map(|fx| u8::from(fx.visible)).collect()),
+        ),
+    ]
+}
+
+/// What the pre-pass produced, as the draw path sees it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CharFXCache {
+    offsets: Vec<Vector2>,
+    colors: Vec<Color>,
+    visible: Vec<u8>,
+}
+
+impl CharFXCache {
+    /// Reads the cache off a node. `get` is the node-property reader.
+    ///
+    /// A missing or wrongly-typed property yields an EMPTY cache rather than a
+    /// partial one, so a label with no custom effects — the overwhelmingly
+    /// common case — costs three reads and nothing else.
+    pub fn from_properties(get: impl Fn(&str) -> Variant) -> Self {
+        let offsets = match get(CHARFX_CACHE_OFFSET) {
+            Variant::PackedVector2Array(v) => v,
+            _ => Vec::new(),
+        };
+        let colors = match get(CHARFX_CACHE_COLOR) {
+            Variant::PackedColorArray(v) => v,
+            _ => Vec::new(),
+        };
+        let visible = match get(CHARFX_CACHE_VISIBLE) {
+            Variant::PackedByteArray(v) => v,
+            _ => Vec::new(),
+        };
+        Self {
+            offsets,
+            colors,
+            visible,
+        }
+    }
+
+    /// Whether anything was cached at all.
+    pub fn is_empty(&self) -> bool {
+        self.offsets.is_empty()
+    }
+
+    /// One glyph's result, or `None` when this glyph had no custom effect.
+    ///
+    /// ⚠️ `None` on a short or ragged cache is the load-bearing behaviour, not
+    /// a convenience. The draw path falls back to drawing the glyph normally,
+    /// so a cache that is missing, stale or shorter than the text leaves the
+    /// text VISIBLE and unmoved. Returning a default `(ZERO, white, true)`
+    /// instead would silently repaint every glyph white, and defaulting
+    /// `visible` the other way would make a stale cache erase the label.
+    pub fn get(&self, glyph: usize) -> Option<(Vector2, Color, bool)> {
+        let offset = *self.offsets.get(glyph)?;
+        let color = *self.colors.get(glyph)?;
+        let visible = *self.visible.get(glyph)? != 0;
+        Some((offset, color, visible))
+    }
 }
 
 /// Godot's built-in BBCode effects. Each is a pure function of the glyph's
@@ -106,6 +331,25 @@ pub enum BuiltinEffect {
     },
     /// `[pulse freq=1 ease=-2]` — alpha breathes between 1 and `1 - height`.
     Pulse { frequency: f32, height: f32 },
+    /// A script-defined effect from `RichTextLabel.custom_effects`, carrying
+    /// the effect object's id (pat-fk17e.2).
+    ///
+    /// ⚠️ Two things about this variant are deliberate and easy to get wrong.
+    ///
+    /// **It widens the enum past its name.** `BuiltinEffect` is now "an effect
+    /// a span can carry", not only a built-in one. Renaming the type would
+    /// touch every call site and all of this module's tests for no behavioural
+    /// gain, so the name is left and this note carries the truth instead.
+    ///
+    /// **[`apply`](Self::apply) does NOTHING for it, by construction.** Every
+    /// other variant is a pure function of `(relative_index, elapsed_time)`;
+    /// a script-defined effect cannot be, because its result comes from running
+    /// GDScript, which needs `&mut SceneTree` and so happens in a pre-pass
+    /// before the draw. The draw path reads that pre-pass's cached result
+    /// instead of calling `apply`. Anything new that calls `apply` on a
+    /// `Custom` and expects a mutation will silently get none — which is why
+    /// `apply`'s arm for it says so rather than being an unremarked `{}`.
+    Custom { effect: u64 },
 }
 
 /// `2*PI` as f32 — the period of the trig-driven effects.
@@ -220,6 +464,14 @@ impl BuiltinEffect {
                 let wave = ((t * frequency * TAU).sin() + 1.0) * 0.5; // [0,1]
                 fx.color.a *= 1.0 - height * (1.0 - wave);
             }
+            // ⚠️ Intentionally no mutation. A script-defined effect's result
+            // cannot be computed here: it comes from running GDScript, which
+            // needs `&mut SceneTree`, so it is produced by the pre-pass and the
+            // draw path reads the cache instead of calling this. Left as an
+            // explicit arm rather than a `_ => {}` so that a future variant
+            // cannot fall into it by accident, and so this silence is on the
+            // record rather than looking like an omission (pat-fk17e.2).
+            BuiltinEffect::Custom { effect: _ } => {}
         }
     }
 }
@@ -491,5 +743,266 @@ mod tests {
         // A non-built-in tag is not ours — the caller decides what to do.
         assert_eq!(BuiltinEffect::parse("ghost", &p(&[])), None);
         assert_eq!(BuiltinEffect::parse("b", &p(&[])), None);
+    }
+
+    // -- script-visible surface (pat-fk17e.2) -------------------------------
+
+    /// Helper: the property bag as a lookup, the way the phantom node holds it.
+    fn bag(fx: &CharFXTransform) -> HashMap<String, Variant> {
+        fx.to_properties().into_iter().collect()
+    }
+
+    /// The seeded names are exactly ClassDB's, including the two registered
+    /// properties this struct has no field for.
+    #[test]
+    fn the_property_bag_covers_every_registered_name() {
+        let b = bag(&fx_at(3, 10, 0.5));
+        for name in [
+            "glyph_flags",
+            "range",
+            "elapsed_time",
+            "visible",
+            "outline",
+            "offset",
+            "color",
+            "env",
+            "glyph_index",
+            "glyph_count",
+            "relative_index",
+            "absolute_index",
+        ] {
+            assert!(b.contains_key(name), "{name} must be seeded");
+            assert_ne!(
+                b[name],
+                Variant::Nil,
+                "{name} must be seeded with a value, not Nil — \
+                 arithmetic on a Nil property is a hard error in GDScript"
+            );
+        }
+        assert_eq!(
+            b.len(),
+            12,
+            "no extra names, so a script sees Godot's surface"
+        );
+    }
+
+    /// ⚠️ `Variant::Float` is f64 and `elapsed_time` is f32. This pins the cast
+    /// rather than the type: a value that does not survive the trip is the bug.
+    #[test]
+    fn elapsed_time_crosses_as_a_float_without_losing_its_value() {
+        let b = bag(&fx_at(0, 4, 0.25));
+        assert_eq!(b["elapsed_time"], Variant::Float(0.25));
+    }
+
+    #[test]
+    fn indices_and_range_cross_with_godots_types() {
+        let b = bag(&fx_at(7, 10, 0.0));
+        assert_eq!(b["range"], Variant::Vector2i(Vector2i::new(0, 10)));
+        assert_eq!(b["relative_index"], Variant::Int(7));
+        assert_eq!(b["absolute_index"], Variant::Int(7));
+        assert_eq!(b["glyph_count"], Variant::Int(10));
+    }
+
+    /// A script writing `char_fx.offset` is read back; this is the whole point
+    /// of the round trip.
+    #[test]
+    fn read_back_collects_what_the_script_wrote() {
+        let mut fx = fx_at(0, 4, 0.0);
+        let written: HashMap<String, Variant> = [
+            (
+                "offset".to_string(),
+                Variant::Vector2(Vector2::new(3.0, -4.0)),
+            ),
+            ("visible".to_string(), Variant::Bool(false)),
+            (
+                "color".to_string(),
+                Variant::Color(Color::new(1.0, 0.0, 0.0, 1.0)),
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        fx.read_back(|k| written.get(k).cloned().unwrap_or(Variant::Nil));
+
+        assert_eq!(fx.offset, Vector2::new(3.0, -4.0));
+        assert!(!fx.visible, "returning false must hide the glyph");
+        assert_eq!(fx.color, Color::new(1.0, 0.0, 0.0, 1.0));
+    }
+
+    /// ⚠️ The control that makes the test above mean something: a property the
+    /// script never touched must KEEP its seeded value, not snap to a default.
+    /// A read-back that zeroed `offset` would silently erase a built-in
+    /// effect's contribution to the same glyph, and the assertion above would
+    /// still pass.
+    #[test]
+    fn read_back_leaves_untouched_properties_alone() {
+        let mut fx = fx_at(0, 4, 0.0);
+        fx.offset = Vector2::new(9.0, 9.0);
+        fx.visible = false;
+        fx.color = Color::new(0.0, 1.0, 0.0, 1.0);
+
+        // A script that wrote nothing at all.
+        fx.read_back(|_| Variant::Nil);
+
+        assert_eq!(fx.offset, Vector2::new(9.0, 9.0), "offset survived");
+        assert!(!fx.visible, "visible survived");
+        assert_eq!(fx.color, Color::new(0.0, 1.0, 0.0, 1.0), "color survived");
+    }
+
+    /// A wrong-typed write is ignored rather than coerced — the seeded value is
+    /// more trustworthy than a guess at what the script meant.
+    #[test]
+    fn read_back_ignores_a_wrongly_typed_write() {
+        let mut fx = fx_at(0, 4, 0.0);
+        fx.offset = Vector2::new(1.0, 2.0);
+        fx.read_back(|k| match k {
+            "offset" => Variant::Int(5),
+            _ => Variant::Nil,
+        });
+        assert_eq!(fx.offset, Vector2::new(1.0, 2.0));
+    }
+
+    #[test]
+    fn env_params_reach_the_script_as_a_dictionary() {
+        let mut fx = fx_at(0, 4, 0.0);
+        fx.env.insert("speed".to_string(), "2".to_string());
+        let b = bag(&fx);
+        let Variant::Dictionary(d) = &b["env"] else {
+            panic!("env must cross as a Dictionary, got {:?}", b["env"]);
+        };
+        assert_eq!(
+            d.get(Variant::String("speed".to_string())),
+            Some(Variant::String("2".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_custom_effect_is_matched_by_its_bbcode_tag() {
+        let effects = vec![(11u64, "mytag".to_string()), (22u64, "other".to_string())];
+        assert_eq!(match_custom_effect("mytag", &effects), Some(11));
+        assert_eq!(match_custom_effect("other", &effects), Some(22));
+        assert_eq!(match_custom_effect("absent", &effects), None);
+        assert_eq!(match_custom_effect("mytag", &[]), None);
+    }
+
+    /// ⚠️ The parser lowercases the tag before this is called, so an effect
+    /// declaring `bbcode = "MyTag"` must still be reachable by `[MyTag]`.
+    /// An exact compare would degrade it to plain text, indistinguishable from
+    /// the tag never having been registered.
+    #[test]
+    fn tag_matching_survives_the_parsers_lowercasing() {
+        let effects = vec![(7u64, "MyTag".to_string())];
+        assert_eq!(match_custom_effect("mytag", &effects), Some(7));
+    }
+
+    /// Two effects claiming one tag: first wins, as in Godot.
+    #[test]
+    fn the_first_effect_claiming_a_tag_wins() {
+        let effects = vec![(1u64, "dup".to_string()), (2u64, "dup".to_string())];
+        assert_eq!(match_custom_effect("dup", &effects), Some(1));
+    }
+
+    // -- pre-pass result cache (pat-fk17e.2) --------------------------------
+
+    /// Round trip: what the pre-pass packed is what the draw path reads.
+    #[test]
+    fn the_cache_round_trips_per_glyph_results() {
+        let mut a = fx_at(0, 2, 0.0);
+        a.offset = Vector2::new(1.0, 2.0);
+        a.color = Color::new(1.0, 0.0, 0.0, 1.0);
+        let mut b = fx_at(1, 2, 0.0);
+        b.offset = Vector2::new(-3.0, 4.0);
+        b.visible = false;
+
+        let packed: HashMap<String, Variant> = cache_to_properties(&[a, b]).into_iter().collect();
+        let cache =
+            CharFXCache::from_properties(|k| packed.get(k).cloned().unwrap_or(Variant::Nil));
+
+        assert!(!cache.is_empty());
+        assert_eq!(
+            cache.get(0),
+            Some((Vector2::new(1.0, 2.0), Color::new(1.0, 0.0, 0.0, 1.0), true))
+        );
+        assert_eq!(
+            cache.get(1),
+            Some((Vector2::new(-3.0, 4.0), Color::WHITE, false)),
+            "an effect returning false must survive as hidden"
+        );
+    }
+
+    /// ⚠️ The most important cache test: a label with no custom effects reads
+    /// an EMPTY cache and every `get` says `None`, so the draw path takes its
+    /// normal route. If this returned a default instead, every ordinary label
+    /// in the engine would get repainted.
+    #[test]
+    fn a_label_with_no_custom_effects_has_an_empty_cache() {
+        let cache = CharFXCache::from_properties(|_| Variant::Nil);
+        assert!(cache.is_empty());
+        assert_eq!(cache.get(0), None);
+        assert_eq!(cache.get(99), None);
+    }
+
+    /// A wrongly-typed property is treated as absent, not coerced.
+    #[test]
+    fn a_wrongly_typed_cache_property_reads_as_absent() {
+        let cache = CharFXCache::from_properties(|_| Variant::Int(7));
+        assert!(cache.is_empty());
+        assert_eq!(cache.get(0), None);
+    }
+
+    /// ⚠️ A glyph past the end of the cache yields `None`, so a stale or short
+    /// cache leaves that glyph drawn normally — VISIBLE and unmoved. The
+    /// alternative (defaulting `visible`) would let a stale cache blank the
+    /// label, which is the worst available failure for a text control.
+    #[test]
+    fn a_glyph_past_the_end_of_the_cache_falls_back_rather_than_vanishing() {
+        let one = fx_at(0, 1, 0.0);
+        let packed: HashMap<String, Variant> = cache_to_properties(&[one]).into_iter().collect();
+        let cache =
+            CharFXCache::from_properties(|k| packed.get(k).cloned().unwrap_or(Variant::Nil));
+
+        assert!(cache.get(0).is_some(), "the cached glyph is there");
+        assert_eq!(cache.get(1), None, "the uncached one falls back");
+    }
+
+    /// A ragged cache — arrays of different lengths — must not panic, and must
+    /// fall back for any glyph it cannot fully answer.
+    #[test]
+    fn a_ragged_cache_falls_back_instead_of_panicking() {
+        let packed: HashMap<String, Variant> = [
+            (
+                CHARFX_CACHE_OFFSET.to_string(),
+                Variant::PackedVector2Array(vec![Vector2::ZERO, Vector2::ZERO]),
+            ),
+            (
+                CHARFX_CACHE_COLOR.to_string(),
+                Variant::PackedColorArray(vec![Color::WHITE]),
+            ),
+            (
+                CHARFX_CACHE_VISIBLE.to_string(),
+                Variant::PackedByteArray(vec![1]),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let cache =
+            CharFXCache::from_properties(|k| packed.get(k).cloned().unwrap_or(Variant::Nil));
+
+        assert!(cache.get(0).is_some());
+        assert_eq!(cache.get(1), None, "offset alone is not an answer");
+    }
+
+    /// `apply` is deliberately inert for a script-defined effect; the draw path
+    /// reads the cache instead. Pinned so a later refactor that quietly makes
+    /// it mutate — or that removes the arm — is caught here.
+    #[test]
+    fn apply_does_nothing_for_a_script_defined_effect() {
+        let mut fx = fx_at(3, 10, 0.75);
+        let before = fx.clone();
+        BuiltinEffect::Custom { effect: 42 }.apply(&mut fx);
+        assert_eq!(
+            fx, before,
+            "a custom effect's result comes from the pre-pass"
+        );
     }
 }

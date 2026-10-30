@@ -8307,13 +8307,48 @@ fn audio_keys_in_range(
 /// This reuses the tween layer's `split_property_path`/`write_subname` rather
 /// than re-deriving the component table: the two paths must agree on what
 /// `position:x` means, and a second implementation is a second thing to drift.
-/// A subname that names no component of the base value (or a base that is still
-/// `Nil` because nothing seeded it) leaves the property untouched, which is the
-/// same conservative choice the tween path makes.
+/// A subname that names no component of the base value leaves the property
+/// untouched, which is the same conservative choice the tween path makes.
+///
+/// 🔑 A compound property the scene never wrote reads back `Nil`, and a
+/// component write onto `Nil` is DROPPED — so animating `modulate:a` on a node
+/// whose `modulate` was never assigned was a silent no-op (pat-21oab). In Godot
+/// every `CanvasItem` has `modulate = Color(1, 1, 1, 1)` from the start, so
+/// `[animate modulate:a]` on a fresh node is entirely ordinary and must work.
+/// The base is therefore seeded before the component write.
+///
+/// ⚠️ Seeded from the ClassDB default rather than a hand-picked one.
+/// `write_subname` already materialises a `Vector2` for a `Nil` base on
+/// `x`/`y` — but as `(f, 0.0)`, so animating `scale:x` on an unassigned `scale`
+/// silently collapses `y` to **0** instead of Godot's `1`. The registered
+/// default is the only source that gets `modulate` (white), `scale` (one) and
+/// everything after them right without guessing per property.
+///
+/// ⚠️ Two layers do this, and both are needed (pat-21oab).
+///
+/// `write_subname` now materialises a `Nil` base for colour components too, so
+/// the common case works with NO registry at all — which matters because
+/// `class_db`'s registry starts EMPTY and is only populated by
+/// `register_all_classes()`. A bare `SceneTree` test never calls that, so a
+/// ClassDB-only fix is a silent no-op exactly where it is easiest to test.
+///
+/// The seeding here is still worth having on top: the registered default is the
+/// only source that knows `scale` defaults to ONE while `position` defaults to
+/// ZERO, which a subname alone cannot distinguish. So when the registry IS
+/// populated, `scale:x` on an unassigned `scale` keeps `y = 1` instead of
+/// collapsing it to 0. An unregistered class or property yields `None` from
+/// `property_get_revert` and simply leaves the base to `write_subname`.
 fn set_animated_property_path(node: &mut Node, path: &str, value: Variant) {
     match crate::tween::split_property_path(path) {
         (prop, Some(sub)) => {
-            let base = node.get_property(prop);
+            let mut base = node.get_property(prop);
+            if base == Variant::Nil {
+                if let Some(default) =
+                    gdobject::class_db::property_get_revert(node.class_name(), prop)
+                {
+                    base = default;
+                }
+            }
             if let Some(updated) = crate::tween::write_subname(&base, sub, &value) {
                 node.set_property(prop, updated);
             }

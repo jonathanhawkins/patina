@@ -737,16 +737,30 @@ mod tests {
         assert!(!b.get_bit(2, 0) && !b.get_bit(3, 3));
 
         // Alpha exactly equal to the threshold is FALSE (`> threshold`).
+        //
+        // 🔑 The alpha MUST be a value `Rgba8` can hold exactly, and `0.5` is
+        // not one (pat-21oab). This assertion was red at HEAD for exactly that
+        // reason: `set_pixel` quantizes with `(v * 255.0 + 0.5) as u8`
+        // (image.rs), and 0.5 × 255 = 127.5 is not an integer, so 0.5 stored as
+        // **128** and `get_pixel` read back 128/255 = 0.50196… — which really is
+        // `> 0.5`, so the bit really was set and the test could never pass. The
+        // implementation was right the whole time; the fixture asked an 8-bit
+        // channel for a value it cannot represent.
+        //
+        // `128.0 / 255.0` round-trips bit-for-bit: it stores 128 and reads back
+        // the identical `f32`, which is what makes "exactly equal" testable at
+        // all here.
+        let exact = 128.0 / 255.0;
         let mut img = Image::create(1, 1, ImageFormat::Rgba8);
-        img.set_pixel(0, 0, Color::new(1.0, 1.0, 1.0, 0.5));
+        img.set_pixel(0, 0, Color::new(1.0, 1.0, 1.0, exact));
         let mut eq = BitMap::new();
-        eq.create_from_image_alpha(&img, 0.5);
+        eq.create_from_image_alpha(&img, exact);
         assert!(
             !eq.get_bit(0, 0),
             "alpha == threshold must be false: Godot tests `alpha > threshold`"
         );
         let mut below = BitMap::new();
-        below.create_from_image_alpha(&img, 0.49);
+        below.create_from_image_alpha(&img, exact - 0.01);
         assert!(
             below.get_bit(0, 0),
             "alpha just above the threshold is true"

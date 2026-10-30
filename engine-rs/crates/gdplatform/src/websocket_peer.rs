@@ -7,13 +7,31 @@
 //!
 //! The RFC 6455 handshake, frame masking, and the text/binary/close/ping/pong
 //! codec are implemented from scratch (including a tiny SHA-1 + base64) so the
-//! library pulls in **no** new runtime dependencies. Only plaintext `ws://` is
-//! wired; `wss://` reports [`WebSocketError::TlsUnsupported`].
+//! library pulls in **no** new runtime dependencies. On native targets only
+//! plaintext `ws://` is wired; `wss://` reports
+//! [`WebSocketError::TlsUnsupported`].
+//!
+//! On `wasm32` the socket comes from the browser instead
+//! ([`crate::websocket_web`], pat-s3rrv.264), which is how Godot's Web export
+//! works: `emws_peer.cpp` hands the URL to the browser's `WebSocket`, so the
+//! browser owns the handshake, the framing and the TLS. **Both `ws://` and
+//! `wss://` therefore work on wasm32** even though the codec below has no TLS
+//! stack. The branch is taken inside [`WebSocketPeer::browser_connect`]; every
+//! public method keeps a single definition, and the five `browser_*` helpers
+//! below are the only places the two transports differ.
 
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// `std::time::Instant::now()` panics on `wasm32-unknown-unknown` — and
+// `WebSocketPeer::new()` calls it, so the browser backend could not construct a
+// peer at all with the std clock. `web_time::Instant` re-exports
+// `std::time::Instant` on native (identical behavior and cost) and is backed by
+// `performance.now()` on wasm32; `os.rs` uses it for the same reason
+// (pat-u3l8c.109).
+use web_time::Instant;
 
 use thiserror::Error;
 
@@ -395,11 +413,35 @@ pub struct WebSocketPeer {
     /// Cap on queued inbound packets (Godot
     /// `WebSocketPeer.max_queued_packets`, default `4096`).
     max_queued_packets: usize,
+    /// Handle into the browser `WebSocket` registry in
+    /// [`crate::websocket_web`], set instead of `stream` on wasm32.
+    ///
+    /// ⚠️ A `u64` rather than the socket itself because `js_sys::Closure` and
+    /// `Rc` are neither `Send` nor `Sync`, and this struct lives inside the
+    /// `static Mutex<HashMap<u64, WebSocketPeer>>` handle table further down
+    /// this file — which requires `Send`. See the `websocket_web` module docs.
+    #[cfg(target_arch = "wasm32")]
+    browser: Option<u64>,
 }
 
 impl Default for WebSocketPeer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Releases the browser socket when the peer goes away (pat-s3rrv.264).
+///
+/// ⚠️ wasm32 only, and not optional there: the registry in
+/// [`crate::websocket_web`] owns the JS `WebSocket` *and* the event closures JS
+/// holds as its handlers, so a peer dropped without `close()` — a script
+/// letting the `Ref` go, a `WebSocketMultiplayerPeer` replacing its client —
+/// would strand both for the lifetime of the page. The browser cannot collect
+/// them, because from JS's side the handlers are still live references.
+#[cfg(target_arch = "wasm32")]
+impl Drop for WebSocketPeer {
+    fn drop(&mut self) {
+        self.release_browser();
     }
 }
 
@@ -428,6 +470,8 @@ impl WebSocketPeer {
             last_heartbeat: Instant::now(),
             heartbeat_waiting: false,
             max_queued_packets: 4096,
+            #[cfg(target_arch = "wasm32")]
+            browser: None,
         }
     }
 
@@ -492,6 +536,11 @@ impl WebSocketPeer {
     /// connection.
     pub fn set_max_queued_packets(&mut self, max: i64) {
         self.max_queued_packets = max.max(1) as usize;
+        // The browser's inbound queue is filled by an event handler, not by
+        // `poll`, so it carries its own copy of the cap. Without this a peer
+        // re-capped after connecting would keep buffering at the old limit
+        // (pat-s3rrv.264).
+        self.sync_browser_queue_cap();
     }
 
     /// The configured queue cap.
@@ -503,10 +552,178 @@ impl WebSocketPeer {
         &self.handshake_headers
     }
 
+    // -- browser transport seam (pat-s3rrv.264) -----------------------------
+    //
+    // Five shims, each with a wasm32 body and a native body that declines. They
+    // exist as cfg'd *items* so every public method keeps ONE definition and
+    // the native code path below stays live code on both targets — no
+    // duplicated `connect_to_url`/`poll`/`close` to drift apart, and no
+    // `unreachable_code` or `dead_code` warnings on either target.
+
+    /// Opens the browser socket, or `None` on a build that has no browser.
+    #[cfg(target_arch = "wasm32")]
+    fn browser_connect(&mut self, url: &str) -> Option<Result<(), WebSocketError>> {
+        // A reconnect must not leave the previous socket (and its JS event
+        // closures) behind in the registry.
+        self.release_browser();
+        let handle = match crate::websocket_web::connect(
+            url,
+            &self.supported_protocols,
+            self.max_queued_packets,
+        ) {
+            Ok(handle) => handle,
+            Err(e) => return Some(Err(WebSocketError::Connect(e))),
+        };
+        self.browser = Some(handle);
+        self.requested_url = url.to_string();
+        self.state = WebSocketState::Connecting;
+        // The browser performs the handshake, so there is no key to verify and
+        // no inbound byte stream to buffer; the rest is the same per-connection
+        // reset the TCP path does.
+        self.sent_key.clear();
+        self.in_buf.clear();
+        self.packets.clear();
+        self.last_was_string = false;
+        self.close_frame_sent = false;
+        self.close_code = -1;
+        self.close_reason.clear();
+        self.frag_opcode = None;
+        self.frag_payload.clear();
+        self.selected_protocol.clear();
+        self.last_heartbeat = Instant::now();
+        self.heartbeat_waiting = false;
+        Some(Ok(()))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn browser_connect(&mut self, _url: &str) -> Option<Result<(), WebSocketError>> {
+        None
+    }
+
+    /// Drains the browser socket into the shared packet queue and republishes
+    /// its `readyState`. Returns `false` when there is no browser socket.
+    #[cfg(target_arch = "wasm32")]
+    fn browser_poll(&mut self) -> bool {
+        let Some(handle) = self.browser else {
+            return false;
+        };
+        let Some(snapshot) = crate::websocket_web::poll(handle) else {
+            // The registry entry is gone (released out from under us). Falling
+            // through to the TCP path would find no socket either, so report
+            // the peer closed rather than silently idle.
+            self.browser = None;
+            self.state = WebSocketState::Closed;
+            return true;
+        };
+        // Queued first, and unconditionally: a close in the same tick must not
+        // discard messages the browser had already delivered.
+        for (payload, was_string) in snapshot.packets {
+            self.queue_packet(payload, was_string);
+        }
+        if snapshot.state == WebSocketState::Open && self.state != WebSocketState::Open {
+            // `socket.protocol` is only meaningful once the handshake has
+            // completed, so it is read on the transition into OPEN.
+            self.selected_protocol = crate::websocket_web::selected_protocol(handle);
+        }
+        self.state = snapshot.state;
+        if snapshot.state == WebSocketState::Closed {
+            // 1006 — "abnormal closure" — is what the native path reports for a
+            // connection that died without a close frame, and it is what the
+            // browser leaves us with when no `CloseEvent` carried a code.
+            self.close_code = if snapshot.close_code >= 0 {
+                snapshot.close_code
+            } else {
+                1006
+            };
+            self.close_reason = snapshot.close_reason;
+            self.release_browser();
+        }
+        true
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn browser_poll(&mut self) -> bool {
+        false
+    }
+
+    /// Sends one message through the browser, or `None` with no browser socket.
+    #[cfg(target_arch = "wasm32")]
+    fn browser_send(&mut self, data: &[u8], text: bool) -> Option<Result<(), WebSocketError>> {
+        let handle = self.browser?;
+        Some(crate::websocket_web::send(handle, data, text).map_err(WebSocketError::Io))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn browser_send(&mut self, _data: &[u8], _text: bool) -> Option<Result<(), WebSocketError>> {
+        None
+    }
+
+    /// Starts the browser's close handshake. Returns `false` with no socket.
+    #[cfg(target_arch = "wasm32")]
+    fn browser_close(&mut self, code: u16, reason: &str) -> bool {
+        let Some(handle) = self.browser else {
+            return false;
+        };
+        if matches!(
+            self.state,
+            WebSocketState::Open | WebSocketState::Connecting
+        ) {
+            let _ = crate::websocket_web::close(handle, code, reason);
+            self.close_code = i32::from(code);
+            self.close_reason = reason.to_string();
+            self.close_frame_sent = true;
+            // ⚠️ CLOSING, not CLOSED: the browser runs the close handshake and
+            // only then fires `close`. [`browser_poll`] publishes the real
+            // `readyState`, which is also what settles CLOSED and releases the
+            // registry entry. Reporting CLOSED here would let a script believe
+            // the socket was gone while the browser was still flushing.
+            self.state = WebSocketState::Closing;
+        }
+        true
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn browser_close(&mut self, _code: u16, _reason: &str) -> bool {
+        false
+    }
+
+    /// `WebSocket.bufferedAmount`, or `None` with no browser socket.
+    #[cfg(target_arch = "wasm32")]
+    fn browser_buffered_amount(&self) -> Option<i64> {
+        self.browser.map(crate::websocket_web::buffered_amount)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn browser_buffered_amount(&self) -> Option<i64> {
+        None
+    }
+
+    /// Pushes `max_queued_packets` down to the browser's own inbound queue.
+    #[cfg(target_arch = "wasm32")]
+    fn sync_browser_queue_cap(&mut self) {
+        if let Some(handle) = self.browser {
+            crate::websocket_web::set_max_queued_packets(handle, self.max_queued_packets);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn sync_browser_queue_cap(&mut self) {}
+
+    /// Drops the browser socket and the JS closures it keeps alive.
+    #[cfg(target_arch = "wasm32")]
+    fn release_browser(&mut self) {
+        if let Some(handle) = self.browser.take() {
+            crate::websocket_web::release(handle);
+        }
+    }
+
     /// Connects to a `ws://` URL and begins the opening handshake.
     ///
     /// The peer enters [`WebSocketState::Connecting`]; call [`poll`](Self::poll)
     /// until it reaches [`WebSocketState::Open`].
+    ///
+    /// On wasm32 the browser supplies the socket, so `wss://` is accepted there
+    /// and the TCP path below is never reached (pat-s3rrv.264).
     pub fn connect_to_url(&mut self, url: &str) -> Result<(), WebSocketError> {
         let parsed = parse_url(url).ok_or_else(|| WebSocketError::InvalidUrl(url.to_string()))?;
         if !matches!(parsed.scheme.as_str(), "ws" | "wss") {
@@ -514,6 +731,9 @@ impl WebSocketPeer {
                 "scheme '{}' is not ws/wss",
                 parsed.scheme
             )));
+        }
+        if let Some(result) = self.browser_connect(url) {
+            return result;
         }
         if parsed.tls {
             return Err(WebSocketError::TlsUnsupported);
@@ -605,6 +825,9 @@ impl WebSocketPeer {
     /// Drives the connection: completes the handshake, drains inbound frames
     /// into the packet queue, answers pings, and advances the close handshake.
     pub fn poll(&mut self) {
+        if self.browser_poll() {
+            return;
+        }
         if self.stream.is_none() || self.state == WebSocketState::Closed {
             return;
         }
@@ -696,6 +919,9 @@ impl WebSocketPeer {
         if self.state != WebSocketState::Open {
             return Err(WebSocketError::NotOpen);
         }
+        if let Some(result) = self.browser_send(data, mode == WriteMode::Text) {
+            return result;
+        }
         let opcode = match mode {
             WriteMode::Text => Opcode::Text,
             WriteMode::Binary => Opcode::Binary,
@@ -739,6 +965,9 @@ impl WebSocketPeer {
 
     /// Initiates a clean close with the given code and reason.
     pub fn close(&mut self, code: u16, reason: &str) {
+        if self.browser_close(code, reason) {
+            return;
+        }
         match self.state {
             WebSocketState::Open => {
                 let mut payload = Vec::with_capacity(2 + reason.len());
@@ -828,8 +1057,11 @@ impl WebSocketPeer {
     /// use an internal buffer" — describes implementations that DO queue.
     /// **Anything that adds an outbound queue here must update this**, or a
     /// script throttling on back-pressure will read zero and never throttle.
+    ///
+    /// On wasm32 the browser IS that queue, so this reports its real
+    /// `WebSocket.bufferedAmount` (pat-s3rrv.264).
     pub fn get_current_outbound_buffered_amount(&self) -> i64 {
-        0
+        self.browser_buffered_amount().unwrap_or(0)
     }
 
     // -- internals ----------------------------------------------------------

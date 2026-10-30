@@ -32,7 +32,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use gdcore::id::ObjectId;
 
-use crate::network::{ConnectionStatus, NetworkPeer, OfflineMultiplayerPeer, PeerId};
+use crate::network::{ConnectionStatus, NetworkError, NetworkPeer, OfflineMultiplayerPeer, PeerId};
 use crate::websocket_multiplayer::WebSocketMultiplayerPeer;
 
 /// Tags an `ObjectId` issued by [`new_multiplayer_peer_handle`]. `0x4D` is
@@ -143,27 +143,32 @@ impl MultiplayerPeerHandle {
     }
 
     /// `WebSocketMultiplayerPeer.create_server(port)`. `Err` for a transport
-    /// that has no server role (the offline peer), matching Godot's `ERR_*`
-    /// return rather than panicking.
-    pub fn create_server(&mut self, port: u16) -> Result<(), String> {
+    /// that has no server role (the offline peer, or any peer in a browser
+    /// build), matching Godot's `ERR_*` return rather than panicking.
+    ///
+    /// Carries the [`NetworkError`] rather than a flattened `String` so the
+    /// caller can reach [`NetworkError::godot_error_code`]: a browser build
+    /// owes the script `ERR_UNAVAILABLE`, not `FAILED` (pat-s3rrv.264).
+    pub fn create_server(&mut self, port: u16) -> Result<(), NetworkError> {
         match self {
-            MultiplayerPeerHandle::WebSocket(p) => p
-                .create_server(("127.0.0.1", port))
-                .map(|_| ())
-                .map_err(|e| e.to_string()),
-            MultiplayerPeerHandle::Offline(_) => {
-                Err("OfflineMultiplayerPeer has no server role".to_string())
-            }
+            MultiplayerPeerHandle::WebSocket(p) => p.create_server(("127.0.0.1", port)).map(|_| ()),
+            // ⚠️ `Transport`, not `Unavailable`: this keeps the offline peer's
+            // script-visible code at `FAILED`, which is what it has always
+            // returned. Only the browser's missing server role is
+            // `ERR_UNAVAILABLE`.
+            MultiplayerPeerHandle::Offline(_) => Err(NetworkError::Transport(
+                "OfflineMultiplayerPeer has no server role".to_string(),
+            )),
         }
     }
 
     /// `WebSocketMultiplayerPeer.create_client(url)`.
-    pub fn create_client(&mut self, url: &str) -> Result<(), String> {
+    pub fn create_client(&mut self, url: &str) -> Result<(), NetworkError> {
         match self {
-            MultiplayerPeerHandle::WebSocket(p) => p.create_client(url).map_err(|e| e.to_string()),
-            MultiplayerPeerHandle::Offline(_) => {
-                Err("OfflineMultiplayerPeer has no client role".to_string())
-            }
+            MultiplayerPeerHandle::WebSocket(p) => p.create_client(url),
+            MultiplayerPeerHandle::Offline(_) => Err(NetworkError::Transport(
+                "OfflineMultiplayerPeer has no client role".to_string(),
+            )),
         }
     }
 }

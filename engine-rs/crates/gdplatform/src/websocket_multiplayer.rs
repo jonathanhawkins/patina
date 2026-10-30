@@ -14,14 +14,27 @@
 //! and framing layers.
 //!
 //! Reuses the frame codec + handshake helpers from [`crate::websocket_peer`],
-//! which keeps this transport dependency-free. Only plaintext `ws://` is wired:
-//! `wss://` is rejected by [`WebSocketPeer::connect_to_url`], and the browser
-//! (wasm) transport is not part of this module.
+//! which keeps this transport dependency-free.
+//!
+//! **Roles by target (pat-s3rrv.264).** On native, both roles work and only
+//! plaintext `ws://` is wired — `wss://` is rejected by
+//! [`WebSocketPeer::connect_to_url`]. On `wasm32` the client role works for both
+//! `ws://` and `wss://`, because [`WebSocketPeer`] hands the URL to the browser
+//! (see [`crate::websocket_web`]) and this module reaches it only through that
+//! peer's public API — `pump_client` and `send_packet` need no change. The
+//! **server role does not exist** there: a browser cannot listen on a socket, so
+//! [`create_server`](WebSocketMultiplayerPeer::create_server) answers
+//! [`NetworkError::Unavailable`] / `ERR_UNAVAILABLE`, matching Godot
+//! (`websocket_multiplayer_peer.cpp` + `platform/web/net_socket_web.h:51-60`).
 
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+// `std::time::Instant::now()` panics on `wasm32-unknown-unknown`, where the
+// client role is live. See the note in `websocket_peer.rs` (pat-u3l8c.109).
+use web_time::Instant;
 
 use crate::multiplayer_peer_state::{MultiplayerPeerSignal, MultiplayerPeerState};
 use crate::network::{
@@ -145,6 +158,38 @@ struct PendingConn {
 }
 
 // ---------------------------------------------------------------------------
+// Server-role availability (pat-s3rrv.264)
+// ---------------------------------------------------------------------------
+
+/// Whether this build can listen for inbound WebSocket connections.
+///
+/// `false` on `wasm32`: a browser page has no listen socket at all, which is why
+/// Godot's web platform stubs `NetSocket::listen` out entirely
+/// (`platform/web/net_socket_web.h:51-60`) and
+/// `WebSocketMultiplayerPeer::create_server` answers `ERR_UNAVAILABLE` there.
+///
+/// Written as a `cfg!` rather than two `#[cfg]` function bodies so that the
+/// value and the error it produces have **one** definition each, reachable from
+/// a native test — the wasm32 branch is otherwise unobservable without a
+/// browser.
+pub const fn server_role_available() -> bool {
+    !cfg!(target_arch = "wasm32")
+}
+
+/// The error [`WebSocketMultiplayerPeer::create_server`] answers with on a build
+/// where [`server_role_available`] is `false`.
+///
+/// `ERR_UNAVAILABLE`, not `FAILED`: Godot distinguishes "this attempt failed"
+/// from "this platform cannot do this", and a script that retries on failure
+/// must not retry here. See [`NetworkError::godot_error_code`].
+pub fn web_create_server_error() -> NetworkError {
+    NetworkError::Unavailable(
+        "WebSocketMultiplayerPeer has no server role in a Web build: a browser cannot listen"
+            .to_string(),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // WebSocketMultiplayerPeer
 // ---------------------------------------------------------------------------
 
@@ -202,7 +247,14 @@ impl WebSocketMultiplayerPeer {
     ///
     /// The peer is immediately `Connected` with id [`PeerId::SERVER`]; clients
     /// are accepted and handshaked by [`NetworkPeer::poll`].
+    ///
+    /// ⚠️ On a build with no server role — the browser — this refuses with
+    /// [`NetworkError::Unavailable`] (`ERR_UNAVAILABLE`) before touching the
+    /// socket. See [`server_role_available`].
     pub fn create_server<A: ToSocketAddrs>(&mut self, addr: A) -> Result<SocketAddr> {
+        if !server_role_available() {
+            return Err(web_create_server_error());
+        }
         self.close();
         let listener =
             TcpListener::bind(addr).map_err(|e| NetworkError::Transport(e.to_string()))?;
@@ -223,6 +275,12 @@ impl WebSocketMultiplayerPeer {
     /// Dials a `ws://` URL. The peer stays [`ConnectionStatus::Connecting`]
     /// until [`NetworkPeer::poll`] completes the handshake **and** the server
     /// assigns a peer id.
+    ///
+    /// On `wasm32` this is the only role that exists, and `wss://` works too:
+    /// the [`WebSocketPeer`] underneath hands the URL to the browser, so the
+    /// browser does the TLS (pat-s3rrv.264). Nothing below this line is
+    /// target-specific — the control/data envelope and `pump_client` go through
+    /// that peer's public API either way.
     pub fn create_client(&mut self, url: &str) -> Result<()> {
         self.close();
         let mut client = WebSocketPeer::new();

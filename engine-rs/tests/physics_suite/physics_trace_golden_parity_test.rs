@@ -237,6 +237,10 @@ fn golden_gravity_fall_matches_artifact() {
 // 2. Elastic bounce trace matches checked-in golden
 // ===========================================================================
 
+/// Was RED at HEAD; green again after pat-21oab.2 re-blessed
+/// `elastic_bounce_30frames` against Godot's contact-bias formula. This test is
+/// the independent check on that re-bless: it reads the golden and never writes
+/// it, and it owns its own copy of the scene.
 #[test]
 fn golden_elastic_bounce_matches_artifact() {
     let (_, trace) = run_traced(make_elastic_bounce(), 30, 1.0 / 60.0);
@@ -248,6 +252,15 @@ fn golden_elastic_bounce_matches_artifact() {
 // 3. Friction deceleration trace matches checked-in golden
 // ===========================================================================
 
+/// ⚠️ RED at HEAD, pre-existing (parent bead pat-21oab, test debt).
+///
+/// Root-caused under pat-21oab.2: the floor's `CollisionShape2D` authors
+/// `half_extents`, a property Godot 4 does not have and nothing in
+/// `engine-rs/crates/` reads, so the floor resolves to the degenerate
+/// zero-extent rectangle and never collides — the ball free-falls and `vx`
+/// never decays. The golden is no better: it records a pre-pat-0q2kx.28 default
+/// 16px circle. See `physics_integration_test::za_golden_friction_deceleration`
+/// for the full triage and the fix (author `size`, then re-bless).
 #[test]
 fn golden_friction_decel_matches_artifact() {
     let (_, trace) = run_traced(make_friction_decel(), 30, 1.0 / 60.0);
@@ -259,6 +272,11 @@ fn golden_friction_decel_matches_artifact() {
 // 4. Static blocking trace matches checked-in golden
 // ===========================================================================
 
+/// ⚠️ RED at HEAD, pre-existing (parent bead pat-21oab, test debt).
+///
+/// Same root cause as [`golden_friction_decel_matches_artifact`]: the floor is
+/// authored with `half_extents`, so it collides with nothing and the ball falls
+/// through. See `physics_integration_test::za_golden_static_body_blocking`.
 #[test]
 fn golden_static_blocking_matches_artifact() {
     let (_, trace) = run_traced(make_static_blocking(), 60, 1.0 / 60.0);

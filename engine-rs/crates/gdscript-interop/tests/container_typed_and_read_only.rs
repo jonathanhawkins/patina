@@ -6,10 +6,15 @@
 //! handle to shared storage carrying its own type constraint and read-only
 //! flag, and that state is visible through every alias.
 //!
-//! Containers cannot yet be *created* typed from a declaration
-//! (`var a: Array[int] = []`): the parser keeps that hint as a string. So the
-//! typed queries are pinned here in their untyped answers, which are Godot's
-//! answers for an untyped container.
+//! ⚠️ This file used to say containers "cannot yet be *created* typed from a
+//! declaration (`var a: Array[int] = []`)". That is no longer true — pat-s3rrv.265
+//! wires declaration hints and read-only `const` containers, and
+//! `typed_containers_from_declarations.rs` covers them.
+//!
+//! What is pinned *here* is still correct and still worth having: every typed
+//! query below is asked of a **bare literal** (`[]`, `{}`) with no declared
+//! type, and Godot's answer for an untyped container is what these assert. So
+//! these are the untyped baseline, not a record of a missing feature.
 
 use gdscript_interop::interpreter::Interpreter;
 use gdvariant::Variant;

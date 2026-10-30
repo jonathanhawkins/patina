@@ -144,15 +144,32 @@ fn characterbody2d_move_and_slide_script_dispatch() {
         "link 1: `velocity.y += gravity * delta` must reach the node property, got {vel:?}",
     );
 
-    // Link 2 — the bare `move_and_slide()` reached the native dispatch and left
-    // its one-shot request (the physics phase has not consumed it yet).
+    // Link 2 — the bare `move_and_slide()` reached the native dispatch AND the
+    // physics phase honoured it inside this same tick.
+    //
+    // ⚠️ Rewritten by pat-0q2kx.201. This used to assert the one-shot request
+    // was still `true` after the step, because the character pass ran BEFORE
+    // the script phase and so could not have consumed a request the script had
+    // not made yet. Now that `_physics_process` runs before the step (Godot's
+    // `Main::iteration` order) the request is raised and consumed in one tick,
+    // which is the whole point of the reorder — so the flag reads `false` and
+    // the body has already moved. Both halves are asserted: the `false` alone
+    // would also hold if the call never reached dispatch at all.
     assert_eq!(
         ml.tree()
             .get_node(player)
             .unwrap()
             .get_property("_move_and_slide_requested"),
-        Variant::Bool(true),
-        "link 2: a bare move_and_slide() must reach SceneAccess::call_node_method",
+        Variant::Bool(false),
+        "link 2: the one-shot request must be CONSUMED in the tick the script \
+         raised it (pat-0q2kx.201 ordering)",
+    );
+    let after_one = node_vec2(&ml, player, "position");
+    assert!(
+        after_one.y > start.y,
+        "link 2: a bare move_and_slide() must reach SceneAccess::call_node_method \
+         and move the body within that SAME tick — under the old step-before-scripts \
+         order one step moved it nowhere, {start:?} -> {after_one:?}",
     );
 
     // Link 3 — two seconds of frames: the body falls and is stopped by the floor
