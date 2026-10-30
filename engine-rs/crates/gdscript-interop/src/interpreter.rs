@@ -8799,6 +8799,34 @@ impl Interpreter {
                     .is_some_and(|a| a.physics2d_body_set_collision_layers(body, layers, is_mask));
                 Ok(Variant::Bool(ok))
             }
+            // `body_add_collision_exception(body, excepted_body)` /
+            // `body_remove_collision_exception` (pat-s3rrv.100) — the server
+            // form of `PhysicsBody2D.add_collision_exception_with`. One arm for
+            // both, as the collision-layer pair above: they differ only in
+            // direction and `method` is the match's own binding.
+            //
+            // ⚠️ Answers `Nil`, not the accessor's bool, even when nothing was
+            // applied. Both methods return **void** in Godot, and the node-form
+            // arm (gdscene/src/scripting.rs) discards its bool for the same
+            // stated reason: inventing a return value Godot does not have makes
+            // `if PhysicsServer2D.body_add_collision_exception(a, b):` a script
+            // that works here and breaks there. (The neighbouring
+            // `body_set_collision_layer` arm does surface a bool; that predates
+            // this and is the divergence, not this.)
+            "body_add_collision_exception" | "body_remove_collision_exception" => {
+                arity(2)?;
+                let body = rid_arg(args, 0);
+                let excepted = rid_arg(args, 1);
+                let adding = method == "body_add_collision_exception";
+                if let Some(access) = self.scene_access.as_mut() {
+                    if adding {
+                        access.physics2d_body_add_collision_exception(body, excepted);
+                    } else {
+                        access.physics2d_body_remove_collision_exception(body, excepted);
+                    }
+                }
+                Ok(Variant::Nil)
+            }
             // ⚠️ `body_apply_impulse(body, impulse, position = Vector2())` —
             // the POSITION IS OPTIONAL and defaults to the centre of mass, so
             // the 2-arg form is the central one. `arity` is deliberately not

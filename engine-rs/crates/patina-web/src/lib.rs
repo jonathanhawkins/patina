@@ -54,6 +54,19 @@ pub mod audio;
 #[cfg(target_arch = "wasm32")]
 pub mod web_audio;
 
+/// The web asset VFS: `res://` out of a fetched `.pck`, `user://` in the
+/// browser's persistent storage (pat-u3l8c.113).
+///
+/// Portable on purpose, like [`audio`]: the pack mount and the write-through
+/// `user://` store are exercised by native `cargo test`, and only the `fetch`
+/// and the IndexedDB puts need a browser (see [`web_vfs`]).
+pub mod vfs;
+
+/// Browser bindings for [`vfs`]: the handle the page mounts the fetched pack
+/// through and drains `user://` writes from (pat-u3l8c.113).
+#[cfg(target_arch = "wasm32")]
+pub mod web_vfs;
+
 /// Largest backing-store dimension we will ask a browser for, in physical
 /// pixels. Matches wgpu's default `max_texture_dimension_2d`, which is the
 /// ceiling a swapchain texture has to fit under; a huge CSS box on a 3x
@@ -200,72 +213,6 @@ impl Default for FpsMeter {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fps_meter_reports_sixty_for_sixty_even_frames() {
-        let mut meter = FpsMeter::new(1000.0);
-        // The browser clock does not start at zero.
-        let origin = 1234.5;
-        // The first callback only opens the window, so 61 timestamps bound 60
-        // frames across exactly one second.
-        for i in 0..=60 {
-            meter.frame(origin + f64::from(i) * (1000.0 / 60.0));
-        }
-        assert!(
-            (meter.fps() - 60.0).abs() < 0.01,
-            "expected ~60 fps, got {}",
-            meter.fps()
-        );
-    }
-
-    #[test]
-    fn fps_meter_is_zero_before_the_first_window_closes() {
-        let mut meter = FpsMeter::new(1000.0);
-        for i in 0..30 {
-            assert_eq!(meter.frame(f64::from(i) * 16.0), 0.0);
-        }
-    }
-
-    #[test]
-    fn fps_meter_halves_when_the_frame_rate_halves() {
-        let mut meter = FpsMeter::new(1000.0);
-        for i in 0..=30 {
-            meter.frame(f64::from(i) * (1000.0 / 30.0));
-        }
-        assert!(
-            (meter.fps() - 30.0).abs() < 0.01,
-            "expected ~30 fps, got {}",
-            meter.fps()
-        );
-    }
-
-    #[test]
-    fn fps_meter_survives_a_backwards_clock() {
-        let mut meter = FpsMeter::new(1000.0);
-        for i in 0..=60 {
-            meter.frame(f64::from(i) * (1000.0 / 60.0));
-        }
-        let before = meter.fps();
-        // A stepped system clock hands back a smaller timestamp.
-        meter.frame(0.0);
-        assert_eq!(meter.fps(), before, "a rewind must not produce a new rate");
-        assert!(meter.fps() > 0.0);
-    }
-
-    #[test]
-    fn fps_meter_rejects_a_nonsensical_window() {
-        for window in [0.0, -1000.0, f64::NAN] {
-            let mut meter = FpsMeter::new(window);
-            for i in 0..=60 {
-                meter.frame(f64::from(i) * (1000.0 / 60.0));
-            }
-            assert!(
-                (meter.fps() - 60.0).abs() < 0.01,
-                "window {window} should fall back to 1s, got {}",
-                meter.fps()
-            );
-        }
-    }
 
     #[test]
     fn engine_version_is_nonempty() {

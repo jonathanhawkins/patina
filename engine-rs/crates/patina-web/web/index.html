@@ -15,6 +15,17 @@
   selected — `BrowserWebGpu` when the browser has WebGPU, `Gl` when it fell
   back to WebGL2 — which is the observable difference .110 is about.
 
+  For the frame loop and input (pat-u3l8c.111): the `engine` lines report the
+  rate requestAnimationFrame is actually driving MainLoop::step at, and the most
+  recent translated input event. Move the pointer, scroll, press keys, drag a
+  finger or move a standard-mapped gamepad stick over the canvas and `last`
+  should change; `fps` should sit near the display refresh rate, and `frames`
+  should keep climbing. Switch tabs and `hidden` flips — `elapsed` keeps
+  advancing, throttled rather than frozen, which is the clamping the driver is
+  for. Note the engine loop is deliberately independent of the clear-colour
+  animation below: the scene is an empty Node2D, since loading a project's
+  scene tree is the export pipeline's job (pat-u3l8c.114).
+
   For audio (.112): click anywhere (or press a key) to resume the AudioContext,
   then press "play tone". The `frames pulled` counter rising is the observable
   proof that the AudioWorkletProcessor is draining the engine mixer's ring;
@@ -62,7 +73,11 @@
     <canvas id="patina-canvas"></canvas>
 
     <script type="module">
-      import init, { startCanvasRenderer, startWebAudio } from "./patina_web.js";
+      import init, {
+        startCanvasRenderer,
+        startEngine,
+        startWebAudio,
+      } from "./patina_web.js";
 
       const status = document.getElementById("status");
       const toneButton = document.getElementById("tone");
@@ -102,6 +117,18 @@
       try {
         await init();
         const renderer = await startCanvasRenderer("patina-canvas");
+
+        // The engine owns its own requestAnimationFrame loop in Rust — the
+        // acceptance is that rAF drives MainLoop::step, not that JS pumps it —
+        // so this only reads the counters back out (pat-u3l8c.111).
+        const engine = startEngine("patina-canvas");
+        const engineLines = () =>
+          `engine:  ${engine.fps.toFixed(1)} fps, ${engine.frames} frames, ` +
+          `${engine.elapsed.toFixed(2)}s simulated` +
+          `${engine.hidden ? " (tab hidden — throttled)" : ""}\n` +
+          `input:   ${engine.events} events, ${engine.touches} touches, ` +
+          `${engine.gamepads} gamepads\n` +
+          `last:    ${engine.lastInput || "(none yet — press a key or move the pointer)"}`;
         const renderLines =
           `backend: ${renderer.backend}\n` +
           `adapter: ${renderer.adapter}\n` +
@@ -132,6 +159,8 @@
             renderLines +
             "\n" +
             audioLine() +
+            "\n" +
+            engineLines() +
             (skipped ? "\nframe skipped (surface not ready)" : "");
           requestAnimationFrame(frame);
         };

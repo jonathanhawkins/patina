@@ -1411,6 +1411,57 @@ impl PhysicsServer {
         self.server_bodies.get(&body).copied().flatten()
     }
 
+    /// `PhysicsServer2D.body_add_collision_exception(body, excepted_body)`
+    /// (pat-s3rrv.100) — the server form of
+    /// `PhysicsBody2D.add_collision_exception_with`.
+    ///
+    /// Godot keeps the exception set on the body named *first*
+    /// (`upstream/godot/servers/physics_2d/godot_body_2d.h`) and the broadphase
+    /// pair filter asks both sides, which is why storing it one-sidedly still
+    /// excuses the pair — see [`PhysicsBody2D::excludes`].
+    pub fn server_body_add_collision_exception(&mut self, body: u64, excepted: u64) -> bool {
+        self.server_body_set_collision_exception(body, excepted, true)
+    }
+
+    /// `PhysicsServer2D.body_remove_collision_exception(body, excepted_body)`.
+    pub fn server_body_remove_collision_exception(&mut self, body: u64, excepted: u64) -> bool {
+        self.server_body_set_collision_exception(body, excepted, false)
+    }
+
+    /// Both server exception forms, which differ only in direction.
+    ///
+    /// Answers whether BOTH RIDs resolved to live bodies. A RID from
+    /// `body_create` that has not been admitted to a space yet sits in
+    /// `server_bodies` as `None` (the two-phase shape this map uses), so
+    /// excepting a spaceless body reports `false` rather than dropping the
+    /// exception silently — the same contract
+    /// `physics2d_node_add_collision_exception` answers for nodes.
+    ///
+    /// ⚠️ Both arguments must be *server* RIDs. A node-created body has no RID
+    /// to name here, because `PhysicsBody2D.get_rid()` is not implemented
+    /// (`grep '"get_rid"'` over the scripting surface returns nothing), so
+    /// node-to-node exceptions go through `add_collision_exception_with` on the
+    /// node instead. Nothing is lost: the two sets live on the same
+    /// `PhysicsBody2D` and are consulted by the same pair filter.
+    fn server_body_set_collision_exception(&mut self, body: u64, excepted: u64, add: bool) -> bool {
+        let (Some(target), Some(other)) =
+            (self.server_body_id(body), self.server_body_id(excepted))
+        else {
+            return false;
+        };
+        match self.world.get_body_mut(target) {
+            Some(b) => {
+                if add {
+                    b.add_collision_exception(other);
+                } else {
+                    b.remove_collision_exception(other);
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
     /// `PhysicsServer2D.body_test_motion(body, params)` → `(collided, travel)`
     /// (pat-0q2kx.200).
     ///

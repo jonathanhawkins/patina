@@ -183,7 +183,7 @@ fn a_self_signed_certificate_round_trips_and_is_well_formed_der() {
     // 1.2.840.113549.1.1.11 — sha256WithRSAEncryption. It appears twice: once
     // in the TBS and once in the outer signatureAlgorithm, which RFC 5280
     // requires to match.
-    let oid = [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0Bu8];
+    let oid: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B];
     let occurrences = der.windows(oid.len()).filter(|w| *w == oid).count();
     assert_eq!(
         occurrences, 2,

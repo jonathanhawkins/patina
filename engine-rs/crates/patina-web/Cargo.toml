@@ -34,6 +34,12 @@ gdaudio = { path = "../gdaudio" }
 # workspace depends on patina-web; it is the wasm leaf.
 gdscene = { path = "../gdscene" }
 
+# pat-u3l8c.113: PckMount - the `.pck` reader the web VFS mounts over `res://`.
+# Not a new crate on wasm32: `gdscene` above depends on gdresource
+# unconditionally, so it is already in this crate's wasm tree and proven to
+# build for the target. Named directly because `vfs` constructs `PckMount`.
+gdresource = { path = "../gdresource" }
+
 # pat-s3rrv.41: InputEvent / Key / MouseButton / GamepadAxis live here. Wasm-safe
 # — winit and softbuffer are optional and off by default, and the crate already
 # carries a `cfg(target_arch = "wasm32")` dependency section.
@@ -67,4 +73,28 @@ web-sys = { version = "0.3", features = [
     "Element",
     "HtmlCanvasElement",
     "Window",
+    # pat-u3l8c.111: the frame loop and the DOM input listeners.
+    # `Performance` is `performance.now()`, the clock the touch tracker
+    # differences a drag against; the frame loop gets its timestamp from
+    # requestAnimationFrame instead.
+    "Performance",
+    # Every event type a listener is annotated with has to be enabled, even the
+    # ones reachable only through a Deref chain the compiler already knows:
+    # `Element` pulls in `EventTarget`/`Node`, but not `MouseEvent`.
+    "Event",
+    "KeyboardEvent",
+    "MouseEvent",
+    "PointerEvent",
+    "WheelEvent",
+    "TouchEvent",
+    "TouchList",
+    "Touch",
+    # `getBoundingClientRect()`, for the canvas origin a pointer position is
+    # measured from. `DomRect` enables its `DomRectReadOnly` base, which is
+    # where `left()`/`top()` actually live.
+    "DomRect",
+    "Navigator",
+    "Gamepad",
+    "GamepadButton",
+    "GamepadMappingType",
 ] }

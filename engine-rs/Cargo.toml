@@ -104,6 +104,12 @@ serde_yaml = "0.9"
 name = "editor"
 path = "examples/editor.rs"
 
+# pat-u3l8c.114: writes the deployable web export folder (the IO driver for
+# gdplatform::web_export). Driven by scripts/web-export.sh.
+[[example]]
+name = "web_export"
+path = "examples/web_export.rs"
+
 # Verifier-lane build speed: ~550 integration test binaries each link the full
 # engine, and full DWARF (debuginfo=2) dominates that link time. Line tables
 # keep file:line in panic backtraces — enough for swarm verify triage — while

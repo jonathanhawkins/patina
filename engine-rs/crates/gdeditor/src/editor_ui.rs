@@ -54,6 +54,54 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
   font-size: 12px; height: 34px;
 }
 #menu-bar .menu-bar-brand { color: var(--accent); font-weight: bold; font-size: 13px; padding: 0 12px 0 4px; }
+/* pat-8g7ea: top-bar chrome Godot builds in editor_node.cpp that Patina had no
+   equivalent for -- the project-title label in the left spacer, the redraw
+   update spinner at the end of right_menu_hb, and the collapsed main-menu
+   button that replaces the whole MenuBar when
+   interface/editor/collapse_main_menu is on. */
+#menu-bar .project-title {
+  color: var(--text-dim); font-size: 12px; padding: 0 10px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; max-width: 40%;
+}
+#menu-bar .project-title .unsaved { color: var(--accent); font-weight: bold; }
+#main-menu-button-wrap { position: relative; display: none; align-items: center; }
+#main-menu-button-wrap.collapsed { display: flex; }
+#main-menu-button {
+  background: none; border: none; color: var(--text); cursor: pointer;
+  font-size: 12px; padding: 0 8px; line-height: 1;
+}
+#main-menu-button:hover { background: var(--hover); }
+#main-menu-popup {
+  display: none; position: absolute; top: 100%; left: 0; z-index: 60;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 3px;
+  min-width: 160px; padding: 2px 0;
+}
+#main-menu-popup.open { display: block; }
+#update-spinner-wrap { position: relative; display: flex; align-items: center; }
+#update-spinner {
+  background: none; border: none; color: var(--text-dim); cursor: pointer;
+  font-size: 13px; padding: 0 6px; line-height: 1;
+}
+#update-spinner.spinning { color: var(--accent); }
+#update-spinner-popup {
+  display: none; position: absolute; top: 100%; right: 0; z-index: 60;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 3px;
+  min-width: 210px; padding: 2px 0;
+}
+#update-spinner-popup.open { display: block; }
+/* ⚠️ NOT `.menu-action`: `setupMenuBar` binds a click handler to every
+   `.menu-action` in the document and reads `data-action` off it, so these rows
+   would each fire `handleMenuAction(null)`. The `.menu-action` padding is also
+   scoped to `.menu-dropdown`, so they would arrive unstyled. */
+#update-spinner-popup .spinner-mi, #main-menu-popup .collapsed-mi {
+  padding: 4px 14px; cursor: pointer; white-space: nowrap; display: flex;
+  align-items: center; font-size: 12px;
+}
+#update-spinner-popup .spinner-mi:hover, #main-menu-popup .collapsed-mi:hover {
+  background: var(--hover); color: var(--accent);
+}
+#update-spinner-popup .spinner-sep { height: 1px; background: var(--border); margin: 4px 0; }
+#update-spinner-popup .radio-mark { display: inline-block; width: 14px; }
 .menu-spacer { flex: 1 1 auto; min-width: 8px; }
 .renderer-indicator {
   color: #6cab4d; font-size: 11px; padding: 4px 6px 4px 12px; margin-left: 6px;
@@ -1953,6 +2001,23 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
 <!-- Menu bar -->
 <div id="menu-bar">
   <span class="menu-bar-brand">Patina</span>
+  <!-- pat-8g7ea: Godot's collapsed main menu (editor_node.cpp
+       `main_menu_button`, text "Main Menu", TripleBar icon, switch_on_hover).
+       `_update_main_menu_type()` swaps between the MenuBar and THIS button on
+       `interface/editor/collapse_main_menu`; the popup carries the same menus
+       as submenu items. Hidden until that setting is on, exactly as Godot
+       hides whichever of the two is not in use. -->
+  <div id="main-menu-button-wrap">
+    <button id="main-menu-button" title="Main Menu" aria-label="Main Menu">&#9776; Main Menu</button>
+    <div id="main-menu-popup">
+      <div class="collapsed-mi" data-collapsed-menu="scene">Scene</div>
+      <div class="collapsed-mi" data-collapsed-menu="edit">Edit</div>
+      <div class="collapsed-mi" data-collapsed-menu="project">Project</div>
+      <div class="collapsed-mi" data-collapsed-menu="debug">Debug</div>
+      <div class="collapsed-mi" data-collapsed-menu="editor">Editor</div>
+      <div class="collapsed-mi" data-collapsed-menu="help">Help</div>
+    </div>
+  </div>
   <div class="menu-item" data-menu="scene">
     <button>Scene</button>
     <div class="menu-dropdown">
@@ -2028,8 +2093,16 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       <div class="menu-action" data-action="help-about">About Patina Engine</div>
     </div>
   </div>
+  <!-- pat-8g7ea: `project_title`, the Label Godot puts in `left_spacer`
+       between the menu bar and the main-screen buttons (editor_node.cpp). Its
+       text comes from `_update_title()`: "(*) <scene file> - <project name>",
+       the "(*)" only while there are unsaved changes, and "Unnamed Project"
+       when `application/config/name` is empty. The scene name comes FIRST so
+       it is still legible when the OS task bar truncates the title. -->
+  <div class="menu-spacer">
+    <span class="project-title" id="project-title" title="Unnamed Project">Unnamed Project</span>
+  </div>
   <!-- Workspace switcher (centered) — Godot's main-screen tabs -->
-  <div class="menu-spacer"></div>
   <div class="mode-buttons">
     <button class="mode-btn active" data-mode="2d">2D</button>
     <button class="mode-btn" data-mode="3d">3D</button>
@@ -2054,11 +2127,29 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   </div>
   <!-- pat-j8sfr: renderer selector dropdown (Godot editor_node.cpp renderer
        OptionButton: Forward+ / Mobile / Compatibility), not static text. -->
-  <select class="renderer-indicator" id="renderer-select" title="Rendering method">
+  <!-- pat-8g7ea: Godot's own tooltip and accessibility name for this OptionButton
+       (editor_node.cpp). "Rendering method" was Patina's wording, not Godot's,
+       and it dropped both caveats that make the choice meaningful. -->
+  <select class="renderer-indicator" id="renderer-select" aria-label="Renderer" title="Choose a renderer.&#10;&#10;Notes:&#10;- On mobile platforms, the Mobile renderer is used if Forward+ is selected here.&#10;- On the web platform, the Compatibility renderer is always used.">
     <option value="forward_plus">Forward+</option>
     <option value="mobile">Mobile</option>
     <option value="gl_compatibility">Compatibility</option>
   </select>
+  <!-- pat-8g7ea: `update_spinner`, the MenuButton Godot adds to
+       `right_menu_hb` AFTER the renderer (editor_node.cpp). It spins while the
+       editor window redraws, and its popup is two radio items plus a
+       separator and a hide action. The two radio labels are the user's only
+       control over continuous redraw, which Godot warns "can increase power
+       usage". -->
+  <div id="update-spinner-wrap">
+    <button id="update-spinner" aria-label="Update Mode" title="Spins when the editor window redraws.">&#9696;</button>
+    <div id="update-spinner-popup">
+      <div class="spinner-mi" data-spinner-mode="continuously"><span class="radio-mark"></span>Update Continuously</div>
+      <div class="spinner-mi" data-spinner-mode="when-changed"><span class="radio-mark"></span>Update When Changed</div>
+      <div class="spinner-sep"></div>
+      <div class="spinner-mi" data-spinner-action="hide">Hide Update Spinner</div>
+    </div>
+  </div>
 </div>
 <div id="toolbar">
   <button class="tool-btn active" data-tool="select" title="Select (Q)">Q</button>
@@ -9876,6 +9967,167 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       var tabName = file ? file.split('/').pop().split('\\').pop() : 'Untitled';
       tab.innerHTML = escapeHtml(tabName) + (modified ? '<span class="modified-indicator"> *</span>' : '');
     }
+    // pat-8g7ea: the top-bar project title is driven by the same two facts, so
+    // it is refreshed here rather than from a second poll that could disagree
+    // with the indicator about whether the scene is modified.
+    lastSceneFile = file || '';
+    lastSceneModified = !!modified;
+    updateProjectTitle(lastSceneFile, lastSceneModified);
+  }
+
+  // ---- pat-8g7ea: top-bar chrome from editor_node.cpp --------------------
+  // `project_title` (left_spacer), `update_spinner` (end of right_menu_hb) and
+  // the collapsed `main_menu_button`. Godot builds all three in
+  // `EditorNode::EditorNode()` and they live for the editor's lifetime.
+  var projectName = '';
+  var lastSceneFile = '';
+  var lastSceneModified = false;
+
+  // 1:1 with `EditorNode::_update_title()`.
+  //
+  // 🔑 THE ORDER IS LOAD-BEARING. Godot puts "(*)" first and the SCENE name
+  // before the project name, and says why in a comment: the title also goes to
+  // the OS task bar, where it gets truncated from the right — so the unsaved
+  // mark and the file you are editing have to come first. Reversing it looks
+  // identical in a wide window and loses exactly the wrong half in a narrow one.
+  function updateProjectTitle(file, modified) {
+    var el = document.getElementById('project-title');
+    if (!el) return;
+    var appname = projectName && projectName.length ? projectName : 'Unnamed Project';
+    var title = appname;
+    if (file) {
+      title = file.split('/').pop().split('\\').pop() + ' - ' + appname;
+    }
+    el.innerHTML = (modified ? '<span class="unsaved">(*)</span> ' : '') + escapeHtml(title);
+    el.title = (modified ? '(*) ' : '') + title;
+  }
+
+  // `application/config/name`, read once. An empty name is Godot's
+  // "Unnamed Project" case, which `updateProjectTitle` handles.
+  function refreshProjectName() {
+    return api('GET', '/api/project_settings').then(function(data) {
+      if (data && typeof data.project_name === 'string') {
+        projectName = data.project_name;
+      }
+      updateProjectTitle(lastSceneFile, lastSceneModified);
+    });
+  }
+
+  // Godot persists these in EditorSettings. There is no client-side editor
+  // settings store yet, so localStorage stands in under the SAME keys, letting
+  // a future server-side store adopt them unchanged.
+  var SPINNER_MODE_KEY = 'interface/editor/update_continuously';
+  var SPINNER_SHOW_KEY = 'interface/editor/show_update_spinner';
+  var COLLAPSE_MENU_KEY = 'interface/editor/collapse_main_menu';
+
+  function lsGet(key) {
+    // ⚠️ localStorage THROWS, not returns null, in a private window or with
+    // site data blocked — and this runs during init, so an uncaught throw here
+    // would take the rest of the top-bar wiring with it.
+    try { return localStorage.getItem(key); } catch (e) { return null; }
+  }
+
+  function lsSet(key, value) {
+    try { localStorage.setItem(key, value); } catch (e) {}
+  }
+
+  function applyUpdateSpinnerMode() {
+    var wrap = document.getElementById('update-spinner-wrap');
+    var btn = document.getElementById('update-spinner');
+    var popup = document.getElementById('update-spinner-popup');
+    if (!wrap || !btn || !popup) return;
+    // `show_update_spinner` is a tri-state in Godot (0 = dev builds only,
+    // 1 = always, 2 = disabled); only 2 hides it.
+    wrap.style.display = lsGet(SPINNER_SHOW_KEY) === '2' ? 'none' : 'flex';
+    var continuous = lsGet(SPINNER_MODE_KEY) === '1';
+    if (continuous) { btn.classList.add('spinning'); } else { btn.classList.remove('spinning'); }
+    // Godot's two tooltips, verbatim. The continuous one carries the power
+    // warning because that is the mode a user leaves on without noticing.
+    btn.title = continuous
+      ? 'Spins when the editor window redraws.\nUpdate Continuously is enabled, which can increase power usage. Click to disable it.'
+      : 'Spins when the editor window redraws.';
+    Array.prototype.forEach.call(popup.querySelectorAll('[data-spinner-mode]'), function(mi) {
+      var on = (mi.getAttribute('data-spinner-mode') === 'continuously') === continuous;
+      var mark = mi.querySelector('.radio-mark');
+      if (mark) { mark.textContent = on ? '•' : ''; }
+    });
+  }
+
+  // 1:1 with `_update_main_menu_type()`: exactly ONE of the MenuBar and the
+  // "Main Menu" button is in the tree at a time. Showing both would offer every
+  // action twice.
+  function setCollapseMainMenu(on) {
+    var wrap = document.getElementById('main-menu-button-wrap');
+    if (wrap) {
+      if (on) { wrap.classList.add('collapsed'); } else { wrap.classList.remove('collapsed'); }
+    }
+    Array.prototype.forEach.call(document.querySelectorAll('#menu-bar > .menu-item'), function(mi) {
+      mi.style.display = on ? 'none' : '';
+    });
+    lsSet(COLLAPSE_MENU_KEY, on ? '1' : '0');
+  }
+
+  function initTopBarChrome() {
+    var btn = document.getElementById('update-spinner');
+    var popup = document.getElementById('update-spinner-popup');
+    if (btn && popup) {
+      btn.addEventListener('click', function(ev) {
+        ev.stopPropagation();
+        popup.classList.toggle('open');
+      });
+      Array.prototype.forEach.call(popup.querySelectorAll('[data-spinner-mode]'), function(mi) {
+        mi.addEventListener('click', function(ev) {
+          ev.stopPropagation();
+          lsSet(SPINNER_MODE_KEY, mi.getAttribute('data-spinner-mode') === 'continuously' ? '1' : '0');
+          popup.classList.remove('open');
+          applyUpdateSpinnerMode();
+        });
+      });
+      var hide = popup.querySelector('[data-spinner-action="hide"]');
+      if (hide) {
+        hide.addEventListener('click', function(ev) {
+          ev.stopPropagation();
+          lsSet(SPINNER_SHOW_KEY, '2');
+          popup.classList.remove('open');
+          applyUpdateSpinnerMode();
+        });
+      }
+      document.addEventListener('click', function() { popup.classList.remove('open'); });
+    }
+    applyUpdateSpinnerMode();
+
+    var mmBtn = document.getElementById('main-menu-button');
+    var mmPopup = document.getElementById('main-menu-popup');
+    if (mmBtn && mmPopup) {
+      mmBtn.addEventListener('click', function(ev) {
+        ev.stopPropagation();
+        mmPopup.classList.toggle('open');
+      });
+      Array.prototype.forEach.call(mmPopup.querySelectorAll('[data-collapsed-menu]'), function(mi) {
+        mi.addEventListener('click', function(ev) {
+          ev.stopPropagation();
+          var name = mi.getAttribute('data-collapsed-menu');
+          var target = document.querySelector('.menu-item[data-menu="' + name + '"]');
+          mmPopup.classList.remove('open');
+          // The collapsed entries open the SAME dropdowns the bar does, so the
+          // actions stay defined in exactly one place.
+          if (target) {
+            var dd = target.querySelector('.menu-dropdown');
+            target.style.display = '';
+            if (dd) { dd.classList.add('open'); }
+          }
+        });
+      });
+      document.addEventListener('click', function() { mmPopup.classList.remove('open'); });
+    }
+    setCollapseMainMenu(lsGet(COLLAPSE_MENU_KEY) === '1');
+    refreshProjectName();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initTopBarChrome);
+  } else {
+    initTopBarChrome();
   }
 
   // ---- Add Node Dialog (1:1 port of Godot's CreateDialog, create_dialog.cpp) ----

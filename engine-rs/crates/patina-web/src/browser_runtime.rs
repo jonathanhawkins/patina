@@ -140,14 +140,14 @@ impl WebEngineHandle {
 
     /// Fingers currently down.
     #[wasm_bindgen(getter)]
-    pub fn touches(&self) -> usize {
-        self.runtime.borrow().touches.len()
+    pub fn touches(&self) -> u32 {
+        self.runtime.borrow().touches.len() as u32
     }
 
     /// Standard-mapped gamepads being tracked.
     #[wasm_bindgen(getter)]
-    pub fn gamepads(&self) -> usize {
-        self.runtime.borrow().gamepads.len()
+    pub fn gamepads(&self) -> u32 {
+        self.runtime.borrow().gamepads.len() as u32
     }
 
     /// Caps the frame rate (Godot's `Engine.max_fps`); `0` removes the cap.
@@ -374,7 +374,9 @@ fn install_listeners(
                 let touches = event.changed_touches();
                 let mut runtime = runtime.borrow_mut();
                 for i in 0..touches.length() {
-                    let Some(touch) = touches.get(i) else { continue };
+                    let Some(touch) = touches.get(i) else {
+                        continue;
+                    };
                     let input = runtime.touches.touch_begin(
                         touch_index(&touch),
                         Vector2::new(touch.client_x() as f32, touch.client_y() as f32),
@@ -401,7 +403,9 @@ fn install_listeners(
                 let touches = event.changed_touches();
                 let mut runtime = runtime.borrow_mut();
                 for i in 0..touches.length() {
-                    let Some(touch) = touches.get(i) else { continue };
+                    let Some(touch) = touches.get(i) else {
+                        continue;
+                    };
                     let input = runtime.touches.touch_move(
                         touch_index(&touch),
                         Vector2::new(touch.client_x() as f32, touch.client_y() as f32),
@@ -420,25 +424,23 @@ fn install_listeners(
     for (name, canceled) in [("touchend", false), ("touchcancel", true)] {
         let runtime = runtime.clone();
         let canvas_for_touch = canvas.clone();
-        listen(
-            canvas.as_ref(),
-            name,
-            move |event: web_sys::TouchEvent| {
-                let mapping = mapping_for(&canvas_for_touch);
-                let touches = event.changed_touches();
-                let mut runtime = runtime.borrow_mut();
-                for i in 0..touches.length() {
-                    let Some(touch) = touches.get(i) else { continue };
-                    let input = runtime.touches.touch_end(
-                        touch_index(&touch),
-                        Vector2::new(touch.client_x() as f32, touch.client_y() as f32),
-                        canceled,
-                        mapping,
-                    );
-                    runtime.push(input);
-                }
-            },
-        )?;
+        listen(canvas.as_ref(), name, move |event: web_sys::TouchEvent| {
+            let mapping = mapping_for(&canvas_for_touch);
+            let touches = event.changed_touches();
+            let mut runtime = runtime.borrow_mut();
+            for i in 0..touches.length() {
+                let Some(touch) = touches.get(i) else {
+                    continue;
+                };
+                let input = runtime.touches.touch_end(
+                    touch_index(&touch),
+                    Vector2::new(touch.client_x() as f32, touch.client_y() as f32),
+                    canceled,
+                    mapping,
+                );
+                runtime.push(input);
+            }
+        })?;
     }
 
     // --- visibility -----------------------------------------------------

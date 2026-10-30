@@ -2,6 +2,7 @@
 // tests/*.rs is a module here, so one engine link serves them all
 // (build-perf Tier 3). Run one module's tests with
 //   cargo nextest run -p gdeditor --test editor_suite_e -E 'test(/^<mod>::/)'
+mod editor_top_bar_chrome_test;
 mod editor_top_bar_movie_maker_test;
 mod editor_top_bar_play_custom_test;
 mod editor_top_bar_renderer_test;

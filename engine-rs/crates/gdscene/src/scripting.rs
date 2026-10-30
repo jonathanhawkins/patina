@@ -4906,6 +4906,16 @@ impl SceneAccess for SceneTreeAccessor {
             .is_some_and(|p| p.server_body_set_collision_layers(body, layers, is_mask))
     }
 
+    fn physics2d_body_add_collision_exception(&mut self, body: u64, excepted: u64) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_body_add_collision_exception(body, excepted))
+    }
+
+    fn physics2d_body_remove_collision_exception(&mut self, body: u64, excepted: u64) -> bool {
+        self.physics_mut()
+            .is_some_and(|p| p.server_body_remove_collision_exception(body, excepted))
+    }
+
     fn physics2d_body_apply_impulse(
         &mut self,
         body: u64,

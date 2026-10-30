@@ -40,6 +40,7 @@ pub mod tcp_server;
 pub mod thread;
 pub mod time;
 pub mod udp_server;
+pub mod web_export;
 pub mod web_request_driver;
 pub mod webrtc_peer;
 pub mod websocket_multiplayer;

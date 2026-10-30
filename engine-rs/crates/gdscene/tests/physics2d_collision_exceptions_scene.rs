@@ -14,6 +14,7 @@
 
 use gdcore::math::Vector2;
 use gdscene::node::{Node, NodeId};
+use gdscene::physics_server::PhysicsServer;
 use gdscene::scene_tree::SceneTree;
 use gdscene::{GDScriptNodeInstance, MainLoop};
 use gdvariant::Variant;
@@ -357,5 +358,292 @@ fn a_character_with_an_exception_walks_through_the_wall() {
         "with the wall excepted the walker must pass clean through it, but \
          stopped at {x} (wall at {WALL_X}) — the kinematic sweep builds its own \
          obstacle list, so the solver's pair filter alone does not cover it"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The `PhysicsServer2D` server forms (pat-s3rrv.100, last open clause)
+// ---------------------------------------------------------------------------
+//
+// `PhysicsBody2D.add_collision_exception_with` above is the NODE form. Godot
+// also exposes `PhysicsServer2D.body_add_collision_exception(body, excepted)`
+// addressed by RID, which is how a script drives physics with no node of its
+// own (`upstream/godot/servers/physics_server_2d.cpp`). Patina had the node form
+// and not this one: `grep -rn '"body_add_collision_exception"'` over
+// gdscript-interop returned zero.
+//
+// Both layers are covered, because a break in either is a different bug: the
+// SERVER level (the RID registry over the shared world) and the SCRIPT level
+// (the singleton dispatch arm reaching it from GDScript).
+
+/// Half-extent of the server-created boxes.
+///
+/// ⚠️ Boxes rather than circles on purpose: two circles stacked at the same `x`
+/// balance on a point, and any drift would make the control flaky. The node
+/// tests above use boxes for the same reason, and a half-extent of 8 keeps the
+/// resting geometry identical either way.
+const R: f32 = 8.0;
+/// A floor spanning `y ∈ [190, 210]`, so its top face is at 190.
+const SRV_FLOOR_Y: f32 = 200.0;
+const SRV_FLOOR_HALF: f32 = 10.0;
+/// Where a single circle comes to rest on that floor.
+const SRV_REST_Y: f32 = SRV_FLOOR_Y - SRV_FLOOR_HALF - R;
+const DT: f32 = 1.0 / 60.0;
+
+/// A `StaticBody2D` floor registered the ordinary (node) way, so the server
+/// bodies below have something to land on that is NOT one of themselves — the
+/// same control the node tests use.
+fn server_floor_tree() -> SceneTree {
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    let mut floor = Node::new("Floor", "StaticBody2D");
+    floor.set_property("position", Variant::Vector2(Vector2::new(0.0, SRV_FLOOR_Y)));
+    let floor_id = tree.add_child(root, floor).unwrap();
+    let mut shape = Node::new("Shape", "CollisionShape2D");
+    shape.set_property(
+        "size",
+        Variant::Vector2(Vector2::new(1000.0, SRV_FLOOR_HALF * 2.0)),
+    );
+    tree.add_child(floor_id, shape).unwrap();
+    tree
+}
+
+/// Two RID-addressed circle bodies above the node floor, `upper` 40px above
+/// `lower`, mirroring the node scene's geometry.
+fn server_stack() -> (PhysicsServer, u64, u64) {
+    let tree = server_floor_tree();
+    let mut server = PhysicsServer::new();
+    server.register_bodies(&tree);
+
+    let shape = server.server_rectangle_shape_create();
+    assert!(server.server_shape_set_data(shape, R, Some(Vector2::new(R, R))));
+
+    let mut make = |y: f32| {
+        let body = server.server_body_create();
+        assert!(server.server_body_set_space(body, 1));
+        assert!(server.server_body_add_shape(body, shape));
+        assert!(server.server_body_set_state_vec2(body, 0, Vector2::new(0.0, y)));
+        body
+    };
+    let lower = make(100.0);
+    let upper = make(60.0);
+    (server, upper, lower)
+}
+
+fn srv_y(server: &PhysicsServer, body: u64) -> f32 {
+    server
+        .server_body_position(body)
+        .unwrap_or_else(|| panic!("RID {body} must be a live body in the world"))
+        .y
+}
+
+fn srv_settle(server: &mut PhysicsServer) {
+    for _ in 0..180 {
+        server.step_physics(DT);
+    }
+}
+
+/// ⚠️ The control. Two RID bodies with no exception STACK — without this, every
+/// "they passed through" assertion below would pass against a world that never
+/// made them collide.
+#[test]
+fn without_an_exception_two_server_bodies_stack() {
+    let (mut server, upper, lower) = server_stack();
+    srv_settle(&mut server);
+
+    let (uy, ly) = (srv_y(&server, upper), srv_y(&server, lower));
+    assert!(
+        (ly - SRV_REST_Y).abs() < 3.0,
+        "the lower RID body must rest on the node floor at ~{SRV_REST_Y}, got {ly}"
+    );
+    assert!(
+        ly - uy > R,
+        "the upper RID body must settle ON the lower one — separation {} is too \
+         small for a stack, so they already pass through each other",
+        ly - uy
+    );
+}
+
+/// **The server-level acceptance.** `body_add_collision_exception` makes two RID
+/// bodies interpenetrate while BOTH still land on the node floor.
+#[test]
+fn the_server_exception_form_lets_two_rid_bodies_pass_through() {
+    let (mut server, upper, lower) = server_stack();
+    assert!(
+        server.server_body_add_collision_exception(upper, lower),
+        "both RIDs are live bodies in a space, so the call must report applied"
+    );
+    srv_settle(&mut server);
+
+    let (uy, ly) = (srv_y(&server, upper), srv_y(&server, lower));
+    assert!(
+        (ly - uy).abs() < R,
+        "the excepted RID bodies must occupy the same space; still {} apart",
+        ly - uy
+    );
+    // 🔑 Both still collide with everything else. An exception that disabled the
+    // bodies outright would satisfy the assertion above with both of them far
+    // below the floor.
+    assert!(
+        (ly - SRV_REST_Y).abs() < 3.0,
+        "the lower body must still rest on the floor at ~{SRV_REST_Y}, got {ly}"
+    );
+    assert!(
+        (uy - SRV_REST_Y).abs() < 3.0,
+        "the upper body must ALSO rest on the floor at ~{SRV_REST_Y}, got {uy} — \
+         falling past it means the exception leaked into every pair"
+    );
+}
+
+/// `body_remove_collision_exception` restores blocking.
+///
+/// ⚠️ Removed while the bodies are still far apart and falling, not after they
+/// have interpenetrated: un-excepting overlapping bodies would test the
+/// solver's ability to push them apart, which is a different mechanism.
+#[test]
+fn removing_the_server_exception_restores_blocking() {
+    let (mut server, upper, lower) = server_stack();
+    assert!(server.server_body_add_collision_exception(upper, lower));
+    for _ in 0..5 {
+        server.step_physics(DT);
+    }
+    assert!(
+        server.server_body_remove_collision_exception(upper, lower),
+        "removing a live exception must report applied"
+    );
+    srv_settle(&mut server);
+
+    let (uy, ly) = (srv_y(&server, upper), srv_y(&server, lower));
+    assert!(
+        ly - uy > R,
+        "with the exception removed the bodies must stack again — separation \
+         {} means the pair filter never went back to reporting contacts",
+        ly - uy
+    );
+    assert!(
+        (ly - SRV_REST_Y).abs() < 3.0,
+        "the lower body must still rest on the floor at ~{SRV_REST_Y}, got {ly}"
+    );
+}
+
+/// A RID that is not a live body reports "not applied" rather than silently
+/// dropping the exception.
+///
+/// Both halves matter: `body_create` hands back a RID whose body does not exist
+/// until `body_set_space`, so "the RID is real" and "the body is in the world"
+/// are different questions, and only the second one can carry an exception.
+#[test]
+fn the_server_exception_form_rejects_a_rid_with_no_body() {
+    let (mut server, upper, lower) = server_stack();
+
+    let spaceless = server.server_body_create();
+    assert!(
+        server.server_body_id(spaceless).is_none(),
+        "a body with no space is not in the world yet"
+    );
+    assert!(
+        !server.server_body_add_collision_exception(upper, spaceless),
+        "excepting a spaceless body must report not-applied, not pretend to work"
+    );
+    assert!(
+        !server.server_body_add_collision_exception(spaceless, lower),
+        "the same must hold with the spaceless RID named first"
+    );
+    assert!(
+        !server.server_body_add_collision_exception(upper, 999_999),
+        "a RID the server never minted must report not-applied"
+    );
+
+    // The real pair is untouched by any of that: the bodies still stack.
+    srv_settle(&mut server);
+    assert!(
+        srv_y(&server, lower) - srv_y(&server, upper) > R,
+        "a rejected call must not have excepted the pair anyway"
+    );
+}
+
+/// **The script-level acceptance.** A GDScript reaches the exception through the
+/// `PhysicsServer2D` singleton, with no node of its own for either body.
+///
+/// The resting positions are read from the SERVER, not relayed through script
+/// variables: the engine is what decides where the bodies end up, and a test
+/// that asserted on a value the script had written could not see the engine
+/// disagree.
+#[test]
+fn a_script_excepts_two_bodies_through_the_physics_server_singleton() {
+    const DRIVER_GD: &str = "\
+extends Node2D
+var upper_rid = 0
+var lower_rid = 0
+var made = false
+var ticks = 0
+func _physics_process(delta):
+    if self.made == false:
+        self.made = true
+        var shape = PhysicsServer2D.rectangle_shape_create()
+        PhysicsServer2D.shape_set_data(shape, Vector2(8, 8))
+        self.lower_rid = PhysicsServer2D.body_create()
+        PhysicsServer2D.body_set_space(self.lower_rid, 1)
+        PhysicsServer2D.body_add_shape(self.lower_rid, shape)
+        PhysicsServer2D.body_set_state(self.lower_rid, 0, Vector2(0, 100))
+        self.upper_rid = PhysicsServer2D.body_create()
+        PhysicsServer2D.body_set_space(self.upper_rid, 1)
+        PhysicsServer2D.body_add_shape(self.upper_rid, shape)
+        PhysicsServer2D.body_set_state(self.upper_rid, 0, Vector2(0, 60))
+    PhysicsServer2D.body_add_collision_exception(self.upper_rid, self.lower_rid)
+    self.ticks = self.ticks + 1
+";
+
+    let mut tree = server_floor_tree();
+    let root = tree.root_id();
+    let driver = tree.add_child(root, Node::new("Driver", "Node2D")).unwrap();
+    tree.attach_script(
+        driver,
+        Box::new(GDScriptNodeInstance::from_source(DRIVER_GD, driver).unwrap()),
+    );
+
+    let mut ml = MainLoop::new(tree);
+    // Only this populates `node_to_body`; without it the floor is not in the
+    // world and nothing would stop the falling bodies.
+    ml.register_physics_bodies();
+    settle(&mut ml);
+
+    let var_of = |name: &str| ml.tree().get_node(driver).map(|n| n.get_property(name));
+    let rid = |name: &str| -> u64 {
+        match var_of(name) {
+            Some(Variant::Int(i)) if i > 0 => i as u64,
+            other => panic!("{name} must be a live RID, got {other:?}"),
+        }
+    };
+    // A handler that throws part-way stops incrementing `ticks`, so this is the
+    // "the dispatch arm exists and did not raise" assertion. An unwired
+    // `PhysicsServer2D` method is a RuntimeError, not a silent no-op.
+    let ticks = match var_of("ticks") {
+        Some(Variant::Int(i)) => i,
+        other => panic!("ticks must be an int, got {other:?}"),
+    };
+    assert!(
+        ticks > 100,
+        "every physics tick must have run the handler to completion, got \
+         {ticks} — a RuntimeError from an unwired \
+         PhysicsServer2D.body_add_collision_exception stops the count"
+    );
+
+    let (upper, lower) = (rid("upper_rid"), rid("lower_rid"));
+    let server = ml.physics_server();
+    let (uy, ly) = (srv_y(server, upper), srv_y(server, lower));
+    assert!(
+        (ly - uy).abs() < R,
+        "the script's exception must make the two RID bodies interpenetrate; \
+         still {} apart",
+        ly - uy
+    );
+    assert!(
+        (ly - SRV_REST_Y).abs() < 3.0,
+        "the lower body must rest on the node floor at ~{SRV_REST_Y}, got {ly}"
+    );
+    assert!(
+        (uy - SRV_REST_Y).abs() < 3.0,
+        "the upper body must ALSO rest on the floor at ~{SRV_REST_Y}, got {uy}"
     );
 }

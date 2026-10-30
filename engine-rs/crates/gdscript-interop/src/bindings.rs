@@ -1392,6 +1392,21 @@ pub trait SceneAccess {
         Vec::new()
     }
 
+    /// `PhysicsServer2D.body_add_collision_exception(body, excepted_body)`
+    /// (pat-s3rrv.100) — the RID form of the node method above.
+    ///
+    /// Returns whether both RIDs resolved to live bodies, so the caller can
+    /// tell "excepted" from "named a body that does not exist"; the dispatch
+    /// arm discards it, because Godot's method returns void.
+    fn physics2d_body_add_collision_exception(&mut self, _body: u64, _excepted: u64) -> bool {
+        false
+    }
+
+    /// `PhysicsServer2D.body_remove_collision_exception(body, excepted_body)`.
+    fn physics2d_body_remove_collision_exception(&mut self, _body: u64, _excepted: u64) -> bool {
+        false
+    }
+
     /// `RayCast2D.force_raycast_update()` — re-runs the node's cast **now**,
     /// republishing its `_hit_*` properties, and reports whether it hit
     /// (pat-0q2kx.32).
