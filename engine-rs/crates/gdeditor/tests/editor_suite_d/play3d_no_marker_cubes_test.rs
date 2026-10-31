@@ -12,35 +12,54 @@
 //!
 //! # The distinction this pins
 //!
-//! That one `Box` meant two unrelated things, which is why the first fix
-//! regressed `play_uses_scene_camera3d`:
+//! That one `Box` meant two unrelated things, which is why a naive shape-based
+//! strip regressed `play_uses_scene_camera3d`:
 //!
 //!   * **a pivot with no geometry of its own** — `Node3D`, `Marker3D`, `Area3D`,
 //!     and the `VisualInstance3D` effect/probe classes. Editor handle only.
-//!   * **scene content whose geometry did not resolve** — a `MeshInstance3D`
-//!     with no `mesh`. It IS scene content, and dropping it would make a broken
-//!     asset silently invisible instead of visibly wrong.
+//!   * **a `MeshInstance3D` whose `mesh` did not resolve** — which also lands on
+//!     `PrimitiveShape::Box`.
 //!
-//! They are now separate shapes (`Marker` vs `Box`), split on Godot's own line:
-//! everything with drawable geometry descends from `GeometryInstance3D`. Only
-//! `Marker` is stripped, so the mesh-less `MeshInstance3D` in the fixture below
-//! must still survive into the game list — asserted explicitly, because that is
-//! the half a shape-based strip got wrong.
+//! 🔑 They are separated by the KIND, not by a new shape. Geometry that resolves
+//! becomes `Render3DKind::Mesh`; only the unresolved placeholder stays
+//! `Render3DKind::Primitive`, and the strip keys off that. So a `MeshInstance3D`
+//! carrying a real `mesh` survives a game frame, and a mesh-less one draws
+//! nothing — which is Godot's behaviour (a null `mesh` submits no geometry) and
+//! what this bead's Implement line asks for. The fixtures that relied on a
+//! mesh-less node standing in for scene content were given real meshes, which is
+//! what makes them honest either way.
+//!
+//! # ⚠️ Why the Decal is NOT toggled
+//!
+//! The acceptance text asks for a frame "identical to the same scene with those
+//! four nodes removed", with a `Decal` among the four. **That comparison cannot
+//! pass, however correct the strip is.** A `Decal` is collected into
+//! `env_effects` by `scene_env_effects` (viewport_3d_render.rs:2183) and reaches
+//! the renderer (`renderer.rs:658`, `:1280`); `strip_editor_only_items` only
+//! filters `items` and never touches `env_effects`. So deleting the Decal from
+//! the scene removes its shading contribution, and the two frames differ by that
+//! no matter what the marker strip does.
+//!
+//! The Decal therefore lives in BOTH variants, holding `env_effects` constant,
+//! and its clause is asserted on the render LIST instead: no item for the Decal
+//! survives into a game frame. Same guarantee, with one variable instead of two.
 //!
 //! # What makes this test non-vacuous
 //!
-//! Three assertions have to hold together, and none alone is enough:
+//! Several assertions have to hold together, and none alone is enough:
 //!
 //! 1. the two GAME frames are pixel-identical — the markers contribute nothing;
 //! 2. the two EDITOR frames DIFFER — the markers were genuinely being drawn, in
 //!    view, and are still drawn for the editor;
 //! 3. each of the four marker NODES is present in the EDITOR list carrying
-//!    `Marker` — so they were collected and classified, rather than classified
-//!    as something this test does not look for.
+//!    `Box` — so they were collected and classified, rather than classified as
+//!    something this test does not look for;
+//! 4. the real mesh SURVIVES the game strip — otherwise "no markers" would be
+//!    satisfied by stripping the whole scene.
 //!
 //! Without (2) and (3), (1) would also pass if the marker nodes were off-screen,
 //! if the render list were empty, or if the classification silently changed. A
-//! fourth guard asserts the frame is not a flat background, so "identical" is
+//! further guard asserts the frame is not a flat background, so "identical" is
 //! not two blank images agreeing.
 
 use gdeditor::viewport_3d_render::{
@@ -72,9 +91,6 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1)
 
 [node name="Zone" type="Area3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1)
-
-[node name="Splat" type="Decal" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1)
 "#;
 
 /// A lit mesh at the origin with a `Camera3D` two units down +Z looking at it
@@ -86,8 +102,12 @@ fn scene_source(with_markers: bool) -> String {
 [node name="Root" type="Node3D"]
 
 [node name="Box" type="MeshInstance3D" parent="."]
+mesh = "primitive:BoxMesh"
 
 [node name="Sun" type="DirectionalLight3D" parent="."]
+
+[node name="Splat" type="Decal" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1)
 
 [node name="Cam" type="Camera3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 2)
@@ -204,8 +224,8 @@ fn play3d_no_marker_cubes() {
             .get_node_or_null(scene_root, name)
             .unwrap_or_else(|| panic!("fixture has {name}"));
         assert!(
-            has_shape(&editor_items, id, PrimitiveShape::Marker),
-            "{name} must be classified as an editor-only Marker and be present \
+            has_shape(&editor_items, id, PrimitiveShape::Box),
+            "{name} must carry a Box placeholder and be present \
              in the EDITOR list — if it is absent or carries another shape, the \
              game-list assertion below proves nothing",
         );
@@ -213,27 +233,38 @@ fn play3d_no_marker_cubes() {
 
     let game_items = game_3d_render_inputs(&with, camera, &viewport).items;
     assert_eq!(
-        shape_count(&game_items, PrimitiveShape::Marker),
+        shape_count(&game_items, PrimitiveShape::Box),
         0,
-        "no pivot marker may survive into the game render list",
+        "no Box placeholder may survive into the game render list — a pivot, a \
+         Marker3D, an Area3D and a Decal all draw nothing in Godot",
     );
 
-    // -- and the placeholder for real scene content MUST survive --------------
+    // -- and REAL scene content MUST survive ---------------------------------
     //
-    // The mesh-less `MeshInstance3D` also falls through to the primitive
-    // fallback, as `PrimitiveShape::Box`. Stripping by shape deleted it too,
-    // which is what broke `play_uses_scene_camera3d`
-    // ("game mode drops editor furniture, not scene content").
+    // 🔑 This is the half that stops the fix being "strip everything", and it is
+    // why the fixture's `MeshInstance3D` carries `mesh = "primitive:BoxMesh"`.
+    // Resolved geometry becomes `Render3DKind::Mesh`, a different kind from the
+    // `Primitive` placeholder, so the strip cannot reach it. A mesh-LESS
+    // MeshInstance3D stays a `Primitive` and is dropped — which is Godot's own
+    // behaviour (a `MeshInstance3D` with a null mesh submits nothing) and what
+    // this bead's Implement line asks for.
     assert!(
-        game_items.iter().any(|item| item.node_id == mesh.raw()
-            && matches!(
-                item.kind,
-                Render3DKind::Primitive {
-                    shape: PrimitiveShape::Box
-                }
-            )),
-        "the mesh-less MeshInstance3D keeps its Box placeholder in the game \
-         list: it is scene content whose geometry did not resolve, not editor \
-         furniture",
+        game_items.iter().any(
+            |item| item.node_id == mesh.raw() && matches!(item.kind, Render3DKind::Mesh { .. })
+        ),
+        "the MeshInstance3D with real geometry must stay in the game list: the \
+         bead drops editor furniture, not scene content",
+    );
+
+    // …and the Decal's own placeholder is gone from the game list, which is the
+    // Decal clause of the acceptance. Asserted on the LIST rather than by
+    // removing the Decal from the scene, for the reason in the module header:
+    // a Decal also feeds `env_effects`, which the strip does not touch.
+    let splat = with
+        .get_node_or_null(scene_root, "Splat")
+        .expect("fixture has the Decal");
+    assert!(
+        !game_items.iter().any(|item| item.node_id == splat.raw()),
+        "the Decal must contribute no render item to a game frame",
     );
 }

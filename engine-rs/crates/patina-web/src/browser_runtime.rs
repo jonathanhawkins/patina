@@ -63,8 +63,18 @@ struct Runtime {
 
 impl Runtime {
     fn new(tree: SceneTree) -> Self {
+        Self::from_engine(WebEngine::new(tree))
+    }
+
+    /// Adopts an already-built engine.
+    ///
+    /// Needed because `boot_mounted_project` returns an engine that has ALREADY
+    /// been configured from the project's settings and input map; rebuilding it
+    /// from the tree through `new` would discard that configuration
+    /// (pat-mgixk.73).
+    fn from_engine(engine: WebEngine) -> Self {
         Self {
-            engine: WebEngine::new(tree),
+            engine,
             touches: TouchTracker::new(),
             gamepads: GamepadTracker::new(),
             fps: FpsMeter::new(1000.0),
@@ -582,12 +592,33 @@ pub fn start_engine(canvas_id: String) -> Result<WebEngineHandle, JsValue> {
     let canvas = crate::canvas::canvas_by_id(&canvas_id).map_err(JsValue::from)?;
     let navigator = window()?.navigator();
 
-    let mut tree = SceneTree::new();
-    let root = tree.root_id();
-    tree.add_child(root, Node::new("Node2D", "Node2D"))
-        .map_err(|e| JsValue::from_str(&format!("could not build the scene: {e:?}")))?;
-
-    let runtime = Rc::new(RefCell::new(Runtime::new(tree)));
+    // Boot the project out of the mounted pack, the way Godot's web export
+    // does (pat-mgixk.73). The export shell mounts the `.pck` and then calls
+    // this; before now the pack was never read, so an exported game ran an
+    // empty `Node2D` tree with no `_ready`, no `_process` and no input map.
+    //
+    // ⚠️ The two callers differ and both must keep working. The export shell
+    // (`gdplatform/src/web_export.rs`) mounts a pack first; the dev page
+    // (`patina-web/web/index.html`) does not mount anything and only wants a
+    // canvas to draw on. So a MISSING `res://project.godot` falls back to the
+    // bare tree — that is the dev page's case and the behaviour that was there
+    // before — while a project that EXISTS and fails to boot is reported, since
+    // booting an empty scene silently is the bug being fixed here.
+    //
+    // Discriminating on `file_exists` rather than on the error text keeps the
+    // two cases apart without parsing a message: "no project here" is a
+    // different situation from "this project is broken".
+    let runtime = if gdcore::file_access::FileAccess::file_exists("res://project.godot") {
+        let engine = WebEngine::boot_mounted_project()
+            .map_err(|e| JsValue::from_str(&format!("could not boot the mounted project: {e}")))?;
+        Rc::new(RefCell::new(Runtime::from_engine(engine)))
+    } else {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        tree.add_child(root, Node::new("Node2D", "Node2D"))
+            .map_err(|e| JsValue::from_str(&format!("could not build the scene: {e:?}")))?;
+        Rc::new(RefCell::new(Runtime::new(tree)))
+    };
     install_listeners(&runtime, &canvas)?;
     install_frame_loop(&runtime, navigator)?;
     Ok(WebEngineHandle { runtime })

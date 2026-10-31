@@ -145,13 +145,24 @@ fn json_ok(resp: &str) -> serde_json::Value {
 fn import_dock_populates_for_selected_resource() {
     let (handle, port) = make_server();
 
-    // A texture resource: importer "Texture2D" with presets + editable options.
+    // A texture resource: importer id `texture`, shown as "Texture2D", with
+    // presets + editable options.
     let tex = json_ok(&http_get(port, "/api/import_settings?path=res://icon.png"));
     assert_eq!(tex["importable"], serde_json::json!(true));
+    // ⚠️ TWO fields, because upstream uses two. `ImportDock::_update_options`
+    // pairs `get_visible_name()` as the item LABEL with `get_importer_name()`
+    // as the item METADATA it acts on (editor/docks/import_dock.cpp:133,141-142),
+    // so the API has to carry both: a `.import` file stores the id, the dock
+    // displays the name.
     assert_eq!(
         tex["importer"],
+        serde_json::json!("texture"),
+        "the API carries Godot's importer ID, which is what a .import file stores"
+    );
+    assert_eq!(
+        tex["importer_visible_name"],
         serde_json::json!("Texture2D"),
-        "Import As shows the importer"
+        "...and the label the dock shows in Import As"
     );
     let presets = tex["presets"].as_array().unwrap();
     assert!(!presets.is_empty(), "Preset menu is populated");
@@ -183,7 +194,15 @@ fn import_dock_populates_for_selected_resource() {
 
     // A different resource type maps to a different importer.
     let audio = json_ok(&http_get(port, "/api/import_settings?path=res://music.ogg"));
-    assert_eq!(audio["importer"], serde_json::json!("Audio Stream"));
+    // ⚠️ `oggvorbisstr` / "Ogg Vorbis", not "Audio Stream". That old label was
+    // never Godot's: `ResourceImporterOggVorbis::get_visible_name()` returns
+    // "Ogg Vorbis" (modules/vorbis/resource_importer_ogg_vorbis.cpp). It read
+    // plausibly, which is exactly why it survived.
+    assert_eq!(audio["importer"], serde_json::json!("oggvorbisstr"));
+    assert_eq!(
+        audio["importer_visible_name"],
+        serde_json::json!("Ogg Vorbis")
+    );
 
     // No path / an unimportable extension -> empty-state.
     assert_eq!(

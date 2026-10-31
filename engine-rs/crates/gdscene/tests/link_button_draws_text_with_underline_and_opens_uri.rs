@@ -13,20 +13,22 @@
 //!
 //! # Why the geometry below is exact rather than approximate
 //!
-//! Every number is derived from the font constants, not measured from a run:
-//! `GLYPH_W/GLYPH_H/GLYPH_GAP = 5/7/1` (`control_render.rs:31-33`) and
-//! `text_scale(16) = 16 / 7 = 2` (pinned by that module's own unit test). So for
-//! `"Docs"` at the default size 16:
+//! ⚠️ REVISED for pat-mgixk.66. This note used to derive every number from the
+//! 5x7 bitmap constants — `text_width = (4*5 + 3*1) * 2` = **46**, `glyph_h =
+//! 7 * 2` = **14**, underline `y = 14 + 2` = **16**. Default text is now drawn
+//! and measured with the embedded TTF face, so those literals described a rule
+//! that no longer matches the glyphs underneath it.
 //!
-//! * `text_width = (4*5 + 3*1) * 2` = **46**
-//! * `glyph_h = 7 * 2` = **14**, `thickness = scale` = **2**
-//! * underline `y = 0 + 14 + 2` = **16**
+//! The width is therefore taken from `TtfFont::builtin().measure_line("Docs",
+//! 16.0)` — the public spelling of the computation `control_render` itself uses,
+//! so the expectation tracks the face instead of restating a constant. The
+//! vertical offset is `line_height_px(16) + thickness(2)` = **18**.
 //!
-//! ⚠️ The Line's ENDPOINTS are asserted, not merely its presence. Clauses 3 and
-//! 4 only require a Line to appear and disappear, which a stub emitting a
-//! zero-length or full-rect line would satisfy; `to.x == 46` is what proves the
-//! rule spans the text, and `y == 16` that it sits under the baseline rather
-//! than through the glyphs.
+//! ⚠️ The Line's ENDPOINTS are still asserted, not merely its presence. Clauses
+//! 3 and 4 only require a Line to appear and disappear, which a stub emitting a
+//! zero-length or full-rect line would satisfy; `to.x == docs_w()` is what proves
+//! the rule spans the TEXT (not the 120-wide control rect), and `y == 18` that it
+//! sits under the baseline rather than through the glyphs.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -51,10 +53,28 @@ const ALWAYS: i64 = 0;
 const ON_HOVER: i64 = 1;
 const NEVER: i64 = 2;
 
-/// Text width of `"Docs"` at the default font size — see the module note.
-const DOCS_W: f32 = 46.0;
+/// Text width of `"Docs"` at the default font size.
+///
+/// ⚠️ DERIVED from the real face, not the 5x7 bitmap constants (pat-mgixk.66).
+/// This was a hard-coded `46.0` computed from `GLYPH_W/GLYPH_GAP * text_scale`,
+/// which is what the underline used to span. The rasterizer now draws default
+/// text with the embedded TTF, and `control_render` measures the rule with the
+/// same face — so a bitmap-derived literal here would assert the rule is the
+/// wrong length on purpose.
+///
+/// `TtfFont::builtin().measure_line` is the public spelling of the very
+/// computation `control_render::measure_text_px` performs (that helper is
+/// `pub(crate)` and an integration test cannot call it), so the two agree
+/// bit-for-bit rather than approximately.
+fn docs_w() -> f32 {
+    gdrender2d::TtfFont::builtin().measure_line("Docs", 16.0)
+}
+
 /// Underline offset below a top-left-anchored label at the default font size.
-const UNDERLINE_Y: f32 = 16.0;
+///
+/// `line_height_px(16) + thickness(2)`. The line height is now the authored
+/// pixel size rather than `GLYPH_H * text_scale` (= 14), so this moved 16 -> 18.
+const UNDERLINE_Y: f32 = 18.0;
 
 /// A tree holding one `LinkButton` at the origin, 120x24.
 ///
@@ -144,7 +164,7 @@ fn link_button_draws_text_with_underline_and_opens_uri() {
     assert_eq!(from, Vector2::new(0.0, UNDERLINE_Y));
     assert_eq!(
         to,
-        Vector2::new(DOCS_W, UNDERLINE_Y),
+        Vector2::new(docs_w(), UNDERLINE_Y),
         "the rule spans the TEXT width, not the 120-wide control rect — a \
          stretched LinkButton must not trail a line past its own label"
     );

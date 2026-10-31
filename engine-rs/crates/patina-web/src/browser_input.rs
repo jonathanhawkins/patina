@@ -12,7 +12,7 @@
 //! so the whole translation is testable on the host. The browser listeners are a
 //! thin adapter that reads fields off the DOM event and calls these.
 
-use gdcore::math::Vector2;
+use gdcore::math::{Transform2D, Vector2};
 use gdplatform::input::{GamepadAxis, GamepadButton, InputEvent, Key, MouseButton};
 
 /// How a canvas maps CSS pixels to project pixels.
@@ -28,6 +28,18 @@ pub struct CanvasMapping {
     pub origin_css: Vector2,
     /// `window.devicePixelRatio`.
     pub device_pixel_ratio: f32,
+    /// Canvas (backing) pixels -> project coordinates: the inverse of the
+    /// stretch transform the renderer applies (pat-mgixk.74).
+    ///
+    /// 🔑 Without this, [`Self::to_project`] stopped at canvas pixels despite
+    /// its name. Under any stretch mode those are NOT project coordinates, so
+    /// on a 320x180 project shown at 640x480 every click landed at double the
+    /// intended position and anything inside a letterbox bar mapped onto real
+    /// content.
+    ///
+    /// ⚠️ Defaults to IDENTITY, so a project that does not stretch maps exactly
+    /// as it did before this field existed.
+    pub canvas_to_project: Transform2D,
 }
 
 impl Default for CanvasMapping {
@@ -35,6 +47,7 @@ impl Default for CanvasMapping {
         Self {
             origin_css: Vector2::new(0.0, 0.0),
             device_pixel_ratio: 1.0,
+            canvas_to_project: Transform2D::IDENTITY,
         }
     }
 }
@@ -47,10 +60,13 @@ impl CanvasMapping {
         } else {
             1.0
         };
-        Vector2::new(
+        let canvas_px = Vector2::new(
             (client_css.x - self.origin_css.x) * dpr,
             (client_css.y - self.origin_css.y) * dpr,
-        )
+        );
+        // ...and the rest of the way into project space (pat-mgixk.74).
+        // IDENTITY when the project does not stretch, so this is a no-op there.
+        self.canvas_to_project.xform(canvas_px)
     }
 }
 

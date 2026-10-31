@@ -79,6 +79,33 @@ impl LifecycleManager {
         tree.collect_subtree_bottom_up(subtree_root, &mut bottom_up);
 
         for &id in &bottom_up {
+            // 🔑 READY RUNS ONCE PER NODE (pat-mgixk.406). Godot's
+            // `Node::_propagate_ready` notifies READY only for a node that has
+            // not been readied yet, re-armable through `Node.request_ready()`
+            // (`scene/main/node.cpp`); entering the tree again fires
+            // EXIT_TREE/ENTER_TREE but **not** READY.
+            //
+            // Without this guard every re-entry replayed `_ready`, and re-entry
+            // is not a rare event:
+            //
+            // * `SceneTree::reparent` ends by calling this function, so any
+            //   reparent re-ran `_ready` for the whole moved subtree.
+            // * `SceneTreeAccessor::add_child` routes an ALREADY-PARENTED node
+            //   through `reparent`, and `instantiate_packed_scene` parents its
+            //   result under the root — so the ordinary GDScript idiom
+            //   `var e = scene.instantiate(); add_child(e)` ran the child's
+            //   `_ready` twice.
+            // * The editor's drag-reparent runs user callbacks a second time too.
+            //
+            // ⚠️ Guarding HERE rather than special-casing `reparent` is what
+            // makes the rule Godot's: it is a property of the node, not of the
+            // call path, so every present and future re-entry point inherits it,
+            // and `request_ready()` keeps working because it clears the same
+            // flag this reads. The two rewind helpers below also clear it
+            // deliberately, which is how a premature pass is allowed to re-run.
+            if tree.get_node(id).is_some_and(|n| n.is_ready()) {
+                continue;
+            }
             tree.trace_record(id, TraceEventType::Notification, "READY");
             if let Some(node) = tree.get_node_mut(id) {
                 node.set_ready(true);
@@ -117,11 +144,25 @@ impl LifecycleManager {
     /// emission had no listeners to reach.
     ///
     /// ⚠️ That reasoning was re-checked when `ready` and `child_entered_tree`
-    /// were added to the same phases (pat-mgixk.64) and it still holds for the
-    /// same reason: the premature pass runs before any script is attached, so
-    /// there is nobody connected to receive either. If a future caller ever
-    /// connects to a node BEFORE dispatching, this comment becomes wrong and the
-    /// rewind has to drop those emissions too.
+    /// were added to the same phases (pat-mgixk.64). It holds for `ready` and
+    /// `tree_entered`, which are emitted ON THE ENTERING NODE — that node has no
+    /// script and therefore no connections during the premature pass.
+    ///
+    /// ⚠️ It does NOT hold as cleanly for `child_entered_tree`, and this is the
+    /// one place it is written down: that signal is emitted on the **parent**,
+    /// which in the assemble-then-dispatch flows (the editor's Play path,
+    /// autoload instantiation) is an already-live node that may well have a
+    /// script and listeners. Such a parent therefore sees
+    /// `child_entered_tree` TWICE for the same child: once from the premature
+    /// pass `add_child` triggers, once from the real dispatch after this rewind.
+    /// Emissions cannot be un-emitted, so the rewind cannot repair it.
+    ///
+    /// Left as-is deliberately rather than papered over: the pre-existing
+    /// `tree_entered` emission has had the same duplicate-on-rewind shape since
+    /// pat-nzgdu.84, suppressing it needs a "premature pass" flag threaded
+    /// through `add_child` -> `enter_tree`, and guessing at that without being
+    /// able to run the editor Play flow would trade a known, documented
+    /// duplicate for an unknown regression. Worth its own bead.
     pub fn rewind_for_redispatch(tree: &mut SceneTree, subtree_root: NodeId) {
         let mut ids = Vec::new();
         tree.collect_subtree_top_down(subtree_root, &mut ids);
@@ -180,7 +221,20 @@ impl LifecycleManager {
         for &id in &bottom_up {
             tree.trace_record(id, TraceEventType::Notification, "EXIT_TREE");
             if let Some(node) = tree.get_node_mut(id) {
-                node.set_ready(false);
+                // 🔑 The ready flag SURVIVES leaving the tree (pat-mgixk.406).
+                // Godot's `_propagate_exit_tree` clears `inside_tree` but NOT
+                // `data.ready_notified` — only `Node.request_ready()` does
+                // (`scene/main/node.cpp`). That is precisely what makes "_ready
+                // runs once per node" hold across a re-entry.
+                //
+                // ⚠️ Clearing it here made the ready-once guard in `enter_tree`
+                // inert for the case it exists for: `SceneTree::reparent` runs
+                // `exit_tree` and then `enter_tree`, so the flag was false again
+                // by the time the guard read it and `_ready` replayed anyway.
+                // The two changes are one fix and neither works alone.
+                //
+                // `rewind_for_redispatch` still clears the flag explicitly —
+                // that is a deliberate rewind of a premature pass, not an exit.
                 node.set_inside_tree(false);
                 node.receive_notification(NOTIFICATION_EXIT_TREE);
             }
@@ -555,6 +609,16 @@ mod tests {
             ]
         );
         assert!(!tree.get_node(child1_id).unwrap().is_inside_tree());
-        assert!(!tree.get_node(child1_id).unwrap().is_ready());
+        // ⚠️ REVISED for pat-mgixk.406: this asserted `!is_ready()`, which
+        // encoded Patina's old behaviour of clearing the flag on EXIT_TREE.
+        // Godot keeps `ready_notified` set after a node leaves the tree —
+        // `Node.is_node_ready()` keeps reporting true, and only
+        // `request_ready()` re-arms it. Keeping the flag is what stops a
+        // reparent replaying `_ready`.
+        assert!(
+            tree.get_node(child1_id).unwrap().is_ready(),
+            "the ready flag must survive EXIT_TREE: _ready has run for this \
+             node and only request_ready() may undo that"
+        );
     }
 }

@@ -3112,7 +3112,27 @@ pub fn render_editor_3d_frame_gpu(
         Some(gdserver3d::sky::SkyMaterial::Physical(m)) => m.night_sky.is_some(),
         _ => false,
     };
-    if render_env.fog_enabled || sky_needs_software {
+    // pat-mgixk.52: reflection probes contribute an ambient term the software
+    // path shades (`renderer.rs:1128` -> `sample_probes_at`) and the wgpu
+    // pipeline does not. Both renderers RECEIVE them — `populate_editor_scene_3d`
+    // calls `add_reflection_probe` + `update_reflection_probe` for each
+    // (`:2398`) — but on the GPU side those only fill storage and a query
+    // accessor (`wgpu_pipeline.rs:4891`); nothing reads them back during
+    // shading. So a scene with a probe silently lost its contribution in the
+    // default editor and Play viewport.
+    //
+    // The bead allows routing to software rather than porting probe shading
+    // into the WGSL, which is what this does.
+    //
+    // ⚠️ Gated on PRESENCE, not on `ambient_mode != Disabled`. A narrower test
+    // would be tighter today, but it would couple this condition to exactly
+    // what the software path currently does with a probe — and probe SPECULAR
+    // is the obvious next thing to land there, at which point a mode-based gate
+    // would start dropping contributions again, silently. Conservative costs a
+    // software frame for a scene that has probes at all; wrong costs every
+    // pixel of every probe-lit surface.
+    let probes_need_software = !inputs.env_effects.reflection_probes.is_empty();
+    if render_env.fog_enabled || sky_needs_software || probes_need_software {
         return framebuffer_to_bgra(&render_editor_3d_frame_from_inputs(viewport, inputs));
     }
 

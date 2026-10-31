@@ -148,6 +148,16 @@ fn viewport(ssao: bool) -> Viewport3D {
     vp.camera.override_transform =
         Some(Transform3D::IDENTITY.translated(Vector3::new(0.0, 0.0, 3.0)));
 
+    // ⚠️ GRID AND ORIGIN AXES OFF. `draw_grid_overlay` is drawn over the final
+    // image (no depth test) and the Godot-convention axis colours are
+    // `X_AXIS_COLOR_3D` (0.86, 0.32, 0.34) and `Z_AXIS_COLOR_3D`
+    // (0.33, 0.55, 0.88) — which BOTH satisfy the red/blue predicates below.
+    // `Grid3D::default()` has `visible: true`, so leaving this alone feeds a
+    // frame-spanning red line into `checker_bounds`, inflating the surface's
+    // bounding box and moving the quadrant samples off the texel centres this
+    // test's whole argument depends on. It happened to pass anyway; that is
+    // luck, not correctness.
+    vp.grid.visible = false;
     // Fallback 1: no sky resource at all, so `sky_needs_software` is false.
     vp.environment.sky_visible = false;
     // The preview sun is the only light once the sky ambient is gone (the

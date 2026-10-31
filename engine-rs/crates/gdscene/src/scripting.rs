@@ -2162,6 +2162,94 @@ fn set_richtext(tree: &mut SceneTree, node_id: NodeId, value: String) {
     }
 }
 
+/// `AnimationPlayer` / `AnimationMixer` methods a script can call
+/// (pat-mgixk.79).
+///
+/// Returns `None` for a node with no attached player, so the generic node table
+/// stays reachable — the same decline-and-fall-through contract the
+/// NavigationAgent, Timer and Camera3D handlers use.
+///
+/// Every arm forwards to an `AnimationPlayer` API that already existed and had
+/// no script caller: a quoted-name grep found **0** dispatch hits for
+/// `get_queue`, `clear_queue`, `animation_set_next`, `set_blend_time`,
+/// `get_current_animation_length` and `advance`, while `AnimationPlayer`
+/// implements all of them.
+fn animation_player_method(
+    tree: &mut crate::scene_tree::SceneTree,
+    nid: NodeId,
+    method: &str,
+    args: &[Variant],
+) -> Option<Variant> {
+    // `advance` needs the tree (it runs the whole apply pass), so it is handled
+    // before the player borrow below.
+    if method == "advance" {
+        let delta = match args.first() {
+            Some(Variant::Float(f)) => *f,
+            Some(Variant::Int(i)) => *i as f64,
+            // Godot's `advance` takes a required delta; a malformed call is a
+            // no-op rather than a zero-advance that looks like success.
+            _ => return Some(Variant::Nil),
+        };
+        return tree
+            .advance_animation_player(nid, delta)
+            .then_some(Variant::Nil);
+    }
+
+    let text = |i: usize| -> Option<String> {
+        match args.get(i) {
+            Some(Variant::String(s)) => Some(s.clone()),
+            Some(Variant::StringName(s)) => Some(s.as_str().to_string()),
+            _ => None,
+        }
+    };
+    let num = |i: usize| -> Option<f64> {
+        match args.get(i) {
+            Some(Variant::Float(f)) => Some(*f),
+            Some(Variant::Int(n)) => Some(*n as f64),
+            _ => None,
+        }
+    };
+
+    let player = tree.get_animation_player_mut(nid)?;
+    match method {
+        "get_queue" => Some(Variant::PackedStringArray(player.get_queue())),
+        "clear_queue" => {
+            player.clear_queue();
+            Some(Variant::Nil)
+        }
+        "animation_set_next" => {
+            let (anim, next) = (text(0)?, text(1)?);
+            player.animation_set_next(anim, next);
+            Some(Variant::Nil)
+        }
+        "set_blend_time" => {
+            let (from, to, secs) = (text(0)?, text(1)?, num(2)?);
+            player.set_blend_time(from, to, secs);
+            Some(Variant::Nil)
+        }
+        "get_current_animation_length" => {
+            // Godot answers 0.0 when nothing is assigned, not null.
+            let len = player
+                .current_animation()
+                .and_then(|name| player.animations.get(name))
+                .map(|anim| anim.length)
+                .unwrap_or(0.0);
+            Some(Variant::Float(len))
+        }
+        "set_current_animation" => {
+            // Godot's setter STARTS the clip, which is why this cannot be a
+            // plain property write into the bag.
+            let name = text(0)?;
+            player.play(&name);
+            Some(Variant::Nil)
+        }
+        "get_assigned_animation" | "get_current_animation" => Some(Variant::String(
+            player.current_animation().unwrap_or("").to_string(),
+        )),
+        _ => None,
+    }
+}
+
 impl SceneAccess for SceneTreeAccessor {
     fn get_node(&self, from: u64, path: &str) -> Option<u64> {
         let from_id = NodeId::from_object_id(ObjectId::from_raw(from));
@@ -2668,6 +2756,45 @@ impl SceneAccess for SceneTreeAccessor {
                 return;
             }
         }
+        // The same routing for an AnimationPlayer's own properties
+        // (pat-mgixk.79). `set_node_property` reached the player for NOTHING
+        // before this, so `$AP.speed_scale = 2.0` and
+        // `$AP.current_animation = "run"` were silent no-ops: the write landed
+        // in the node's property bag, which the player never reads.
+        //
+        // ⚠️ Guarded on the node actually HAVING a player, which is what keeps
+        // `speed_scale` from colliding with `AnimatedSprite2D.speed_scale` — a
+        // different property on a different node type, handled elsewhere in
+        // this file. No player means `routed` stays false and the write falls
+        // through untouched.
+        if prop == "speed_scale" || prop == "current_animation" || prop == "assigned_animation" {
+            let routed = match self.tree_mut().get_animation_player_mut(nid) {
+                Some(player) => {
+                    if prop == "speed_scale" {
+                        match &value {
+                            Variant::Float(f) => player.speed_scale = *f,
+                            Variant::Int(i) => player.speed_scale = *i as f64,
+                            // A malformed value leaves the rate alone rather
+                            // than freezing playback at 0.
+                            _ => {}
+                        }
+                    } else if let Variant::String(name) = &value {
+                        // Godot's `current_animation` setter STARTS the clip —
+                        // it is not a label. That is the whole reason this
+                        // cannot be a plain bag write.
+                        player.play(name);
+                    }
+                    true
+                }
+                None => false,
+            };
+            if routed {
+                if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                    n.set_property(prop, value);
+                }
+                return;
+            }
+        }
         // Route a Node3D transform component through the canonical
         // local-transform setters so a script write is visible to rendering and
         // physics (pat-0q2kx.29). A plain `set_property` here writes only the
@@ -2845,6 +2972,20 @@ impl SceneAccess for SceneTreeAccessor {
         if let Some(value) =
             crate::camera3d::call_camera3d_method(self.tree_mut(), nid, method, args)
         {
+            return Some(value);
+        }
+
+        // AnimationPlayer's own method surface (pat-mgixk.79). Declines every
+        // node without a player, so the table below stays reachable.
+        //
+        // ⚠️ Registered HERE and not in the interpreter: `call_method_on` falls
+        // back to this table for names it does not know, so one registration
+        // serves BOTH `$AP.get_queue()` and the bare `get_queue()` a script on
+        // the player itself would write. The sole exception is `play`, which the
+        // interpreter claims first to disambiguate `AnimationPlayer.play(clip)`
+        // from `AudioStreamPlayer.play(seek)` — that arm forwards all four of
+        // Godot's arguments rather than duplicating this table.
+        if let Some(value) = animation_player_method(self.tree_mut(), nid, method, args) {
             return Some(value);
         }
 
@@ -3676,13 +3817,22 @@ impl SceneAccess for SceneTreeAccessor {
             // The class guard is satisfiable by construction for anything
             // `get_viewport()` hands back, and keeps a same-named method on an
             // unrelated node from being answered with the root window's state.
-            "get_visible_rect" | "set_input_as_handled" | "is_input_handled"
+            "get_visible_rect"
+            | "set_input_as_handled"
+            | "is_input_handled"
+            | "gui_get_focus_owner"
                 if self
                     .tree()
                     .get_node(nid)
                     .is_some_and(|n| n.is_class("Viewport")) =>
             {
                 match method {
+                    // Godot answers the focused Control, or null when nothing
+                    // holds focus — not an error (pat-mgixk.59).
+                    "gui_get_focus_owner" => Some(match self.tree().focus_owner() {
+                        Some(owner) => Variant::ObjectId(owner.object_id()),
+                        None => Variant::Nil,
+                    }),
                     "get_visible_rect" => {
                         // Godot's visible rect starts at the origin; only the
                         // SIZE varies with the stretch settings.
@@ -7431,7 +7581,14 @@ impl SceneAccess for SceneTreeAccessor {
 
     // -- AnimationPlayer playback (pat-0q2kx.1) -----------------------------
 
-    fn animation_player_play(&mut self, node: u64, name: &str) -> bool {
+    fn animation_player_play(
+        &mut self,
+        node: u64,
+        name: &str,
+        custom_blend: f64,
+        custom_speed: f64,
+        from_end: bool,
+    ) -> bool {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
         let Some(player) = self.tree_mut().get_animation_player_mut(nid) else {
             return false;
@@ -7439,15 +7596,22 @@ impl SceneAccess for SceneTreeAccessor {
         if name.is_empty() {
             // Godot's `play()` with no argument resumes the current clip, or
             // starts the autoplay clip when nothing has played yet.
+            //
+            // ⚠️ Still routed through `play_ex` so a bare `play()` with an
+            // explicit speed — `play("", -1, 2.0)` — is not silently normal
+            // speed. The resume branch only chooses the NAME.
             let current = player.current_animation().map(str::to_owned);
             match current {
-                Some(current) => player.play(&current),
+                Some(current) => player.play_ex(&current, custom_blend, custom_speed, from_end),
                 None => {
                     player.play_autoplay();
                 }
             }
         } else {
-            player.play(name);
+            // `play_ex`, not `play`: it has honoured custom_blend/custom_speed/
+            // from_end since pat-0q2kx.1 and had no caller passing them
+            // (pat-mgixk.79).
+            player.play_ex(name, custom_blend, custom_speed, from_end);
         }
         true
     }
@@ -7847,6 +8011,51 @@ impl SceneAccess for SceneTreeAccessor {
 
     fn reload_current_scene(&mut self) -> bool {
         self.tree_mut().reload_current_scene().is_ok()
+    }
+
+    fn set_current_scene(&mut self, node_id: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node_id));
+        // Refuse a node that is not in the tree rather than recording a
+        // current scene that cannot be read back — `current_scene` would then
+        // answer an id `get_node` cannot resolve.
+        if self.tree().get_node(nid).is_none() {
+            return false;
+        }
+        // `None` source: there is no file behind this scene, so
+        // `reload_current_scene` correctly stops working — as in Godot.
+        self.tree_mut().set_current_scene(nid, None);
+        true
+    }
+
+    fn change_scene_to_node(&mut self, node_id: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node_id));
+        // Godot hands the node OVER, so it must come out of the arena first.
+        //
+        // ⚠️ If it still has a parent, that parent keeps a stale child id after
+        // `take_node` — the node is re-inserted under the root with the same
+        // id, so the subtree survives, but the old parent would list a child it
+        // no longer owns. Detaching first keeps the old parent consistent. The
+        // natural argument is an `instantiate()` result, which has no parent.
+        let parent = self.tree().get_node(nid).and_then(|n| n.parent());
+        if let Some(pid) = parent {
+            if let Some(old) = self.tree_mut().get_node_mut(pid) {
+                old.remove_child_id(nid);
+            }
+        }
+        let Some(mut node) = self.tree_mut().take_node(nid) else {
+            return false;
+        };
+        node.set_parent(None);
+        self.tree_mut().change_scene_to_node(node).is_ok()
+    }
+
+    fn notify_group_flags(&mut self, flags: i64, group: &str, what: i64) -> bool {
+        self.tree_mut().notify_group_flags(
+            flags.max(0) as u32,
+            group,
+            gdobject::notification::Notification::new(what as i32),
+        );
+        true
     }
 
     fn quit(&mut self, exit_code: i64) {

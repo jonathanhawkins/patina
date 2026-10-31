@@ -756,7 +756,25 @@ pub trait SceneAccess {
 
     /// Play `name` on the AnimationPlayer attached to `node` (an empty `name`
     /// resumes the current clip). Returns `false` if `node` has no player.
-    fn animation_player_play(&mut self, _node: u64, _name: &str) -> bool {
+    /// `AnimationPlayer.play(name, custom_blend, custom_speed, from_end)`.
+    ///
+    /// ⚠️ All FOUR arguments, not just the clip name (pat-mgixk.79). Godot's
+    /// signature is `play(name = "", custom_blend = -1, custom_speed = 1.0,
+    /// from_end = false)`, and `AnimationPlayer::play_ex` has honoured all of
+    /// them all along — the script bridge passed only `args[0]`, so a
+    /// `play("walk", 0.3, 2.0)` ran at normal speed with the default blend and
+    /// the two numbers were silently discarded.
+    ///
+    /// `custom_blend` of `-1.0` means "use the player's default blend time",
+    /// which is Godot's own sentinel rather than a magic number of ours.
+    fn animation_player_play(
+        &mut self,
+        _node: u64,
+        _name: &str,
+        _custom_blend: f64,
+        _custom_speed: f64,
+        _from_end: bool,
+    ) -> bool {
         false
     }
 
@@ -1103,6 +1121,33 @@ pub trait SceneAccess {
     /// `SceneTree.reload_current_scene`. `false` when there is no current scene
     /// or it cannot be re-instantiated.
     fn reload_current_scene(&mut self) -> bool {
+        false
+    }
+
+    /// `SceneTree.set_current_scene(node)` — marks an already-present node as
+    /// the current scene without instancing anything (pat-mgixk.59).
+    ///
+    /// ⚠️ This clears the packed source behind the current scene, so
+    /// `reload_current_scene` cannot work afterwards — the same consequence
+    /// Godot has, because there is no longer a file the scene came from.
+    fn set_current_scene(&mut self, _node_id: u64) -> bool {
+        false
+    }
+
+    /// `SceneTree.change_scene_to_node(node)` — replaces the current scene with
+    /// an already-built node (pat-mgixk.59).
+    ///
+    /// ⚠️ Godot's parameter is a node that is NOT in the tree; it is handed
+    /// over, not copied. The natural source is `PackedScene.instantiate()`,
+    /// which returns a detached instance.
+    fn change_scene_to_node(&mut self, _node_id: u64) -> bool {
+        false
+    }
+
+    /// `SceneTree.notify_group_flags(flags, group, notification)` — delivers a
+    /// notification to every node in `group`, honouring the `GROUP_CALL_*`
+    /// flags (pat-mgixk.59).
+    fn notify_group_flags(&mut self, _flags: i64, _group: &str, _what: i64) -> bool {
         false
     }
 

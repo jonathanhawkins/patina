@@ -877,7 +877,13 @@ impl MainLoop {
             };
             if PARTICLE_CLASSES_3D.contains(&node.class_name()) {
                 present_3d.insert(id);
-                configs_3d.push((id, emitting_flag(node), read_emitter_3d(node)));
+                let mut emitter_3d = read_emitter_3d(node);
+                // The emitter's transform THIS frame, stamped onto every
+                // particle spawned this frame — the 3D twin of the 2D line
+                // below (pat-mgixk.70). `read_emitter_3d` takes only the node,
+                // so it cannot resolve a global transform itself.
+                emitter_3d.emitter_transform = crate::node3d::get_global_transform(&self.tree, id);
+                configs_3d.push((id, emitting_flag(node), emitter_3d));
                 continue;
             }
             if !PARTICLE_CLASSES.contains(&node.class_name()) {
@@ -974,7 +980,25 @@ impl MainLoop {
             // these on the CPUParticles2D node directly; GPUParticles2D reads them
             // from its ParticleProcessMaterial, which we approximate with the same
             // node keys so an authored velocity is honored in both cases.
-            if let Variant::Vector2(d) = node.get_property("direction") {
+            // 🔑 Vector3 AND Vector2 (pat-mgixk.67). Godot's
+            // `ParticleProcessMaterial.direction` and `.gravity` are Vector3 for
+            // the 2D emitter as well as the 3D one
+            // (`doc/classes/ParticleProcessMaterial.xml`), and `packed_scene`
+            // flattens them onto the node UNCHANGED as `Variant::Vector3`
+            // (pinned by `particle_process_material_flattens.rs`). This block
+            // matched only `Vector2`, so on every editor-authored GPUParticles2D
+            // the match silently fell through and the emitter used Patina's
+            // defaults — gravity ZERO and direction UP. The 2D emitter takes
+            // x,y, as Godot's does.
+            //
+            // Vector2 is still accepted: that is the CPUParticles2D spelling,
+            // where these live on the node itself.
+            let authored_direction = match node.get_property("direction") {
+                Variant::Vector2(d) => Some(d),
+                Variant::Vector3(d) => Some(Vector2::new(d.x, d.y)),
+                _ => None,
+            };
+            if let Some(d) = authored_direction {
                 if d != Vector2::ZERO {
                     emitter.material.direction = d;
                 }
@@ -988,12 +1012,66 @@ impl MainLoop {
             if let Some(v) = prop_f32(node.get_property("initial_velocity_max")) {
                 emitter.material.initial_velocity_max = v;
             }
-            if let Variant::Vector2(g) = node.get_property("gravity") {
+            // As above. ⚠️ No zero-guard here, deliberately matching the
+            // previous code: an authored gravity of (0, 0) is a real value —
+            // "this emitter is weightless" — and skipping it would leave
+            // Patina's default in place instead.
+            let authored_gravity = match node.get_property("gravity") {
+                Variant::Vector2(g) => Some(g),
+                Variant::Vector3(g) => Some(Vector2::new(g.x, g.y)),
+                _ => None,
+            };
+            if let Some(g) = authored_gravity {
                 emitter.material.gravity = g;
             }
+            // Per-particle scale, flattened from the material's
+            // `scale_min`/`scale_max`. Read only by the 3D emitter before this,
+            // so a 2D emitter authoring scale 3 drew at 1 (pat-mgixk.67).
+            if let Some(v) = prop_f32(node.get_property("scale_min")) {
+                emitter.material.scale_min = v;
+            }
+            if let Some(v) = prop_f32(node.get_property("scale_max")) {
+                emitter.material.scale_max = v;
+            }
+            // The `color_ramp` GradientTexture1D, flattened to
+            // `__color_ramp_offsets` / `__color_ramp_colors`. Reusing the same
+            // helper `read_emitter_3d` uses, so the two emitters cannot disagree
+            // about what a ramp means.
+            emitter.color_curve = color_ramp_curve(node);
             if let Variant::Color(c) = node.get_property("color") {
                 emitter.material.start_color = c;
                 emitter.material.end_color = c;
+            }
+            // 🔑 SDF collision parameters (pat-mgixk.69). The canvas SDF was
+            // already built every frame below and `step_with_sdf` already called
+            // with it — but this block never read `collision_mode`, so the
+            // material kept its `Disabled` default and `resolve_sdf_collisions`
+            // returned immediately. The field was rasterized and thrown away on
+            // every frame of every scene.
+            //
+            // Read exactly the way `read_emitter_3d` reads them
+            // (`main_loop.rs`, the `ParticleProcessMaterial` block): the `.tscn`
+            // flattener lands these on the node alongside `gravity`/`spread`, and
+            // `ParticleCollisionMode` is one shared enum for 2D and 3D.
+            emitter.material.collision_mode = crate::particle3d::ParticleCollisionMode::from_godot(
+                match node.get_property("collision_mode") {
+                    Variant::Int(v) => v,
+                    Variant::Float(f) => f as i64,
+                    _ => 0,
+                },
+            );
+            if let Some(v) = prop_f32(node.get_property("collision_friction")) {
+                emitter.material.collision_friction = v;
+            }
+            if let Some(v) = prop_f32(node.get_property("collision_bounce")) {
+                emitter.material.collision_bounce = v;
+            }
+            // Godot puts `collision_base_size` on the GPUParticles2D node, not on
+            // the material; the 3D reader lands it on the material too
+            // (as `particle_size`), so both paths keep the radius where the
+            // simulator can see it.
+            if let Some(v) = prop_f32(node.get_property("collision_base_size")) {
+                emitter.material.collision_base_size = v;
             }
             configs.push((id, is_emitting, emitter));
         }

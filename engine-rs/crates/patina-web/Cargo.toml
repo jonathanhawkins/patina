@@ -22,6 +22,11 @@ crate-type = ["cdylib", "rlib"]
 # does not enable. So gdscene brings no native-only crate onto wasm32.
 gdcore = { path = "../gdcore" }
 gdvariant = { path = "../gdvariant" }
+# pat-mgixk.74: ClassDB, to populate it at engine construction. Named directly
+# rather than reached through gdscene, which re-exports only
+# `gdobject::signal::Connection`. No new weight on wasm32: gdscene already
+# depends on gdobject unconditionally, so it is in this crate's tree either way.
+gdobject = { path = "../gdobject" }
 # The engine's real mixer (AudioServer + AudioMixer) plus the web device layer
 # it feeds (gdaudio::WebAudioOutput). Not target-gated: gdaudio's native-only
 # pieces (cpal, minimp3) are gated inside that crate, and keeping it on both

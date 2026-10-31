@@ -1250,7 +1250,14 @@ pub(crate) fn text_scale(font_size: i64) -> u32 {
 /// `TtfFont::builtin()` parses an embedded face, so it is memoized rather than
 /// rebuilt per measurement — layout measures every Control's text on every
 /// frame.
-fn builtin_face() -> &'static gdrender2d::TtfFont {
+/// The embedded default UI face, cached for the process.
+///
+/// `pub(crate)` so `canvas_render`'s rasterizer draws default text with the
+/// SAME face this module measures with (pat-mgixk.66). That identity is the
+/// whole point: layout measured with this face while the rasterizer drew a 5x7
+/// bitmap, so every default-theme string was positioned for one font and
+/// painted in another. Sharing the accessor makes the two impossible to drift.
+pub(crate) fn builtin_face() -> &'static gdrender2d::TtfFont {
     static FACE: std::sync::OnceLock<gdrender2d::TtfFont> = std::sync::OnceLock::new();
     FACE.get_or_init(gdrender2d::TtfFont::builtin)
 }
@@ -2845,9 +2852,15 @@ fn draw_control(
                     .or_else(|| theme.get_color("Button", "font_color"))
                     .unwrap_or(Color::new(0.875, 0.875, 0.875, 1.0));
                 let font_size = theme.get_font_size("Button", "font_size").unwrap_or(16);
-                let scale = text_scale(font_size);
-                let tw = text_width(&text, scale);
-                let th = GLYPH_H * scale as f32;
+                // 🔑 The REAL font's advances, not the 5x7 placeholder
+                // (pat-mgixk.66). `text_width` charges every glyph a flat 5px
+                // and `text_scale` quantises the size, so font_size 16 and 20
+                // measured identically and a centred label was centred for a
+                // font nobody drew. Now that the rasterizer paints this text
+                // with `builtin_face`, centring has to use the same metrics or
+                // the label sits off-centre by the difference between them.
+                let tw = measure_text_px(&text, font_size as f32);
+                let th = line_height_px(font_size as f32);
                 // Centre the label within the button rect.
                 let position = Vector2::new(
                     rect.position.x + (rect.size.x - tw) * 0.5,
@@ -2875,9 +2888,16 @@ fn draw_control(
                     // marks it as a link.
                     .unwrap_or(Color::new(0.875, 0.875, 0.875, 1.0));
                 let font_size = theme.get_font_size("LinkButton", "font_size").unwrap_or(16);
+                // `scale` survives for the underline THICKNESS only; the width
+                // and height below come from the real face (pat-mgixk.66).
                 let scale = text_scale(font_size);
-                let tw = text_width(&text, scale);
-                let glyph_h = GLYPH_H * scale as f32;
+                // ⚠️ Not centring — see the note below — but the underline
+                // `DrawLine` spans `position.x + tw`, so a bitmap-derived `tw`
+                // would leave the rule visibly shorter or longer than the text
+                // the rasterizer now draws. The underline is the consumer that
+                // makes this measurement load-bearing for a LinkButton.
+                let tw = measure_text_px(&text, font_size as f32);
+                let glyph_h = line_height_px(font_size as f32);
                 // ⚠️ Drawn at the rect's top-left, NOT centred like `"Button"`.
                 // A LinkButton has no stylebox and its minimum size is the text
                 // itself (`link_button.cpp::get_minimum_size`), so there is no

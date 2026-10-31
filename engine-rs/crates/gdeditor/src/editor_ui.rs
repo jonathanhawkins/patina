@@ -11902,8 +11902,16 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     // Import As: dropdown of compatible importers.
     var importAs = document.getElementById('import-as');
     importAs.innerHTML = '';
-    (info.importers && info.importers.length ? info.importers : [info.importer]).forEach(function(name) {
-      var o = document.createElement('option'); o.value = name; o.textContent = name; importAs.appendChild(o);
+    // Upstream pairs the two and uses them for DIFFERENT things:
+    // `add_item(get_visible_name())` is the label and
+    // `set_item_metadata(get_importer_name())` is the value it acts on
+    // (editor/docks/import_dock.cpp:133,141-142). So value = the importer id,
+    // text = the visible name. Falls back to the id when the server sends no
+    // label, so an older server still renders something.
+    (info.importers && info.importers.length ? info.importers : [info.importer]).forEach(function(id) {
+      var o = document.createElement('option'); o.value = id;
+      o.textContent = (id === info.importer && info.importer_visible_name) ? info.importer_visible_name : id;
+      importAs.appendChild(o);
     });
     importAs.value = info.importer; importAs.disabled = false;
     // Preset menu.

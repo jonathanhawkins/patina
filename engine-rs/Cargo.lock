@@ -2251,6 +2251,7 @@ dependencies = [
  "console_error_panic_hook",
  "gdaudio",
  "gdcore",
+ "gdobject",
  "gdplatform",
  "gdrender2d",
  "gdrender3d",

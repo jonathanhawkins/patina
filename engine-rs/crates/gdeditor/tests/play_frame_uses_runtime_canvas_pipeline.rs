@@ -163,14 +163,47 @@ fn flat_normal() -> Texture2D {
 }
 
 /// Renders the fixture through the Play entry point.
-fn play_frame(normal: Texture2D, snap: bool) -> Vec<Color> {
+/// Renders a Play frame.
+///
+/// `grouped` selects the CanvasGroup parent (`true`, the real fixture) or a
+/// plain `Node2D` carrying the same 0.5 alpha as `modulate` (`false`).
+///
+/// 🔑 `modulate`, NOT `self_modulate`, in the ungrouped variant, and the choice
+/// is the whole point of the comparison. `modulate` propagates down the chain,
+/// so each child blends at 0.5 ON ITS OWN — which is exactly the per-child
+/// blending a missing `collect_canvas_groups` produces. `self_modulate` does not
+/// inherit, so the children would have drawn fully opaque and BOTH sample points
+/// would have moved, destroying the differential.
+fn play_frame(normal: Texture2D, snap: bool, grouped: bool) -> Vec<Color> {
     // ⚠️ REQUIRED, and its absence fails as an EMPTY frame rather than an error:
     // `collect_canvas_items` filters on `is_class("CanvasItem")`, which walks the
     // ClassDB chain. Unpopulated, a ColorRect is not a CanvasItem, the list comes
     // back empty and every assertion below compares clear to clear.
     register_all_classes();
 
-    let scene = PackedScene::from_tscn(SCENE).expect("scene parses");
+    // One fixture, two spellings of the same parent: nothing else differs, so
+    // any pixel that changes between the two renders changed because of the
+    // grouping.
+    let source = if grouped {
+        SCENE.to_string()
+    } else {
+        SCENE.replace(
+            "[node name=\"Group\" type=\"CanvasGroup\" parent=\".\"]\nself_modulate = Color(1, 1, 1, 0.5)",
+            "[node name=\"Group\" type=\"Node2D\" parent=\".\"]\nmodulate = Color(1, 1, 1, 0.5)",
+        )
+    };
+    if !grouped {
+        // ⚠️ A silent no-op `replace` would hand back the GROUPED scene and the
+        // differential below would compare a frame with itself — passing the
+        // control and failing the overlap check for no reason. Assert the swap
+        // landed.
+        assert_ne!(
+            source, SCENE,
+            "the ungrouped variant must actually replace the CanvasGroup node; \
+             the fixture text must have drifted from the pattern"
+        );
+    }
+    let scene = PackedScene::from_tscn(&source).expect("scene parses");
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     add_packed_scene_to_tree(&mut tree, root, &scene).expect("scene instances");
@@ -205,7 +238,7 @@ fn close(a: Color, b: Color, tol: f32) -> bool {
 
 #[test]
 fn play_frame_uses_runtime_canvas_pipeline() {
-    let frame = play_frame(hemispherical_normal(), true);
+    let frame = play_frame(hemispherical_normal(), true, true);
     assert_eq!(frame.len(), (W * H) as usize, "frame is 640x360");
 
     // -- (1) the window content scale reaches the Play frame ----------------
@@ -240,20 +273,59 @@ fn play_frame_uses_runtime_canvas_pipeline() {
     // overlap is one 0.5 blend and matches the single-child area. Blended
     // per-child it is 1-0.5^2 = 0.75 alpha — a visibly brighter seam exactly
     // where they cross.
-    let single = px(&frame, at(105.0, 30.0).0, at(105.0, 30.0).1);
-    let overlap = px(&frame, at(115.0, 30.0).0, at(115.0, 30.0).1);
-    assert!(
-        close(single, overlap, 0.02),
-        "the CanvasGroup overlap must be ONE 0.5-alpha blend, identical to the \
-         single-child area ({single:?}), not a double blend ({overlap:?}) — Play \
-         never ran collect_canvas_groups",
-    );
-    // Guard against both being background: the group must actually have drawn.
+    // ⚠️ DIFFERENTIAL, not an absolute relationship between two regions of one
+    // frame. The earlier version of this asserted `overlap == single`, reasoning
+    // that a flattened group is one 0.5 blend while per-child blending is
+    // 1-0.5^2 = 0.75. It failed three verifies, and the diagnosis (BlackWaterfall,
+    // bead comment 08:02) is that the ASSERTION was wrong: a group's scratch
+    // buffer is rasterized with a TRANSPARENT clear and then composited with the
+    // group tint, which is not the same alpha math as a 0.5-alpha draw over the
+    // OPAQUE runtime clear — so the single-child area was never the right oracle.
+    // A PointLight2D also shades the composited frame, mixing lighting into both
+    // samples.
+    //
+    // 🔑 Rendering the SAME fixture with the group replaced by a plain parent
+    // removes both objections at once: the alpha math never has to be predicted,
+    // and the lighting is common-mode and cancels.
+    let ungrouped = play_frame(hemispherical_normal(), true, false);
+    let (sx, sy) = at(105.0, 30.0);
+    let (vx, vy) = at(115.0, 30.0);
+    let single = px(&frame, sx, sy);
+    let overlap = px(&frame, vx, vy);
+    let single_ungrouped = px(&ungrouped, sx, sy);
+    let overlap_ungrouped = px(&ungrouped, vx, vy);
+
+    // Guard first: the children must actually be drawn, or everything below
+    // compares background to background.
     let bg = px(&frame, at(160.0, 150.0).0, at(160.0, 150.0).1);
     assert!(
         !close(single, bg, 0.02),
         "precondition: the group's children must be drawn, or (2) compares \
          background to background (single {single:?} vs background {bg:?})",
+    );
+
+    // 🔑 The control. Only ONE child covers (105,30), so grouping cannot change
+    // it: flattening one opaque rect and tinting it 0.5 is the same as drawing
+    // that rect at 0.5. If this moves, the two renders differ for some reason
+    // other than the grouping and the comparison below proves nothing.
+    assert!(
+        close(single, single_ungrouped, 0.02),
+        "control: the single-child area must be identical with and without the \
+         CanvasGroup — only one child covers it, so grouping cannot affect it. \
+         grouped {single:?} vs ungrouped {single_ungrouped:?}",
+    );
+
+    // ...and the overlap, where BOTH children land, must change. Grouped it is
+    // one composite of a flattened buffer; ungrouped it is two 0.5 blends
+    // stacked. Equal values mean the group was never composited as a unit —
+    // Play never ran collect_canvas_groups.
+    assert!(
+        !close(overlap, overlap_ungrouped, 0.02),
+        "the CanvasGroup must composite as a UNIT: the overlap must differ from \
+         the same scene drawn without the group ({overlap:?} vs \
+         {overlap_ungrouped:?}), while the single-child area stays put. Equal \
+         here means Play never ran collect_canvas_groups and the children \
+         blended individually",
     );
 
     // -- (3) NoiseTexture2D is baked and sampled ----------------------------
@@ -277,7 +349,7 @@ fn play_frame_uses_runtime_canvas_pipeline() {
     );
 
     // -- (4) the CanvasTexture normal map changes the lit pixels ------------
-    let flat = play_frame(flat_normal(), true);
+    let flat = play_frame(flat_normal(), true, true);
     let lit_differs = (0..64u32).any(|i| {
         let (lx, ly) = at(200.0 + i as f32, 60.0);
         !close(px(&frame, lx, ly), px(&flat, lx, ly), 0.01)
@@ -296,7 +368,7 @@ fn play_frame_uses_runtime_canvas_pipeline() {
     // pixel space — what the bead needs proved is that
     // CanvasQuality::from_project_settings is wired at all, and it had no
     // production caller before.
-    let unsnapped = play_frame(hemispherical_normal(), false);
+    let unsnapped = play_frame(hemispherical_normal(), false, true);
     assert!(
         frame
             .iter()

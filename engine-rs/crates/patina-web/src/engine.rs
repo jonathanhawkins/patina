@@ -31,11 +31,82 @@ pub struct WebEngine {
 
 impl WebEngine {
     /// Wraps an already-populated scene tree.
+    ///
+    /// 🔑 Populates the process-global ClassDB first (pat-mgixk.74). This is the
+    /// web runtime's equivalent of the boot step every other entry point
+    /// performs — `patina-runner`'s `project_boot::boot_from_project_text` and
+    /// `EngineBootstrap::init_servers` both call this, mirroring Godot's
+    /// `register_scene_types()` during server init.
+    ///
+    /// ⚠️ Without it the browser renders a BLANK canvas no matter what else is
+    /// correct, and silently: `canvas_render::collect_canvas_items` keeps a node
+    /// only `if node.is_class("CanvasItem")`, that answer comes from the global
+    /// ClassDB, and `ClassDB::new()` starts empty — so the render list is empty
+    /// and every frame is the clear colour. The gate is spelled negatively, so
+    /// an unpopulated DB drops the whole scene rather than degrading.
+    ///
+    /// Safe to call on every construction: registration writes into a
+    /// name-keyed map, so repeats overwrite rather than accumulate, which is why
+    /// the runner's two boot paths can both call it in one process.
     pub fn new(tree: SceneTree) -> Self {
+        gdobject::class_db::register_all_classes();
         Self {
             main_loop: MainLoop::new(tree),
             driver: FrameDriver::new(),
         }
+    }
+
+    /// Boots the project out of the mounted `.pck` and returns an engine
+    /// driving its main scene (pat-mgixk.73).
+    ///
+    /// Godot's web export mounts the pack and then runs the ordinary
+    /// `Main::setup`/`Main::start`, so the project's main scene, autoloads and
+    /// `[input]` map are live on the first frame
+    /// (`upstream/godot/platform/web/web_main.cpp`). Patina's `start_engine`
+    /// built a bare `Node2D` tree and never read the pack the export shell had
+    /// just mounted, so an exported game ran an empty scene — no `_ready`, no
+    /// `_process`, no input map.
+    ///
+    /// # Ordering
+    ///
+    /// ⚠️ The lifecycle runs HERE, not inside
+    /// [`gdscene::res_boot::boot_from_res`], and autoloads enter before the main
+    /// scene. Godot guarantees an autoload is in the tree before the main
+    /// scene's `_ready` can reach it, so entering the main scene first would
+    /// break `get_node("/root/MyAutoload")` in `_ready` — and it would break it
+    /// only for projects that use autoloads, which is the worst kind of
+    /// intermittent.
+    ///
+    /// ⚠️ `configure_from_project_settings` and `set_input_map` run AFTER the
+    /// tree is assembled but BEFORE any frame, matching
+    /// `run_booted_project` in the native runner. Installing the input map
+    /// later would drop the first frame's input; configuring the tick rate
+    /// later would run frame 0 at the engine default.
+    ///
+    /// The error is a `String` naming the stage that failed, so the JS binding
+    /// can surface "no project.godot in the mounted pack" instead of a blank
+    /// canvas.
+    pub fn boot_mounted_project() -> Result<Self, String> {
+        let booted = gdscene::res_boot::boot_from_res()?;
+        let mut tree = booted.tree;
+
+        for (_, node_id) in &booted.autoload_roots {
+            gdscene::lifecycle::LifecycleManager::enter_tree(&mut tree, *node_id);
+        }
+        if let Some(main_root) = booted.main_scene_root {
+            gdscene::lifecycle::LifecycleManager::enter_tree(&mut tree, main_root);
+        }
+
+        // `WebEngine::new` populates the ClassDB, which `boot_from_res` has
+        // already done — it is idempotent, and going through `new` keeps this
+        // path from drifting out of step with however `new` is configured.
+        let mut engine = Self::new(tree);
+        engine
+            .main_loop
+            .configure_from_project_settings(&booted.settings);
+        engine.main_loop.set_input_map(booted.input_map);
+        engine.main_loop.register_physics_bodies();
+        Ok(engine)
     }
 
     /// Advances the engine for an animation-frame callback at `now_ms`.
@@ -155,6 +226,84 @@ impl WebEngine {
             out.extend_from_slice(&[to_u8(px.r), to_u8(px.g), to_u8(px.b), to_u8(px.a)]);
         }
         out
+    }
+
+    /// Renders the running scene into a `canvas_w` x `canvas_h` RGBA buffer,
+    /// honouring the project's `display/window/stretch/*` settings
+    /// (pat-mgixk.74).
+    ///
+    /// 🔑 This is [`Self::render_2d_rgba`]'s stretch-aware replacement. That one
+    /// renders the scene AT the size it is handed, so on a 640x480 canvas a
+    /// 320x180 project drew its nodes at project coordinates in the top-left
+    /// corner at 1:1 and left the rest blank — the canvas was bigger, not the
+    /// content. Nothing scaled and nothing was letterboxed.
+    ///
+    /// The transform comes from `RootWindow::stretch_transform()`, whose
+    /// counterpart `window_to_canvas()` already describes itself as "the inverse
+    /// of the transform the renderer applies". The renderer simply never applied
+    /// one; both halves existed and were never joined.
+    pub fn render_frame_rgba(&mut self, canvas_w: u32, canvas_h: u32, project_root: &str) -> Vec<u8> {
+        use gdcore::math::{Color, Vector2};
+
+        // The window has to know the real backing size first: every value below
+        // is derived from it, so computing the stretch against a stale size
+        // would letterbox for the wrong canvas.
+        let canvas_size = Vector2::new(canvas_w as f32, canvas_h as f32);
+        self.main_loop.tree_mut().root_window_mut().size = canvas_size;
+        let stretch = self.main_loop.tree().root_window().stretch_transform();
+        // ⚠️ The camera is resolved against the PROJECT space (`visible_size`),
+        // not the canvas. Passing the canvas size here would centre the camera
+        // on the stretched viewport and then stretch it again.
+        let visible = self.main_loop.tree().root_window().visible_size();
+
+        let tree = self.main_loop.tree();
+        let mut items = gdscene::canvas_render::collect_canvas_items(tree);
+        if let Some(view) =
+            gdscene::canvas_render::camera2d_view_transform(tree, visible, None, 0.0)
+        {
+            gdscene::canvas_render::apply_camera2d_view(&mut items, view);
+        }
+        // ⚠️ Prepended UNCONDITIONALLY, which is why this is a plain loop and
+        // not a second `apply_camera2d_view` call. That helper deliberately
+        // exempts `CanvasFollow::Fixed` items so a HUD layer does not pan with
+        // the camera — correct for a camera, wrong for the stretch: a HUD that
+        // skipped the stretch would draw at 1:1 over scaled content.
+        for item in items.iter_mut() {
+            item.global_transform = stretch * item.global_transform;
+        }
+
+        let mut textures = gdscene::texture_cache::TextureCache::new(project_root.to_string());
+        // Rasterized at the CANVAS size with an opaque black clear, so the
+        // letterbox bars need no special case: they are simply the region no
+        // stretched item covers. Godot's bars are black too.
+        let frame = gdscene::canvas_render::rasterize_render_list(
+            &items,
+            canvas_w,
+            canvas_h,
+            Color::new(0.0, 0.0, 0.0, 1.0),
+            Some(&mut textures),
+        );
+        let mut out = Vec::with_capacity((canvas_w as usize) * (canvas_h as usize) * 4);
+        for px in &frame.pixels {
+            let to_u8 = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+            out.extend_from_slice(&[to_u8(px.r), to_u8(px.g), to_u8(px.b), to_u8(px.a)]);
+        }
+        out
+    }
+
+    /// Canvas (backing) pixels -> project coordinates, for mapping pointer
+    /// events under stretch (pat-mgixk.74).
+    ///
+    /// The exact inverse of what [`Self::render_frame_rgba`] applies, taken from
+    /// the same `RootWindow`, so a click always lands on the node drawn under
+    /// the cursor. ⚠️ Call it only after a frame has been rendered at the
+    /// current canvas size, since that is what sets the window size the
+    /// transform is derived from.
+    pub fn canvas_to_project(&self, canvas_point: gdcore::math::Vector2) -> gdcore::math::Vector2 {
+        self.main_loop
+            .tree()
+            .root_window()
+            .window_to_canvas(canvas_point)
     }
 
     /// Mutable access to the scene, for wiring a scene up after construction.

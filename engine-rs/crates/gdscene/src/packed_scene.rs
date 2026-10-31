@@ -1040,22 +1040,48 @@ impl PackedScene {
             let Some(props) = sub_resource_props.get(&mat_id) else {
                 continue;
             };
-            for key in [
-                "direction",
-                "gravity",
-                "spread",
-                "initial_velocity_min",
-                "initial_velocity_max",
-                "color",
-                "scale_min",
-                "scale_max",
-            ] {
+            // ⚠️ EVERY key the resource carries, not a hard-coded list.
+            //
+            // The list here was exactly eight keys (direction, gravity, spread,
+            // initial_velocity_min/max, color, scale_min/max) while `MainLoop`
+            // reads a dozen more straight off the node — `sub_emitter_mode`,
+            // `sub_emitter_frequency`, `sub_emitter_amount_at_end`,
+            // `sub_emitter_keep_velocity`, `collision_mode`,
+            // `collision_friction`, `collision_bounce`,
+            // `attractor_interaction_enabled` — with comments asserting that
+            // this flattener lands them there. It did not. Godot saves all of
+            // them on the `[sub_resource type="ParticleProcessMaterial"]`, so an
+            // editor-authored scene's sub-emitters, collision response and
+            // attractor opt-out never engaged. The only things that ever set
+            // them were tests authoring them directly on the NODE, which is why
+            // the gap read as done (pat-mgixk.68).
+            //
+            // Copying whatever the resource declares fixes the whole class at
+            // once and cannot drift: `ParticleProcessMaterial` has ~113
+            // properties, and an allowlist goes stale every time a reader starts
+            // consulting one more.
+            //
+            // ⚠️ Resource-typed values are SKIPPED. A `SubResource:<id>` string
+            // is a reference into `sub_resource_props`, which is gone by render
+            // time — landing it on the node would hand a reader an id it cannot
+            // resolve. Those need the two-hop sampling that `color_ramp` and the
+            // `*_curve` params get below.
+            //
+            // `resource_*` is skipped too: those are `Resource` bookkeeping
+            // (`resource_name`, `resource_local_to_scene`) that a `.tscn`
+            // sub_resource may carry, and they describe the material rather than
+            // the particles.
+            for (key, value) in props {
                 if tmpl.properties.contains_key(key) {
                     continue;
                 }
-                if let Some(value) = props.get(key) {
-                    tmpl.properties.insert(key.to_string(), value.clone());
+                if key.starts_with("resource_") {
+                    continue;
                 }
+                if sub_ref_id(Some(value)).is_some() {
+                    continue;
+                }
+                tmpl.properties.insert(key.clone(), value.clone());
             }
 
             // `color_ramp` is what makes a particle's colour change over its

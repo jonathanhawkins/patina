@@ -1398,10 +1398,84 @@ impl Interpreter {
                 // A snapshot, as before the pat-s3rrv.8 flip: the body may
                 // mutate the array it iterates.
                 let items: Vec<Variant> = match iter_val {
-                    Variant::Array(a) => a.to_vec(),
+                    Variant::Array(ref a) => a.to_vec(),
                     // Godot iterates an int as range(n): 0, 1, ..., n-1
                     // (empty when n <= 0). Mirrors `for i in 5:`.
                     Variant::Int(n) => (0..n).map(Variant::Int).collect(),
+
+                    // -- the rest of Godot's iterables (pat-mgixk.72) ---------
+                    //
+                    // `OPCODE_ITERATE_BEGIN_*` in `gdscript_vm.cpp` covers all of
+                    // these; Patina accepted Array and int and raised a TypeError
+                    // on everything else, so `for k in dict` and `for c in "abc"`
+                    // — core GDScript — were runtime errors.
+                    //
+                    // Materialised into the same `Vec` the two arms above build,
+                    // which is what makes `await` inside the body keep working
+                    // for free: `ResumeFrame::For` already carries
+                    // `pending_items`, so a suspended loop resumes through the
+                    // existing path with no new frame type.
+
+                    // A Dictionary iterates its KEYS, in insertion order —
+                    // `Dictionary` stores `entries: Vec<(Variant, Variant)>`
+                    // precisely so that order is defined.
+                    Variant::Dictionary(ref d) => d.with(|dict| dict.keys().cloned().collect()),
+
+                    // A String iterates single-character Strings, not code
+                    // points: `for c in "hi"` binds "h" then "i".
+                    Variant::String(ref text) => text
+                        .chars()
+                        .map(|c| Variant::String(c.to_string()))
+                        .collect(),
+
+                    // A float iterates like `range()` with step 1 but keeps
+                    // FLOAT values: `for i in 2.5` yields 0.0, 1.0, 2.0.
+                    Variant::Float(end) => float_range(0.0, end, 1.0),
+
+                    // Vector2/Vector3 are `range(from, to[, step])`. The integer
+                    // variants yield ints and the float variants yield floats,
+                    // which is why they cannot share one arm.
+                    Variant::Vector2(v) => float_range(v.x as f64, v.y as f64, 1.0),
+                    Variant::Vector3(v) => float_range(v.x as f64, v.y as f64, v.z as f64),
+                    Variant::Vector2i(v) => int_range(v.x as i64, v.y as i64, 1),
+                    Variant::Vector3i(v) => int_range(v.x as i64, v.y as i64, v.z as i64),
+
+                    // Every Packed*Array iterates its elements.
+                    Variant::PackedByteArray(ref v) => {
+                        v.iter().map(|b| Variant::Int(*b as i64)).collect()
+                    }
+                    Variant::PackedInt32Array(ref v) => {
+                        v.iter().map(|i| Variant::Int(*i as i64)).collect()
+                    }
+                    Variant::PackedInt64Array(ref v) => {
+                        v.iter().copied().map(Variant::Int).collect()
+                    }
+                    Variant::PackedFloat32Array(ref v) => {
+                        v.iter().map(|f| Variant::Float(*f as f64)).collect()
+                    }
+                    Variant::PackedFloat64Array(ref v) => {
+                        v.iter().copied().map(Variant::Float).collect()
+                    }
+                    Variant::PackedStringArray(ref v) => {
+                        v.iter().cloned().map(Variant::String).collect()
+                    }
+                    Variant::PackedVector2Array(ref v) => {
+                        v.iter().copied().map(Variant::Vector2).collect()
+                    }
+                    Variant::PackedVector3Array(ref v) => {
+                        v.iter().copied().map(Variant::Vector3).collect()
+                    }
+                    Variant::PackedColorArray(ref v) => {
+                        v.iter().copied().map(Variant::Color).collect()
+                    }
+                    Variant::PackedVector4Array(ref v) => {
+                        v.iter().copied().map(Variant::Vector4).collect()
+                    }
+
+                    // An object implementing Godot's iterator virtuals
+                    // (`Object._iter_init`/`_iter_next`/`_iter_get`).
+                    Variant::ObjectId(_) => self.object_iter_items(&iter_val, iterable)?,
+
                     other => {
                         return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                             "cannot iterate over {}",
@@ -6045,6 +6119,19 @@ impl Interpreter {
     /// `SceneTree` in Godot, and only on this dispatch path here.
     ///
     /// `Ok(None)` means "not a SceneTree method", so the caller falls through.
+    /// Extracts an ObjectId argument for a `get_tree()` method.
+    ///
+    /// Godot types these parameters as `Node`/`Object`; anything else is a bad
+    /// argument rather than a silent no-op (pat-mgixk.59).
+    fn scene_tree_arg_object(ctx: &str, args: &[Variant], idx: usize) -> Result<u64, RuntimeError> {
+        match args.get(idx) {
+            Some(Variant::ObjectId(id)) => Ok(id.raw()),
+            other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "{ctx}() expects a node object for argument {idx}, got {other:?}"
+            )))),
+        }
+    }
+
     fn try_scene_tree_method(
         &mut self,
         name: &str,
@@ -6072,6 +6159,57 @@ impl Interpreter {
                     None => false,
                 };
                 Variant::Int(if ok { OK } else { ERR_CANT_OPEN })
+            }
+            // `get_tree().change_scene_to_node(n)` — hands an already-built
+            // node over as the current scene. The idiomatic source is
+            // `PackedScene.instantiate()`, whose result is detached.
+            "change_scene_to_node" => {
+                Self::require_args("change_scene_to_node", args, 1)?;
+                let node = Self::scene_tree_arg_object("change_scene_to_node", args, 0)?;
+                let ok = match self.scene_access {
+                    Some(ref mut access) => access.change_scene_to_node(node),
+                    None => false,
+                };
+                Variant::Int(if ok { OK } else { ERR_CANT_OPEN })
+            }
+            // Void in Godot. Marks a node already in the tree as current; it
+            // instantiates nothing.
+            "set_current_scene" => {
+                Self::require_args("set_current_scene", args, 1)?;
+                let node = Self::scene_tree_arg_object("set_current_scene", args, 0)?;
+                if let Some(ref mut access) = self.scene_access {
+                    access.set_current_scene(node);
+                }
+                Variant::Nil
+            }
+            // The flagged sibling of the `notify_group` arm below, which Godot
+            // defines as this call with GROUP_CALL_DEFAULT.
+            //
+            // ⚠️ `notify_group` is NOT folded in here: it already has its own
+            // arm, and a combined pattern would be unreachable for it. The
+            // argument order also differs — flags come first only in this form,
+            // so the group name is at index 1 here and index 0 there.
+            "notify_group_flags" => {
+                Self::require_args("notify_group_flags", args, 3)?;
+                let flags = Self::scene_tree_arg_int("notify_group_flags", args, 0, 0)?;
+                let group = Self::scene_tree_arg_string("notify_group_flags", args, 1)?;
+                let what = Self::scene_tree_arg_int("notify_group_flags", args, 2, 0)?;
+                if let Some(ref mut access) = self.scene_access {
+                    access.notify_group_flags(flags, &group, what);
+                }
+                Variant::Nil
+            }
+            // Godot's `SceneTree.queue_delete(obj)` is the tree-level spelling
+            // of `Node.queue_free()`; both defer to the same end-of-frame reap,
+            // so this forwards to the binding that already existed rather than
+            // adding a second deletion path.
+            "queue_delete" => {
+                Self::require_args("queue_delete", args, 1)?;
+                let node = Self::scene_tree_arg_object("queue_delete", args, 0)?;
+                if let Some(ref mut access) = self.scene_access {
+                    access.queue_free(node);
+                }
+                Variant::Nil
             }
             // `get_tree().set_multiplayer(api)` — the script spelling for
             // installing a `MultiplayerAPIExtension` (pat-s3rrv.230). The
@@ -7499,6 +7637,74 @@ impl Interpreter {
                 } else {
                     Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "emit_signal() requires scene access".into(),
+                    )))
+                }
+            }
+            // Godot resolves an unqualified call to `self`, so a bare
+            // `connect("sig", Callable(self, "m"))` inside a script IS
+            // `self.connect(...)` — `Object::connect` reached through the
+            // script instance.
+            //
+            // ⚠️ `emit_signal` (just above) has had a bare arm all along and
+            // `connect` never did, so the two halves of the commonest signal
+            // idiom disagreed: a script could emit its own signal but could not
+            // subscribe to one without naming a receiver. And the failure was
+            // not a quiet `false` — an unresolved call ABORTS the enclosing
+            // body, so every statement after a bare `connect` in `_ready`
+            // silently stopped running, leaving later fields at their initial
+            // values (pat-mgixk.9 part 2).
+            "connect" => {
+                if args.len() < 2 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "connect() needs a signal and a target".into(),
+                    )));
+                }
+                let signal = match &args[0] {
+                    Variant::String(s) => s.clone(),
+                    Variant::StringName(s) => s.as_str().to_string(),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "connect() signal must be string".into(),
+                        )))
+                    }
+                };
+                let self_node = self.current_node_id;
+                // Through the SAME `callable_target` the object-level arm in
+                // `call_method_on` uses, so a `Callable`, a bare method name
+                // and a `Callable` whose target is 0 (meaning self) all resolve
+                // identically on both paths. A second resolver here is exactly
+                // how the two would drift.
+                let Some((target_id, method_name)) = callable_target(&args[1], self_node) else {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "connect() target must be a Callable or a method name".into(),
+                    )));
+                };
+                // Godot ConnectFlags bitmask (DEFERRED=1, ONE_SHOT=4, ...).
+                // One arg earlier than the object arm's legacy 3-arg shape,
+                // because a bare call has no receiver to spend a slot on.
+                let flags = match args.get(2) {
+                    Some(Variant::Int(f)) => *f,
+                    _ => 0,
+                };
+                if let (Some(ref mut access), Some(node_id)) = (&mut self.scene_access, self_node) {
+                    access.connect_signal_flags(
+                        node_id,
+                        &signal,
+                        target_id,
+                        &method_name,
+                        flags,
+                        &[],
+                    );
+                    // ⚠️ `Nil`, matching the object-level arm. Godot returns an
+                    // `Error` int (OK == 0), so BOTH arms are inaccurate here —
+                    // but making only the new one correct would leave
+                    // `obj.connect()` and `connect()` returning different types
+                    // for the same operation. Fixing both belongs in its own
+                    // change.
+                    Ok(Some(Variant::Nil))
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "connect() requires scene access".into(),
                     )))
                 }
             }
@@ -11397,6 +11603,61 @@ impl Interpreter {
         Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(root)))
     }
 
+    /// Materialises an object's iteration via Godot's `Object` iterator
+    /// virtuals — `_iter_init` / `_iter_next` / `_iter_get` (pat-mgixk.72).
+    ///
+    /// Godot hands `_iter_init` and `_iter_next` a **one-element Array** as the
+    /// iteration state and lets the callee write element 0; `_iter_get` then
+    /// receives that ELEMENT, not the array. Array is a reference type here
+    /// (pat-s3rrv.8), so both sides see one backing store — which is the whole
+    /// reason Godot passes an Array rather than the state by value. Passing a
+    /// fresh array to `_iter_get`, or reading the state before `_iter_init`
+    /// returns, would feed every iteration the same starting value.
+    ///
+    /// Both predicates are read for TRUTH, as Godot does: `_iter_init` returning
+    /// false means "nothing to iterate" (an empty loop, not an error), and
+    /// `_iter_next` returning false ends it.
+    fn object_iter_items(
+        &mut self,
+        obj: &Variant,
+        object_expr: &Expr,
+    ) -> Result<Vec<Variant>, RuntimeError> {
+        /// A `_iter_next` that never answers false would hang the frame
+        /// forever. Godot has no such cap — it simply loops — but a hung frame
+        /// is indistinguishable from a deadlocked engine, so this fails loudly
+        /// instead. Far above any plausible real iteration.
+        const MAX_OBJECT_ITER: usize = 10_000_000;
+
+        let state = SharedArray::from_vec(vec![Variant::Nil]);
+        let state_arg = Variant::Array(state.clone());
+
+        if !self
+            .call_method_on(obj, "_iter_init", &[state_arg.clone()], object_expr)?
+            .is_truthy()
+        {
+            return Ok(Vec::new());
+        }
+        let mut items = Vec::new();
+        loop {
+            // Re-read element 0 every pass: the callee advances it in place.
+            let cursor = state.get(0).unwrap_or(Variant::Nil);
+            items.push(self.call_method_on(obj, "_iter_get", &[cursor], object_expr)?);
+            if items.len() >= MAX_OBJECT_ITER {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "object iterator produced more than {MAX_OBJECT_ITER} items — \
+                     `_iter_next` never returned false"
+                ))));
+            }
+            if !self
+                .call_method_on(obj, "_iter_next", &[state_arg.clone()], object_expr)?
+                .is_truthy()
+            {
+                break;
+            }
+        }
+        Ok(items)
+    }
+
     fn call_method_on(
         &mut self,
         obj: &Variant,
@@ -13852,7 +14113,26 @@ impl Interpreter {
                                 _ => None,
                             };
                             if let Some(clip) = anim_clip {
-                                if access.animation_player_play(id, &clip) {
+                                // Godot: `play(name = "", custom_blend = -1,
+                                // custom_speed = 1.0, from_end = false)`
+                                // (pat-mgixk.79). Only `args[0]` was read here,
+                                // so the other three were dropped on the floor
+                                // even though `play_ex` implements all of them.
+                                let num = |i: usize, default: f64| match args.get(i) {
+                                    Some(Variant::Float(f)) => *f,
+                                    Some(Variant::Int(n)) => *n as f64,
+                                    _ => default,
+                                };
+                                let custom_blend = num(1, -1.0);
+                                let custom_speed = num(2, 1.0);
+                                let from_end = matches!(args.get(3), Some(v) if v.is_truthy());
+                                if access.animation_player_play(
+                                    id,
+                                    &clip,
+                                    custom_blend,
+                                    custom_speed,
+                                    from_end,
+                                ) {
                                     return Ok(Variant::Nil);
                                 }
                             }
@@ -40338,4 +40618,52 @@ match x:
         );
         assert_eq!(v, Variant::Float(0.5));
     }
+}
+
+/// `range(from, to, step)` with FLOAT values — Godot's float/Vector2/Vector3
+/// iteration (pat-mgixk.72).
+///
+/// A zero or wrong-signed step yields nothing rather than looping forever,
+/// which is what Godot's `range()` does for the same inputs.
+fn float_range(from: f64, to: f64, step: f64) -> Vec<Variant> {
+    let mut out = Vec::new();
+    if step == 0.0 || !step.is_finite() || !from.is_finite() || !to.is_finite() {
+        return out;
+    }
+    let mut v = from;
+    if step > 0.0 {
+        while v < to {
+            out.push(Variant::Float(v));
+            v += step;
+        }
+    } else {
+        while v > to {
+            out.push(Variant::Float(v));
+            v += step;
+        }
+    }
+    out
+}
+
+/// `range(from, to, step)` with INT values — Godot's Vector2i/Vector3i
+/// iteration. Separate from [`float_range`] because the element type is part of
+/// the observable: `for i in Vector2i(0, 2)` binds ints, not floats.
+fn int_range(from: i64, to: i64, step: i64) -> Vec<Variant> {
+    let mut out = Vec::new();
+    if step == 0 {
+        return out;
+    }
+    let mut v = from;
+    if step > 0 {
+        while v < to {
+            out.push(Variant::Int(v));
+            v += step;
+        }
+    } else {
+        while v > to {
+            out.push(Variant::Int(v));
+            v += step;
+        }
+    }
+    out
 }

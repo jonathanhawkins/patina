@@ -43,9 +43,9 @@ use crate::control_render::ControlDrawItem;
 use crate::node::NodeId;
 use crate::tilemap::{self, TILE_SET_PREFIX};
 use crate::{canvas_order, control, node2d, SceneTree};
+use gdcore::file_access::FileAccess;
 use gdcore::math::{Color, Rect2, Transform2D, Vector2, Vector2i};
 use gdrender2d::draw;
-use gdrender2d::font::{draw_string, BitmapFont};
 use gdrender2d::renderer::FrameBuffer;
 use gdscript_interop::canvas_server;
 use gdserver2d::material::{
@@ -2100,6 +2100,129 @@ fn item_belongs_to_layer(tree: &SceneTree, item_node: u64, layer: NodeId) -> boo
     false
 }
 
+/// The `res://` path of a node's `theme` resource, or `""` when it has none.
+///
+/// ⚠️ Reads the `__extres__theme` COMPANION key first, and that is the whole
+/// trick. `packed_scene` stores a `theme = ExtResource("1_t")` property as the
+/// **literal reference string** and puts the resolved path in
+/// `__extres__<prop>` (`packed_scene.rs:1524-1556`); only `script` is rewritten
+/// in place. Reading `theme` alone yields `ExtResource("1_t")`, which is not a
+/// path, so the load would silently find nothing. Same shape as
+/// `control::foldable_group_of`.
+///
+/// The raw property is still consulted as a fallback, for a hand-written
+/// `theme = "res://ui.tres"` and for a node whose theme was set from a script.
+fn theme_resource_path(node: &crate::node::Node) -> String {
+    match node.get_property("__extres__theme") {
+        Variant::String(s) if !s.is_empty() => return s,
+        _ => {}
+    }
+    match node.get_property("theme") {
+        // A still-unresolved `ExtResource(...)` reference is not a path; treating
+        // it as one would ask the filesystem for a literal `ExtResource("1_t")`.
+        Variant::String(s) if s.starts_with("res://") || s.starts_with("user://") => s,
+        _ => String::new(),
+    }
+}
+
+/// Every Control in `root`'s subtree that carries its own `theme`, loaded.
+///
+/// Godot resolves a theme item through the node's own `theme`, then each
+/// ancestor's, then the project theme, then the built-in default
+/// (`scene/theme/theme_owner.cpp`). The control walk already implements the
+/// ancestor half of that, merging each node's own theme over the one handed down
+/// from its parent (`control_render.rs:871-880`) — it just needs this map.
+///
+/// Themes are read through [`FileAccess`], so a mounted `.pck` serves them, and
+/// cached per path: a UI where twenty Buttons sit under one themed Panel parses
+/// the `.tres` once. The cache stores the FAILED lookup too, so a missing or
+/// unparseable theme is not re-read once per node.
+/// The base theme every `Control` inherits before its own `theme` applies: the
+/// project's `gui/theme/custom`, merged over the engine default (pat-mgixk.65).
+///
+/// Godot loads this in `ThemeDB::initialize_theme` and it sits UNDER every node
+/// theme in the resolution order, so a project theme styles a UI whose nodes
+/// name no theme at all — which is how a shipped game is usually themed, and
+/// the clause of this bead that [`collect_node_themes`] does not cover.
+///
+/// Read through [`FileAccess`] so it resolves against whatever `res://` root
+/// the caller installed, and so a mounted `.pck` serves it — the same
+/// mechanism `collect_node_themes` uses, rather than a second notion of where
+/// the project lives. A project with no `project.godot`, no `gui/theme/custom`,
+/// or an unreadable theme file keeps the plain default, so this cannot make a
+/// previously-working scene render differently.
+fn project_base_theme() -> crate::theme::Theme {
+    let mut base = crate::theme::Theme::default_theme();
+    let Ok(project) = FileAccess::read_file_string("res://project.godot") else {
+        return base;
+    };
+    let Ok(settings) = gdcore::project_settings::ProjectSettings::from_godot_format(&project)
+    else {
+        return base;
+    };
+    let Some(path) = settings
+        .get("gui/theme/custom")
+        .and_then(|v| v.as_string())
+        .filter(|p| !p.is_empty())
+    else {
+        return base;
+    };
+    match FileAccess::read_file_string(path) {
+        // ⚠️ `Theme::merge_with` lets its ARGUMENT win on collisions, so the
+        // project theme is merged INTO the default. The other way round would
+        // leave the default masking every project override — and silently, the
+        // pixels simply staying default.
+        Ok(text) => base.merge_with(&crate::theme::Theme::from_tres(&text)),
+        Err(e) => tracing::warn!(
+            theme = %path,
+            error = %e,
+            "gui/theme/custom names a theme resource that cannot be read; \
+             falling back to the default theme"
+        ),
+    }
+    base
+}
+
+fn collect_node_themes(
+    tree: &SceneTree,
+    root: NodeId,
+) -> std::collections::HashMap<NodeId, crate::theme::Theme> {
+    let mut subtree = Vec::new();
+    tree.collect_subtree_top_down(root, &mut subtree);
+
+    let mut by_path: std::collections::HashMap<String, Option<crate::theme::Theme>> =
+        std::collections::HashMap::new();
+    let mut out = std::collections::HashMap::new();
+
+    for id in subtree {
+        let Some(node) = tree.get_node(id) else {
+            continue;
+        };
+        let path = theme_resource_path(node);
+        if path.is_empty() {
+            continue;
+        }
+        let loaded = by_path.entry(path.clone()).or_insert_with(|| {
+            match FileAccess::read_file_string(&path) {
+                Ok(text) => Some(crate::theme::Theme::from_tres(&text)),
+                Err(e) => {
+                    tracing::warn!(
+                        theme = %path,
+                        error = %e,
+                        "a node names a theme resource that cannot be read; \
+                         falling back to the inherited theme"
+                    );
+                    None
+                }
+            }
+        });
+        if let Some(theme) = loaded {
+            out.insert(id, theme.clone());
+        }
+    }
+    out
+}
+
 /// Lays out and draws the running scene's `Control` subtree into render items the
 /// 2D rasterizer already understands (pat-0q2kx.19).
 ///
@@ -2110,9 +2233,28 @@ fn item_belongs_to_layer(tree: &SceneTree, item_node: u64, layer: NodeId) -> boo
 ///
 /// 1. every container is sorted (`Container::_sort_children`), parents before
 ///    children, so child rects are real rather than all sitting at the origin;
-/// 2. the control tree is drawn by [`crate::control_render`] — the same themed
-///    pass the unit tests exercise — and its primitives are mapped onto
-///    [`Render2DKind`], so no per-control drawing rule is duplicated here.
+/// 2. the control tree is drawn by [`crate::control_render`] — and its
+///    primitives are mapped onto [`Render2DKind`], so no per-control drawing
+///    rule is duplicated here.
+///
+/// Theme resolution (pat-mgixk.65): each Control's own `theme` resource is
+/// loaded by [`collect_node_themes`] and passed to
+/// [`crate::control_render::control_draw_items_themed`], so a `.tscn`'s
+/// `theme = ExtResource("ui.tres")` reaches the node and every descendant.
+///
+/// The inheritance happens on the way DOWN, inside the control walk: each node
+/// merges its own theme over the one handed to it and passes the result to its
+/// children (`control_render.rs:871-880`). That is O(1) per node instead of a
+/// walk back up per lookup. Note it is *not*
+/// `control_render::effective_theme`, which implements the same precedence by
+/// walking ancestors and still has no callers.
+///
+/// ⚠️ The base is still [`crate::theme::Theme::default_theme`]: the project
+/// theme from ProjectSettings `gui/theme/custom` is **not** wired in yet, so a
+/// project that sets only that key still renders with the built-in default.
+/// Godot loads it in `ThemeDB::initialize_theme` (`scene/theme/theme_db.cpp`)
+/// and merges it under the node chain. Doing that needs ProjectSettings to
+/// reach this function, which it currently does not.
 ///
 /// `z_index` carries the walk's paint order (parents first) and is offset by
 /// [`CONTROL_Z_BASE`] so UI composites above plain 2D nodes, which is what a
@@ -2171,8 +2313,20 @@ pub fn build_control_render_items(
 
     // (2) Draw, then translate each primitive into a render item. Positions are
     // already global viewport space, so the item transform is a pure translation.
-    let theme = crate::theme::Theme::default_theme();
-    let items = crate::control_render::control_draw_items(tree, root, &theme, size);
+    // 🔑 Each Control's own `theme` resource is resolved here and handed to the
+    // THEMED pass (pat-mgixk.65). `control_draw_items` forwards an EMPTY
+    // `node_themes` map (`control_render.rs:231-236`), so going through it meant
+    // the walk had nothing but the default to merge and a scene's
+    // `theme = ExtResource("ui.tres")` changed no pixels at all. The merge
+    // machinery was already written and simply had no caller that fed it.
+    let node_themes = collect_node_themes(tree, root);
+    // The project theme is the BASE of the chain, under every node theme
+    // (pat-mgixk.65 clause 2). `effective_theme` merges a node's own theme over
+    // whatever base it is handed, so supplying it here is all the wiring the
+    // project setting needs.
+    let theme = project_base_theme();
+    let items =
+        crate::control_render::control_draw_items_themed(tree, root, &theme, &node_themes, size);
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         let (transform, z, kind) = match item {
@@ -2875,7 +3029,6 @@ pub fn rasterize_render_list_with_quality(
     let items = &culled[..];
 
     let mut fb = FrameBuffer::new(width.max(1), height.max(1), clear);
-    let font = BitmapFont::builtin();
     // The back buffer a canvas_item shader samples as `SCREEN_TEXTURE`
     // (pat-s3rrv.183). `None` until a BackBufferCopy item runs, because Godot
     // gives an uncopied SCREEN_TEXTURE undefined contents — serving the item's
@@ -3109,9 +3262,13 @@ pub fn rasterize_render_list_with_quality(
                 ..
             } => {
                 // A `theme_override_fonts/font` draws through the real outline
-                // rasterizer at the authored pixel size; everything else keeps
-                // the built-in bitmap font, so no unrelated editor text changes
-                // appearance (pat-0q2kx.146).
+                // rasterizer at the authored pixel size (pat-0q2kx.146).
+                //
+                // ⚠️ The `else` below is no longer "keep the bitmap font" — as
+                // of pat-mgixk.66 it is the embedded TTF face too, so BOTH
+                // branches rasterize outlines and the only difference is WHICH
+                // face. Default-theme text does change appearance by design:
+                // that is the bug being fixed.
                 let drawn = font_path.as_deref().is_some_and(|path| {
                     with_override_font(path, |ttf, atlas| {
                         gdrender2d::ttf_font::draw_ttf_text_with_fallbacks(
@@ -3127,11 +3284,31 @@ pub fn rasterize_render_list_with_quality(
                     })
                 });
                 if !drawn {
-                    // Map Godot's font size onto the built-in bitmap font's integer
-                    // pixel scale (native cell height), at least 1.
-                    let scale =
-                        ((*font_size as f32 / font.char_height as f32).round() as u32).max(1);
-                    draw_string(&mut fb, &font, xform.origin, text, item.modulate, scale);
+                    // 🔑 The embedded TTF face, not the 5x7 bitmap
+                    // (pat-mgixk.66). Godot draws every theme string with a
+                    // dynamic FontFile (`default_theme.cpp make_default_theme`)
+                    // and measures with that same face; Patina measured with
+                    // `builtin_face` and drew with `BitmapFont::builtin`, so
+                    // every default-theme label in Play was positioned for one
+                    // font and painted in another — at widths that disagreed
+                    // with the layout that placed it.
+                    //
+                    // Drawn at the AUTHORED pixel size rather than a quantised
+                    // integer scale: the bitmap path had to round `font_size`
+                    // onto a cell-height multiple, which is why font_size 16 and
+                    // 20 rendered identically.
+                    with_builtin_face(|ttf, atlas| {
+                        gdrender2d::ttf_font::draw_ttf_text_with_fallbacks(
+                            &mut fb,
+                            atlas,
+                            ttf,
+                            &[],
+                            text,
+                            xform.origin,
+                            *font_size as f32,
+                            item.modulate,
+                        );
+                    });
                 }
             }
             Render2DKind::Polygon { points, color } => {
@@ -4412,4 +4589,33 @@ fn with_override_font<
             None => false,
         }
     })
+}
+
+/// Runs `f` with the embedded default UI face and its glyph atlas
+/// (pat-mgixk.66).
+///
+/// 🔑 The face comes from `control_render::builtin_face`, the SAME accessor
+/// layout measures with. Default-theme text used to be measured with that face
+/// and drawn with a 5x7 bitmap, so wrapped and centred strings were positioned
+/// for one font and painted in another. Sharing one accessor makes measured and
+/// drawn widths impossible to drift apart.
+///
+/// ⚠️ Its OWN atlas, deliberately NOT the one [`with_override_font`] uses.
+/// `GlyphAtlas`'s cache key is `(glyph_id, quantized_size)` with no face
+/// identity (`gdrender2d/src/ttf_font.rs:299`), so two faces sharing an atlas
+/// collide whenever they want the same glyph id at the same size — and glyph id
+/// 5 is a different letter in a different font. A separate atlas means wiring
+/// the default face cannot corrupt override-font text.
+fn with_builtin_face<
+    F: FnOnce(&gdrender2d::ttf_font::TtfFont, &mut gdrender2d::ttf_font::GlyphAtlas),
+>(
+    f: F,
+) {
+    use std::cell::RefCell;
+    thread_local! {
+        static BUILTIN_ATLAS: RefCell<gdrender2d::ttf_font::GlyphAtlas> =
+            RefCell::new(gdrender2d::ttf_font::GlyphAtlas::new(512, 512));
+    }
+    let face = crate::control_render::builtin_face();
+    BUILTIN_ATLAS.with(|atlas| f(face, &mut atlas.borrow_mut()));
 }

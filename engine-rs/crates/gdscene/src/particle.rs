@@ -17,11 +17,21 @@
 //! Two Godot features follow from real GPU particles and are consequently
 //! **absent**, not merely unimplemented here:
 //!
-//! - **Collision.** Godot's GPU particles collide against `ParticlesCollisionBox3D`
-//!   / `Sphere3D` / `SDF3D` / `HeightField3D` (and the 2D SDF equivalents) inside
-//!   the particle shader. This module has no collider input at all: a particle's
-//!   only per-step force is `gravity`, so particles pass through every body in the
-//!   scene. `collision_mode`/`collision_friction`/`collision_bounce` are unhonored.
+//! - **Collision.** ⚠️ PARTIALLY CLOSED — this bullet used to say the module had
+//!   "no collider input at all" and that
+//!   `collision_mode`/`collision_friction`/`collision_bounce` were unhonored.
+//!   Both are now false for the 2D SDF path: [`ParticleSimulator::step_with_sdf`]
+//!   resolves against the `CanvasSdf` built from `LightOccluder2D` nodes with
+//!   `sdf_collision = true`, honouring `collision_mode` (Rigid and
+//!   HideOnContact), `collision_friction`, `collision_bounce` and
+//!   `collision_base_size` (pat-s3rrv.250, wired end to end and corrected to
+//!   canvas space in pat-mgixk.69).
+//!
+//!   Still absent: Godot's analytic 3D collider nodes
+//!   (`GPUParticlesCollisionBox3D` / `Sphere3D` / `SDF3D` / `HeightField3D`),
+//!   which the 3D simulator in `particle3d.rs` owns, and attractors on this 2D
+//!   path. A 2D emitter in a frame with no `sdf_collision` occluders still takes
+//!   plain [`ParticleSimulator::step`], where the only per-step force is gravity.
 //! - **Trails.** `trail_enabled`/`trail_lifetime` (and the trail mesh sections
 //!   Godot builds from the particle's transform history) have no equivalent: each
 //!   particle emits exactly one draw command per frame (see
@@ -149,6 +159,14 @@ pub struct ParticleMaterial {
     pub collision_friction: f32,
     /// Godot `collision_bounce` — restitution along the contact normal.
     pub collision_bounce: f32,
+    /// Godot `GPUParticles2D.collision_base_size` — the particle's collision
+    /// RADIUS basis, in canvas units (pat-mgixk.69).
+    ///
+    /// ⚠️ Lives on the material here although Godot puts it on the emitter node,
+    /// because this struct is what `resolve_sdf_collisions` can see. The 3D path
+    /// made the same choice (`collision_base_size` -> `material.particle_size`,
+    /// `main_loop.rs`), so both readers land it in the same place.
+    pub collision_base_size: f32,
 }
 
 impl Default for ParticleMaterial {
@@ -171,6 +189,8 @@ impl Default for ParticleMaterial {
             collision_mode: ParticleCollisionMode::Disabled,
             collision_friction: 0.0,
             collision_bounce: 0.0,
+            // Godot's `collision_base_size` default is 1.0.
+            collision_base_size: 1.0,
         }
     }
 }
@@ -316,6 +336,18 @@ pub struct ParticleEmitter {
     /// so the result depends only on elapsed time — not on how the render
     /// delta happened to be chopped up (pat-nzgdu.145).
     pub fixed_fps: u32,
+    /// Godot's `ParticleProcessMaterial.color_ramp` (a `GradientTexture1D`),
+    /// sampled over each particle's life (pat-mgixk.67).
+    ///
+    /// `None` keeps the previous behaviour exactly — a straight
+    /// `start_color -> end_color` lerp — so an emitter that authored no ramp
+    /// simulates bit-identically to before this field existed.
+    ///
+    /// ⚠️ Lives HERE and not on [`ParticleMaterial`] for a hard reason:
+    /// `ParticleMaterial` is `Copy`, and [`crate::particle3d::ColorCurve`] owns
+    /// a `Vec` of keyframes. Putting it there would silently remove `Copy` from
+    /// a type that is copied all over this crate and the scene layer.
+    pub color_curve: Option<crate::particle3d::ColorCurve>,
 }
 
 impl Default for ParticleEmitter {
@@ -333,6 +365,7 @@ impl Default for ParticleEmitter {
             emitter_transform: Transform2D::IDENTITY,
             draw_order: ParticleDrawOrder::Index,
             fixed_fps: 0,
+            color_curve: None,
         }
     }
 }
@@ -379,7 +412,19 @@ impl ParticleEmitter {
             velocity,
             lifetime,
             lifetime_remaining: lifetime,
-            color: self.material.start_color,
+            // pat-mgixk.67: a ramped emitter must be ramp-coloured from its
+            // FIRST published frame. Godot samples the gradient at t = 0 when
+            // the particle is born; seeding `material.start_color` here meant a
+            // scene that authored only a `color_ramp` (the common case — `color`
+            // stays white) published WHITE for one frame per particle and only
+            // picked up the ramp on the next `step_exact`.
+            //
+            // ⚠️ `None` keeps the previous value exactly, so an emitter with no
+            // ramp spawns bit-identically to before.
+            color: match &self.color_curve {
+                Some(curve) => curve.sample(0.0),
+                None => self.material.start_color,
+            },
             scale,
             rotation: 0.0,
             angular_velocity,
@@ -634,34 +679,87 @@ impl ParticleSimulator {
         let friction = self.emitter.material.collision_friction.clamp(0.0, 1.0);
         let bounce = self.emitter.material.collision_bounce.clamp(0.0, 1.0);
 
+        // 🔑 CANVAS SPACE, not particle space (pat-mgixk.69). `p.position` is
+        // relative to the particle's `spawn_transform`, while
+        // `CanvasSdf::sample` takes a canvas point (`gdrender2d/src/sdf2d.rs`).
+        // Feeding the local position in meant the field was read at the wrong
+        // place for any emitter not sitting at the canvas origin — an emitter at
+        // (200, 100) sampled the occluder 200px to the left and 100px up from
+        // where its particles actually were. The publish step shows the
+        // conversion: `global = spawn_transform.xform(p.position)`.
+        //
+        // Godot's radius: `collision_base_size` scaled by the particle, halved
+        // because the property is a diameter-like base SIZE
+        // (`particles.glsl`).
+        let base_size = self.emitter.material.collision_base_size.max(0.0);
+
         if mode == ParticleCollisionMode::HideOnContact {
-            self.active_particles
-                .retain(|p| sdf.sample(p.position) > 0.0);
+            self.active_particles.retain(|p| {
+                let canvas = p.spawn_transform.xform(p.position);
+                sdf.sample(canvas) - base_size * p.scale * 0.5 > 0.0
+            });
             return;
         }
 
         for p in &mut self.active_particles {
-            let d = sdf.sample(p.position);
+            let canvas = p.spawn_transform.xform(p.position);
+            let radius = base_size * p.scale * 0.5;
+            let d = sdf.sample(canvas) - radius;
             // `> 0.0` and not `>= 0.0`: a particle resting exactly ON the surface is
             // in contact and must keep being resolved, or gravity walks it inside
             // one step at a time.
             if d > 0.0 {
                 continue;
             }
-            let n = sdf.normal_at(p.position);
+            let n = sdf.normal_at(canvas);
             if n.x == 0.0 && n.y == 0.0 {
                 // No gradient to push along — a degenerate field. Leaving the
                 // particle put is better than moving it in an arbitrary direction.
                 continue;
             }
-            // Back onto the surface. `d` is negative inside, so `-d` is the depth.
-            p.position = p.position + n * (-d);
+            // A zero-scale spawn basis has no inverse; leaving the particle put
+            // beats writing NaN into its position. Mirrors the determinant guard
+            // the publish step uses.
+            let t = p.spawn_transform;
+            let det = t.x.x * t.y.y - t.x.y * t.y.x;
+            if det.abs() < 1e-9 {
+                continue;
+            }
+            let inv = t.affine_inverse();
+
+            // Push out in CANVAS space — `d` is negative inside, so `-d` is the
+            // depth — then express the resulting POINT back in particle space.
+            p.position = inv.xform(canvas + n * (-d));
+
+            // ⚠️ The velocity is in particle space, so the contact normal has to
+            // be too. `basis_xform` (no translation) converts the direction, and
+            // it is re-normalised because a scaled basis does not preserve unit
+            // length — an un-normalised normal would scale the restitution and
+            // friction terms by the emitter's scale.
+            //
+            // ⚠️ KNOWN LIMIT, exact for every transform a scene actually uses.
+            // A normal is a covector: strictly it transforms by the basis's
+            // inverse-TRANSPOSE, not by the basis. For a rotation plus a UNIFORM
+            // scale the two agree up to length, which the re-normalisation
+            // below removes, so this is exact there — and that covers every
+            // rigid or uniformly-scaled emitter. Under a NON-uniform emitter
+            // scale the recovered normal is skewed by the aspect ratio, so the
+            // bounce direction is slightly off (the push-out above is unaffected:
+            // it happens in canvas space). Doing the split in canvas space
+            // instead — `t.basis_xform(velocity)`, split against `n` where it is
+            // already unit, then back through `inv.basis_xform` — would be exact
+            // for any invertible basis and is the fix if a scene ever needs it.
+            let n_local = inv.basis_xform(n);
+            if n_local.x == 0.0 && n_local.y == 0.0 {
+                continue;
+            }
+            let n_local = n_local.normalized();
 
             // Split the velocity about the contact normal and treat the halves
             // differently: restitution acts along the normal, friction across it.
-            let vn = p.velocity.dot(n);
+            let vn = p.velocity.dot(n_local);
             if vn < 0.0 {
-                let normal_part = n * vn;
+                let normal_part = n_local * vn;
                 let tangent = p.velocity - normal_part;
                 p.velocity = tangent * (1.0 - friction) - normal_part * bounce;
             }
@@ -736,13 +834,26 @@ impl ParticleSimulator {
             p.position = p.position + p.velocity * dt_scaled;
             p.rotation += p.angular_velocity * dt_scaled;
 
-            // Interpolate color over lifetime
+            // Interpolate color over lifetime.
+            //
+            // pat-mgixk.67: an authored `color_ramp` wins. Godot's
+            // `ParticleProcessMaterial` shapes colour with a gradient, not a
+            // two-stop lerp, so a three-stop ramp was previously flattened to
+            // its endpoints — and a GPUParticles2D that authored ONLY a ramp
+            // (the common case, since `color` stays white) rendered flat white
+            // for its whole life.
+            //
+            // ⚠️ `None` keeps the exact previous expression, so every existing
+            // emitter simulates unchanged.
             let t = p.age_ratio();
-            p.color = self
-                .emitter
-                .material
-                .start_color
-                .lerp(self.emitter.material.end_color, t);
+            p.color = match &self.emitter.color_curve {
+                Some(curve) => curve.sample(t),
+                None => self
+                    .emitter
+                    .material
+                    .start_color
+                    .lerp(self.emitter.material.end_color, t),
+            };
 
             // --- `shader_type particles` process() (pat-0q2kx.261) ---
             //

@@ -213,6 +213,11 @@ pub fn render_html_shell(
             "{{PATINA_INITIAL_MEMORY_MB}}",
             &config.initial_memory_mb.to_string(),
         )
+        // The project's `audio/driver/mix_rate`, resolved for the web platform
+        // by `web::web_mix_rate` (pat-mgixk.75). This was the literal 44100, so
+        // a project asking for 48000 — or for the browser's own rate, which
+        // Godot spells as 0 — got neither.
+        .replace("{{PATINA_MIX_RATE}}", &config.mix_rate.to_string())
         .replace(
             "{{PATINA_MAX_MEMORY_MB}}",
             &config.max_memory_mb.to_string(),
@@ -527,7 +532,7 @@ pub const DEFAULT_SHELL: &str = r#"<!DOCTYPE html>
     // ⚠️ Keep them synchronous — an `await` inside either one re-introduces the
     // overlap, and it surfaces as audio that works until suddenly it does not.
     try {
-      const audio = startWebAudio(44100);
+      const audio = startWebAudio({{PATINA_MIX_RATE}});
       const audioGlue = await importSource(audio.workletGlue);
       audioGlue.patinaInstallGestureUnlock(audio.context, () => audio.markUnlocked());
       await audioGlue.patinaRegisterWorklet(audio.context, () =>

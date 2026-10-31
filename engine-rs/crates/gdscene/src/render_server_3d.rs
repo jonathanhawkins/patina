@@ -222,6 +222,13 @@ pub struct RenderServer3DAdapter {
     renderer: SoftwareRenderer3D,
     instance_map: InstanceMap,
     multimesh_map: MultiMeshMap,
+    /// Expanded render instances for 3D particle emitters (pat-mgixk.70).
+    ///
+    /// Same NodeId -> instances shape as [`MultiMeshMap`], and deliberately the
+    /// same type: a particle emitter expands into one instance per LIVE
+    /// particle exactly as a MultiMesh expands into one per entry, so the
+    /// create/free/reuse bookkeeping is identical.
+    particle_map: MultiMeshMap,
     sprite_map: SpriteMap,
     /// Label3D node -> render instance (pat-0q2kx.109).
     label_map: SpriteMap,
@@ -251,6 +258,7 @@ impl RenderServer3DAdapter {
             renderer: SoftwareRenderer3D::new(),
             instance_map: InstanceMap::default(),
             multimesh_map: MultiMeshMap::default(),
+            particle_map: MultiMeshMap::default(),
             sprite_map: SpriteMap::default(),
             label_map: SpriteMap::default(),
             light_map: LightMap::default(),
@@ -323,8 +331,18 @@ impl RenderServer3DAdapter {
         let csg_visible = self.sync_csg_shapes(tree);
         // Label3D text quads billboard toward the same camera (pat-0q2kx.109).
         let label_visible = self.sync_label3d(tree, camera_transform.origin);
-        let visible_count =
-            visible_count + multimesh_visible + sprite_visible + csg_visible + label_visible;
+        // One instance per live 3D particle (pat-mgixk.70). `MainLoop` has
+        // simulated and published these all along and NOTHING read them: a
+        // case-insensitive `particle` grep over `gdrender3d` and
+        // `gdserver3d/src` found only the Sprite3D/Label3D billboard enums, so
+        // every 3D emitter was invisible.
+        let particle_visible = self.sync_particles_3d(tree);
+        let visible_count = visible_count
+            + multimesh_visible
+            + sprite_visible
+            + csg_visible
+            + label_visible
+            + particle_visible;
 
         // 3. Sync light nodes to render server.
         let light_count = self.sync_lights(tree);
@@ -907,6 +925,171 @@ impl RenderServer3DAdapter {
         }
 
         visible_count
+    }
+
+    /// Syncs `GPUParticles3D` / `CPUParticles3D` nodes into the 3D draw list
+    /// (pat-mgixk.70).
+    ///
+    /// Each emitter expands into one render instance per LIVE particle, drawing
+    /// its `draw_pass_1` mesh (GPUParticles3D) or `mesh` (CPUParticles3D) at the
+    /// particle's position and tinted by its colour — the same expansion
+    /// [`sync_multimesh_instances`](Self::sync_multimesh_instances) performs.
+    ///
+    /// 🔑 The per-particle data is read off the NODE, not from the simulator:
+    /// `MainLoop::process_particles` publishes `_particle_positions`
+    /// (`PackedVector3Array`) and `_particle_colors` onto each emitter every
+    /// frame. That is the existing seam — the render server syncs from the
+    /// `SceneTree` and has no access to `MainLoop`'s simulators — and it had no
+    /// reader at all on the 3D side.
+    ///
+    /// ⚠️ Those positions are already WORLD-space when `local_coords` is false
+    /// (Godot's default), because the emitter's global transform is applied at
+    /// spawn. Composing the node transform on top would apply it twice and send
+    /// particles to double the emitter's offset. Only `local_coords = true`
+    /// keeps them in the node's space and therefore needs the compose.
+    fn sync_particles_3d(&mut self, tree: &SceneTree) -> u32 {
+        let all_nodes = tree.all_nodes_in_tree_order();
+        let mut current: HashMap<NodeId, ()> = HashMap::new();
+        let mut visible_count = 0u32;
+
+        for &nid in &all_nodes {
+            let Some(node) = tree.get_node(nid) else {
+                continue;
+            };
+            if !matches!(node.class_name(), "GPUParticles3D" | "CPUParticles3D") {
+                continue;
+            }
+            // Godot draws NOTHING for an emitter with no draw pass, so an
+            // unresolvable mesh skips the node entirely rather than standing in
+            // a cube — a placeholder here would put grey boxes in every game
+            // frame that has a particle node.
+            let Some(mesh) = Self::resolve_particle_mesh(tree, nid) else {
+                continue;
+            };
+            current.insert(nid, ());
+
+            let positions: Vec<Vector3> = match node.get_property("_particle_positions") {
+                Variant::PackedVector3Array(v) => v,
+                _ => Vec::new(),
+            };
+            let colors: Vec<Color> = match node.get_property("_particle_colors") {
+                Variant::PackedColorArray(v) => v,
+                _ => Vec::new(),
+            };
+            let local_coords = matches!(node.get_property("local_coords"), Variant::Bool(true));
+            let node_visible = node3d::is_visible_in_tree(tree, nid);
+            let node_transform = node3d::get_global_transform(tree, nid);
+            let geometry = geometry_instance_settings_for_node(tree, nid);
+
+            let count = positions.len();
+            let existing = self.particle_map.node_to_instances.remove(&nid);
+            let mut inst_ids: Vec<Instance3DId> = existing.unwrap_or_default();
+            while inst_ids.len() > count {
+                if let Some(id) = inst_ids.pop() {
+                    self.renderer.free_instance(id);
+                }
+            }
+            while inst_ids.len() < count {
+                let new_id = self.renderer.create_instance();
+                self.renderer.set_mesh(new_id, mesh.clone());
+                inst_ids.push(new_id);
+            }
+
+            for (i, pos) in positions.iter().enumerate() {
+                let inst_id = inst_ids[i];
+                self.renderer.set_mesh(inst_id, mesh.clone());
+
+                let mut particle_tf = Transform3D::IDENTITY;
+                particle_tf.origin = *pos;
+                let composed = if local_coords {
+                    node_transform * particle_tf
+                } else {
+                    particle_tf
+                };
+                self.renderer.set_transform(inst_id, composed);
+                self.renderer.set_visible(inst_id, node_visible);
+                self.renderer
+                    .set_geometry_instance_settings(inst_id, geometry.clone());
+
+                let mat = Material3D {
+                    albedo: colors.get(i).copied().unwrap_or(Color::WHITE),
+                    // Godot's particles are unlit by default, like Sprite3D:
+                    // shading them would make a colour-ramp particle read as
+                    // black wherever no light reaches it.
+                    shading_mode: ShadingMode::Unlit,
+                    // ⚠️ A particle quad MUST disable back-face culling, and
+                    // this is load-bearing rather than cosmetic:
+                    // `Material3D::default()` is `cull_mode: CullMode::Back`,
+                    // which culls a `QuadMesh` by winding so it never reaches a
+                    // pixel. `sprite3d_render.rs` carries the same two lines
+                    // with the same note — a Label3D's text vanished for
+                    // exactly this reason. The instances were synced correctly
+                    // and the frame still came out empty.
+                    //
+                    // Godot's particle quads are visible from both sides too,
+                    // so this matches behaviour as well as fixing the draw.
+                    double_sided: true,
+                    cull_mode: CullMode::Disabled,
+                    ..Material3D::default()
+                };
+                self.renderer.set_material(inst_id, mat);
+
+                if node_visible {
+                    visible_count += 1;
+                }
+            }
+
+            self.particle_map.node_to_instances.insert(nid, inst_ids);
+        }
+
+        // Free instances for emitters that left the tree (or stopped resolving
+        // a mesh), mirroring the MultiMesh cleanup.
+        let stale: Vec<NodeId> = self
+            .particle_map
+            .node_to_instances
+            .keys()
+            .filter(|nid| !current.contains_key(nid))
+            .copied()
+            .collect();
+        for nid in stale {
+            if let Some(ids) = self.particle_map.node_to_instances.remove(&nid) {
+                for id in ids {
+                    self.renderer.free_instance(id);
+                }
+            }
+        }
+
+        visible_count
+    }
+
+    /// The mesh a 3D emitter draws per particle, or `None` when it has none.
+    ///
+    /// `draw_pass_1` is GPUParticles3D's first draw pass and `mesh` is
+    /// CPUParticles3D's equivalent. A `.tscn` writes either as
+    /// `SubResource("QuadMesh_1")`, which `packed_scene` records on the node as
+    /// `__resref__<prop>` holding `"<class>::<sub id>"` — the generic
+    /// `__subres__<prop>__<key>` copy beside it is a verbatim save-round-trip
+    /// bag whose own comment says no render path reads it, so the class comes
+    /// from the `__resref__` companion.
+    fn resolve_particle_mesh(tree: &SceneTree, nid: NodeId) -> Option<Mesh3D> {
+        let node = tree.get_node(nid)?;
+        for key in ["draw_pass_1", "mesh"] {
+            if let Variant::String(meta) = node.get_property(&format!("__resref__{key}")) {
+                if let Some((class, _)) = meta.split_once("::") {
+                    if let Some(m) = Self::mesh_from_type_name(class) {
+                        return Some(m);
+                    }
+                }
+            }
+            // A flat `<key>_type` string, which the MultiMesh resolver accepts
+            // too and which a Rust-built fixture is likeliest to set.
+            if let Variant::String(s) = node.get_property(&format!("{key}_type")) {
+                if let Some(m) = Self::mesh_from_type_name(&s) {
+                    return Some(m);
+                }
+            }
+        }
+        None
     }
 
     /// Syncs `Sprite3D` nodes into the 3D draw list (pat-u3l8c.39).

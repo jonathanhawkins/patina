@@ -4557,6 +4557,37 @@ impl SceneTree {
             .copied()
             .filter(|id| self.animation_callback_mode(*id) == mode)
             .collect();
+        self.advance_animation_players(delta, node_ids);
+    }
+
+    /// Godot `AnimationMixer.advance(delta)`: advance ONE player explicitly and
+    /// apply its sampled results (pat-mgixk.79). Returns `false` when the node
+    /// has no player.
+    ///
+    /// 🔑 This is what makes `ANIMATION_CALLBACK_MODE_PROCESS_MANUAL` usable.
+    /// `AnimationCallbackMode::Manual`'s own doc comment says "only an explicit
+    /// `advance()` moves the playhead" — and `advance()` had no dispatch
+    /// anywhere, so a MANUAL player could never move at all.
+    ///
+    /// ⚠️ Advances only `node_id`, not every Manual-mode player.
+    /// `process_animations_in_mode(delta, Manual)` would move all of them, which
+    /// is not what Godot's per-player `advance` means.
+    pub fn advance_animation_player(&mut self, node_id: NodeId, delta: f64) -> bool {
+        if !self.animation_players.contains_key(&node_id) {
+            return false;
+        }
+        self.advance_animation_players(delta, vec![node_id]);
+        true
+    }
+
+    /// The shared advance-and-apply block, over an explicit node list.
+    ///
+    /// Extracted so `advance_animation_player` above runs the IDENTICAL
+    /// application pass as the frame loop — property tracks, method tracks,
+    /// audio keys, root motion, nested clip starts and playback signals. A
+    /// second copy for `advance()` would drift from this one, and the half it
+    /// dropped would be invisible until a scene relied on it.
+    fn advance_animation_players(&mut self, delta: f64, node_ids: Vec<NodeId>) {
         for node_id in node_ids {
             // Advance the player and gather everything we need while only the
             // player is borrowed, so we can then mutate nodes and scripts.

@@ -88,9 +88,17 @@ impl ImportResourceType {
     ///
     /// This is `ResourceImporter::get_importer_name()` — the string Godot writes
     /// into a `.import` file's `importer="..."` line
-    /// (`editor/file_system/editor_file_system.cpp:2659`) and shows as the
-    /// dock's "Import As:" value. It is NOT `get_resource_type()`: the texture
-    /// importer is named `texture` and *produces* a `Texture2D`.
+    /// (`editor/file_system/editor_file_system.cpp:2659`). It is NOT
+    /// `get_resource_type()`: the texture importer is named `texture` and
+    /// *produces* a `Texture2D`.
+    ///
+    /// ⚠️ And it is NOT what the dock DISPLAYS, which this comment used to
+    /// claim. `ImportDock::_update_options` builds each entry as
+    /// `Pair(get_visible_name(), get_importer_name())` and then
+    /// `add_item(E.first)` / `set_item_metadata(-1, E.second)`
+    /// (`editor/docks/import_dock.cpp:133,141-142`) — so the *label* is the
+    /// visible name and the id is the hidden metadata. See
+    /// [`ImportResourceType::godot_importer_visible_name`] for the label.
     ///
     /// Transcribed from upstream, one importer at a time, never derived from the
     /// type name — the two differ unpredictably (`.ogg` is `oggvorbisstr`, not
@@ -100,6 +108,67 @@ impl ImportResourceType {
     /// Returns `"unknown"` for extensions Godot does not import at all, which
     /// includes native formats like `.tscn` and `.gd` — they are loaded, not
     /// imported, so they have no importer.
+    /// Godot's **visible** importer name for an importer id — the string the
+    /// Import dock actually shows in its "Import As:" list.
+    ///
+    /// `ImportDock::_update_options` pairs the two and uses them for different
+    /// things: `add_item(get_visible_name())` is the label, and
+    /// `set_item_metadata(get_importer_name())` is the value it acts on
+    /// (`editor/docks/import_dock.cpp:133,141-142`). So an API that reports one
+    /// field cannot serve both; the dock needs the label and a `.import` file
+    /// needs the id.
+    ///
+    /// Transcribed from each importer's `get_visible_name()` body in upstream,
+    /// one at a time. ⚠️ Several are nothing like their id, and two are nothing
+    /// like what Patina previously displayed: `oggvorbisstr` is "Ogg Vorbis"
+    /// (not "Audio Stream") and `font_data_dynamic` is
+    /// "Font Data (Dynamic Font)" (not "Font").
+    pub fn godot_importer_visible_name(id: &str) -> &'static str {
+        match id {
+            // editor/import/resource_importer_texture.cpp:168
+            "texture" => "Texture2D",
+            // editor/import/resource_importer_svg.cpp
+            "svg" => "DPITexture",
+            // editor/import/resource_importer_wav.cpp:39
+            "wav" => "Microsoft WAV",
+            // modules/vorbis/resource_importer_ogg_vorbis.cpp
+            "oggvorbisstr" => "Ogg Vorbis",
+            // modules/minimp3/resource_importer_mp3.cpp
+            "mp3" => "MP3",
+            // editor/import/3d/resource_importer_scene.cpp:258-261 — the
+            // `_scene_import_type == "PackedScene"` branch.
+            "scene" => "Scene",
+            // editor/import/resource_importer_dynamic_font.cpp
+            "font_data_dynamic" => "Font Data (Dynamic Font)",
+            // editor/import/resource_importer_bmfont.cpp
+            "font_data_bmfont" => "Font Data (AngelCode BMFont)",
+            // editor/import/resource_importer_imagefont.cpp
+            "font_data_image" => "Font Data (Image Font)",
+            // editor/import/resource_importer_shader_file.cpp
+            "glsl" => "GLSL Shader File",
+            // editor/import/resource_importer_obj.cpp
+            "wavefront_obj" => "OBJ as Mesh",
+            // editor/import/resource_importer_image.cpp
+            "image" => "Image",
+            // editor/import/resource_importer_bitmask.cpp
+            "bitmap" => "BitMap",
+            // editor/import/resource_importer_texture_atlas.cpp
+            "texture_atlas" => "TextureAtlas",
+            // editor/import/resource_importer_csv_translation.cpp
+            "csv_translation" => "CSV Translation",
+            // ⚠️ Patina-only: `godot_importer_id` maps `Script` here, but Godot
+            // has NO script importer at all — scripts are loaded, not imported
+            // (`grep \'return "script"\'` over upstream/editor and
+            // upstream/modules finds nothing). Kept so the sidecar-writing path
+            // has a label rather than falling through to "Unknown".
+            "script" => "Script",
+            // `godot_importer_name` answers "unknown" for anything Godot does
+            // not import; the dock is not shown for those (`importable:false`),
+            // so this is a label of last resort rather than a real state.
+            _ => "Unknown",
+        }
+    }
+
     pub fn godot_importer_name(ext: &str) -> &'static str {
         match ext.to_lowercase().as_str() {
             // editor/import/resource_importer_texture.cpp
@@ -598,6 +667,34 @@ mod tests {
         assert_eq!(T::godot_importer_name("fnt"), "font_data_bmfont");
         // Case-insensitive, like `from_extension`.
         assert_eq!(T::godot_importer_name("PNG"), "texture");
+    }
+
+    /// Each expectation is a `get_visible_name()` body in upstream, cited at the
+    /// match arm. These are what the dock DISPLAYS, as distinct from the ids
+    /// above which it stores.
+    #[test]
+    fn godot_importer_visible_names_match_upstream() {
+        use super::ImportResourceType as T;
+        assert_eq!(T::godot_importer_visible_name("texture"), "Texture2D");
+        assert_eq!(T::godot_importer_visible_name("scene"), "Scene");
+        assert_eq!(T::godot_importer_visible_name("wav"), "Microsoft WAV");
+        assert_eq!(T::godot_importer_visible_name("oggvorbisstr"), "Ogg Vorbis");
+        assert_eq!(T::godot_importer_visible_name("glsl"), "GLSL Shader File");
+        assert_eq!(
+            T::godot_importer_visible_name("font_data_dynamic"),
+            "Font Data (Dynamic Font)"
+        );
+        // ⚠️ The two labels Patina used to show that upstream never had. These
+        // are the assertions that would have caught the old strings, which read
+        // plausibly and were simply invented.
+        assert_ne!(
+            T::godot_importer_visible_name("oggvorbisstr"),
+            "Audio Stream"
+        );
+        assert_ne!(T::godot_importer_visible_name("font_data_dynamic"), "Font");
+        // An id Godot does not import gets a label of last resort rather than
+        // an empty string, so the dock never renders a blank "Import As:".
+        assert_eq!(T::godot_importer_visible_name("unknown"), "Unknown");
     }
 
     /// Formats Godot loads rather than imports have no importer.

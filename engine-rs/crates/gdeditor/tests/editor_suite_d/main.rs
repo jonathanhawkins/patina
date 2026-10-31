@@ -23,3 +23,4 @@ mod editor_signals_groups_chrome_test;
 mod editor_sky_sun_fog_parity_test;
 mod editor_smoke_test;
 mod editor_tab_label_test;
+mod play3d_no_marker_cubes_test;

@@ -137,7 +137,8 @@ fn import_settings_reports_advanced_options_per_importer() {
         port,
         "/api/import_settings?path=res://model.gltf",
     ));
-    assert_eq!(scene["importer"], serde_json::json!("Scene"));
+    assert_eq!(scene["importer"], serde_json::json!("scene"));
+    assert_eq!(scene["importer_visible_name"], serde_json::json!("Scene"));
     assert_eq!(
         scene["advanced"],
         serde_json::json!(true),
@@ -147,7 +148,13 @@ fn import_settings_reports_advanced_options_per_importer() {
     // ResourceImporterDynamicFont::has_advanced_options() -> true
     // (upstream/godot/editor/import/resource_importer_dynamic_font.cpp:145).
     let font = json_ok(&http_get(port, "/api/import_settings?path=res://ui.ttf"));
-    assert_eq!(font["importer"], serde_json::json!("Font"));
+    // ⚠️ "Font Data (Dynamic Font)", not "Font" — another label upstream never
+    // had (editor/import/resource_importer_dynamic_font.cpp).
+    assert_eq!(font["importer"], serde_json::json!("font_data_dynamic"));
+    assert_eq!(
+        font["importer_visible_name"],
+        serde_json::json!("Font Data (Dynamic Font)")
+    );
     assert_eq!(
         font["advanced"],
         serde_json::json!(true),
@@ -157,21 +164,72 @@ fn import_settings_reports_advanced_options_per_importer() {
     // Everything else inherits ResourceImporter::has_advanced_options() -> false
     // (upstream/godot/core/io/resource_importer.h:145), so the button stays
     // hidden — a flag that were always true would show it on a PNG.
-    for (path, importer) in [
-        ("res://icon.png", "Texture2D"),
-        ("res://music.ogg", "Audio Stream"),
+    for (path, importer, visible) in [
+        ("res://icon.png", "texture", "Texture2D"),
+        ("res://music.ogg", "oggvorbisstr", "Ogg Vorbis"),
     ] {
         let info = json_ok(&http_get(
             port,
             &format!("/api/import_settings?path={path}"),
         ));
         assert_eq!(info["importer"], serde_json::json!(importer));
+        assert_eq!(info["importer_visible_name"], serde_json::json!(visible));
         assert_eq!(
             info["advanced"],
             serde_json::json!(false),
             "{importer} inherits has_advanced_options() == false"
         );
     }
+
+    handle.stop();
+}
+
+/// **The acceptance test** for pat-mgixk.407: the dock SHOWS Godot's visible
+/// importer name while the API CARRIES the importer id.
+///
+/// Those are two different strings in upstream and they are used for two
+/// different things. `ImportDock::_update_options` builds each entry as
+/// `Pair(get_visible_name(), get_importer_name())`, then
+/// `add_item(E.first)` for the label and `set_item_metadata(-1, E.second)` for
+/// the value it acts on (`editor/docks/import_dock.cpp:133,141-142`). A
+/// `.import` file stores the id; the dock displays the name.
+///
+/// Reporting only one of the two is what left `editor_suite_b` red: the field
+/// was switched from the label to the id and the tests still wanted the label —
+/// so every bead verify that included this suite failed on it.
+///
+/// ⚠️ **Scope of the DOM half.** The `Import As:` options are built in the
+/// browser from the API payload, so a server-side test cannot observe the
+/// rendered `<option>` text. The second assertion therefore checks that the
+/// served page *wires* the label — it proves the generator, not the pixel. The
+/// `textContent`/`value` split it checks for is the one upstream makes, and a
+/// real rendered check needs the browser verifier.
+#[test]
+fn import_dock_shows_name_and_reports_importer_id() {
+    let (handle, port) = make_server();
+
+    let info = json_ok(&http_get(port, "/api/import_settings?path=res://icon.png"));
+    assert_eq!(
+        info["importer"],
+        serde_json::json!("texture"),
+        "the API must carry the importer ID — `ResourceImporterTexture::get_importer_name()`, \
+         the string a .import file's `importer=` line holds"
+    );
+    assert_eq!(
+        info["importer_visible_name"],
+        serde_json::json!("Texture2D"),
+        "...and the visible name — `get_visible_name()` \
+         (editor/import/resource_importer_texture.cpp:168), which is what the dock shows"
+    );
+
+    // The served page must feed the label to the option text rather than the
+    // id, or the dock would display `texture` where Godot shows `Texture2D`.
+    let html = http_get(port, "/editor");
+    assert!(
+        html.contains("info.importer_visible_name"),
+        "the served editor must render the visible name in the Import As list; \
+         without it the dock shows the raw importer id"
+    );
 
     handle.stop();
 }

@@ -24722,9 +24722,15 @@ fn api_get_import_settings(state: &Arc<Mutex<EditorState>>, query: &str, stream:
     send_json(
         stream,
         &format!(
-            r#"{{"importable":true,"path":"{}","importer":"{}","importers":["{}"],"presets":[{}],"options":[{}],"advanced":{}}}"#,
+            r#"{{"importable":true,"path":"{}","importer":"{}","importer_visible_name":"{}","importers":["{}"],"presets":[{}],"options":[{}],"advanced":{}}}"#,
             path.replace('"', "\\\""),
             importer,
+            // The dock's "Import As:" LABEL, which upstream takes from
+            // `get_visible_name()` while acting on the id it stores as item
+            // metadata (`editor/docks/import_dock.cpp:133,141-142`). Reporting
+            // only one of the two is what left the suite red: the tests wanted
+            // the label and the API had switched to the id.
+            ImportResourceType::godot_importer_visible_name(importer),
             importer,
             presets_json,
             options.join(","),

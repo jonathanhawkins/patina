@@ -669,6 +669,19 @@ pub struct ParticleEmitter3D {
     pub emitting: bool,
     /// If `true`, particles are in the emitter's local space.
     pub local_coords: bool,
+    /// The emitter node's global transform at the moment of emission
+    /// (pat-mgixk.70).
+    ///
+    /// ⚠️ Mirrors `ParticleEmitter2D::emitter_transform` (pat-0q2kx.51), which
+    /// the 2D path has set from `node2d::get_global_transform` all along. The 3D
+    /// emitter had no such field and `EmissionShape3D::sample` starts at
+    /// `Vector3::ZERO`, so every 3D emitter spawned its particles at the WORLD
+    /// ORIGIN however the node was placed — while colliders and attractors in
+    /// the same simulation used global transforms.
+    ///
+    /// Defaults to identity, so a simulator built straight from
+    /// `ParticleEmitter3D::default()` behaves exactly as before.
+    pub emitter_transform: Transform3D,
 }
 
 impl Default for ParticleEmitter3D {
@@ -682,6 +695,7 @@ impl Default for ParticleEmitter3D {
             explosiveness: 0.0,
             speed_scale: 1.0,
             emitting: true,
+            emitter_transform: Transform3D::IDENTITY,
             local_coords: false,
         }
     }
@@ -717,6 +731,26 @@ impl ParticleEmitter3D {
         let lifetime = self.lifetime * lifetime_factor;
 
         let base_scale = rand_range(&mut rng, self.material.scale_min, self.material.scale_max);
+
+        // Godot's default `local_coords = false` spawns in WORLD space at the
+        // emitter's global transform and leaves each particle there as the
+        // emitter moves on (`doc/classes/GPUParticles3D.xml`); the emission
+        // shape is sampled in the emitter's own space first.
+        //
+        // ⚠️ With `local_coords = true` the renderer draws the particles
+        // THROUGH the node's transform, so pre-transforming here would apply it
+        // twice. That is why this is a branch and not an unconditional xform.
+        let (position, velocity) = if self.local_coords {
+            (position, velocity)
+        } else {
+            (
+                self.emitter_transform.xform(position),
+                // The BASIS only. A velocity is a direction: adding the
+                // emitter's translation to it would hurl every particle away
+                // from the origin at the emitter's distance per second.
+                self.emitter_transform.basis.xform(velocity),
+            )
+        };
 
         Particle3D {
             position,

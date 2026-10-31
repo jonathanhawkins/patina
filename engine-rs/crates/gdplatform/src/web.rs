@@ -260,6 +260,15 @@ pub struct WebExportConfig {
     /// Emit a PWA service worker + offline page + linkable web manifest so the
     /// export is installable and works offline (mirrors Godot's PWA option).
     pub pwa_enabled: bool,
+    /// Mix rate handed to `startWebAudio`, in Hz — Godot's
+    /// `audio/driver/mix_rate`, resolved for the web platform by
+    /// [`web_mix_rate`] (pat-mgixk.75).
+    ///
+    /// **0 means "let the browser choose"**, which is Godot's own meaning for
+    /// `audio/driver/mix_rate.web` and what the engine already does with it:
+    /// `WebEngine::attach_audio_output` leaves the scene mixer's rate alone
+    /// when handed 0, so the `AudioContext`'s native rate wins.
+    pub mix_rate: u32,
 }
 
 impl Default for WebExportConfig {
@@ -275,8 +284,42 @@ impl Default for WebExportConfig {
             show_preloader: true,
             focus_canvas: true,
             pwa_enabled: false,
+            mix_rate: 44_100,
         }
     }
+}
+
+/// The mix rate a web export should run its `AudioContext` at, from the
+/// project's settings (pat-mgixk.75).
+///
+/// Godot resolves `audio/driver/mix_rate` through the platform feature tags, so
+/// a web export honours `audio/driver/mix_rate.web` when the project sets one
+/// and falls back to the base key otherwise. The shell previously hard-coded
+/// 44100, so a project asking for 48000 — or for the browser's own rate — got
+/// neither.
+///
+/// 🔑 **Non-zero is the test for "set", not presence.** `audio/driver/mix_rate.web`
+/// has a seeded DEFAULT of 0 (`project_settings.rs:723`), so every project that
+/// has had its defaults seeded carries the key; a presence check (which is what
+/// `get_setting_with_override_and_custom_features` does) would therefore return
+/// 0 for every project and the base key would be unreachable. 0 is also Godot's
+/// own encoding of "let the browser decide", so treating it as unset and
+/// passing it through are the same thing here.
+pub fn web_mix_rate(settings: &gdcore::ProjectSettings) -> u32 {
+    let web = settings
+        .get("audio/driver/mix_rate.web")
+        .and_then(|v| v.as_int())
+        .unwrap_or(0);
+    if web > 0 {
+        return web as u32;
+    }
+    // A project that explicitly sets the base to 0 means the same thing, so it
+    // passes straight through rather than being clamped up to 44100.
+    settings
+        .get("audio/driver/mix_rate")
+        .and_then(|v| v.as_int())
+        .unwrap_or(44_100)
+        .max(0) as u32
 }
 
 // ---------------------------------------------------------------------------

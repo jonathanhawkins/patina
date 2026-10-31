@@ -83,6 +83,7 @@ pub mod physics_server_3d;
 pub mod polygon_path_finder;
 pub mod popup;
 pub mod project_runtime;
+pub mod res_boot;
 pub mod range_controls;
 pub mod raycast2d;
 pub mod raycast3d;
