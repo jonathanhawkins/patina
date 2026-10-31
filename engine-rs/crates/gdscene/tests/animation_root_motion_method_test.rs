@@ -14,9 +14,7 @@ use gdcore::math::Vector3;
 use gdscene::animation::{Animation, AnimationPlayer, AnimationTrack, KeyFrame, TrackType};
 use gdscene::node::Node;
 use gdscene::scene_tree::SceneTree;
-use gdscript_interop::bindings::{
-    MethodInfo, ScriptError, ScriptInstance, ScriptPropertyInfo,
-};
+use gdscript_interop::bindings::{MethodInfo, ScriptError, ScriptInstance, ScriptPropertyInfo};
 use gdvariant::Variant;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -30,7 +28,9 @@ struct RecordingScript {
 
 impl ScriptInstance for RecordingScript {
     fn call_method(&mut self, name: &str, args: &[Variant]) -> Result<Variant, ScriptError> {
-        self.calls.borrow_mut().push((name.to_string(), args.to_vec()));
+        self.calls
+            .borrow_mut()
+            .push((name.to_string(), args.to_vec()));
         Ok(Variant::Nil)
     }
     fn get_property(&self, _name: &str) -> Option<Variant> {
@@ -48,12 +48,29 @@ impl ScriptInstance for RecordingScript {
     fn get_script_name(&self) -> &str {
         "RecordingScript"
     }
-    fn has_method(&self, _name: &str) -> bool {
-        true
+    /// ⚠️ Everything EXCEPT `_init`, and the exclusion is load bearing.
+    ///
+    /// `SceneTree::attach_script` runs `attach_script_with_init_args`, which
+    /// calls `_init` on attach whenever `has_method("_init")` answers true
+    /// (`scene_tree.rs:5464`, pat-mgixk.100) — Godot's own behaviour, since
+    /// `_init` fires when the instance is constructed. A double that claims
+    /// EVERY method therefore records a phantom `_init` the moment it is
+    /// attached, and every call-count assertion below is off by one.
+    ///
+    /// Fixed here rather than by filtering the log, so each assertion can keep
+    /// saying what it means ("fired once") instead of carrying a subtraction.
+    fn has_method(&self, name: &str) -> bool {
+        name != "_init"
     }
 }
 
-fn method_track(node_path: &str, track_name: &str, at: f64, method: &str, arg: Variant) -> AnimationTrack {
+fn method_track(
+    node_path: &str,
+    track_name: &str,
+    at: f64,
+    method: &str,
+    arg: Variant,
+) -> AnimationTrack {
     let mut t = AnimationTrack::with_type(node_path, track_name, TrackType::Method);
     t.add_keyframe(KeyFrame::linear(
         at,
@@ -77,15 +94,27 @@ fn method_track_fires_on_targeted_child_node() {
 
     let enemy_calls: CallLog = Rc::new(RefCell::new(Vec::new()));
     let player_calls: CallLog = Rc::new(RefCell::new(Vec::new()));
-    tree.attach_script(enemy, Box::new(RecordingScript { calls: enemy_calls.clone() }));
+    tree.attach_script(
+        enemy,
+        Box::new(RecordingScript {
+            calls: enemy_calls.clone(),
+        }),
+    );
     tree.attach_script(
         player_node,
-        Box::new(RecordingScript { calls: player_calls.clone() }),
+        Box::new(RecordingScript {
+            calls: player_calls.clone(),
+        }),
     );
 
     let mut anim = Animation::new("fx", 2.0);
-    anim.tracks
-        .push(method_track("Enemy", "on_hit", 1.0, "take_damage", Variant::Int(7)));
+    anim.tracks.push(method_track(
+        "Enemy",
+        "on_hit",
+        1.0,
+        "take_damage",
+        Variant::Int(7),
+    ));
 
     let mut player = AnimationPlayer::new();
     player.add_animation(anim);
@@ -126,7 +155,10 @@ fn root_motion_applies_to_root_node_target_not_player() {
     let mut anim = Animation::new("walk", 2.0);
     let mut pos = AnimationTrack::with_type("", "position", TrackType::Property);
     pos.add_keyframe(KeyFrame::linear(0.0, Variant::Vector3(Vector3::ZERO)));
-    pos.add_keyframe(KeyFrame::linear(2.0, Variant::Vector3(Vector3::new(4.0, 0.0, 0.0))));
+    pos.add_keyframe(KeyFrame::linear(
+        2.0,
+        Variant::Vector3(Vector3::new(4.0, 0.0, 0.0)),
+    ));
     anim.tracks.push(pos);
 
     let mut player = AnimationPlayer::new();
@@ -136,18 +168,44 @@ fn root_motion_applies_to_root_node_target_not_player() {
     player.root_motion_track = Some("position".to_string());
     tree.attach_animation_player(player_node, player).unwrap();
 
-    // At t=1.0 the linear delta is half of (4,0,0) = (2,0,0), applied to Rig.
+    // At t=1.0 the linear delta is half of (4,0,0) = (2,0,0).
     tree.process_animations(1.0);
 
-    match tree.get_node(rig).unwrap().get_property("position") {
-        Variant::Vector3(v) => {
-            assert!((v.x - 2.0).abs() < 1e-3, "Rig root motion x, got {v:?}");
-            assert!(v.y.abs() < 1e-3 && v.z.abs() < 1e-3, "got {v:?}");
-        }
-        v => panic!("Rig should receive root motion translation, got {v:?}"),
-    }
+    // -- the mixer PUBLISHES the motion (pat-mgixk.78) ----------------------
+    //
+    // ⚠️ This clause used to assert that `Rig.position.x` had become 2.0 — that
+    // root motion MOVED the node. Godot's `AnimationMixer` never does
+    // (`AnimationMixer.xml:323-326`): it cancels the root track from the pose,
+    // reports the motion through `get_root_motion_position()` and leaves the
+    // user to apply it. The old assertion pinned the double-move this bead
+    // removes, so it is inverted here rather than deleted — the delta still has
+    // to be the (2,0,0) the clip travelled, or the feature is simply gone.
+    let rm = *tree
+        .get_animation_player(player_node)
+        .unwrap()
+        .root_motion();
+    assert!(
+        (rm.position_delta.x - 2.0).abs() < 1e-3
+            && rm.position_delta.y.abs() < 1e-3
+            && rm.position_delta.z.abs() < 1e-3,
+        "the mixer must publish the clip's travel for this frame, got {:?}",
+        rm.position_delta
+    );
 
-    // The player node itself is never moved by root motion aimed at root_node.
+    // -- and NEITHER node moved --------------------------------------------
+    //
+    // `Rig` is the `root_node` the motion was aimed at, so it is the node the
+    // old behaviour would have moved; the player is the one it must never have
+    // moved. Both are checked, because "the mixer moves nothing" is the whole
+    // claim and testing only one of them would leave the other free to drift.
+    assert!(
+        matches!(
+            tree.get_node(rig).unwrap().get_property("position"),
+            Variant::Nil
+        ),
+        "the mixer must not write a position onto its root_node target: {:?}",
+        tree.get_node(rig).unwrap().get_property("position")
+    );
     assert!(
         matches!(
             tree.get_node(player_node).unwrap().get_property("position"),
@@ -168,11 +226,21 @@ fn method_track_empty_path_targets_owner_node() {
         .unwrap();
 
     let calls: CallLog = Rc::new(RefCell::new(Vec::new()));
-    tree.attach_script(player_node, Box::new(RecordingScript { calls: calls.clone() }));
+    tree.attach_script(
+        player_node,
+        Box::new(RecordingScript {
+            calls: calls.clone(),
+        }),
+    );
 
     let mut anim = Animation::new("a", 2.0);
-    anim.tracks
-        .push(method_track("", "footstep", 1.0, "on_footstep", Variant::Int(3)));
+    anim.tracks.push(method_track(
+        "",
+        "footstep",
+        1.0,
+        "on_footstep",
+        Variant::Int(3),
+    ));
 
     let mut player = AnimationPlayer::new();
     player.add_animation(anim);

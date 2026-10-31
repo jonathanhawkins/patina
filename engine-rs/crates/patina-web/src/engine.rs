@@ -23,10 +23,27 @@ use gdscene::scene_tree::SceneTree;
 
 use crate::audio::SceneAudioRing;
 
+/// The 3D render server held across frames, plus the size it was built for.
+///
+/// 🔑 The size is stored so the adapter can be REUSED. Godot keeps one
+/// `RenderingServer` for the process and draws from it in every
+/// `Main::iteration`; rebuilding it per frame would discard its mesh and texture
+/// caches each time, so the per-frame cost would grow with the scene instead of
+/// staying flat. A canvas resize is the only thing that forces a new one,
+/// because the adapter's framebuffer is fixed at construction.
+struct Renderer3D {
+    width: u32,
+    height: u32,
+    adapter: gdscene::render_server_3d::RenderServer3DAdapter,
+}
+
 /// A running scene plus the driver that advances it.
 pub struct WebEngine {
     main_loop: MainLoop,
     driver: FrameDriver,
+    /// Built on the first 3D frame, not at construction: a 2D-only project must
+    /// not pay for a renderer it never draws through.
+    renderer_3d: Option<Renderer3D>,
 }
 
 impl WebEngine {
@@ -53,6 +70,7 @@ impl WebEngine {
         Self {
             main_loop: MainLoop::new(tree),
             driver: FrameDriver::new(),
+            renderer_3d: None,
         }
     }
 
@@ -88,23 +106,47 @@ impl WebEngine {
     /// canvas.
     pub fn boot_mounted_project() -> Result<Self, String> {
         let booted = gdscene::res_boot::boot_from_res()?;
-        let mut tree = booted.tree;
-
-        for (_, node_id) in &booted.autoload_roots {
-            gdscene::lifecycle::LifecycleManager::enter_tree(&mut tree, *node_id);
-        }
-        if let Some(main_root) = booted.main_scene_root {
-            gdscene::lifecycle::LifecycleManager::enter_tree(&mut tree, main_root);
-        }
 
         // `WebEngine::new` populates the ClassDB, which `boot_from_res` has
         // already done — it is idempotent, and going through `new` keeps this
         // path from drifting out of step with however `new` is configured.
-        let mut engine = Self::new(tree);
+        let mut engine = Self::new(booted.tree);
+
+        // 🔑 CONFIGURE BEFORE ENTERING THE TREE. `LifecycleManager::enter_tree`
+        // dispatches `_ready` (it calls `process_script_ready` in its READY
+        // phase, lifecycle.rs:119), so anything a script reads there must
+        // already be installed.
+        //
+        // Godot's order is exactly this: `Main::setup()` applies the project's
+        // settings — `Engine::set_physics_ticks_per_second` among them — and
+        // only then does `Main::start()` instance and enter the main scene
+        // (`platform/web/web_main.cpp`). Configuring afterwards meant a script
+        // reading `Engine.physics_ticks_per_second` in `_ready` saw the engine
+        // default 60 instead of the project's value, and
+        // `Input.is_action_pressed` in `_ready` resolved against an empty map.
+        // `MainLoop::new` is a pure constructor and dispatches nothing, so
+        // building it first costs nothing.
+        //
+        // ⚠️ `register_physics_bodies` stays AFTER the tree is entered: it
+        // registers the bodies that are in the tree, so hoisting it with the
+        // rest would find none.
         engine
             .main_loop
             .configure_from_project_settings(&booted.settings);
         engine.main_loop.set_input_map(booted.input_map);
+
+        // Autoloads first, then the main scene — Godot boots them in that
+        // order, which is what lets a main scene's `_ready` reach an autoload.
+        for (_, node_id) in &booted.autoload_roots {
+            gdscene::lifecycle::LifecycleManager::enter_tree(engine.main_loop.tree_mut(), *node_id);
+        }
+        if let Some(main_root) = booted.main_scene_root {
+            gdscene::lifecycle::LifecycleManager::enter_tree(
+                engine.main_loop.tree_mut(),
+                main_root,
+            );
+        }
+
         engine.main_loop.register_physics_bodies();
         Ok(engine)
     }
@@ -175,6 +217,60 @@ impl WebEngine {
         self.main_loop.tree()
     }
 
+    /// Renders the current 3D scene into an RGBA8 buffer of `width` x `height`,
+    /// row-major, four bytes a pixel (pat-mgixk.49).
+    ///
+    /// 🔑 This is the 3D counterpart of [`Self::render_frame_rgba`], and the web
+    /// half of the same "one renderer, two runtime drivers" split: it drives the
+    /// same `RenderServer3DAdapter::render_frame` the native runner's
+    /// `--render-to` does, from the scene's own `Camera3D`. Before it, this
+    /// crate's entire presentation surface was `WebRenderer::present_clear` — a
+    /// flat colour — so a 3D game in the browser produced no scene pixel at all,
+    /// while the 2D path had had `render_frame_rgba` since pat-mgixk.74.
+    ///
+    /// Call it from the animation-frame tick, after [`Self::frame`], so the
+    /// pixels are the frame that was just stepped.
+    ///
+    /// ⚠️ Returns PIXELS, and does not present them, exactly as the 2D frame
+    /// does. The host decides: a 2D canvas context takes these straight through
+    /// `putImageData`, while the WebGPU surface in `crate::canvas` would need a
+    /// texture upload and a blit pipeline it does not have. Handing back the
+    /// buffer keeps that choice out of the engine rather than guessing at it.
+    ///
+    /// ⚠️ Deliberately NOT folded into `render_frame_rgba`. Compositing 2D over
+    /// 3D needs the canvas rasterizer to report which pixels it actually covered
+    /// — its clear is opaque, so "equals the clear colour" cannot tell an
+    /// untouched pixel from a black sprite. Returning the two frames separately
+    /// lets the host stack them, and leaves every existing 2D caller's output
+    /// byte-for-byte unchanged.
+    pub fn render_3d_rgba(&mut self, width: u32, height: u32) -> Vec<u8> {
+        let width = width.max(1);
+        let height = height.max(1);
+        // `take` rather than `as_mut`: moving the renderer out for the duration
+        // of the render keeps the adapter borrow and the `self.main_loop` borrow
+        // plainly disjoint instead of relying on field-splitting.
+        let mut renderer = self
+            .renderer_3d
+            .take()
+            .filter(|r| r.width == width && r.height == height)
+            .unwrap_or_else(|| Renderer3D {
+                width,
+                height,
+                adapter: gdscene::render_server_3d::RenderServer3DAdapter::new(width, height),
+            });
+        let (_snapshot, frame) = renderer.adapter.render_frame(self.main_loop.tree());
+        let mut out = Vec::with_capacity((width as usize) * (height as usize) * 4);
+        for px in &frame.pixels {
+            // `putImageData` wants straight (non-premultiplied) sRGB bytes in
+            // RGBA order, which is the order `Color` already stores — the same
+            // conversion the 2D frames below use.
+            let to_u8 = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+            out.extend_from_slice(&[to_u8(px.r), to_u8(px.g), to_u8(px.b), to_u8(px.a)]);
+        }
+        self.renderer_3d = Some(renderer);
+        out
+    }
+
     /// Rasterizes the current 2D scene into an RGBA8 buffer of `width` x
     /// `height`, row-major, four bytes a pixel (pat-mgixk.28).
     ///
@@ -242,7 +338,12 @@ impl WebEngine {
     /// counterpart `window_to_canvas()` already describes itself as "the inverse
     /// of the transform the renderer applies". The renderer simply never applied
     /// one; both halves existed and were never joined.
-    pub fn render_frame_rgba(&mut self, canvas_w: u32, canvas_h: u32, project_root: &str) -> Vec<u8> {
+    pub fn render_frame_rgba(
+        &mut self,
+        canvas_w: u32,
+        canvas_h: u32,
+        project_root: &str,
+    ) -> Vec<u8> {
         use gdcore::math::{Color, Vector2};
 
         // The window has to know the real backing size first: every value below

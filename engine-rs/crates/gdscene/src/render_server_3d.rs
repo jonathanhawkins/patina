@@ -476,7 +476,14 @@ impl RenderServer3DAdapter {
             fov,
             near,
             far,
-            environment: None,
+            // pat-mgixk.51: the runner adapter rendered every scene with NO
+            // environment, so a `WorldEnvironment` (or the project's
+            // `default_environment` / `default_clear_color`) changed nothing it
+            // drew. Resolved through the same function the editor's Play view
+            // uses, so the two paths cannot disagree about what a scene asked
+            // for. `None` when the scene authors nothing and there is no
+            // readable project — exactly the value this field held before.
+            environment: crate::world_environment::runtime_environment_3d(tree, active_camera),
         };
 
         (viewport, camera_transform)
@@ -667,7 +674,7 @@ impl RenderServer3DAdapter {
                         // Load any `sampler2D` uniform's image before handing the
                         // material over — the renderers sample from the material's
                         // texture map, not from `parameters` (pat-s3rrv.122).
-                        self.bind_shader_textures(&mut shader_mat);
+                        bind_shader_textures(&mut shader_mat, &mut self.texture_cache);
                         self.renderer.set_shader_material(inst_id, shader_mat);
                     }
 
@@ -1747,42 +1754,6 @@ impl RenderServer3DAdapter {
     /// string (`"spatial"`/`"sky"`, from the `.gdshader` source) or the legacy
     /// integer form (`1` = Sky). Any `shader_parameter/*` properties become
     /// bound uniform values.
-    /// Loads each `sampler2D` uniform's texture into the material (pat-s3rrv.122).
-    ///
-    /// 🔑 THIS IS THE STEP THAT WAS MISSING ENTIRELY. `resolve_shader_material`
-    /// collects `shader_parameter/<name>` into `parameters`, but a Variant holds
-    /// a resource PATH, not pixels — and the fragment path samples from the
-    /// material's texture map. With nothing performing this load,
-    /// `texture(tex, UV)` always hit the missing-binding white placeholder, and
-    /// `CustomFragmentShader::set_texture` had no caller outside its own tests.
-    ///
-    /// A path that fails to load is skipped rather than bound black, so an
-    /// unresolvable texture keeps the neutral placeholder instead of turning the
-    /// surface into a silhouette.
-    fn bind_shader_textures(&mut self, mat: &mut ShaderMaterial3D) {
-        let Some(shader) = mat.shader.as_ref() else {
-            return;
-        };
-        let compiled = gdserver3d::ShaderCompiler3D::new()
-            .compile_cached(shader.shader_type, &shader.source_code);
-        let samplers: Vec<(String, String)> = compiled
-            .uniforms
-            .iter()
-            .filter(|u| u.uniform_type == gdserver3d::shader::UniformType::Sampler2D)
-            .filter_map(|u| match mat.get_shader_parameter(&u.name) {
-                Some(gdvariant::Variant::String(path)) if !path.is_empty() => {
-                    Some((u.name.clone(), path.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-        for (name, path) in samplers {
-            if let Some(img) = self.texture_cache.get_or_load(&path) {
-                mat.set_texture(&name, img);
-            }
-        }
-    }
-
     /// `pub` so the editor/Play draw list can carry a ShaderMaterial too, not
     /// just this adapter (pat-mgixk.50). The data is already on the node:
     /// `packed_scene` flattens a `ShaderMaterial` sub-resource to `shader_code`
@@ -3060,6 +3031,52 @@ impl MaterialTextureCache {
             return None;
         }
         Some(Arc::new(TextureImage::new(width, height, pixels)))
+    }
+}
+
+/// Loads each `sampler2D` uniform's texture into `mat` (pat-s3rrv.122).
+///
+/// 🔑 THIS IS THE STEP THAT WAS MISSING ENTIRELY. `resolve_shader_material`
+/// collects `shader_parameter/<name>` into `parameters`, but a Variant holds a
+/// resource PATH, not pixels — and the fragment path samples from the material's
+/// texture map. With nothing performing this load, `texture(tex, UV)` always hit
+/// the missing-binding white placeholder, and `CustomFragmentShader::set_texture`
+/// had no caller outside its own tests.
+///
+/// 🔑 A `pub` FREE function, not a method on [`RenderServer3DAdapter`]
+/// (pat-mgixk.50). It was a private method, so the only way to bind a shader's
+/// textures was to own an adapter — and the editor/Play path does not: it builds
+/// its own draw list and carries its own [`MaterialTextureCache`]. So
+/// `viewport_3d_render` resolved the ShaderMaterial (and has since
+/// pat-mgixk.50's first pass) but handed it over with an EMPTY texture map, and
+/// every `sampler2D` on that path sampled the white placeholder. Taking the
+/// cache as an argument is what lets both paths perform the same load against
+/// their own cache.
+///
+/// A path that fails to load is skipped rather than bound black, so an
+/// unresolvable texture keeps the neutral placeholder instead of turning the
+/// surface into a silhouette.
+pub fn bind_shader_textures(mat: &mut ShaderMaterial3D, textures: &mut MaterialTextureCache) {
+    let Some(shader) = mat.shader.as_ref() else {
+        return;
+    };
+    let compiled =
+        gdserver3d::ShaderCompiler3D::new().compile_cached(shader.shader_type, &shader.source_code);
+    let samplers: Vec<(String, String)> = compiled
+        .uniforms
+        .iter()
+        .filter(|u| u.uniform_type == gdserver3d::shader::UniformType::Sampler2D)
+        .filter_map(|u| match mat.get_shader_parameter(&u.name) {
+            Some(gdvariant::Variant::String(path)) if !path.is_empty() => {
+                Some((u.name.clone(), path.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    for (name, path) in samplers {
+        if let Some(img) = textures.get_or_load(&path) {
+            mat.set_texture(&name, img);
+        }
     }
 }
 

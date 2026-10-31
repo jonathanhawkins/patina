@@ -358,15 +358,29 @@ fn effect_from_sub_resource(
     fields: &std::collections::HashMap<String, String>,
 ) -> Option<Box<dyn crate::effects::AudioEffect>> {
     use crate::effects::{
-        AudioEffectAmplify, AudioEffectCapture, AudioEffectCompressor, AudioEffectFilter,
-        AudioEffectFilterCascade, AudioEffectHardLimiter, AudioEffectLimiter, AudioEffectRecord,
-        AudioEffectReverb, FilterMode,
+        AudioEffectAmplify, AudioEffectCapture, AudioEffectChorus, AudioEffectCompressor,
+        AudioEffectDelay, AudioEffectDistortion, AudioEffectFilter, AudioEffectFilterCascade,
+        AudioEffectHardLimiter, AudioEffectLimiter, AudioEffectPanner, AudioEffectPhaser,
+        AudioEffectPitchShift, AudioEffectRecord, AudioEffectReverb, AudioEffectSpectrumAnalyzer,
+        AudioEffectStereoEnhance, ChorusVoice, DistortionMode, FilterMode, CHORUS_MAX_VOICES,
     };
 
     let f = |name: &str, default: f32| -> f32 {
         fields
             .get(name)
             .and_then(|v| v.trim().parse::<f32>().ok())
+            .unwrap_or(default)
+    };
+
+    // ⚠️ Booleans need their own reader (pat-mgixk.84). A `.tres` writes them as
+    // `true`/`false`, which `parse::<f32>()` rejects — so reading `tap1_active`
+    // through `f` would silently fall back to the default for EVERY authored
+    // value, including an explicit `false`. That is the quietest possible bug:
+    // the tap is on because the parse failed, not because the project said so.
+    let b = |name: &str, default: bool| -> bool {
+        fields
+            .get(name)
+            .map(|v| v.trim() == "true")
             .unwrap_or(default)
     };
 
@@ -424,7 +438,164 @@ fn effect_from_sub_resource(
             rec.set_format(f("format", 1.0) as i64);
             Some(Box::new(rec))
         }
-        "AudioEffectReverb" => Some(Box::new(AudioEffectReverb::new())),
+        // pat-mgixk.84: this arm used to be a bare `AudioEffectReverb::new()`,
+        // so every authored field was discarded — a layout that set `wet` or
+        // `room_size` in the editor produced the DSP's own hard-coded "roomy"
+        // preset instead.
+        //
+        // ⚠️ The DSP's `new()` is NOT Godot's defaults (it is wet 0.35 / dry 0.7
+        // / feedback 0.5 / delay 0.04s against Godot's 0.5 / 1.0 / 0.8 / 0.15s),
+        // so the defaults below are deliberately taken from
+        // `doc/classes/AudioEffectReverb.xml` rather than from `new()`. That
+        // means an authored Reverb with NO fields also changes behaviour — in
+        // the direction of Godot, which is the point of the bead. No existing
+        // test asserts on a factory-built Reverb's output; the two in
+        // `effects.rs` construct it directly and the `server.rs` one only names
+        // a bus "Reverb".
+        //
+        // ⚠️ `damping`, `hipass`, `predelay_feedback` and `spread` have no
+        // counterpart in this DSP (a single feedback delay line), so they are
+        // read by nothing. Left to the audio-effect-dsp-parity bead rather than
+        // approximated onto `feedback`, which would make two different Godot
+        // knobs move the same number.
+        "AudioEffectReverb" => {
+            let mut reverb = AudioEffectReverb::new();
+            reverb.wet = f("wet", 0.5);
+            reverb.dry = f("dry", 1.0);
+            // Godot's `room_size` is the tail-length control, which in a
+            // feedback-delay reverb is the feedback coefficient.
+            reverb.feedback = f("room_size", 0.8);
+            // Godot authors the pre-delay in MILLIseconds; the field is seconds.
+            reverb.delay_secs = f("predelay_msec", 150.0) / 1000.0;
+            Some(Box::new(reverb))
+        }
+        // pat-mgixk.84: Delay / Distortion / SpectrumAnalyzer. The DSP for all
+        // three already existed and was unit-tested in `effects.rs`; nothing
+        // could name them from a bus layout, so the slot was dropped and
+        // `AudioServer.get_bus_effect_instance` had no analyzer to hand back —
+        // which is the standard visualizer setup.
+        //
+        // Defaults are Godot's, from `doc/classes/AudioEffect*.xml`.
+        "AudioEffectDelay" => {
+            let mut delay = AudioEffectDelay::new();
+            delay.dry = f("dry", 1.0);
+            delay.tap1_active = b("tap1_active", true);
+            delay.tap1_delay_ms = f("tap1_delay_ms", 250.0);
+            delay.tap1_level_db = f("tap1_level_db", -6.0);
+            delay.tap2_active = b("tap2_active", true);
+            delay.tap2_delay_ms = f("tap2_delay_ms", 500.0);
+            delay.tap2_level_db = f("tap2_level_db", -12.0);
+            delay.feedback_active = b("feedback_active", false);
+            delay.feedback_delay_ms = f("feedback_delay_ms", 340.0);
+            delay.feedback_level_db = f("feedback_level_db", -6.0);
+            delay.feedback_lowpass = f("feedback_lowpass", 16000.0);
+            // ⚠️ `tap1_pan` / `tap2_pan` (Godot 0.2 / -0.4) have no field: this
+            // DSP sums the taps mono into both channels. Reading them would
+            // need per-tap panning in `effects.rs`, which belongs to the
+            // dsp-parity bead — recorded here so the gap is visible rather than
+            // looking like an oversight.
+            Some(Box::new(delay))
+        }
+        "AudioEffectDistortion" => {
+            let mut dist = AudioEffectDistortion::new();
+            // `mode` is an ENUM INDEX in the `.tres`, and the order is Godot's
+            // (MODE_CLIP 0, ATAN 1, LOFI 2, OVERDRIVE 3, WAVESHAPE 4). An
+            // unknown index falls back to Clip, Godot's default, rather than
+            // dropping the whole effect.
+            dist.mode = match f("mode", 0.0) as i64 {
+                1 => DistortionMode::ATan,
+                2 => DistortionMode::LoFi,
+                3 => DistortionMode::Overdrive,
+                4 => DistortionMode::WaveShape,
+                _ => DistortionMode::Clip,
+            };
+            // Godot names these `pre_gain`/`post_gain` and documents both in
+            // decibels, which is what the fields store.
+            dist.pre_gain_db = f("pre_gain", 0.0);
+            dist.post_gain_db = f("post_gain", 0.0);
+            dist.drive = f("drive", 0.0);
+            // ⚠️ `keep_hf_hz` (Godot 16000) has no field — this DSP has no
+            // high-frequency bypass. Same disposition as the pans above.
+            Some(Box::new(dist))
+        }
+        // ⚠️ Godot's property is `buffer_length`, not `buffer_length_secs`, and
+        // its default is 2.0 s — the constructor's own parameter name is the
+        // field, not the authored key.
+        //
+        // `fft_size` (an enum index, default 2 = 2048) and `tap_back_pos` have
+        // no counterpart: this analyzer sizes its window from the buffer
+        // length. Deferred, not approximated.
+        "AudioEffectSpectrumAnalyzer" => Some(Box::new(AudioEffectSpectrumAnalyzer::new(f(
+            "buffer_length",
+            2.0,
+        )))),
+        // pat-mgixk.89: the modulation family. These had no DSP at all, so a
+        // Godot layout naming any of them lost the slot entirely.
+        //
+        // Defaults are Godot's, from `doc/classes/AudioEffect*.xml`, and the
+        // keys are the SERIALIZED property names from each
+        // `audio_effect_*.cpp` `ADD_PROPERTY` — which for this family are the
+        // plain underscore names, unlike Chorus's `voice/N/...` paths.
+        "AudioEffectPanner" => Some(Box::new(AudioEffectPanner::new(f("pan", 0.0)))),
+        "AudioEffectStereoEnhance" => {
+            let mut fx = AudioEffectStereoEnhance::new();
+            fx.pan_pullout = f("pan_pullout", 1.0);
+            fx.time_pullout_ms = f("time_pullout_ms", 0.0);
+            fx.surround = f("surround", 0.0);
+            Some(Box::new(fx))
+        }
+        "AudioEffectPhaser" => {
+            let mut fx = AudioEffectPhaser::new();
+            fx.range_min_hz = f("range_min_hz", 440.0);
+            fx.range_max_hz = f("range_max_hz", 1600.0);
+            fx.rate_hz = f("rate_hz", 0.5);
+            fx.feedback = f("feedback", 0.7);
+            fx.depth = f("depth", 1.0);
+            Some(Box::new(fx))
+        }
+        // 🔑 Chorus is the one class in this family whose authored keys are
+        // PATHS, not flat names: `voice/1/delay_ms`, and **1-indexed**
+        // (`audio_effect_chorus.cpp` registers `voice/%d/...` starting at 1
+        // while the array is 0-based). Reading `voice/0/...` or `voice_1_delay`
+        // would find nothing and silently leave every voice at its default,
+        // which is the failure this arm exists to avoid.
+        // ⚠️ `oversampling` is registered as a FLOAT upstream despite being a
+        // count, and `fft_size` is an ENUM INDEX (0..=4 -> 256..4096), not a
+        // size in samples. Reading fft_size as a literal window length would
+        // ask for a 3-frame window.
+        "AudioEffectPitchShift" => {
+            let mut fx = AudioEffectPitchShift::new();
+            fx.pitch_scale = f("pitch_scale", 1.0);
+            fx.oversampling = f("oversampling", 4.0);
+            fx.fft_size = f("fft_size", 3.0) as i64;
+            Some(Box::new(fx))
+        }
+        "AudioEffectChorus" => {
+            let mut fx = AudioEffectChorus::new();
+            // Godot clamps voice_count to 1..=MAX_VOICES; a layout asking for
+            // more would otherwise index past the array.
+            fx.voice_count = (f("voice_count", 2.0) as usize).clamp(1, CHORUS_MAX_VOICES);
+            fx.dry = f("dry", 1.0);
+            fx.wet = f("wet", 0.5);
+            for i in 0..CHORUS_MAX_VOICES {
+                // ⚠️ Defaults per slot are NOT uniform: voices 1 and 2 are
+                // pre-configured by Godot's constructor, 3 and 4 fall back to
+                // the bare `Voice()` values. `AudioEffectChorus::new()` already
+                // encodes that, so each default below is read off the voice it
+                // is overwriting rather than hard-coded.
+                let d = fx.voices[i];
+                let key = |name: &str| format!("voice/{}/{}", i + 1, name);
+                fx.voices[i] = ChorusVoice {
+                    delay_ms: f(&key("delay_ms"), d.delay_ms),
+                    rate_hz: f(&key("rate_hz"), d.rate_hz),
+                    depth_ms: f(&key("depth_ms"), d.depth_ms),
+                    level_db: f(&key("level_db"), d.level_db),
+                    cutoff_hz: f(&key("cutoff_hz"), d.cutoff_hz),
+                    pan: f(&key("pan"), d.pan),
+                };
+            }
+            Some(Box::new(fx))
+        }
         // pat-s3rrv.54: the whole filter family. The biquad DSP already existed
         // and was unit-tested; only three of the eight classes could be named
         // from a bus layout, and the other five were silently dropped.

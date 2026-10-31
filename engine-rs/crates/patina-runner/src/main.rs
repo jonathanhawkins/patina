@@ -10,6 +10,7 @@
 //! patina-runner <scene.tscn> [--frames N] [--delta D]
 //! patina-runner <project.godot> --trace-out <file> [--frames N]
 //! patina-runner <scene.tscn> --frames N --frame-out <file.png|file.ppm>
+//! patina-runner <scene.tscn> --frames N --render-to <file.png>
 //! ```
 //!
 //! `--trace-out` writes the conformance trace envelope the conformance gate
@@ -21,6 +22,13 @@
 //! so a 2D game run outside the editor's Play tab drew no pixels at all. The
 //! builder now lives in `gdscene::canvas_render` and this is one of its two
 //! runtime drivers.
+//!
+//! `--render-to` is the same story for 3D (pat-mgixk.49). Godot's
+//! `Main::iteration` asks the RenderingServer to draw every frame, from the
+//! current `Camera3D`; this runner stepped frames and rendered nothing, so
+//! outside the editor process no 3D pixel was ever produced. The flag holds ONE
+//! `SceneRenderer3D` for the whole run, renders after every `MainLoop` step, and
+//! writes the last frame as a PNG.
 
 #![warn(clippy::all)]
 
@@ -39,6 +47,7 @@ use gdscene::trace::TraceEventType;
 use gdscene::{add_packed_scene_to_tree, LifecycleManager, MainLoop, PackedScene};
 use gdvariant::serialize::to_json;
 use patina_runner::project_boot;
+use patina_runner::render3d::SceneRenderer3D;
 use serde_json::{json, Value};
 
 // ---------------------------------------------------------------------------
@@ -70,9 +79,17 @@ struct Args {
     /// Where to write the last frame's 2D canvas as a binary PPM, when asked
     /// for (pat-mgixk.28).
     frame_out: Option<PathBuf>,
-    /// Framebuffer size for `--frame-out`, defaulting to Godot's own default
-    /// viewport (1152x648).
+    /// Framebuffer size for `--frame-out` and `--render-to`, defaulting to
+    /// Godot's own default viewport (1152x648).
     frame_size: (u32, u32),
+    /// Where to write the last frame of the 3D scene render as a PNG, when
+    /// asked for (pat-mgixk.49).
+    ///
+    /// Separate from [`Self::frame_out`] because the two are different
+    /// pipelines, not two formats of one: `--frame-out` rasterizes the 2D
+    /// canvas item list, `--render-to` drives the 3D `RenderServer3DAdapter`
+    /// from the scene's `Camera3D`. A project can want either or both.
+    render_to: Option<PathBuf>,
 }
 
 /// Parses command-line arguments manually (no extra dependency).
@@ -83,7 +100,7 @@ fn parse_args() -> Result<Args, String> {
         return Err(format!(
             "Usage: {} <scene.tscn|project.godot|game.pck> [--main-pack PACK] \
              [--frames N] [--delta D] [--trace-out FILE] \
-             [--frame-out FILE.png|FILE.ppm] \
+             [--frame-out FILE.png|FILE.ppm] [--render-to FILE.png] \
              [--frame-size WxH]",
             args[0]
         ));
@@ -106,6 +123,7 @@ fn parse_args() -> Result<Args, String> {
     let mut event_trace = false;
     let mut trace_out: Option<PathBuf> = None;
     let mut frame_out: Option<PathBuf> = None;
+    let mut render_to: Option<PathBuf> = None;
     // Godot's default viewport, so a frame dumped without `--frame-size`
     // matches what the project would open at.
     let mut frame_size: (u32, u32) = (1152, 648);
@@ -147,6 +165,12 @@ fn parse_args() -> Result<Args, String> {
                 i += 1;
                 frame_out = Some(PathBuf::from(
                     args.get(i).ok_or("--frame-out requires a path")?,
+                ));
+            }
+            "--render-to" => {
+                i += 1;
+                render_to = Some(PathBuf::from(
+                    args.get(i).ok_or("--render-to requires a path")?,
                 ));
             }
             "--frame-size" => {
@@ -204,6 +228,7 @@ fn parse_args() -> Result<Args, String> {
         debug,
         frame_out,
         frame_size,
+        render_to,
     })
 }
 
@@ -389,15 +414,53 @@ fn serialize_event_trace(tree: &SceneTree) -> Value {
     Value::Array(events)
 }
 
+/// Writes the run's last 3D frame to `path` as a PNG (pat-mgixk.49).
+///
+/// A run whose scene never rendered — `--render-to` given but zero frames asked
+/// for — has no last frame, and that is an error rather than an empty file: a
+/// zero-byte or all-black PNG would be indistinguishable from "the scene drew
+/// nothing", which is exactly the question the image exists to answer.
+fn write_render_to(renderer: &SceneRenderer3D, path: &Path) -> Result<(), String> {
+    let frame = renderer.last_frame().ok_or_else(|| {
+        format!(
+            "--render-to {} was requested but no frame was rendered; the run \
+             stepped no frames",
+            path.display()
+        )
+    })?;
+    frame
+        .save_png(&path.to_string_lossy())
+        .map_err(|e| format!("could not write {}: {e}", path.display()))
+}
+
+/// Steps `frames` frames, optionally rendering the 3D scene after each one.
+///
+/// 🔑 `render3d` is `Option<&mut SceneRenderer3D>` rather than a path because
+/// the renderer must outlive the loop: Godot keeps one `RenderingServer` for the
+/// process and draws from it in every `Main::iteration`. Building an adapter per
+/// frame — which is what the standalone `render_scene_frame` does — would throw
+/// away its mesh and texture caches each time, so the per-frame cost would grow
+/// with the scene instead of staying flat.
+///
+/// ⚠️ The render happens INSIDE the loop, after the step, not once after it
+/// returns. Rendering only at the end would still write an image, but it would
+/// be a frame nothing in the run ever corresponded to, and a scene that quits
+/// mid-run (the `should_quit` break below) would have its last drawn frame
+/// silently replaced by a later one. Drawing every frame is also what proves the
+/// loop can sustain the renderer at all.
 fn run_main_loop(
     main_loop: &mut MainLoop,
     frames: u64,
     delta: f64,
     trace_frames: bool,
+    mut render3d: Option<&mut SceneRenderer3D>,
 ) -> Vec<Value> {
     let mut frame_trace = Vec::new();
     for _ in 0..frames {
         main_loop.step(delta);
+        if let Some(renderer) = render3d.as_deref_mut() {
+            renderer.render(main_loop.tree());
+        }
         if trace_frames {
             frame_trace.push(json!({
                 "frame": main_loop.frame_count(),
@@ -547,10 +610,28 @@ fn run_booted_project(booted: project_boot::BootedProject, project_dir: &Path, a
     // Register 2D physics bodies so RigidBody2D/etc. actually simulate under the
     // honored gravity (2D bodies are not auto-registered by `step`).
     main_loop.register_physics_bodies();
-    let frame_trace = run_main_loop(&mut main_loop, args.frames, args.delta, args.trace_frames);
+    // pat-mgixk.49: one renderer for the whole run, built before the first
+    // frame, so `run_main_loop` can draw after every step.
+    let mut renderer3d = args
+        .render_to
+        .as_ref()
+        .map(|_| SceneRenderer3D::new(args.frame_size.0, args.frame_size.1));
+    let frame_trace = run_main_loop(
+        &mut main_loop,
+        args.frames,
+        args.delta,
+        args.trace_frames,
+        renderer3d.as_mut(),
+    );
     if let Some(ref path) = args.frame_out {
         if let Err(e) = write_frame_out(&main_loop, &project_dir, path, args.frame_size) {
             eprintln!("Error writing frame: {e}");
+            process::exit(1);
+        }
+    }
+    if let (Some(renderer), Some(path)) = (renderer3d.as_ref(), args.render_to.as_ref()) {
+        if let Err(e) = write_render_to(renderer, path) {
+            eprintln!("Error writing 3D frame: {e}");
             process::exit(1);
         }
     }
@@ -740,10 +821,28 @@ fn main() {
     main_loop
         .audio_bridge_mut()
         .set_base_dir(project_dir.clone());
-    let frame_trace = run_main_loop(&mut main_loop, args.frames, args.delta, args.trace_frames);
+    // pat-mgixk.49: one renderer for the whole run, built before the first
+    // frame, so `run_main_loop` can draw after every step.
+    let mut renderer3d = args
+        .render_to
+        .as_ref()
+        .map(|_| SceneRenderer3D::new(args.frame_size.0, args.frame_size.1));
+    let frame_trace = run_main_loop(
+        &mut main_loop,
+        args.frames,
+        args.delta,
+        args.trace_frames,
+        renderer3d.as_mut(),
+    );
     if let Some(ref path) = args.frame_out {
         if let Err(e) = write_frame_out(&main_loop, &project_dir, path, args.frame_size) {
             eprintln!("Error writing frame: {e}");
+            process::exit(1);
+        }
+    }
+    if let (Some(renderer), Some(path)) = (renderer3d.as_ref(), args.render_to.as_ref()) {
+        if let Err(e) = write_render_to(renderer, path) {
+            eprintln!("Error writing 3D frame: {e}");
             process::exit(1);
         }
     }
@@ -885,7 +984,7 @@ func _ready():
         tree.add_child(root, child).unwrap();
 
         let mut main_loop = MainLoop::new(tree);
-        let trace = run_main_loop(&mut main_loop, 2, 1.0 / 60.0, true);
+        let trace = run_main_loop(&mut main_loop, 2, 1.0 / 60.0, true, None);
 
         assert_eq!(trace.len(), 2);
         assert_eq!(trace[0]["frame"], json!(1));

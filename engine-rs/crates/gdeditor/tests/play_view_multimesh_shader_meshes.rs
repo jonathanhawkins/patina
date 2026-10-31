@@ -956,3 +956,323 @@ fn play_view_renders_the_multimesh_s_own_mesh_resource() {
         sphere.vertices.len(),
     );
 }
+
+// ---------------------------------------------------------------------------
+// A ShaderMaterial's `sampler2D` uniform on the 3D editor/Play path
+// ---------------------------------------------------------------------------
+
+/// The shader source, as a FILE on disk.
+///
+/// 🔑 AN EXTERNAL `.gdshader`, NOT AN INLINE `code = "..."` SUB-RESOURCE, and
+/// not by preference — an inline one CANNOT WORK for a uniform. The sampler list
+/// comes from `gdserver3d::shader::parse_uniforms`, which walks
+/// `source.lines()` and keeps a line only if it
+/// `strip_prefix("uniform ")`-matches. A `.tscn` property value is parsed out of
+/// a single line (`PackedScene::from_tscn` iterates `source.lines()` and stitches
+/// continuations only by BRACKET depth, never inside a quoted string), so an
+/// inline `code = "shader_type spatial; uniform sampler2D t; ..."` is ONE line
+/// beginning with `shader_type` — `parse_uniforms` returns an empty list and
+/// nothing is ever bindable.
+///
+/// That is why the first revision of this test failed with `Bound names: []`
+/// against a correct implementation. The sibling constant-colour fixtures
+/// (`shaded_box_tscn`) get away with one line because they declare no uniform.
+///
+/// Godot projects keep shaders in `.gdshader` files anyway, and
+/// `resolve_shader_material` already has the branch: `packed_scene` maps a
+/// ShaderMaterial's `shader = ExtResource(..)` to a `shader_path` property, and
+/// the resolver loads it with `load_gdshader`. Real newlines in the file are what
+/// make the uniform visible.
+fn shader_file(dir: &std::path::Path) -> String {
+    let path = dir.join("tint.gdshader");
+    std::fs::write(
+        &path,
+        "shader_type spatial;\nrender_mode unshaded;\nuniform sampler2D tint_map;\nvoid fragment() {\n\tALBEDO = texture(tint_map, UV).rgb;\n}\n",
+    )
+    .expect("the fixture shader must be writable");
+    path.to_string_lossy().into_owned()
+}
+
+/// A 4x4 solid-blue PNG on disk, returned as a filesystem path.
+///
+/// Written rather than injected: `MaterialTextureCache::get_or_load` resolves a
+/// texture by PATH and reads a file, and that load is precisely the link this
+/// slice wires up — so a fixture that handed the pixels over directly would skip
+/// the thing under test. (The sibling
+/// `gpu_play_view_samples_material_textures.rs` injects for the opposite reason:
+/// there the loader is a detour, here it is the subject.)
+///
+/// 4x4 rather than 1x1 so the shader's `texture(tint_map, UV)` samples a real
+/// interior texel at any UV, instead of depending on how a degenerate
+/// single-texel image clamps.
+///
+/// A bare filesystem path, not `res://`: `MaterialTextureCache::load` passes a
+/// non-`res://` path through unchanged, while `res://` needs the project roots
+/// that only a booted project installs.
+fn blue_texture_file(dir: &std::path::Path) -> String {
+    solid_texture_file(
+        dir,
+        "tint.png",
+        gdcore::math::Color::new(0.0, 0.0, 1.0, 1.0),
+    )
+}
+
+/// The CONTROL texture for the sampler test: solid red, same size, same loader.
+///
+/// 🔑 The control differs from the experiment in the texel COLOUR and nothing
+/// else. See [`play_view_binds_a_shader_sampler_texture`] for why a
+/// shader-absent control cannot work here.
+fn red_texture_file(dir: &std::path::Path) -> String {
+    solid_texture_file(
+        dir,
+        "tint_control.png",
+        gdcore::math::Color::new(1.0, 0.0, 0.0, 1.0),
+    )
+}
+
+/// Writes a 4x4 solid-colour PNG and returns its filesystem path.
+///
+/// 4x4 rather than 1x1 so `texture(tint_map, UV)` samples a real interior texel
+/// at any UV, instead of depending on how a degenerate single-texel image
+/// clamps.
+fn solid_texture_file(dir: &std::path::Path, name: &str, color: gdcore::math::Color) -> String {
+    let path = dir.join(name);
+    let fb = gdrender2d::FrameBuffer::new(4, 4, color);
+    fb.save_png(&path.to_string_lossy())
+        .expect("the fixture texture must be writable");
+    path.to_string_lossy().into_owned()
+}
+
+/// A per-process scratch directory holding both fixture files.
+fn fixture_dir() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("pat_mgixk_50_shader_tex_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("the temp dir must be creatable");
+    dir
+}
+
+/// A box whose `material_override` is a ShaderMaterial SAMPLING `tint_map`.
+///
+/// The shader is referenced as an `[ext_resource]` rather than written inline —
+/// see [`shader_file`] for why an inline `code = "..."` makes the uniform
+/// invisible. `packed_scene` resolves `shader = ExtResource(..)` to a
+/// `shader_path` property on the node (the `else if ext_ref_id(..)` branch of its
+/// ShaderMaterial pass), which `resolve_shader_material` then loads.
+///
+/// `render_mode unshaded` on purpose: the colour census then reads the sampled
+/// texel itself rather than the texel times an unknown lighting term, so "the
+/// texture reached the fragment stage" is separable from "the scene is lit". The
+/// sibling red-constant test above has to settle for channel dominance for
+/// exactly that reason.
+///
+/// ⚠️ The uniform is `tint_map`, not `albedo` or `tex`. `gdserver3d`'s WGSL
+/// emitter generates binding names as `t_<uniform>`, so a uniform named after a
+/// built-in material slot can collide with a generated name and fall back
+/// silently.
+fn sampling_box_tscn(shader_path: &str, texture_path: Option<&str>) -> String {
+    let (ext, subresources, override_line) = match texture_path {
+        Some(path) => (
+            format!("[ext_resource type=\"Shader\" path=\"{shader_path}\" id=\"1_sh\"]\n"),
+            format!(
+                r#"
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_T"]
+shader = ExtResource("1_sh")
+shader_parameter/tint_map = "{path}"
+"#
+            ),
+            "material_override = SubResource(\"ShaderMaterial_T\")\n".to_string(),
+        ),
+        None => (String::new(), String::new(), String::new()),
+    };
+    format!(
+        r#"[gd_scene load_steps=4 format=3]
+
+{ext}
+[sub_resource type="BoxMesh" id="Mesh_T"]
+{subresources}
+[node name="Root" type="Node3D"]
+
+[node name="Camera" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 4)
+
+[node name="Mesh" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)
+mesh = SubResource("Mesh_T")
+{override_line}"#
+    )
+}
+
+fn load_sampling_box(shader_path: &str, texture_path: Option<&str>) -> (SceneTree, NodeId) {
+    register_3d_classes();
+    let src = sampling_box_tscn(shader_path, texture_path);
+    let scene = PackedScene::from_tscn(&src).expect("the .tscn parses");
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    add_packed_scene_to_tree(&mut tree, root, &scene).expect("the scene instances");
+    let mesh = tree
+        .get_node_by_path("/root/Root/Mesh")
+        .expect("the fixture has /root/Root/Mesh");
+    (tree, mesh)
+}
+
+/// Blue-DOMINANT, for the same reason [`is_red`] is dominance rather than
+/// magnitude: the Play frame's post chain can scale the channels, and dominance
+/// is invariant under that while still excluding the white placeholder (which is
+/// achromatic) and any red or green result.
+fn is_blue(c: &gdcore::math::Color) -> bool {
+    c.b - c.r > 0.05 && c.b - c.g > 0.05
+}
+
+/// **The `sampler2D` slice of pat-mgixk.50.**
+///
+/// A ShaderMaterial whose `sampler2D` uniform names a texture samples THAT
+/// TEXTURE on the editor/Play path.
+///
+/// # What was wrong
+///
+/// This bead's first pass made `viewport_3d_render` resolve a ShaderMaterial and
+/// carry it on `Render3DItem::shader_material`, which fixed constant-colour
+/// shaders. It did not bind textures: `bind_shader_textures` — the step that
+/// turns a `shader_parameter/<name>` PATH into pixels in the material's texture
+/// map — was a **private method on `RenderServer3DAdapter`**, and the editor
+/// path owns no adapter. So the material arrived with an empty texture map and
+/// `texture(tint_map, UV)` returned the missing-binding WHITE placeholder
+/// (`gdrender3d/tests/custom_shader_sampler_binding_reaches_the_shader.rs` pins
+/// that placeholder). The shader ran; it just read white.
+///
+/// Making it a free function taking a [`MaterialTextureCache`] is what lets both
+/// paths run the same load.
+///
+/// # Both entry points
+///
+/// The binding happens in `build_render_list`, whose output is what
+/// `game_3d_render_inputs`, `render_editor_3d_frame` (software) and
+/// `render_editor_3d_frame_gpu` all consume — so one call serves every one of
+/// them.
+#[test]
+fn play_view_binds_a_shader_sampler_texture() {
+    let dir = fixture_dir();
+    let shader = shader_file(&dir);
+    let texture = blue_texture_file(&dir);
+    let (tree, mesh) = load_sampling_box(&shader, Some(&texture));
+
+    // -- exact: the draw item's material carries the LOADED image ------------
+    //
+    // 🔑 Asserted on the public struct, not inferred from pixels. A pixel census
+    // alone cannot distinguish "the texture was bound" from "something else
+    // turned the mesh blue"; `get_texture` names the exact thing that was
+    // missing.
+    let items: Vec<_> = Viewport3D::new(W, H)
+        .build_render_list(&tree)
+        .into_iter()
+        .filter(|item| item.node_id == mesh.raw())
+        .collect();
+    assert_eq!(items.len(), 1, "the MeshInstance3D contributes one draw");
+    let shader_mat = items[0]
+        .shader_material
+        .as_ref()
+        .expect("the draw item must carry the authored ShaderMaterial");
+    let bound = shader_mat.get_texture("tint_map").unwrap_or_else(|| {
+        panic!(
+            "the `tint_map` sampler2D must have its image BOUND on the draw \
+             item. None is the pre-fix behaviour: the material reached here with \
+             an empty texture map because `bind_shader_textures` was private to \
+             RenderServer3DAdapter, so `texture(tint_map, UV)` sampled the white \
+             placeholder. An EMPTY list with the fix in place means the uniform \
+             was never parsed — check that the shader source reached \
+             `parse_uniforms` with `uniform ` at the START OF A LINE (see \
+             `shader_file`). Bound names: {:?}",
+            shader_mat.textures.keys().collect::<Vec<_>>()
+        )
+    });
+    assert_eq!(
+        (bound.width, bound.height),
+        (4, 4),
+        "the bound image must be the 4x4 fixture that was written to disk, not \
+         a placeholder of some other size",
+    );
+
+    // -- observable: the mesh's own pixels are BLUE --------------------------
+    //
+    // 🔑 Differenced against the identical scene with NO override, and rendered
+    // through the Play frame, which draws no grid and no origin axes — the
+    // editor frame alpha-blends a RED x-axis over the mesh, so its chrome is not
+    // invariant between the two frames (see `shaded_box_tscn`).
+    let shaded = render_game_3d_frame(&tree, W, H).expect("the fixture has a Camera3D");
+    // 🔑 The control binds a RED texture through the SAME shader — it does not
+    // drop the shader.
+    //
+    // ⚠️ This used to pass `None`, which builds a `.tscn` with no
+    // `[ext_resource]`, no `[sub_resource]` and no `material_override` at all.
+    // That control differed in TWO things, and the second one dominated:
+    // without a ShaderMaterial the shader's `render_mode unshaded` does not
+    // apply either, so the control mesh was LIT by the default environment while
+    // the experiment was unlit. Measured: all 324 differing pixels came back
+    // blue-dominant in that control, which is what its own guard assertion
+    // caught. The comment on `is_blue` claiming the control shows "the white
+    // placeholder" describes a shader-present/texture-absent fixture — not the
+    // one `None` produced.
+    //
+    // With a red control both frames are unshaded, the geometry is identical so
+    // no background pixel can enter the differing set, and the only variable
+    // left is the sampled texel.
+    let control_texture = red_texture_file(&dir);
+    let (plain_tree, _) = load_sampling_box(&shader, Some(&control_texture));
+    let plain = render_game_3d_frame(&plain_tree, W, H).expect("the fixture has a Camera3D");
+    assert_eq!(
+        shaded.pixels.len(),
+        plain.pixels.len(),
+        "same viewport, same pixel count",
+    );
+
+    let differing: Vec<usize> = (0..shaded.pixels.len())
+        .filter(|&i| {
+            let (a, b) = (&shaded.pixels[i], &plain.pixels[i]);
+            (a.r - b.r).abs() > 1e-3 || (a.g - b.g).abs() > 1e-3 || (a.b - b.b).abs() > 1e-3
+        })
+        .collect();
+    assert!(
+        !differing.is_empty(),
+        "the authored ShaderMaterial must change the frame at all; zero \
+         differing pixels means it never reached the renderer",
+    );
+
+    // 🔑 The control actually sampled its OWN texture. Without this the
+    // "no blue in the control" guard below is vacuous: a control that rendered
+    // nothing, or fell back to a placeholder, also contains no blue.
+    let red_plain = differing
+        .iter()
+        .filter(|&&i| is_red(&plain.pixels[i]))
+        .count();
+    assert!(
+        red_plain > 0,
+        "the control binds a RED texture through the same shader, so its own \
+         changed pixels must be red-dominant. Zero means the control did not \
+         sample its texture either, and the comparison measures nothing",
+    );
+
+    let blue_plain = differing
+        .iter()
+        .filter(|&&i| is_blue(&plain.pixels[i]))
+        .count();
+    assert_eq!(
+        blue_plain,
+        0,
+        "the control samples a red texel, so none of the {} changed pixels may \
+         be blue-dominant in it. A non-zero count means the difference is not \
+         the texture and the assertion below proves nothing",
+        differing.len(),
+    );
+
+    let blue_shaded = differing
+        .iter()
+        .filter(|&&i| is_blue(&shaded.pixels[i]))
+        .count();
+    assert!(
+        blue_shaded > 0,
+        "the sampled texel is pure blue and the shader is `unshaded`, so the \
+         mesh's pixels must be blue-dominant; none of the {} changed pixels \
+         are. An ACHROMATIC result here is the exact signature of the \
+         unbound-sampler placeholder: the shader ran and sampled white",
+        differing.len(),
+    );
+}

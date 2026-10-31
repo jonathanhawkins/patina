@@ -260,7 +260,32 @@ fn script_reentrant_signal_dispatch() {
         "link 4: the self-connect for `self_ping` must dispatch too"
     );
 
-    // -- 2. 🔑 A → B → A by signal -------------------------------------------
+    // -- 2a. A → A by signal: the SIMPLEST re-entrant delivery ---------------
+    //
+    // 🔑 Asserted BEFORE the cross-node route below, deliberately. `nextest`
+    // stops the test at the first failing assertion, so whichever of these two
+    // comes first is the only one the run tells you anything about. This one
+    // involves a single node — Player emits its own signal from `_process` and
+    // handles it on itself — so it isolates exactly one question: **is a
+    // checked-out script reachable at all?**
+    //
+    //   passes  => the `ACTIVE_SCRIPTS` lookup works and the guard IS installed
+    //              on the `_process` path, so any remaining failure is specific
+    //              to the CROSS-NODE route (2b).
+    //   fails   => the guard is not installed on the path this fixture takes,
+    //              and 2b could not possibly pass either.
+    //
+    // With the order reversed, a `died_count == 0` failure left `ping_count`
+    // completely unmeasured, so the run could not distinguish those two causes
+    // — one verify that answered nothing.
+    assert_eq!(
+        var("ping_count"),
+        Some(Variant::Int(1)),
+        "Player emitted its own `self_ping` from _process, connected to its own \
+         handler; emitter and target are the same checked-out script"
+    );
+
+    // -- 2b. 🔑 A → B → A by signal ------------------------------------------
     assert_eq!(
         var("died_count"),
         Some(Variant::Int(1)),
@@ -268,14 +293,6 @@ fn script_reentrant_signal_dispatch() {
          Player._on_enemy_died must have run — in the same frame. 0 means the \
          handler was dropped because Player was checked out of the arena, \
          which is the canonical breakage this bead names"
-    );
-
-    // -- 2. A → A by signal --------------------------------------------------
-    assert_eq!(
-        var("ping_count"),
-        Some(Variant::Int(1)),
-        "Player emitted its own `self_ping` from _process, connected to its own \
-         handler; emitter and target are the same checked-out script"
     );
 
     // -- 3. 🔑 A → B → A by direct call, with a RETURN VALUE -----------------

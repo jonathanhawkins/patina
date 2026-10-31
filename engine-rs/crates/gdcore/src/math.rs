@@ -769,6 +769,44 @@ pub fn fposmod(x: f32, y: f32) -> f32 {
 /// `round()` (round-half-away-from-zero). They differ on every negative
 /// half-step: snapping `-2.5` to a step of `1` gives `-2` here and `-3` through
 /// `round()`. A step of `0` returns the value unchanged rather than dividing.
+/// Godot's `Math::ease` — the easing curve a per-key animation `transition`
+/// exponent applies to an already-normalised interpolation factor
+/// (pat-mgixk.80).
+///
+/// Ported from `core/math/math_funcs.cpp:96-119`, branch for branch:
+///
+/// * `c > 1` is ease-**out** (`x^c`), `0 < c < 1` is ease-**in**
+///   (`1 - (1-x)^(1/c)`);
+/// * `c < 0` is ease in-**out**, mirrored about `x = 0.5`;
+/// * `c == 0` returns **0**, which upstream comments as "no ease (raw)". It does
+///   NOT return `x`, and that asymmetry is deliberate upstream.
+///
+/// ⚠️ `c == 0` never reaches here from the animation sampler: a `transition` of
+/// 0 means *hold the key's value*, which `animation.rs` checks before easing
+/// (`animation.cpp:2663-2666`). The branch is ported anyway so the function is
+/// Godot's, not Godot-as-the-sampler-happens-to-use-it.
+///
+/// `x` is clamped to `0..=1` first, as upstream does.
+pub fn ease(x: f32, c: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    if c > 0.0 {
+        if c < 1.0 {
+            1.0 - (1.0 - x).powf(1.0 / c)
+        } else {
+            x.powf(c)
+        }
+    } else if c < 0.0 {
+        // in-out: the first half eases in, the second mirrors it.
+        if x < 0.5 {
+            (x * 2.0).powf(-c) * 0.5
+        } else {
+            (1.0 - (1.0 - (x - 0.5) * 2.0).powf(-c)) * 0.5 + 0.5
+        }
+    } else {
+        0.0
+    }
+}
+
 pub fn snapped_scalar(value: f32, step: f32) -> f32 {
     if step != 0.0 {
         (value / step + 0.5).floor() * step

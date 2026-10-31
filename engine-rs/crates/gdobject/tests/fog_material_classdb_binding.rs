@@ -74,12 +74,25 @@ fn fog_material_classdb_binding() {
     );
     assert!(is_parent_class("FogMaterial", "Object"));
 
-    // ⚠️ Material is VIRTUAL but FogMaterial is CONCRETE:
+    // ⚠️ Material is VIRTUAL and FogMaterial is CONCRETE:
     // `GDREGISTER_VIRTUAL_CLASS(Material)` vs `GDREGISTER_CLASS(FogMaterial)`
     // (register_scene_types.cpp:439, 742). Marking FogMaterial abstract would
     // make `FogMaterial.new()` fail where Godot allows it.
-    assert!(is_abstract("Material"), "Material is virtual in Godot");
-    assert!(!can_instantiate("Material"));
+    //
+    // 🔑 pat-mgixk.97: these two asserted `is_abstract("Material")` and
+    // `!can_instantiate("Material")` — "Material is virtual in Godot", as if
+    // virtual meant abstract. It does not, and this file's own `_VIRTUAL_` note
+    // above is the giveaway. `ClassDB::register_class(bool p_virtual)` sets
+    // `creation_func` unconditionally (`core/object/class_db.h:255-261`) while
+    // `register_abstract_class` does not, and `ClassDB::is_abstract` is exactly
+    // `creation_func == nullptr` (`class_db.cpp:842`). So a VIRTUAL class is
+    // instantiable and not abstract; only GDREGISTER_ABSTRACT_CLASS is.
+    // extension_api.json agrees: Material is_instantiable = true.
+    assert!(
+        !is_abstract("Material"),
+        "GDREGISTER_VIRTUAL_CLASS still installs a creation func"
+    );
+    assert!(can_instantiate("Material"));
     assert!(
         !is_abstract("FogMaterial"),
         "GDREGISTER_CLASS(FogMaterial) — it is instantiable"

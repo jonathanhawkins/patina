@@ -336,6 +336,62 @@ fn a_dock_created_sidecar_names_its_importer_and_source() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// ⚠️ The sidecar's importer id must come from the **extension**, not from a
+/// coarse resource type.
+///
+/// `.ogg` and `.wav` are both `ImportResourceType::Audio`, but Godot gives them
+/// DIFFERENT importers: `oggvorbisstr`
+/// (`modules/vorbis/resource_importer_ogg_vorbis.cpp`) and `wav`
+/// (`editor/import/resource_importer_wav.cpp`). The dock-created sidecar used to
+/// be written from the type, whose `Audio` arm answered `"wav"`, so **every**
+/// `.ogg` got `importer="wav"` on disk while the dock's own GET reported
+/// `oggvorbisstr` — the API and the file disagreeing about the same asset, and
+/// a real Godot editor opening the project would hand the file to the WAV
+/// importer (pat-mgixk.407).
+#[test]
+fn a_dock_created_sidecar_derives_the_importer_from_the_extension() {
+    let (_handle, port, dir) = server_on_temp_project("ogg_importer");
+    // A stub is enough: this endpoint resolves the path and writes a sidecar, it
+    // never decodes the asset.
+    std::fs::write(dir.join("music.ogg"), b"OggS\x00stub").unwrap();
+
+    assert!(
+        !dir.join("music.ogg.import").exists(),
+        "no sidecar before the first edit"
+    );
+    json_of(&http_post(
+        port,
+        "/api/import_settings",
+        r#"{"path":"res://music.ogg","option":"loop","value":false}"#,
+    ));
+
+    let text = std::fs::read_to_string(dir.join("music.ogg.import"))
+        .expect("the dock must create a sidecar for the asset it just edited");
+    assert!(
+        text.contains("importer=\"oggvorbisstr\""),
+        "an .ogg sidecar must name Godot's Ogg Vorbis importer:\n{text}"
+    );
+    // The negative matters on its own: `wav` is a real importer id, so a reader
+    // seeing it would not suspect a bug — it is simply the wrong one here.
+    assert!(
+        !text.contains("importer=\"wav\""),
+        "`wav` is the importer for .wav only; writing it for an .ogg is the defect:\n{text}"
+    );
+
+    // And the two halves must agree: the dock REPORTS the id it WRITES.
+    let info = json_of(&http_get(
+        port,
+        "/api/import_settings?path=res%3A//music.ogg",
+    ));
+    assert_eq!(
+        info["importer"],
+        serde_json::json!("oggvorbisstr"),
+        "the API and the sidecar must not disagree about the same asset"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Non-importable and traversal paths are refused rather than writing a sidecar
 /// somewhere outside the project.
 #[test]

@@ -370,3 +370,97 @@ fn change_scene_to_node_from_script() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `set_group_flags` — the flagged spelling of `set_group`, which was the only
+/// one bound.
+///
+/// ⚠️ The property name `hp` is deliberately NOT an engine property of
+/// `Node2D`. A name the ClassDB knows would be seeded with a default on every
+/// node as it is built, so "the non-member has no `hp`" would be asserting
+/// against a value the loader put there rather than against the group write.
+///
+/// 🔑 The discriminator is the NON-member. An implementation that ignored the
+/// group and wrote the property on every node — or one that resolved the group
+/// name from the wrong argument index and matched nothing, then fell back —
+/// would satisfy "the member got it" on its own.
+const GD_GROUP_FLAGS: &str = "\
+extends Node2D
+var ran = false
+var done = false
+
+func _process(delta):
+    if self.done:
+        return
+    self.done = true
+    get_node(\"Listener\").add_to_group(\"squad\")
+    get_tree().set_group_flags(0, \"squad\", \"hp\", 42)
+    self.ran = true
+";
+
+#[test]
+fn set_group_flags_from_script_writes_only_group_members() {
+    let _guard = BOOT_LOCK.lock().unwrap();
+    let dir = unique_project_dir("groupflags");
+    write_project(&dir, GD_GROUP_FLAGS);
+    let mut boot = boot(&dir);
+
+    let listener = boot
+        .main_loop()
+        .unwrap()
+        .tree()
+        .get_node_by_path("/root/Main/Listener")
+        .expect("the fixture declares a Listener node");
+    let victim = boot
+        .main_loop()
+        .unwrap()
+        .tree()
+        .get_node_by_path("/root/Main/Victim")
+        .expect("the fixture declares a Victim node");
+
+    // -- control: neither node carries the property before the frame ---------
+    for (id, name) in [(listener, "Listener"), (victim, "Victim")] {
+        assert!(
+            !boot
+                .main_loop()
+                .unwrap()
+                .tree()
+                .get_node(id)
+                .unwrap()
+                .has_property("hp"),
+            "precondition: {name} must not already have an `hp` property"
+        );
+    }
+
+    boot.main_loop_mut().unwrap().step(DT);
+
+    assert_eq!(
+        script_var(&boot, "ran"),
+        Variant::Bool(true),
+        "`_process` must reach its last line; false means \
+         `get_tree().set_group_flags(...)` raised UndefinedFunction, which is \
+         what HEAD does"
+    );
+
+    assert_eq!(
+        boot.main_loop()
+            .unwrap()
+            .tree()
+            .get_node(listener)
+            .unwrap()
+            .get_property("hp"),
+        Variant::Int(42),
+        "the group member must receive the property write"
+    );
+
+    assert!(
+        !boot
+            .main_loop()
+            .unwrap()
+            .tree()
+            .get_node(victim)
+            .unwrap()
+            .has_property("hp"),
+        "a node OUTSIDE the group must not be written to; `hp` on Victim means \
+         the group was never resolved and every node was written instead"
+    );
+}

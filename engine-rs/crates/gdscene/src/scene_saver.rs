@@ -1639,6 +1639,16 @@ fn is_internal_prop(key: &str) -> bool {
         // reference, which is what round-trips; emitting the cache would invent
         // a property Godot has never heard of.
         || key.starts_with("__extres__")
+        // `__object_*__` holds the Object API surface's per-node runtime state —
+        // the `set_block_signals` flag, the `add_user_signal` name list, and the
+        // translation enable/domain (pat-mgixk.99). All four are RUNTIME state a
+        // script sets, not authored scene data: Godot persists none of them, and
+        // `is_internal_prop` is a prefix ALLOWLIST, so without this entry a
+        // scene re-saved after a script called `set_block_signals(true)` would
+        // carry a literal `__object_block_signals__ = true` property that Godot
+        // cannot parse — the same corruption recorded for `__tile_physics_*`
+        // and `signal_connections` above.
+        || key.starts_with("__object_")
         // `__extuid__<prop>` is the same cache for the reference's `uid://`
         // (pat-0q2kx.137). It is re-emitted on the `[ext_resource]` row, so
         // writing it as a node property too would invent one Godot cannot parse.

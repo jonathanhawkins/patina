@@ -79,11 +79,17 @@ fn audio_effect_instance_is_not_an_audio_effect() {
 /// returns null there), so an `is_none()` assertion would fail here for a
 /// reason that has nothing to do with this bead.
 #[test]
-fn audio_effect_base_is_abstract() {
+fn audio_effect_base_is_virtual_not_abstract() {
     registered();
+    // pat-mgixk.97: this asserted `is_abstract("AudioEffect")`, "an abstract
+    // base in Godot". It is `GDREGISTER_VIRTUAL_CLASS(AudioEffect)`
+    // (servers/register_server_types.cpp:173), and virtual still installs a
+    // creation func (`core/object/class_db.h:255-261`) while `is_abstract` is
+    // `creation_func == nullptr` (`class_db.cpp:842`). extension_api.json
+    // agrees: AudioEffect is_instantiable = true.
     assert!(
-        gdobject::class_db::is_abstract("AudioEffect"),
-        "AudioEffect is an abstract base in Godot"
+        !gdobject::class_db::is_abstract("AudioEffect"),
+        "AudioEffect is VIRTUAL, not abstract — Godot constructs it"
     );
     assert!(
         !gdobject::class_db::is_abstract("AudioEffectAmplify"),

@@ -105,11 +105,22 @@ fn an_effect_slot_without_an_enabled_key_defaults_to_enabled() {
 
 /// An effect type Patina has not implemented must not cost the project its bus
 /// layout — the slot is skipped and everything else still loads.
+///
+/// ⚠️ The stand-in was `AudioEffectPitchShift` until pat-mgixk.89 implemented
+/// it, at which point this test asserted the opposite of the truth: the slot
+/// now loads. It is `AudioEffectEQ21` instead, which the factory still does not
+/// model (the 3-band DSP cannot represent 21 bands — that is the
+/// audio-effect-dsp-parity bead's work).
+///
+/// 🔑 **Whoever implements EQ21 must swap this stand-in again**, for any class
+/// `effect_from_sub_resource` still answers `None` for. The test is about the
+/// skip being survivable, not about which class happens to be missing — but it
+/// can only prove that with a class that really is.
 #[test]
 fn an_unknown_effect_type_is_skipped_without_losing_the_buses() {
     let layout = LAYOUT.replace(
         r#"[sub_resource type="AudioEffectAmplify" id="Amplify_1"]"#,
-        r#"[sub_resource type="AudioEffectPitchShift" id="Amplify_1"]"#,
+        r#"[sub_resource type="AudioEffectEQ21" id="Amplify_1"]"#,
     );
     let mut mixer = AudioMixer::new();
     let count = mixer.load_bus_layout_tres(&layout);

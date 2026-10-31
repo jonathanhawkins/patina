@@ -513,10 +513,16 @@ pub trait SceneAccess {
     /// Connect a signal on `source` to `method` on `target`.
     fn connect_signal(&mut self, source: u64, signal: &str, target: u64, method: &str);
     /// Connect a signal honoring Godot `ConnectFlags`
-    /// (`DEFERRED=1`, `PERSIST=2`, `ONE_SHOT=4`, `REFERENCE_COUNTED=8`) plus any
-    /// `Callable.bind` arguments to append. The default implementation drops the
-    /// flags/binds and calls [`connect_signal`](Self::connect_signal); scene
-    /// backends override it to record them (pat-nzgdu.31).
+    /// (`DEFERRED=1`, `PERSIST=2`, `ONE_SHOT=4`, `REFERENCE_COUNTED=8`) plus the
+    /// `Callable.bind` arguments to append and the `Callable.unbind` count of
+    /// trailing signal arguments to drop. The default implementation discards
+    /// all of them and calls [`connect_signal`](Self::connect_signal); scene
+    /// backends override it to record them (pat-nzgdu.31, pat-mgixk.98).
+    ///
+    /// ⚠️ `unbinds` is applied BEFORE `binds` when the signal fires
+    /// (`Connection::resolve_args`), which is what makes the pair able to
+    /// represent any nesting of `.bind()`/`.unbind()` — see
+    /// `callable_bindings` in the interpreter.
     fn connect_signal_flags(
         &mut self,
         source: u64,
@@ -525,9 +531,13 @@ pub trait SceneAccess {
         method: &str,
         flags: i64,
         binds: &[Variant],
-    ) {
-        let _ = (flags, binds);
+        unbinds: usize,
+    ) -> i64 {
+        let _ = (flags, binds, unbinds);
         self.connect_signal(source, signal, target, method);
+        // Godot's `Error::OK`. A backend with no signal bookkeeping cannot
+        // refuse a connect, so the default can only succeed (pat-mgixk.98).
+        0
     }
     /// Disconnect `target.method` from `source.signal`. Returns `true` if a
     /// connection was removed. Default: no-op returning `false`.
@@ -546,6 +556,97 @@ pub trait SceneAccess {
     /// (pat-0q2kx.9). Default: none.
     fn signal_connections(&self, _source: u64, _signal: &str) -> Vec<(u64, String)> {
         Vec::new()
+    }
+
+    // ---------------------------------------------------------------------
+    // Object API surface (pat-mgixk.99)
+    //
+    // ⚠️ Every one of these carries a DEFAULT. `SceneAccess` has six
+    // implementors, four of them mocks in other crates' test files
+    // (`input_singleton_dispatch.rs`, `undoredo_class_commit_undo_redo_property.rs`,
+    // `encoded_object_as_id_script_wrapper.rs`, and one inside this crate's own
+    // tests). A method without a default would break every one of them, so the
+    // defaults follow the `connect_signal_flags` / `disconnect_signal` idiom
+    // already used above: decline, and let the scene backend override.
+    // ---------------------------------------------------------------------
+
+    /// Godot `Object.add_user_signal` — declare a signal at runtime.
+    fn add_user_signal(&mut self, node: u64, name: &str, args: &[Variant]) {
+        let _ = (node, name, args);
+    }
+
+    /// Godot `Object.has_user_signal` — true only for a RUNTIME-added signal,
+    /// not for a class or script signal of the same name. Default `false`.
+    fn has_user_signal(&self, node: u64, name: &str) -> bool {
+        let _ = (node, name);
+        false
+    }
+
+    /// Godot `Object.remove_user_signal`. Returns whether one was removed.
+    fn remove_user_signal(&mut self, node: u64, name: &str) -> bool {
+        let _ = (node, name);
+        false
+    }
+
+    /// Godot `Object.set_block_signals` — suppress every emit from `node`.
+    fn set_block_signals(&mut self, node: u64, blocked: bool) {
+        let _ = (node, blocked);
+    }
+
+    /// Godot `Object.is_blocking_signals`. Default `false`.
+    fn is_blocking_signals(&self, node: u64) -> bool {
+        let _ = node;
+        false
+    }
+
+    /// Godot `Object.is_queued_for_deletion`. Default `false`.
+    fn is_queued_for_deletion(&self, node: u64) -> bool {
+        let _ = node;
+        false
+    }
+
+    /// Godot `Object.cancel_free` — undo a pending `queue_free`.
+    fn cancel_free(&mut self, node: u64) {
+        let _ = node;
+    }
+
+    /// Godot `Object.set_script` — attach or replace the script at
+    /// `script_path`, returning whether it was attached. Emits `script_changed`
+    /// on success.
+    fn set_object_script(&mut self, node: u64, script_path: &str) -> bool {
+        let _ = (node, script_path);
+        false
+    }
+
+    /// Godot `Object.notification(what, reversed)` — run `_notification` across
+    /// the class chain.
+    fn notify_object(&mut self, node: u64, what: i64, reversed: bool) {
+        let _ = (node, what, reversed);
+    }
+
+    /// Godot `Object.set_message_translation`.
+    fn set_message_translation(&mut self, node: u64, enabled: bool) {
+        let _ = (node, enabled);
+    }
+
+    /// Godot `Object.can_translate_messages`.
+    ///
+    /// ⚠️ Defaults to **true**, not false: translation is on until a script
+    /// turns it off, so an unknowing backend must not silently disable `tr()`.
+    fn can_translate_messages(&self, node: u64) -> bool {
+        let _ = node;
+        true
+    }
+
+    /// Godot `Object.set_translation_domain`.
+    fn set_translation_domain(&mut self, node: u64, domain: &str) {
+        let _ = (node, domain);
+    }
+
+    /// Godot `Object.get_translation_domain`. Empty is the default domain.
+    fn get_translation_domain(&self, node: u64) -> String {
+        let _ = node;
+        String::new()
     }
 
     /// Whether `node` declares a signal called `name`, from any of the three
@@ -897,7 +998,11 @@ pub trait SceneAccess {
 
     /// Outgoing connections on `node`'s `signal_name`, as
     /// `(target_object_id, method, one_shot)`.
-    fn signal_connection_list(&self, _node: u64, _signal_name: &str) -> Vec<(u64, String, bool)> {
+    fn signal_connection_list(
+        &self,
+        _node: u64,
+        _signal_name: &str,
+    ) -> Vec<(u64, String, bool, u32)> {
         Vec::new()
     }
 
@@ -1151,6 +1256,28 @@ pub trait SceneAccess {
         false
     }
 
+    /// `SceneTree.set_group_flags(flags, group, property, value)` — sets a
+    /// property on every node in `group`, honouring the `GROUP_CALL_*` flags
+    /// (pat-mgixk.59).
+    ///
+    /// The flagged sibling of [`set_group`](Self::set_group), which took no
+    /// flags. Only the unflagged spelling was bound, so the documented flagged
+    /// one raised `UndefinedFunction` and aborted the calling script.
+    ///
+    /// Returns whether a scene was reachable, like
+    /// [`notify_group_flags`](Self::notify_group_flags) and unlike `set_group`:
+    /// the default body cannot do the work, and a silent `()` would make an
+    /// unimplemented host indistinguishable from a group with no members.
+    fn set_group_flags(
+        &mut self,
+        _flags: i64,
+        _group: &str,
+        _property: &str,
+        _value: Variant,
+    ) -> bool {
+        false
+    }
+
     /// `SceneTree.quit(exit_code)` — records the quit request. It does not stop
     /// execution itself; the host loop polls it at the frame boundary, so the
     /// calling frame still completes.
@@ -1281,6 +1408,15 @@ pub trait SceneAccess {
     /// (Godot: `new()` on a bad script yields `null`).
     fn instantiate_script(&mut self, _path: &str) -> Option<u64> {
         None
+    }
+
+    /// `instantiate_script`, forwarding `.new(..)`'s positional arguments to the
+    /// script's `_init` (pat-mgixk.100).
+    ///
+    /// Defaults to the no-argument form so an implementation that has not been
+    /// updated keeps its old behaviour rather than failing to compile.
+    fn instantiate_script_with_args(&mut self, path: &str, _args: &[Variant]) -> Option<u64> {
+        self.instantiate_script(path)
     }
 
     /// Instantiate the GDScript at `script_path` as a **script-backed
@@ -1994,6 +2130,117 @@ pub trait SceneAccess {
     /// `AudioServer.set_bus_name(idx, name)`.
     fn audio_set_bus_name(&mut self, _idx: i64, _name: &str) -> bool {
         false
+    }
+
+    // -- bus effects (pat-mgixk.90) -----------------------------------------
+    //
+    // Effects are addressed by SLOT, not by handle: Patina keeps an effect's
+    // running state on the effect itself, which lives in its bus slot, so these
+    // take indices and the caller's effect is identified by CLASS NAME plus the
+    // properties its `.new()` carried.
+
+    /// `AudioServer.add_bus_effect(bus, effect, at_position = -1)`.
+    ///
+    /// `class_name`/`properties` come from the `Variant::Resource` that
+    /// `AudioEffect*.new()` produces. `at_position` of `-1` appends, as in Godot.
+    fn audio_add_bus_effect(
+        &mut self,
+        _bus: i64,
+        _class_name: &str,
+        _properties: &[(String, gdvariant::Variant)],
+        _at_position: i64,
+    ) -> bool {
+        false
+    }
+
+    /// `AudioServer.remove_bus_effect(bus, effect_idx)`.
+    fn audio_remove_bus_effect(&mut self, _bus: i64, _effect_idx: i64) -> bool {
+        false
+    }
+
+    /// `AudioServer.get_bus_effect_count(bus)` — `None` when the bus is out of
+    /// range, which is distinct from a bus with zero effects.
+    fn audio_get_bus_effect_count(&self, _bus: i64) -> Option<i64> {
+        None
+    }
+
+    /// `AudioServer.swap_bus_effects(bus, a, b)`.
+    fn audio_swap_bus_effects(&mut self, _bus: i64, _a: i64, _b: i64) -> bool {
+        false
+    }
+
+    /// `AudioServer.set_bus_effect_enabled(bus, effect_idx, enabled)`.
+    fn audio_set_bus_effect_enabled(&mut self, _bus: i64, _effect_idx: i64, _on: bool) -> bool {
+        false
+    }
+
+    /// `AudioServer.is_bus_effect_enabled(bus, effect_idx)`.
+    fn audio_is_bus_effect_enabled(&self, _bus: i64, _effect_idx: i64) -> Option<bool> {
+        None
+    }
+
+    /// The class name of the effect in a slot, for `get_bus_effect(bus, idx)`
+    /// to answer with — `None` when the slot is empty.
+    fn audio_bus_effect_class(&self, _bus: i64, _effect_idx: i64) -> Option<String> {
+        None
+    }
+
+    // -- sends, volume, bus list (pat-mgixk.90) ------------------------------
+
+    /// `AudioServer.set_bus_send(bus, send)`.
+    fn audio_set_bus_send(&mut self, _bus: i64, _send: &str) -> bool {
+        false
+    }
+
+    /// `AudioServer.get_bus_send(bus)`.
+    fn audio_get_bus_send(&self, _bus: i64) -> Option<String> {
+        None
+    }
+
+    /// `AudioServer.set_bus_volume_linear(bus, linear)`.
+    ///
+    /// ⚠️ Converted to dB by the IMPLEMENTATION, not here: the mixer stores dB,
+    /// and doing the conversion once on the engine side keeps the two spellings
+    /// of the same value from drifting.
+    fn audio_set_bus_volume_linear(&mut self, _bus: i64, _linear: f32) -> bool {
+        false
+    }
+
+    /// `AudioServer.get_bus_volume_linear(bus)`.
+    fn audio_get_bus_volume_linear(&self, _bus: i64) -> Option<f32> {
+        None
+    }
+
+    /// `AudioServer.set_bus_count(count)` — adds or removes trailing buses.
+    fn audio_set_bus_count(&mut self, _count: i64) -> bool {
+        false
+    }
+
+    /// `AudioServer.move_bus(index, to_index)`.
+    fn audio_move_bus(&mut self, _index: i64, _to_index: i64) -> bool {
+        false
+    }
+
+    // -- bus layouts (pat-mgixk.90) ------------------------------------------
+
+    /// `AudioServer.set_bus_layout(layout)`, given the layout resource's
+    /// properties as `bus/<idx>/<field>` entries.
+    ///
+    /// 🔑 Entries rather than `.tres` text: `load("res://x.tres")` has already
+    /// parsed the file, and `Mixer::load_bus_layout` consumes exactly these
+    /// pairs. Passing text would mean re-serializing what was just parsed and
+    /// parsing it a second time.
+    fn audio_set_bus_layout_entries(&mut self, _entries: &[(String, String)]) -> bool {
+        false
+    }
+
+    /// `AudioServer.generate_bus_layout()` — the live mixer as
+    /// `bus/<idx>/<field>` entries, the same spelling
+    /// [`audio_set_bus_layout_entries`](Self::audio_set_bus_layout_entries)
+    /// consumes, so a generate → set round trip is exact for every field the
+    /// mixer models.
+    fn audio_generate_bus_layout_entries(&self) -> Vec<(String, String)> {
+        Vec::new()
     }
 
     /// `AudioServer.set_bus_volume_db(idx, db)`.

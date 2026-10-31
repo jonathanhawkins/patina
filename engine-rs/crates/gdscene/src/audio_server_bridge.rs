@@ -19,7 +19,7 @@ use gdaudio::spatial::{
     doppler_pitch_scale, AttenuationModel, AudioListener3D, AudioStreamPlayer2D as Spatial2D,
     AudioStreamPlayer3D as Spatial3D, DopplerTracking,
 };
-use gdaudio::{mix_and_write, AudioBuffer, AudioServer, AudioStreamPlayer};
+use gdaudio::{mix_and_write, AudioBuffer, AudioServer, AudioStreamPlayer, PlaybackId};
 use gdcore::math::{Vector2, Vector3};
 use gdvariant::Variant;
 
@@ -97,6 +97,20 @@ pub struct AudioServerBridge {
     server: AudioServer,
     importer: AudioStreamLoader,
     players: HashMap<NodeId, AudioStreamPlayer>,
+    /// Voices a node is still sounding BEYOND its primary one, oldest first
+    /// (pat-mgixk.85 `max_polyphony`).
+    ///
+    /// 🔑 A parallel map rather than turning `players` into a `Vec`: the
+    /// primary `AudioStreamPlayer` keeps every one of its existing invariants
+    /// (volume, bus, pitch, generator mixing, loop points, the `playing`
+    /// mirror), and polyphony is expressed purely as "previous voices that were
+    /// allowed to survive a retrigger". Nothing that reads `players` changes.
+    ///
+    /// ⚠️ These handles are OWNED here. `AudioStreamPlayer::stop` only knows
+    /// its own `playback_id`, so every path that silences a node has to drain
+    /// this too — node left the tree, stream swapped, and `playing` flipped off.
+    /// A missed path leaks a voice that nothing can ever stop.
+    extra_voices: HashMap<NodeId, Vec<PlaybackId>>,
     /// Nodes already visited once (autoplay fires on first sight).
     seen: HashSet<NodeId>,
     output: Option<Box<dyn AudioOutputStream>>,
@@ -153,6 +167,19 @@ pub struct AudioServerBridge {
     /// property matters because one stream has three spellings — a path, an
     /// `ExtResource` companion, a `Resource` variant — and a change of spelling
     /// is not a change of stream.
+    /// `audio/general/2d_panning_strength` and `3d_panning_strength`
+    /// (pat-mgixk.88).
+    ///
+    /// Godot multiplies each positional player's own `panning_strength` by the
+    /// matching GLOBAL setting (`audio_stream_player_2d.cpp` / `_3d.cpp`), and
+    /// both default to **0.5** — so the default is not 1.0 and every positional
+    /// player was previously panned twice as hard as Godot pans it.
+    ///
+    /// Held on the bridge rather than read per node because it is a project
+    /// setting, not a node property: `configure_from_project_settings` installs
+    /// it once at boot and every voice started afterwards inherits it.
+    panning_strength_2d: f32,
+    panning_strength_3d: f32,
     stream_keys: HashMap<NodeId, String>,
 }
 
@@ -163,6 +190,7 @@ impl AudioServerBridge {
             server: AudioServer::new(),
             importer: AudioStreamLoader::new(),
             players: HashMap::new(),
+            extra_voices: HashMap::new(),
             seen: HashSet::new(),
             output: None,
             base_dir: None,
@@ -176,6 +204,51 @@ impl AudioServerBridge {
             generators: HashMap::new(),
             generators_active: HashSet::new(),
             stream_keys: HashMap::new(),
+            // Godot's documented defaults, so a project that sets neither key
+            // still matches Godot rather than the old implicit 1.0.
+            panning_strength_2d: 0.5,
+            panning_strength_3d: 0.5,
+        }
+    }
+
+    /// Applies the project's audio settings to this bridge (pat-mgixk.88).
+    ///
+    /// 🔑 `audio/driver/mix_rate` reaches the LIVE server through
+    /// `set_output_sample_rate` rather than by rebuilding it from
+    /// `AudioServer::from_project_settings`. A rebuild would drop any bus layout
+    /// already loaded — `bootstrap.rs` loads `default_bus_layout` in the same
+    /// boot — so the setter is what makes this call order-independent.
+    ///
+    /// A malformed or absent value leaves the current setting untouched, so a
+    /// broken project line cannot silence audio or collapse the pan to centre.
+    pub fn configure_from_project_settings(&mut self, settings: &gdcore::ProjectSettings) {
+        if let Some(rate) = settings
+            .get("audio/driver/mix_rate")
+            .and_then(|v| v.as_int())
+        {
+            if rate > 0 {
+                self.server.set_output_sample_rate(rate as u32);
+            }
+        }
+        // ⚠️ `>= 0.0`, not `> 0.0`: Godot treats 0 as a VALID setting meaning
+        // "no panning", and this bead's own acceptance sets
+        // `3d_panning_strength = 0` and expects equal L/R. Rejecting zero as
+        // malformed would make that case silently keep the 0.5 default.
+        if let Some(p) = settings
+            .get("audio/general/2d_panning_strength")
+            .and_then(|v| v.as_float())
+        {
+            if p >= 0.0 {
+                self.panning_strength_2d = p as f32;
+            }
+        }
+        if let Some(p) = settings
+            .get("audio/general/3d_panning_strength")
+            .and_then(|v| v.as_float())
+        {
+            if p >= 0.0 {
+                self.panning_strength_3d = p as f32;
+            }
         }
     }
 
@@ -392,6 +465,12 @@ impl AudioServerBridge {
         for id in stale {
             if let Some(mut p) = self.players.remove(&id) {
                 p.stop(&mut self.server);
+            }
+            // The primary player is gone, so nothing else could ever stop these
+            // (pat-mgixk.85). Dropped here rather than left to play out, because
+            // a freed node's audio must not outlive it.
+            for pid in self.extra_voices.remove(&id).unwrap_or_default() {
+                self.server.stop(pid);
             }
             self.seen.remove(&id);
             // Queued audio for a node that left the tree would otherwise be
@@ -622,9 +701,13 @@ impl AudioServerBridge {
         if let Some(v) = number_property(node, "max_db") {
             source.max_db = v;
         }
+        // The node's own strength TIMES the project global (pat-mgixk.88).
+        // Godot composes them; reading only the node ignored a setting whose
+        // default (0.5) is not 1.0.
         if let Some(v) = number_property(node, "panning_strength") {
             source.panning_strength = v;
         }
+        source.panning_strength *= self.panning_strength_3d;
         if let Variant::Int(model) = node.get_property("attenuation_model") {
             source.attenuation_model = AttenuationModel::from_godot_int(model);
         }
@@ -692,9 +775,11 @@ impl AudioServerBridge {
         if let Some(v) = number_property(node, "attenuation") {
             source.attenuation = v;
         }
+        // Same composition as the 3D path, against the 2D global.
         if let Some(v) = number_property(node, "panning_strength") {
             source.panning_strength = v;
         }
+        source.panning_strength *= self.panning_strength_2d;
         source
     }
 
@@ -987,6 +1072,11 @@ impl AudioServerBridge {
             // and stopping there would mute every autoplaying scene.
             if prev_stream_key.is_some() {
                 player.stop(&mut self.server);
+                // Godot's `set_stream` stops the PLAYER, so its extra
+                // polyphonic voices of the old stream go too (pat-mgixk.85).
+                for pid in self.extra_voices.remove(&id).unwrap_or_default() {
+                    self.server.stop(pid);
+                }
                 if play_request.is_none() {
                     playing_prop = false;
                     if let Some(node) = tree.get_node_mut(id) {
@@ -1051,6 +1141,22 @@ impl AudioServerBridge {
             .and_then(|pid| self.server.stream_state(pid));
         let voice_alive = voice_state.is_some();
 
+        // Drop any extra voice that has reached its own end, then ask whether
+        // one is still sounding. Pruning first is what keeps `finished` honest:
+        // the branch table below must not see a node as silent while an older
+        // polyphonic voice is still audible, and must not see it as busy
+        // because of a voice that ended three frames ago.
+        let extras_alive = {
+            let server = &self.server;
+            let extras = self.extra_voices.entry(id).or_default();
+            extras.retain(|pid| server.stream_state(*pid).is_some());
+            let any = !extras.is_empty();
+            if !any {
+                self.extra_voices.remove(&id);
+            }
+            any
+        };
+
         // Godot's `play(from = 0)` ALWAYS (re)starts: on a player that is
         // already running it stops the live voice and begins again from `from`
         // (`play_basic`, monophonic branch). That is the ordinary SFX
@@ -1058,6 +1164,40 @@ impl AudioServerBridge {
         // already true, so no edge fired and the call did nothing at all
         // (pat-mgixk.5).
         if let Some(from) = play_request {
+            // `max_polyphony` (pat-mgixk.85). Godot's default is 1, which is the
+            // monophonic retrigger `player.play` already implements; above 1,
+            // each `play()` adds a voice and the OLDEST is stolen past the cap
+            // (`audio_stream_player_internal.cpp`).
+            //
+            // 🔑 Read straight off the node rather than threaded through the
+            // property tuple above: widening that tuple's arity would touch its
+            // destructure and every reader, for one value used only here.
+            let max_polyphony = tree
+                .get_node(id)
+                .map(|n| match n.get_property("max_polyphony") {
+                    Variant::Int(i) => i.max(1) as usize,
+                    Variant::Float(f) => (f as i64).max(1) as usize,
+                    _ => 1,
+                })
+                .unwrap_or(1);
+            if max_polyphony > 1 {
+                // Detach BEFORE `play()`: it opens by stopping its own
+                // `playback_id`, so the voice already sounding only survives if
+                // the handle has left the player first.
+                if let Some(prev) = player.detach_playback() {
+                    self.extra_voices.entry(id).or_default().push(prev);
+                }
+                // Steal oldest-first until the voice `play()` is about to start
+                // fits under the cap. `+ 1` accounts for that new primary.
+                let extras = self.extra_voices.entry(id).or_default();
+                while extras.len() + 1 > max_polyphony {
+                    let oldest = extras.remove(0);
+                    self.server.stop(oldest);
+                }
+                if extras.is_empty() {
+                    self.extra_voices.remove(&id);
+                }
+            }
             if let Some(pid) = player.play(&mut self.server) {
                 if let Some(points) = self.stream_loops.get(&id) {
                     apply_stream_loop(&mut self.server, pid, points);
@@ -1099,8 +1239,19 @@ impl AudioServerBridge {
         } else if !playing_prop && voice_alive {
             // Script flipped `playing` off: stop the stream, paused or not.
             player.stop(&mut self.server);
-        } else if player.playing_flag() && !voice_alive {
+            // `stop()` stops ALL of a node's voices in Godot, not just the
+            // newest (pat-mgixk.85).
+            for pid in self.extra_voices.remove(&id).unwrap_or_default() {
+                self.server.stop(pid);
+            }
+        } else if player.playing_flag() && !voice_alive && !extras_alive {
             // Stream ran out on its own: reflect that and notify scripts.
+            //
+            // ⚠️ `!extras_alive` is load-bearing (pat-mgixk.85): with
+            // `max_polyphony > 1` the primary voice ends while OLDER voices are
+            // still sounding, and Godot fires `finished` only when the last one
+            // ends. Without it a polyphonic player would report finished — and
+            // flip `playing` to false — while still audible.
             player.stop(&mut self.server);
             if let Some(node) = tree.get_node_mut(id) {
                 node.set_property("playing", Variant::Bool(false));

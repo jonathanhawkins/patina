@@ -3756,6 +3756,7 @@ pub fn bake_noise_textures(tree: &SceneTree, texture_cache: &mut TextureCache) {
 /// bound above defers.
 pub fn canvas_surface_buffer(
     tree: &SceneTree,
+    items: &[Render2DItem],
     width: u32,
     height: u32,
     mut texture_cache: Option<&mut TextureCache>,
@@ -3765,7 +3766,20 @@ pub fn canvas_surface_buffer(
         return surfaces;
     };
 
-    for item in collect_canvas_items(tree) {
+    // 🔑 The CALLER's items, not a fresh `collect_canvas_items(tree)` walk
+    // (pat-mgixk.45). The samples have to land on the pixels the rasterizer
+    // actually painted, and by this point the caller has already pushed those
+    // items through `apply_camera2d_view` and `apply_stretch_transform`. Walking
+    // the tree again rebuilt them in UNTRANSFORMED canvas space, so under the
+    // Play path's content-scale stretch a sprite drawn at window x 396..524 had
+    // its normal map written at x 198..262 — disjoint. `surfaces` was `None`
+    // everywhere the sprite existed, the light shaded a flat surface, and a
+    // normal-mapped frame came out BIT-IDENTICAL to one with the map removed.
+    //
+    // Reading the items the caller is about to rasterize is also the single
+    // source of truth this bead exists to establish: item geometry is decided
+    // once, by whoever built the list, and every later pass agrees with it.
+    for item in items {
         let node_id = NodeId::from_object_id(gdcore::id::ObjectId::from_raw(item.node_id));
         let Some(node) = tree.get_node(node_id) else {
             continue;
@@ -3795,9 +3809,9 @@ pub fn canvas_surface_buffer(
 
         // Sprites fall through to the cache-aware helper: `item_screen_bounds`
         // has no texture size and so returns `None` for every one of them.
-        let bounds = match item_screen_bounds(&item) {
+        let bounds = match item_screen_bounds(item) {
             Some(b) => b,
-            None => match sprite_screen_bounds(&item, cache) {
+            None => match sprite_screen_bounds(item, cache) {
                 Some(b) => b,
                 None => continue,
             },
@@ -4042,7 +4056,7 @@ pub fn render_canvas_from_list(
     if let Some(cache) = texture_cache.as_deref_mut() {
         bake_noise_textures(tree, cache);
     }
-    let surfaces = canvas_surface_buffer(tree, width, height, texture_cache.as_deref_mut());
+    let surfaces = canvas_surface_buffer(tree, items, width, height, texture_cache.as_deref_mut());
     let mut fb = rasterize_render_list_with_groups_and_quality(
         items,
         &groups,

@@ -58,6 +58,20 @@ pub struct KeyFrame {
     pub value: Variant,
     /// How to transition *to* this keyframe from the previous one.
     pub transition: TransitionType,
+    /// Godot's per-key `transition` **exponent** — the ease applied to the
+    /// interpolation factor (pat-mgixk.80).
+    ///
+    /// ⚠️ Distinct from [`KeyFrame::transition`] above, which is Patina's
+    /// per-key *interpolation mode*. Godot has both: a track-wide
+    /// `interpolation_type` and a per-key `transition: real_t`
+    /// (`animation.cpp:2663`). Naming them alike is unfortunate but the
+    /// spellings are Godot's.
+    ///
+    /// 🔑 Read off the **floor** key when sampling, not the next one, because
+    /// upstream takes `p_keys[idx].transition` where `idx` is the last key at
+    /// or before the time. 1.0 is linear (no ease); **0.0 holds the floor key's
+    /// value** rather than easing it.
+    pub ease: f32,
     /// Bézier-track incoming control handle.
     ///
     /// Only read for [`TrackType::Bezier`]; zero on every other track type.
@@ -80,6 +94,8 @@ impl KeyFrame {
             time,
             value,
             transition,
+            // Godot's default per-key transition is 1.0 — linear, no ease.
+            ease: 1.0,
             in_handle: Vector2::ZERO,
             out_handle: Vector2::ZERO,
         }
@@ -96,6 +112,7 @@ impl KeyFrame {
             time,
             value: Variant::Float(value),
             transition: TransitionType::Linear,
+            ease: 1.0,
             in_handle,
             out_handle,
         }
@@ -412,29 +429,37 @@ impl AnimationTrack {
                 // Per-track interpolation (pat-u3l8c.102) overrides the per-key
                 // transition curve. The default `PerKey` falls through to the
                 // unchanged legacy transition logic below.
+                // Godot applies the FLOOR key's `transition` exponent to the
+                // normalised factor before the interpolation switch, and a
+                // transition of 0 holds that key's value outright
+                // (`animation.cpp:2663-2671`) — pat-mgixk.80.
+                if a.ease == 0.0 {
+                    return Some(a.value.clone());
+                }
                 if self.interpolation != TrackInterpolation::PerKey {
                     let duration = b.time - a.time;
                     if duration < 1e-10 {
                         return Some(b.value.clone());
                     }
-                    let t = ((time - a.time) / duration) as f32;
+                    let t = eased_factor(((time - a.time) / duration) as f32, a.ease);
                     return self.sample_interpolated(i, t);
                 }
                 match b.transition {
                     TransitionType::Nearest => {
-                        let mid = (a.time + b.time) / 2.0;
-                        if time < mid {
-                            return Some(a.value.clone());
-                        } else {
-                            return Some(b.value.clone());
-                        }
+                        // 🔑 The FLOOR key, held until the next one is reached —
+                        // upstream is literally `return p_keys[idx].value`
+                        // (`animation.cpp:2673-2675`). This used to switch at the
+                        // MIDPOINT between the two keys, so every NEAREST track
+                        // changed value half a frame-interval early and a
+                        // discrete clip stepped at the wrong times.
+                        return Some(a.value.clone());
                     }
                     TransitionType::Linear => {
                         let duration = b.time - a.time;
                         if duration < 1e-10 {
                             return Some(b.value.clone());
                         }
-                        let t = ((time - a.time) / duration) as f32;
+                        let t = eased_factor(((time - a.time) / duration) as f32, a.ease);
                         return interpolate_variant(&a.value, &b.value, t)
                             .or_else(|| Some(a.value.clone()));
                     }
@@ -758,9 +783,114 @@ pub struct AnimationPlayer {
     /// `animation_finished` handler) does not clear the very queue being
     /// drained (`animation_player.cpp:509`).
     end_reached: bool,
+    /// Root motion published for this frame, for the script getters to read in
+    /// the same frame (pat-mgixk.78). Written by `record_root_motion` from the
+    /// animation step.
+    root_motion: RootMotionState,
+}
+
+/// What a running game needs to read back from root motion, held per mixer
+/// (pat-mgixk.78).
+///
+/// Godot's `AnimationMixer` never moves the node: it cancels the root track from
+/// the visual pose and publishes the motion through
+/// `get_root_motion_position/rotation/scale` and the matching `*_accumulator`
+/// getters, leaving the user to apply it — typically
+/// `velocity = tree.get_root_motion_position() / delta`
+/// (`AnimationMixer.xml:323-326`).
+///
+/// The `*_delta` fields are THIS FRAME's motion and are overwritten every frame;
+/// the accumulators are the running total since the last reset.
+///
+/// ⚠️ `scale_delta` and `scale_accumulator` are RATIOS, so their identity is
+/// `Vector3::ONE` and they compose by MULTIPLICATION. Defaulting them to zero
+/// would publish "scaled to nothing", and summing them would walk away from 1.0
+/// every frame. `rotation_*` is a quaternion for the same reason: identity,
+/// composed by multiplication, which is why a single `rotation_y` angle could
+/// not express it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RootMotionState {
+    /// This frame's root translation.
+    pub position_delta: gdcore::math::Vector3,
+    /// This frame's root rotation.
+    pub rotation_delta: gdcore::math3d::Quaternion,
+    /// This frame's root scale ratio.
+    pub scale_delta: gdcore::math::Vector3,
+    /// Running total of `position_delta` since the last reset.
+    pub position_accumulator: gdcore::math::Vector3,
+    /// Running product of `rotation_delta` since the last reset.
+    pub rotation_accumulator: gdcore::math3d::Quaternion,
+    /// Running product of `scale_delta` since the last reset.
+    pub scale_accumulator: gdcore::math::Vector3,
+    /// Godot's `root_motion_local`: whether the motion is reported in the root
+    /// node's local space rather than the mixer's.
+    pub local: bool,
+}
+
+impl Default for RootMotionState {
+    fn default() -> Self {
+        Self {
+            position_delta: gdcore::math::Vector3::ZERO,
+            rotation_delta: gdcore::math3d::Quaternion::IDENTITY,
+            scale_delta: gdcore::math::Vector3::ONE,
+            position_accumulator: gdcore::math::Vector3::ZERO,
+            rotation_accumulator: gdcore::math3d::Quaternion::IDENTITY,
+            scale_accumulator: gdcore::math::Vector3::ONE,
+            local: false,
+        }
+    }
+}
+
+impl RootMotionState {
+    /// Records one frame's motion: the deltas are REPLACED, the accumulators
+    /// advanced.
+    ///
+    /// ⚠️ The three compose DIFFERENTLY and that is Godot's model, not a
+    /// shortcut: position SUMS, rotation MULTIPLIES (quaternion composition),
+    /// and scale MULTIPLIES componentwise because it is a ratio. Summing the
+    /// scale would walk away from 1.0 every frame even for an unscaled rig.
+    ///
+    /// Every delta is assigned unconditionally, so a frame with no rotation
+    /// publishes identity rather than last frame's value.
+    pub fn record(
+        &mut self,
+        position: gdcore::math::Vector3,
+        rotation: gdcore::math3d::Quaternion,
+        scale: gdcore::math::Vector3,
+    ) {
+        self.position_delta = position;
+        self.rotation_delta = rotation;
+        self.scale_delta = scale;
+        self.position_accumulator = gdcore::math::Vector3::new(
+            self.position_accumulator.x + position.x,
+            self.position_accumulator.y + position.y,
+            self.position_accumulator.z + position.z,
+        );
+        self.rotation_accumulator = self.rotation_accumulator * rotation;
+        self.scale_accumulator = gdcore::math::Vector3::new(
+            self.scale_accumulator.x * scale.x,
+            self.scale_accumulator.y * scale.y,
+            self.scale_accumulator.z * scale.z,
+        );
+    }
+
+    /// Clears the accumulators, as Godot does when the mixer is reset.
+    pub fn reset_accumulators(&mut self) {
+        self.position_accumulator = gdcore::math::Vector3::ZERO;
+        self.rotation_accumulator = gdcore::math3d::Quaternion::IDENTITY;
+        self.scale_accumulator = gdcore::math::Vector3::ONE;
+    }
 }
 
 /// Tracks an in-progress crossfade between two animations.
+///
+/// ⚠️ `Debug, Clone` are REQUIRED, not decoration: `AnimationPlayer` holds a
+/// `blend_state: Option<BlendState>` field and derives both, so dropping them
+/// here fails that derive with E0277 rather than anything pointing at this type.
+/// They went missing when `RootMotionState` was spliced in between this doc
+/// comment and the struct, which stranded the attributes 90 lines up where they
+/// bound to `RootMotionState` instead — deriving `Debug`/`Clone` for it twice
+/// (E0119) and leaving this struct bare (E0277). Four errors, one cause.
 #[derive(Debug, Clone)]
 pub struct BlendState {
     /// The animation being blended *from*.
@@ -810,7 +940,156 @@ impl AnimationPlayer {
             section: None,
             default_blend_time: 0.0,
             end_reached: false,
+            root_motion: RootMotionState::default(),
         }
+    }
+
+    /// This frame's root motion as `(position, rotation, scale)`, read from ALL
+    /// THREE track kinds of the root-motion path (pat-mgixk.78).
+    ///
+    /// Godot's root motion is a full transform delta: a translation, a rotation
+    /// quaternion and a scale RATIO (`animation_mixer.cpp`). Returns the
+    /// identities — zero, `IDENTITY`, `ONE` — for anything the animation does
+    /// not author, so a caller can apply the result unconditionally.
+    ///
+    /// 🔑 Filters by path and dispatches on `track_type`, rather than taking the
+    /// first track with that path the way [`consume_root_motion`] does. A root
+    /// bone normally has THREE tracks sharing one property path, so a `find()`
+    /// that ignores the kind can hand back the rotation track and then fail to
+    /// read it as a vector — silently reporting no motion at all.
+    pub fn root_motion_frame(
+        &self,
+        prev_time: f64,
+        curr_time: f64,
+    ) -> (
+        gdcore::math::Vector3,
+        gdcore::math3d::Quaternion,
+        gdcore::math::Vector3,
+    ) {
+        let mut position = gdcore::math::Vector3::ZERO;
+        let mut rotation = gdcore::math3d::Quaternion::IDENTITY;
+        let mut scale = gdcore::math::Vector3::ONE;
+
+        let track_path = match &self.root_motion_track {
+            Some(p) => p,
+            None => return (position, rotation, scale),
+        };
+        let anim = match self.current.as_ref().and_then(|n| self.animations.get(n)) {
+            Some(a) => a,
+            None => return (position, rotation, scale),
+        };
+
+        // Whether a dedicated `Position3D` bone track supplied the
+        // translation. The generic Property arm below must not override it.
+        let mut position_from_bone_track = false;
+        for track in anim
+            .tracks
+            .iter()
+            .filter(|t| &t.property_path == track_path)
+        {
+            match track.track_type {
+                TrackType::Position3D => {
+                    if let (Some(p), Some(c)) = (
+                        track.sample(prev_time).and_then(variant_to_vec3),
+                        track.sample(curr_time).and_then(variant_to_vec3),
+                    ) {
+                        position = gdcore::math::Vector3::new(c.x - p.x, c.y - p.y, c.z - p.z);
+                        position_from_bone_track = true;
+                    }
+                }
+                // ⚠️ A root-motion track is NOT always a bone track. Godot's
+                // `root_motion_track` is a path, and a scene may point it at a
+                // plain Vector3 property track — which is exactly what
+                // `animation_root_motion_method_test.rs:127` does
+                // (`AnimationTrack::with_type("", "position",
+                // TrackType::Property)`). `consume_root_motion` has always read
+                // that track with `variant_to_vec3` regardless of kind, so
+                // dispatching on the three bone kinds ALONE made this sampler
+                // report zero for a case the engine already supports — and no
+                // test would have caught it, because the auto-apply still reads
+                // `consume_root_motion` and keeps that test green.
+                //
+                // Only `Property`: the kinds are Property, Method, Audio,
+                // Position3D, Rotation3D, Scale3D, BlendShape and Bezier, and a
+                // Bezier track animates ONE component (`position:x`), so its
+                // sample is a float `variant_to_vec3` rejects anyway.
+                //
+                // A dedicated `Position3D` track wins, so this arm can only
+                // fill a gap, never override the specific kind.
+                TrackType::Property => {
+                    if position_from_bone_track {
+                        continue;
+                    }
+                    if let (Some(p), Some(c)) = (
+                        track.sample(prev_time).and_then(variant_to_vec3),
+                        track.sample(curr_time).and_then(variant_to_vec3),
+                    ) {
+                        position = gdcore::math::Vector3::new(c.x - p.x, c.y - p.y, c.z - p.z);
+                    }
+                }
+                TrackType::Rotation3D => {
+                    if let (Some(p), Some(c)) = (
+                        track.sample(prev_time).and_then(variant_to_quaternion),
+                        track.sample(curr_time).and_then(variant_to_quaternion),
+                    ) {
+                        // The LOCAL delta that carries `prev` onto `curr`.
+                        rotation = p.inverse() * c;
+                    }
+                }
+                TrackType::Scale3D => {
+                    if let (Some(p), Some(c)) = (
+                        track.sample(prev_time).and_then(variant_to_vec3),
+                        track.sample(curr_time).and_then(variant_to_vec3),
+                    ) {
+                        // ⚠️ A ratio, and a zero previous component has no
+                        // ratio — 1.0 (no change) is the only safe answer.
+                        // Dividing would publish inf/NaN into the accumulator
+                        // and poison every later frame, since scale composes by
+                        // multiplication.
+                        let ratio =
+                            |prev: f32, curr: f32| if prev == 0.0 { 1.0 } else { curr / prev };
+                        scale = gdcore::math::Vector3::new(
+                            ratio(p.x, c.x),
+                            ratio(p.y, c.y),
+                            ratio(p.z, c.z),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        (position, rotation, scale)
+    }
+
+    /// Publishes this frame's root motion so a getter can read it in the SAME
+    /// frame (pat-mgixk.78).
+    ///
+    /// Called from the animation step, which is the only place that knows the
+    /// interval just advanced over.
+    pub fn record_root_motion_frame(&mut self, prev_time: f64, curr_time: f64) {
+        let (position, rotation, scale) = self.root_motion_frame(prev_time, curr_time);
+        self.root_motion.record(position, rotation, scale);
+    }
+
+    /// This frame's root motion and the running totals.
+    pub fn root_motion(&self) -> &RootMotionState {
+        &self.root_motion
+    }
+
+    /// Clears the accumulators (Godot's reset).
+    pub fn reset_root_motion_accumulators(&mut self) {
+        self.root_motion.reset_accumulators();
+    }
+
+    /// Godot's `root_motion_local` setter: whether the motion is reported in the
+    /// root node's local space.
+    ///
+    /// A narrow setter rather than a `root_motion_mut()`: the deltas and
+    /// accumulators are written by the animation step alone, and handing script
+    /// dispatch a mutable handle to the whole state would let a setter clobber
+    /// them.
+    pub fn set_root_motion_local(&mut self, local: bool) {
+        self.root_motion.local = local;
     }
 
     /// Adds an animation to the player's library.
@@ -1646,7 +1925,7 @@ pub struct MethodCall {
 /// Parses a method-track keyframe value `[method_name, arg0, ...]` into a
 /// [`MethodCall`]. Returns `None` when the value is not an array whose first
 /// element is a string method name.
-fn method_call_from_value(node_path: &str, value: &Variant) -> Option<MethodCall> {
+pub(crate) fn method_call_from_value(node_path: &str, value: &Variant) -> Option<MethodCall> {
     if let Variant::Array(items) = value {
         let method = match items.to_vec().first() {
             Some(Variant::String(s)) => s.clone(),
@@ -1667,6 +1946,16 @@ fn method_call_from_value(node_path: &str, value: &Variant) -> Option<MethodCall
 fn variant_to_vec3(value: Variant) -> Option<gdcore::math::Vector3> {
     match value {
         Variant::Vector3(v) => Some(v),
+        _ => None,
+    }
+}
+
+/// A `Rotation3D` track's sampled value. Those tracks carry
+/// `Variant::Quaternion` — the same arm `skeleton3d.rs:1994` reads when it turns
+/// one into a bone pose.
+fn variant_to_quaternion(value: Variant) -> Option<gdcore::math3d::Quaternion> {
+    match value {
+        Variant::Quaternion(q) => Some(q),
         _ => None,
     }
 }
@@ -1757,6 +2046,25 @@ fn bezier_derivative(p1: f32, p2: f32, s: f32) -> f32 {
 /// Returns `None` if the types are incompatible or interpolation is not
 /// supported for the given type. Supports numeric types (Int, Float),
 /// Vector2, Vector3, and Color.
+/// A key's `transition` exponent applied to a normalised interpolation factor
+/// (pat-mgixk.80).
+///
+/// `1.0` short-circuits, exactly as upstream does — `if (tr != 1.0) { c =
+/// Math::ease(c, tr); }` (`animation.cpp:2669-2671`). That is not just a
+/// micro-optimisation: it keeps every clip authored without transitions
+/// sampling bit-identically to before this existed, so the change cannot move
+/// an existing golden.
+///
+/// `0.0` never arrives here — the caller returns the floor key's value before
+/// easing, which is upstream's `if (tr == 0) return p_keys[idx].value`.
+fn eased_factor(t: f32, tr: f32) -> f32 {
+    if tr == 1.0 {
+        t
+    } else {
+        gdcore::math::ease(t, tr)
+    }
+}
+
 pub fn interpolate_variant(from: &Variant, to: &Variant, t: f32) -> Option<Variant> {
     match (from, to) {
         (Variant::Int(a), Variant::Int(b)) => {

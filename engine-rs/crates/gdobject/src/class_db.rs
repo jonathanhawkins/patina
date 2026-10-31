@@ -1071,6 +1071,32 @@ fn object_class() -> ClassRegistration {
         .method(MethodInfo::new("set", 2))
         .method(MethodInfo::new("get", 1).const_method())
         .method(MethodInfo::new("notification", 1))
+        // The rest of the Object API surface (pat-mgixk.99). `notification` was
+        // already declared above and was the one case that RAISED rather than
+        // answering Nil, because it is not a void method — the others were
+        // simply absent from ClassDB entirely.
+        //
+        // ⚠️ `const_method` follows Object.xml's qualifiers exactly: the five
+        // inspectors are `const`, the setters and the two mutating actions are
+        // not. Marking a setter const would contradict what it exists to do.
+        //
+        // Arities are Godot's REQUIRED argument counts, not the total:
+        // `add_user_signal(signal, arguments = [])` and
+        // `notification(what, reversed = false)` both take one required
+        // argument, which is why the dispatch arms read `args.get(1)`
+        // defensively rather than demanding it.
+        .method(MethodInfo::new("add_user_signal", 1))
+        .method(MethodInfo::new("has_user_signal", 1).const_method())
+        .method(MethodInfo::new("remove_user_signal", 1))
+        .method(MethodInfo::new("set_block_signals", 1))
+        .method(MethodInfo::new("is_blocking_signals", 0).const_method())
+        .method(MethodInfo::new("is_queued_for_deletion", 0).const_method())
+        .method(MethodInfo::new("cancel_free", 0))
+        .method(MethodInfo::new("set_script", 1))
+        .method(MethodInfo::new("set_message_translation", 1))
+        .method(MethodInfo::new("can_translate_messages", 0).const_method())
+        .method(MethodInfo::new("set_translation_domain", 1))
+        .method(MethodInfo::new("get_translation_domain", 0).const_method())
         // Object's four SCRIPT VIRTUALS, which ClassDB did not declare at all
         // although the engine dispatches every one of them (pat-nzgdu).
         //
@@ -1964,6 +1990,7 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("SkinReference")
             .parent("RefCounted")
+            .abstract_class()
             .method(MethodInfo::new("get_skeleton", 0).const_method())
             .method(MethodInfo::new("get_skin", 0).const_method()),
     );
@@ -3671,7 +3698,7 @@ pub fn register_3d_classes() {
     );
 
     // -- Environment / World --
-    register_class(ClassRegistration::new("WorldEnvironment").parent("Node3D"));
+    register_class(ClassRegistration::new("WorldEnvironment").parent("Node"));
     register_class(
         ClassRegistration::new("Marker3D")
             .parent("Node3D")
@@ -4946,11 +4973,7 @@ pub fn register_3d_classes() {
     // instantiable. The pair is easy to get backwards — the base carries no
     // properties and no bound methods at all, which reads like the concrete
     // one.
-    register_class(
-        ClassRegistration::new("JointLimitation3D")
-            .parent("Resource")
-            .abstract_class(),
-    );
+    register_class(ClassRegistration::new("JointLimitation3D").parent("Resource"));
     register_class(
         ClassRegistration::new("JointLimitationCone3D")
             .parent("JointLimitation3D")
@@ -5348,6 +5371,7 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("IKModifier3D")
             .parent("SkeletonModifier3D")
+            .abstract_class()
             .property(PropertyInfo::new(
                 "target_position",
                 Variant::Vector3(Vector3::ZERO),
@@ -5675,8 +5699,7 @@ pub fn register_3d_classes() {
                     .arg("new_name"),
             )
             .signal(SignalInfo::new("tree_changed"))
-            .parent("Resource")
-            .abstract_class(),
+            .parent("Resource"),
     );
     // AnimationNodeExtension — the base a script extends to write a custom
     // AnimationTree blend node (pat-0q2kx.237).
@@ -5697,11 +5720,7 @@ pub fn register_3d_classes() {
             .method(MethodInfo::new("get_remaining_time", 2).static_method())
             .method(MethodInfo::new("is_looping", 1).static_method()),
     );
-    register_class(
-        ClassRegistration::new("AnimationRootNode")
-            .parent("AnimationNode")
-            .abstract_class(),
-    );
+    register_class(ClassRegistration::new("AnimationRootNode").parent("AnimationNode"));
     // ⚠️ 4 of Godot's 8: `loop_mode`, `start_offset`, `stretch_time_scale` and
     // `timeline_length` state no default in the XML, so they are left out rather
     // than invented — the same rule that omitted ten BaseMaterial3D members.
@@ -5795,7 +5814,6 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("AnimationNodeSync")
             .parent("AnimationNode")
-            .abstract_class()
             .property(PropertyInfo::new("sync", Variant::Bool(false))),
     );
     register_class(ClassRegistration::new("AnimationNodeAdd2").parent("AnimationNodeSync"));
@@ -7034,7 +7052,6 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("VisualInstance3D")
             .parent("Node3D")
-            .abstract_class()
             .property(
                 PropertyInfo::new("layers", Variant::Int(1))
                     .with_accessors("get_layer_mask", "set_layer_mask"),
@@ -7237,7 +7254,6 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("GeometryInstance3D")
             .parent("VisualInstance3D")
-            .abstract_class()
             .property(
                 PropertyInfo::new("material_override", Variant::Nil)
                     .with_accessors("get_material_override", "set_material_override"),
@@ -7640,6 +7656,7 @@ pub fn register_3d_classes() {
         register_class(
             ClassRegistration::new("WorkerThreadPool")
                 .parent("Object")
+                .abstract_class()
                 // add_task(action, high_priority, description)
                 .method(MethodInfo::new("add_task", 3))
                 // add_group_task(action, elements, tasks_needed, high_priority, description)
@@ -7864,11 +7881,7 @@ pub fn register_3d_classes() {
     // is called more than once in practice. `Material` is virtual in Godot:
     // `GDREGISTER_VIRTUAL_CLASS(Material)` (register_scene_types.cpp:439).
     if !class_exists("Material") {
-        register_class(
-            ClassRegistration::new("Material")
-                .parent("Resource")
-                .abstract_class(),
-        );
+        register_class(ClassRegistration::new("Material").parent("Resource"));
     }
     // ProceduralSkyMaterial → Material (pat-nzgdu.161): the sky shader material
     // renders (gdserver3d::sky) but was invisible to ClassDB. Register it with
@@ -7946,15 +7959,12 @@ pub fn register_3d_classes() {
     // Mesh -> PrimitiveMesh -> <shape> hierarchy so they are creatable and
     // introspectable. CapsuleMesh carries Godot's defaults.
     if !class_exists("Mesh") {
-        register_class(
-            ClassRegistration::new("Mesh")
-                .parent("Resource")
-                .abstract_class()
-                .property(PropertyInfo::new(
-                    "lightmap_size_hint",
-                    Variant::Vector2i(gdcore::math::Vector2i::new(0, 0)),
-                )),
-        );
+        register_class(ClassRegistration::new("Mesh").parent("Resource").property(
+            PropertyInfo::new(
+                "lightmap_size_hint",
+                Variant::Vector2i(gdcore::math::Vector2i::new(0, 0)),
+            ),
+        ));
     }
 
     // -- Placeholder mesh/material (pat-nzgdu.221) ---------------------------
@@ -8808,7 +8818,6 @@ pub fn register_3d_classes() {
         register_class(
             ClassRegistration::new("PhysicsServer2DManager")
                 .parent("Object")
-                .abstract_class()
                 .method(MethodInfo::new("register_server", 2))
                 .method(MethodInfo::new("set_default_server", 2)),
         );
@@ -8817,6 +8826,7 @@ pub fn register_3d_classes() {
         register_class(
             ClassRegistration::new("PhysicsDirectSpaceState2D")
                 .parent("Object")
+                .abstract_class()
                 .method(MethodInfo::new("cast_motion", 1))
                 .method(MethodInfo::new("collide_shape", 2))
                 .method(MethodInfo::new("get_rest_info", 1))
@@ -8937,6 +8947,7 @@ pub fn register_3d_classes() {
         register_class(
             ClassRegistration::new("PhysicsDirectSpaceState3D")
                 .parent("Object")
+                .abstract_class()
                 .method(MethodInfo::new("cast_motion", 1))
                 .method(MethodInfo::new("collide_shape", 2))
                 .method(MethodInfo::new("get_rest_info", 1))
@@ -9829,7 +9840,6 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("PrimitiveMesh")
             .parent("Mesh")
-            .abstract_class()
             .property(PropertyInfo::new("material", Variant::Nil))
             .property(PropertyInfo::new(
                 "custom_aabb",
@@ -10190,6 +10200,7 @@ pub fn register_3d_classes() {
         register_class(
             ClassRegistration::new("InstancePlaceholder")
                 .parent("Node")
+                .abstract_class()
                 .method(MethodInfo::new("get_stored_values", 0))
                 .method(MethodInfo::new("get_instance_path", 0).const_method())
                 .method(MethodInfo::new("create_instance", 2)),
@@ -10348,7 +10359,11 @@ pub fn register_3d_classes() {
                 Variant::String("[None]".into()),
             )),
     );
-    register_class(ClassRegistration::new("VisualShaderNodeOutput").parent("VisualShaderNode"));
+    register_class(
+        ClassRegistration::new("VisualShaderNodeOutput")
+            .parent("VisualShaderNode")
+            .abstract_class(),
+    );
 
     // -- Particle graph nodes (pat-nzgdu.178) ------------------------------
     //
@@ -10781,6 +10796,7 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("VisualShaderNodeVarying")
             .parent("VisualShaderNode")
+            .abstract_class()
             .property(
                 PropertyInfo::new("varying_name", Variant::String(String::from("[None]")))
                     .with_accessors("get_varying_name", "set_varying_name"),
@@ -10980,7 +10996,9 @@ pub fn register_3d_classes() {
                     .constant("OP_TYPE_MAX", 7),
             ),
     );
-    register_class(ClassRegistration::new("VisualShaderNodeRandomRange").parent("VisualShaderNode"));
+    register_class(
+        ClassRegistration::new("VisualShaderNodeRandomRange").parent("VisualShaderNode"),
+    );
     register_class(
         ClassRegistration::new("VisualShaderNodeBillboard")
             .parent("VisualShaderNode")
@@ -11824,6 +11842,7 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("XRTracker")
             .parent("RefCounted")
+            .abstract_class()
             .property(
                 PropertyInfo::new("description", Variant::String(String::new()))
                     .with_accessors("get_tracker_desc", "set_tracker_desc"),
@@ -11934,6 +11953,7 @@ pub fn register_3d_classes() {
         ClassRegistration::new("XRInterface")
             .signal(SignalInfo::new("play_area_changed").arg("mode"))
             .parent("RefCounted")
+            .abstract_class()
             .property(
                 PropertyInfo::new("ar_is_anchor_detection_enabled", Variant::Bool(false))
                     .with_accessors(
@@ -11992,6 +12012,7 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("WebXRInterface")
             .parent("XRInterface")
+            .abstract_class()
             .signal(
                 SignalInfo::new("session_supported")
                     .arg("session_mode")
@@ -12559,7 +12580,7 @@ pub fn register_3d_classes() {
     );
     register_class(
         ClassRegistration::new("VisualShaderNodeExpression")
-            .parent("VisualShaderNode")
+            .parent("VisualShaderNodeGroupBase")
             .property(
                 PropertyInfo::new("expression", Variant::String(String::new()))
                     .with_accessors("get_expression", "set_expression"),
@@ -14326,7 +14347,10 @@ pub fn register_2d_classes() {
         register_class(
             ClassRegistration::new("SpriteFrames")
                 .parent("Resource")
-                .property(PropertyInfo::new("animations", Variant::Array(Default::default()))),
+                .property(PropertyInfo::new(
+                    "animations",
+                    Variant::Array(Default::default()),
+                )),
         );
     }
     if !class_exists("Camera2D") {
@@ -16120,18 +16144,10 @@ pub fn register_2d_classes() {
     // their full property sets, and `register_class` is last-wins, so calling
     // 2D-then-3D still ends up with the complete definitions.
     if !class_exists("VisualInstance3D") {
-        register_class(
-            ClassRegistration::new("VisualInstance3D")
-                .parent("Node3D")
-                .abstract_class(),
-        );
+        register_class(ClassRegistration::new("VisualInstance3D").parent("Node3D"));
     }
     if !class_exists("GeometryInstance3D") {
-        register_class(
-            ClassRegistration::new("GeometryInstance3D")
-                .parent("VisualInstance3D")
-                .abstract_class(),
-        );
+        register_class(ClassRegistration::new("GeometryInstance3D").parent("VisualInstance3D"));
     }
     if !class_exists("VisibleOnScreenNotifier3D") {
         // pat-0q2kx.198: parent was already right, but the registration was
@@ -16718,7 +16734,10 @@ pub fn register_2d_classes() {
         register_class(
             ClassRegistration::new("ItemList")
                 .parent("Control")
-                .property(PropertyInfo::new("items", Variant::Array(Default::default())))
+                .property(PropertyInfo::new(
+                    "items",
+                    Variant::Array(Default::default()),
+                ))
                 .property(PropertyInfo::new("allow_rmb_select", Variant::Bool(false)))
                 .property(PropertyInfo::new("allow_search", Variant::Bool(true)))
                 .property(PropertyInfo::new("auto_height", Variant::Bool(false)))
@@ -16778,7 +16797,10 @@ pub fn register_2d_classes() {
                 .signal(SignalInfo::new("tab_hovered").arg("tab"))
                 .signal(SignalInfo::new("tab_rmb_clicked").arg("tab"))
                 .parent("Control")
-                .property(PropertyInfo::new("tabs", Variant::Array(Default::default())))
+                .property(PropertyInfo::new(
+                    "tabs",
+                    Variant::Array(Default::default()),
+                ))
                 .property(
                     PropertyInfo::new("tab_count", Variant::Int(0))
                         .with_accessors("get_tab_count", "set_tab_count"),
@@ -16832,7 +16854,6 @@ pub fn register_2d_classes() {
         register_class(
             ClassRegistration::new("BaseButton")
                 .parent("Control")
-                .abstract_class()
                 .property(
                     PropertyInfo::new("disabled", Variant::Bool(false))
                         .with_accessors("is_disabled", "set_disabled"),
@@ -16915,7 +16936,6 @@ pub fn register_2d_classes() {
         register_class(
             ClassRegistration::new("Range")
                 .parent("Control")
-                .abstract_class()
                 .property(
                     PropertyInfo::new("min_value", Variant::Float(0.0))
                         .with_accessors("get_min", "set_min"),
@@ -16965,7 +16985,6 @@ pub fn register_2d_classes() {
         register_class(
             ClassRegistration::new("BoxContainer")
                 .parent("Container")
-                .abstract_class()
                 .property(PropertyInfo::new("vertical", Variant::Bool(false)))
                 // ALIGNMENT_BEGIN = 0
                 .property(
@@ -17279,7 +17298,10 @@ pub fn register_2d_classes() {
         register_class(
             ClassRegistration::new("OptionButton")
                 .parent("Button")
-                .property(PropertyInfo::new("items", Variant::Array(Default::default())))
+                .property(PropertyInfo::new(
+                    "items",
+                    Variant::Array(Default::default()),
+                ))
                 .property(PropertyInfo::new("action_mode", Variant::Int(0)))
                 .property(PropertyInfo::new("alignment", Variant::Int(0)))
                 .property(PropertyInfo::new("allow_reselect", Variant::Bool(false)))
@@ -17688,21 +17710,13 @@ pub fn register_2d_classes() {
         );
     }
     if !class_exists("AudioEffect") {
-        register_class(
-            ClassRegistration::new("AudioEffect")
-                .parent("Resource")
-                .abstract_class(),
-        );
+        register_class(ClassRegistration::new("AudioEffect").parent("Resource"));
     }
     // Godot's `AudioEffectInstance` is the per-playback companion and derives
     // from RefCounted, NOT from AudioEffect (audio_effect.h) — registering it
     // under AudioEffect would make the effect picker offer it as an insert.
     if !class_exists("AudioEffectInstance") {
-        register_class(
-            ClassRegistration::new("AudioEffectInstance")
-                .parent("RefCounted")
-                .abstract_class(),
-        );
+        register_class(ClassRegistration::new("AudioEffectInstance").parent("RefCounted"));
     }
     if !class_exists("AudioEffectAmplify") {
         register_class(
@@ -18452,7 +18466,8 @@ pub fn register_2d_classes() {
     if !class_exists("AudioEffectSpectrumAnalyzerInstance") {
         register_class(
             ClassRegistration::new("AudioEffectSpectrumAnalyzerInstance")
-                .parent("AudioEffectInstance"),
+                .parent("AudioEffectInstance")
+                .abstract_class(),
         );
     }
     if !class_exists("AudioEffectDelay") {
@@ -18676,11 +18691,150 @@ pub fn register_2d_classes() {
         );
     }
 
+    // pat-mgixk.89 — the modulation family. None of these five was registered,
+    // so `ClassDB.class_exists("AudioEffectPanner")` answered false and a
+    // script could not `.new()` one. Property names, defaults and accessor
+    // names all come from `servers/audio/effects/audio_effect_*.cpp`
+    // `ADD_PROPERTY` rather than from the doc XML, because the two disagree:
+    // see `time_pullout_ms` below.
+    if !class_exists("AudioEffectPanner") {
+        register_class(
+            ClassRegistration::new("AudioEffectPanner")
+                .parent("AudioEffect")
+                .property(
+                    PropertyInfo::new("pan", Variant::Float(0.0))
+                        .with_accessors("get_pan", "set_pan"),
+                ),
+        );
+    }
+    if !class_exists("AudioEffectStereoEnhance") {
+        register_class(
+            ClassRegistration::new("AudioEffectStereoEnhance")
+                .parent("AudioEffect")
+                .property(
+                    PropertyInfo::new("pan_pullout", Variant::Float(1.0))
+                        .with_accessors("get_pan_pullout", "set_pan_pullout"),
+                )
+                // ⚠️ The property is `time_pullout_ms` but its accessors drop
+                // the suffix — `set_time_pullout` / `get_time_pullout`. Godot
+                // really is asymmetric here; inferring the accessor from the
+                // property name would name a method that does not exist.
+                .property(
+                    PropertyInfo::new("time_pullout_ms", Variant::Float(0.0))
+                        .with_accessors("get_time_pullout", "set_time_pullout"),
+                )
+                .property(
+                    PropertyInfo::new("surround", Variant::Float(0.0))
+                        .with_accessors("get_surround", "set_surround"),
+                ),
+        );
+    }
+    if !class_exists("AudioEffectPhaser") {
+        register_class(
+            ClassRegistration::new("AudioEffectPhaser")
+                .parent("AudioEffect")
+                .property(
+                    PropertyInfo::new("range_min_hz", Variant::Float(440.0))
+                        .with_accessors("get_range_min_hz", "set_range_min_hz"),
+                )
+                .property(
+                    PropertyInfo::new("range_max_hz", Variant::Float(1600.0))
+                        .with_accessors("get_range_max_hz", "set_range_max_hz"),
+                )
+                .property(
+                    PropertyInfo::new("rate_hz", Variant::Float(0.5))
+                        .with_accessors("get_rate_hz", "set_rate_hz"),
+                )
+                .property(
+                    PropertyInfo::new("feedback", Variant::Float(0.7))
+                        .with_accessors("get_feedback", "set_feedback"),
+                )
+                .property(
+                    PropertyInfo::new("depth", Variant::Float(1.0))
+                        .with_accessors("get_depth", "set_depth"),
+                ),
+        );
+    }
+    if !class_exists("AudioEffectPitchShift") {
+        register_class(
+            ClassRegistration::new("AudioEffectPitchShift")
+                .parent("AudioEffect")
+                .property(
+                    PropertyInfo::new("pitch_scale", Variant::Float(1.0))
+                        .with_accessors("get_pitch_scale", "set_pitch_scale"),
+                )
+                // ⚠️ FLOAT, not INT: Godot registers `oversampling` as a float
+                // despite it being a count (range "4,32,1").
+                .property(
+                    PropertyInfo::new("oversampling", Variant::Float(4.0))
+                        .with_accessors("get_oversampling", "set_oversampling"),
+                )
+                // ⚠️ An ENUM INDEX (0..=4 -> 256,512,1024,2048,4096), so the
+                // default 3 means a 2048-sample window, not "3".
+                .property(
+                    PropertyInfo::new("fft_size", Variant::Int(3))
+                        .with_accessors("get_fft_size", "set_fft_size"),
+                ),
+        );
+    }
+    if !class_exists("AudioEffectChorus") {
+        // 🔑 Chorus is registered in a loop because its 24 voice properties are
+        // PATHS — `voice/1/delay_ms` — and **1-indexed** while the backing array
+        // is 0-based (`audio_effect_chorus.cpp:316-339` uses `ADD_PROPERTYI`
+        // with the 0-based index as the payload). Hand-writing 24 lines is how
+        // an off-by-one slips in.
+        //
+        // ⚠️ Per-voice defaults are NOT uniform: Godot's constructor
+        // pre-configures voices 1 and 2, and 3 and 4 keep the bare `Voice()`
+        // values (delay 12, rate 1, depth 0, cutoff 16000, pan 0).
+        const VOICE_DEFAULTS: [[f64; 6]; 4] = [
+            [15.0, 0.8, 2.0, 0.0, 8000.0, -0.5],
+            [20.0, 1.2, 3.0, 0.0, 8000.0, 0.5],
+            [12.0, 1.0, 0.0, 0.0, 16000.0, 0.0],
+            [12.0, 1.0, 0.0, 0.0, 16000.0, 0.0],
+        ];
+        // Godot shares one accessor pair across voices and disambiguates by
+        // index, so every slot reports the same getter/setter names.
+        const VOICE_FIELDS: [(&str, &str, &str); 6] = [
+            ("delay_ms", "get_voice_delay_ms", "set_voice_delay_ms"),
+            ("rate_hz", "get_voice_rate_hz", "set_voice_rate_hz"),
+            ("depth_ms", "get_voice_depth_ms", "set_voice_depth_ms"),
+            ("level_db", "get_voice_level_db", "set_voice_level_db"),
+            ("cutoff_hz", "get_voice_cutoff_hz", "set_voice_cutoff_hz"),
+            ("pan", "get_voice_pan", "set_voice_pan"),
+        ];
+        let mut reg = ClassRegistration::new("AudioEffectChorus")
+            .parent("AudioEffect")
+            .property(
+                PropertyInfo::new("voice_count", Variant::Int(2))
+                    .with_accessors("get_voice_count", "set_voice_count"),
+            )
+            .property(
+                PropertyInfo::new("dry", Variant::Float(1.0)).with_accessors("get_dry", "set_dry"),
+            )
+            .property(
+                PropertyInfo::new("wet", Variant::Float(0.5)).with_accessors("get_wet", "set_wet"),
+            );
+        for (i, defaults) in VOICE_DEFAULTS.iter().enumerate() {
+            for (slot, (suffix, getter, setter)) in VOICE_FIELDS.iter().enumerate() {
+                reg = reg.property(
+                    PropertyInfo::new(
+                        format!("voice/{}/{}", i + 1, suffix),
+                        Variant::Float(defaults[slot]),
+                    )
+                    .with_accessors(*getter, *setter),
+                );
+            }
+        }
+        register_class(reg);
+    }
+
     if !class_exists("Light2D") {
         // Light2D: 15 own properties from doc/classes/Light2D.xml.
         register_class(
             ClassRegistration::new("Light2D")
                 .parent("Node2D")
+                .abstract_class()
                 .property(
                     PropertyInfo::new("blend_mode", Variant::Int(0))
                         .with_accessors("get_blend_mode", "set_blend_mode"),
@@ -19869,11 +20023,14 @@ pub fn register_2d_classes() {
                         ),
                 )
                 .property(
-                    PropertyInfo::new("code_completion_prefixes", Variant::Array(Default::default()))
-                        .with_accessors(
-                            "get_code_completion_prefixes",
-                            "set_code_completion_prefixes",
-                        ),
+                    PropertyInfo::new(
+                        "code_completion_prefixes",
+                        Variant::Array(Default::default()),
+                    )
+                    .with_accessors(
+                        "get_code_completion_prefixes",
+                        "set_code_completion_prefixes",
+                    ),
                 )
                 .property(
                     PropertyInfo::new("delimiter_comments", Variant::Array(Default::default()))
@@ -19884,10 +20041,13 @@ pub fn register_2d_classes() {
                         "delimiter_strings",
                         // Godot's two default string delimiters, each written
                         // "<start> <end>": apostrophes and double quotes.
-                        Variant::Array(vec![
-                            Variant::String("' '".to_string()),
-                            Variant::String("\" \"".to_string()),
-                        ].into()),
+                        Variant::Array(
+                            vec![
+                                Variant::String("' '".to_string()),
+                                Variant::String("\" \"".to_string()),
+                            ]
+                            .into(),
+                        ),
                     )
                     .with_accessors("get_string_delimiters", "set_string_delimiters"),
                 )
@@ -19938,12 +20098,15 @@ pub fn register_2d_classes() {
                 .property(
                     PropertyInfo::new(
                         "indent_automatic_prefixes",
-                        Variant::Array(vec![
-                            Variant::String(":".to_string()),
-                            Variant::String("{".to_string()),
-                            Variant::String("[".to_string()),
-                            Variant::String("(".to_string()),
-                        ].into()),
+                        Variant::Array(
+                            vec![
+                                Variant::String(":".to_string()),
+                                Variant::String("{".to_string()),
+                                Variant::String("[".to_string()),
+                                Variant::String("(".to_string()),
+                            ]
+                            .into(),
+                        ),
                     )
                     .with_accessors("get_auto_indent_prefixes", "set_auto_indent_prefixes"),
                 )
@@ -21792,7 +21955,11 @@ pub fn register_2d_classes() {
         );
     }
     if !class_exists("TileSetSource") {
-        register_class(ClassRegistration::new("TileSetSource").parent("Resource"));
+        register_class(
+            ClassRegistration::new("TileSetSource")
+                .parent("Resource")
+                .abstract_class(),
+        );
     }
     if !class_exists("TileSetAtlasSource") {
         register_class(
@@ -21963,7 +22130,6 @@ pub fn register_2d_classes() {
         register_class(
             ClassRegistration::new("FlowContainer")
                 .parent("Container")
-                .abstract_class()
                 .property(
                     PropertyInfo::new("alignment", Variant::Int(0))
                         .with_accessors("get_alignment", "set_alignment"),
@@ -22214,7 +22380,11 @@ pub fn register_2d_classes() {
     // value would also guess a type. The class itself is registered because
     // `class_exists`, the inheritance chain and `instantiate` all need it.
     if !class_exists("TreeItem") {
-        register_class(ClassRegistration::new("TreeItem").parent("Object"));
+        register_class(
+            ClassRegistration::new("TreeItem")
+                .parent("Object")
+                .abstract_class(),
+        );
     }
 
     // Tree and the dialogs.
@@ -22263,7 +22433,10 @@ pub fn register_2d_classes() {
                 // Array-of-Dictionaries shape `ItemList.items` uses, so a
                 // Tree round-trips through `.tscn` the same way
                 // (`gdscene::item_views::load_tree`/`store_tree`).
-                .property(PropertyInfo::new("items", Variant::Array(Default::default())))
+                .property(PropertyInfo::new(
+                    "items",
+                    Variant::Array(Default::default()),
+                ))
                 .property(PropertyInfo::new("auto_tooltip", Variant::Bool(true)))
                 .property(PropertyInfo::new("clip_contents", Variant::Bool(true)))
                 .property(PropertyInfo::new("drop_mode_flags", Variant::Int(0)))
@@ -22704,7 +22877,11 @@ pub fn register_root_window_chain() {
     if !class_exists("DisplayServer") {
         // No properties in `doc/classes/DisplayServer.xml` — it is a pure
         // method surface.
-        register_class(ClassRegistration::new("DisplayServer").parent("Object"));
+        register_class(
+            ClassRegistration::new("DisplayServer")
+                .parent("Object")
+                .abstract_class(),
+        );
     }
     if !class_exists("EngineDebugger") {
         // Likewise property-free.
@@ -22863,6 +23040,95 @@ pub fn register_root_window_chain() {
                 .method(MethodInfo::new("get_unix_time_from_system", 0)),
         );
     }
+    // pat-mgixk.83: `AudioServer` was dispatched but NOT in the ClassDB —
+    // a ClassDB search for the class found no registration at all — so
+    // `has_method` denied every call the interpreter actually answers, and
+    // `Engine.has_singleton` disagreed with the dispatcher.
+    //
+    // 🔑 The method list below is EXTRACTED from `call_audio_server_method`'s
+    // arms, not transcribed from Godot's ~60-method binding. Registering a
+    // method with no dispatch arm is the inverse failure and it is worse:
+    // `has_method` answers true and the call then raises `UndefinedFunction`,
+    // so a script guarding with `has_method` is told to proceed into an error.
+    // Each argument count is that arm's own `arity(N)` check;
+    // `get_bus_effect_instance` is 3 because Godot binds it with
+    // `DEFVAL(0)` for `channel` (`audio_server.cpp:2055`).
+    //
+    // ⚠️ `input_device` is a documented property
+    // (`doc/classes/AudioServer.xml:382`) and is deliberately NOT registered:
+    // nothing dispatches `set_input_device`/`get_input_device`, and declaring
+    // the property would make the same false promise the methods above avoid.
+    // The other three carry Godot's documented defaults.
+    if !class_exists("AudioServer") {
+        register_class(
+            ClassRegistration::new("AudioServer")
+                .parent("Object")
+                .property(PropertyInfo::new("bus_count", Variant::Int(1)))
+                .property(PropertyInfo::new(
+                    "output_device",
+                    Variant::String("Default".to_string()),
+                ))
+                .property(PropertyInfo::new(
+                    "playback_speed_scale",
+                    Variant::Float(1.0),
+                ))
+                .method(MethodInfo::new("get_bus_index", 1))
+                .method(MethodInfo::new("get_bus_count", 0))
+                .method(MethodInfo::new("get_bus_name", 1))
+                .method(MethodInfo::new("set_bus_name", 2))
+                .method(MethodInfo::new("set_bus_volume_db", 2))
+                .method(MethodInfo::new("get_bus_volume_db", 1))
+                .method(MethodInfo::new("set_bus_mute", 2))
+                .method(MethodInfo::new("is_bus_mute", 1))
+                .method(MethodInfo::new("set_bus_solo", 2))
+                .method(MethodInfo::new("is_bus_solo", 1))
+                .method(MethodInfo::new("set_bus_bypass_effects", 2))
+                .method(MethodInfo::new("is_bus_bypassing_effects", 1))
+                .method(MethodInfo::new("get_bus_peak_volume_left_db", 2))
+                .method(MethodInfo::new("get_bus_peak_volume_right_db", 2))
+                .method(MethodInfo::new("set_playback_speed_scale", 1))
+                .method(MethodInfo::new("get_playback_speed_scale", 0))
+                .method(MethodInfo::new("get_mix_rate", 0))
+                .method(MethodInfo::new("add_bus", 1))
+                .method(MethodInfo::new("remove_bus", 1))
+                .method(MethodInfo::new("get_bus_effect_instance", 3))
+                .method(MethodInfo::new("set_bus_send", 2))
+                .method(MethodInfo::new("get_bus_send", 1))
+                .method(MethodInfo::new("move_bus", 2))
+                .method(MethodInfo::new("set_bus_volume_linear", 2))
+                .method(MethodInfo::new("get_bus_volume_linear", 1))
+                .method(MethodInfo::new("get_bus_effect_count", 1))
+                .method(MethodInfo::new("get_bus_effect", 2))
+                .method(MethodInfo::new("add_bus_effect", 3))
+                .method(MethodInfo::new("set_bus_effect_enabled", 3))
+                .method(MethodInfo::new("is_bus_effect_enabled", 2))
+                .method(MethodInfo::new("remove_bus_effect", 2))
+                .method(MethodInfo::new("swap_bus_effects", 3))
+                .method(MethodInfo::new("set_bus_count", 1))
+                .method(MethodInfo::new("get_speaker_mode", 0))
+                .method(MethodInfo::new("get_output_device_list", 0))
+                .method(MethodInfo::new("get_output_device", 0))
+                .method(MethodInfo::new("set_output_device", 1))
+                .method(MethodInfo::new("get_driver_name", 0))
+                .method(MethodInfo::new("get_bus_channels", 1)),
+        );
+    }
+    // The layout resource a `.tres` holds (pat-mgixk.90). Parsed at boot by
+    // `mixer.rs::load_bus_layout_tres` but never a ClassDB class, so
+    // `load("res://x.tres")` could not be recognised as one and
+    // `ClassDB.class_exists("AudioBusLayout")` answered false.
+    //
+    // ⚠️ No methods: Godot's `AudioBusLayout` is pure data. Its contents are
+    // read by the mixer rather than exposed per-bus on the resource, so there is
+    // nothing to declare that could be called.
+    //
+    // Registered here beside `AudioServer` rather than in
+    // `register_audio_classes`, because this function runs from
+    // `SceneTree::new()` — the two classes should appear or be absent together.
+    if !class_exists("AudioBusLayout") {
+        register_class(ClassRegistration::new("AudioBusLayout").parent("Resource"));
+    }
+
     if !class_exists("Performance") {
         register_class(ClassRegistration::new("Performance").parent("Object"));
     }
@@ -23601,6 +23867,7 @@ pub fn register_viewport_classes() {
             // through, and it declares no members of its own.
             ClassRegistration::new("Noise")
                 .parent("Resource")
+                .abstract_class()
                 .method(MethodInfo::new("get_noise_1d", 1).const_method())
                 .method(MethodInfo::new("get_noise_2d", 2).const_method())
                 .method(MethodInfo::new("get_noise_2dv", 1).const_method())
@@ -24571,7 +24838,11 @@ fn register_rendering_device_classes() {
     // never `new()`. Registered so `class_exists`/inheritance answer; its method
     // surface lands with the implementation beads.
     if !class_exists("RenderingDevice") {
-        register_class(ClassRegistration::new("RenderingDevice").parent("Object"));
+        register_class(
+            ClassRegistration::new("RenderingDevice")
+                .parent("Object")
+                .abstract_class(),
+        );
     }
 
     // GLSL (or HLSL) source handed to `shader_compile_spirv_from_source`.
@@ -25616,7 +25887,6 @@ pub fn register_audio_classes() {
         register_class(
             ClassRegistration::new("AudioStreamPlayback")
                 .parent("RefCounted")
-                .abstract_class()
                 .method(MethodInfo::new("start", 0))
                 .method(MethodInfo::new("stop", 0))
                 .method(MethodInfo::new("is_playing", 0).const_method())
@@ -25649,7 +25919,6 @@ pub fn register_audio_classes() {
         register_class(
             ClassRegistration::new("AudioStreamPlaybackResampled")
                 .parent("AudioStreamPlayback")
-                .abstract_class()
                 .method(MethodInfo::new("begin_resample", 0))
                 .method(MethodInfo::new("get_stream_sampling_rate", 0)),
         );
@@ -25665,6 +25934,7 @@ pub fn register_audio_classes() {
         register_class(
             ClassRegistration::new("AudioStreamGeneratorPlayback")
                 .parent("AudioStreamPlaybackResampled")
+                .abstract_class()
                 .method(MethodInfo::new("push_frame", 1))
                 .method(MethodInfo::new("can_push_buffer", 1).const_method())
                 .method(MethodInfo::new("push_buffer", 1))
@@ -25678,6 +25948,7 @@ pub fn register_audio_classes() {
         register_class(
             ClassRegistration::new("AudioStreamPlaybackPolyphonic")
                 .parent("AudioStreamPlayback")
+                .abstract_class()
                 .method(MethodInfo::new("play_stream", 1))
                 .method(MethodInfo::new("set_stream_volume", 2))
                 .method(MethodInfo::new("set_stream_pitch_scale", 2))
@@ -25689,6 +25960,7 @@ pub fn register_audio_classes() {
         register_class(
             ClassRegistration::new("AudioStreamPlaybackInteractive")
                 .parent("AudioStreamPlayback")
+                .abstract_class()
                 .method(MethodInfo::new("switch_to_clip_by_name", 1))
                 .method(MethodInfo::new("switch_to_clip", 1))
                 .method(MethodInfo::new("get_current_clip_index", 0)),
@@ -25696,12 +25968,16 @@ pub fn register_audio_classes() {
     }
     if !class_exists("AudioStreamPlaybackPlaylist") {
         register_class(
-            ClassRegistration::new("AudioStreamPlaybackPlaylist").parent("AudioStreamPlayback"),
+            ClassRegistration::new("AudioStreamPlaybackPlaylist")
+                .parent("AudioStreamPlayback")
+                .abstract_class(),
         );
     }
     if !class_exists("AudioStreamPlaybackSynchronized") {
         register_class(
-            ClassRegistration::new("AudioStreamPlaybackSynchronized").parent("AudioStreamPlayback"),
+            ClassRegistration::new("AudioStreamPlaybackSynchronized")
+                .parent("AudioStreamPlayback")
+                .abstract_class(),
         );
     }
 
@@ -25971,7 +26247,10 @@ pub fn register_audio_classes() {
                 // `typedarray::PackedByteArray`, i.e. a flat array of byte arrays,
                 // which loses the page grouping the granule positions index against.
                 // ADD_PROPERTY at modules/ogg/ogg_packet_sequence.cpp:131 is the truth.
-                .property(PropertyInfo::new("packet_data", Variant::Array(Default::default())))
+                .property(PropertyInfo::new(
+                    "packet_data",
+                    Variant::Array(Default::default()),
+                ))
                 // ⚠️ Named `granule_positions`, but its accessors are
                 // `{set,get}_packet_granule_positions` — and the values are one per
                 // PAGE, not per packet, despite that name (`page_granule_positions`
@@ -26080,6 +26359,7 @@ pub fn register_io_classes() {
                 .signal(SignalInfo::new("extension_loaded").arg("extension"))
                 .signal(SignalInfo::new("extension_unloading").arg("extension"))
                 .parent("Object")
+                .abstract_class()
                 // ⚠️ `gdextension_manager.h:54-58` is a plain enum numbering from
                 // 0, so FAILED is **1** and 2 is ALREADY_LOADED. This bead's own
                 // text says "LOAD_STATUS_FAILED (2)"; that number is wrong.
@@ -26740,6 +27020,7 @@ pub fn register_io_classes() {
         register_class(
             ClassRegistration::new("JavaScriptBridge")
                 .parent("Object")
+                .abstract_class()
                 .method(MethodInfo::new("eval", 1))
                 .method(MethodInfo::new("get_interface", 1))
                 .method(MethodInfo::new("create_callback", 1))
@@ -26754,7 +27035,11 @@ pub fn register_io_classes() {
         );
     }
     if !class_exists("JavaScriptObject") {
-        register_class(ClassRegistration::new("JavaScriptObject").parent("RefCounted"));
+        register_class(
+            ClassRegistration::new("JavaScriptObject")
+                .parent("RefCounted")
+                .abstract_class(),
+        );
     }
 
     // -- ImageFormatLoader (pat-nzgdu.218) -----------------------------------
@@ -26907,6 +27192,7 @@ pub fn register_io_classes() {
         register_class(
             ClassRegistration::new("FileAccess")
                 .parent("RefCounted")
+                .abstract_class()
                 .method(MethodInfo::new("open", 2).static_method())
                 .method(MethodInfo::new("get_as_text", 0).const_method())
                 .method(MethodInfo::new("get_buffer", 1).const_method())
@@ -26952,6 +27238,7 @@ pub fn register_io_classes() {
         register_class(
             ClassRegistration::new("DirAccess")
                 .parent("RefCounted")
+                .abstract_class()
                 .method(MethodInfo::new("open", 1).static_method())
                 .method(MethodInfo::new("list_dir_begin", 0))
                 .method(MethodInfo::new("get_next", 0))
@@ -27430,7 +27717,10 @@ fn register_gltf_classes() {
             .parent("RefCounted")
             .property(PropertyInfo::new("gltf_to_godot_expression", Variant::Nil))
             .property(PropertyInfo::new("godot_to_gltf_expression", Variant::Nil))
-            .property(PropertyInfo::new("node_paths", Variant::Array(Default::default())))
+            .property(PropertyInfo::new(
+                "node_paths",
+                Variant::Array(Default::default()),
+            ))
             .property(PropertyInfo::new("object_model_type", Variant::Int(0)))
             .property(PropertyInfo::new(
                 "json_pointers",
@@ -27579,15 +27869,30 @@ fn register_gltf_classes() {
                 "use_named_skin_binds",
                 Variant::Bool(false),
             ))
-            .property(PropertyInfo::new("nodes", Variant::Array(Default::default())))
-            .property(PropertyInfo::new("buffers", Variant::Array(Default::default())))
+            .property(PropertyInfo::new(
+                "nodes",
+                Variant::Array(Default::default()),
+            ))
+            .property(PropertyInfo::new(
+                "buffers",
+                Variant::Array(Default::default()),
+            ))
             .property(PropertyInfo::new(
                 "buffer_views",
                 Variant::Array(Default::default()),
             ))
-            .property(PropertyInfo::new("accessors", Variant::Array(Default::default())))
-            .property(PropertyInfo::new("meshes", Variant::Array(Default::default())))
-            .property(PropertyInfo::new("materials", Variant::Array(Default::default())))
+            .property(PropertyInfo::new(
+                "accessors",
+                Variant::Array(Default::default()),
+            ))
+            .property(PropertyInfo::new(
+                "meshes",
+                Variant::Array(Default::default()),
+            ))
+            .property(PropertyInfo::new(
+                "materials",
+                Variant::Array(Default::default()),
+            ))
             .property(PropertyInfo::new(
                 "scene_name",
                 Variant::String(String::new()),
@@ -27604,15 +27909,30 @@ fn register_gltf_classes() {
                 "root_nodes",
                 Variant::PackedInt32Array(Vec::new()),
             ))
-            .property(PropertyInfo::new("textures", Variant::Array(Default::default())))
+            .property(PropertyInfo::new(
+                "textures",
+                Variant::Array(Default::default()),
+            ))
             .property(PropertyInfo::new(
                 "texture_samplers",
                 Variant::Array(Default::default()),
             ))
-            .property(PropertyInfo::new("images", Variant::Array(Default::default())))
-            .property(PropertyInfo::new("skins", Variant::Array(Default::default())))
-            .property(PropertyInfo::new("cameras", Variant::Array(Default::default())))
-            .property(PropertyInfo::new("lights", Variant::Array(Default::default())))
+            .property(PropertyInfo::new(
+                "images",
+                Variant::Array(Default::default()),
+            ))
+            .property(PropertyInfo::new(
+                "skins",
+                Variant::Array(Default::default()),
+            ))
+            .property(PropertyInfo::new(
+                "cameras",
+                Variant::Array(Default::default()),
+            ))
+            .property(PropertyInfo::new(
+                "lights",
+                Variant::Array(Default::default()),
+            ))
             .property(PropertyInfo::new(
                 "unique_names",
                 Variant::Array(Default::default()),
@@ -27621,13 +27941,19 @@ fn register_gltf_classes() {
                 "unique_animation_names",
                 Variant::Array(Default::default()),
             ))
-            .property(PropertyInfo::new("skeletons", Variant::Array(Default::default())))
+            .property(PropertyInfo::new(
+                "skeletons",
+                Variant::Array(Default::default()),
+            ))
             .property(PropertyInfo::new("create_animations", Variant::Bool(false)))
             .property(PropertyInfo::new(
                 "import_as_skeleton_bones",
                 Variant::Bool(false),
             ))
-            .property(PropertyInfo::new("animations", Variant::Array(Default::default())))
+            .property(PropertyInfo::new(
+                "animations",
+                Variant::Array(Default::default()),
+            ))
             .property(PropertyInfo::new(
                 "handle_binary_image_mode",
                 Variant::Int(0),
@@ -28020,6 +28346,7 @@ pub fn register_networking_classes() {
         register_class(
             ClassRegistration::new("WebRTCDataChannel")
                 .parent("PacketPeer")
+                .abstract_class()
                 .property(
                     PropertyInfo::new("write_mode", Variant::Int(1))
                         .with_accessors("get_write_mode", "set_write_mode"),
@@ -28243,6 +28570,7 @@ pub fn register_networking_classes() {
         register_class(
             ClassRegistration::new("MultiplayerAPI")
                 .parent("RefCounted")
+                .abstract_class()
                 .method(MethodInfo::new("set_multiplayer_peer", 1))
                 .method(MethodInfo::new("is_server", 0))
                 .method(MethodInfo::new("get_unique_id", 0))
@@ -28717,7 +29045,7 @@ pub fn register_networking_classes() {
     if !class_exists("StreamPeerTCP") {
         register_class(
             ClassRegistration::new("StreamPeerTCP")
-                .parent("StreamPeer")
+                .parent("StreamPeerSocket")
                 .method(MethodInfo::new("connect_to_host", 2))
                 .method(MethodInfo::new("get_status", 0))
                 .method(MethodInfo::new("poll", 0))
@@ -29221,8 +29549,14 @@ fn register_navigation_resource_classes() {
                     "vertices",
                     Variant::PackedVector2Array(Vec::new()),
                 ))
-                .property(PropertyInfo::new("polygons", Variant::Array(Default::default())))
-                .property(PropertyInfo::new("outlines", Variant::Array(Default::default())))
+                .property(PropertyInfo::new(
+                    "polygons",
+                    Variant::Array(Default::default()),
+                ))
+                .property(PropertyInfo::new(
+                    "outlines",
+                    Variant::Array(Default::default()),
+                ))
                 .property(
                     PropertyInfo::new("sample_partition_type", Variant::Int(0))
                         .with_accessors("get_sample_partition_type", "set_sample_partition_type"),
@@ -29305,7 +29639,10 @@ fn register_navigation_resource_classes() {
                     "vertices",
                     Variant::PackedVector3Array(Vec::new()),
                 ))
-                .property(PropertyInfo::new("polygons", Variant::Array(Default::default())))
+                .property(PropertyInfo::new(
+                    "polygons",
+                    Variant::Array(Default::default()),
+                ))
                 .property(
                     PropertyInfo::new("sample_partition_type", Variant::Int(0))
                         .with_accessors("get_sample_partition_type", "set_sample_partition_type"),
@@ -29559,7 +29896,7 @@ pub fn register_input_event_classes() {
     if !class_exists("InputEvent") {
         register_class(
             ClassRegistration::new("InputEvent")
-                .parent("RefCounted")
+                .parent("Resource")
                 .abstract_class()
                 .property(
                     PropertyInfo::new("device", Variant::Int(0))
@@ -30001,6 +30338,164 @@ pub fn register_input_event_classes() {
     }
 }
 
+/// Core classes that Godot's ClassDB knows and Patina's did not (pat-mgixk.101).
+///
+/// 62 classes, every parent taken from Godot's own doc XML
+/// (`doc/classes`, `modules/*/doc_classes`, `platform/*/doc_classes` — the last
+/// two matter: `GDScript` is a MODULE class, so a scan of `doc/classes` alone
+/// misses it).
+///
+/// 🔑 **Parents only. No methods, no properties.** A method registered here with
+/// no dispatch arm makes `has_method()` answer true while the call returns Nil —
+/// a registration and a dispatch that disagree, which is a defect this codebase
+/// has hit repeatedly. Properties are omitted for the same reason the existing
+/// `the_property_free_singletons_carry_no_invented_properties` test exists:
+/// inventing plausible defaults is worse than declaring none.
+///
+/// ⚠️ Variant built-ins are deliberately ABSENT. `Vector2`, `Color`, `Array`,
+/// `String`, `bool` and ~35 others are documented in the same XML directories
+/// but are NOT ClassDB classes — `ClassDB.class_exists("Vector2")` is false in
+/// Godot, and extension_api.json keeps them in a separate `builtin_classes`
+/// array. The discriminator is that every real class declares `inherits=` and
+/// only `Object` does not.
+///
+/// ⚠️ The 15 singletons below are `abstract_class()`, so
+/// `ClassDB.can_instantiate("Input")` is false and `Input.new()` raises as it
+/// does in Godot. The set is named explicitly rather than inferred from the
+/// parent: `JSONRPC` also inherits `Object` and IS instantiable.
+pub fn register_core_object_classes() {
+    // Parents come from the chains the other registrars install, so this runs
+    // after them.
+    if !class_exists("Object") {
+        register_class(object_class());
+    }
+    register_class(ClassRegistration::new("AStar2D").parent("RefCounted"));
+    register_class(ClassRegistration::new("AStar3D").parent("RefCounted"));
+    register_class(ClassRegistration::new("AnimatedTexture").parent("Texture2D"));
+    register_class(ClassRegistration::new("AtlasTexture").parent("Texture2D"));
+    register_class(
+        ClassRegistration::new("AudioEffectBandLimitFilter").parent("AudioEffectFilter"),
+    );
+    register_class(ClassRegistration::new("AudioEffectBandPassFilter").parent("AudioEffectFilter"));
+    register_class(ClassRegistration::new("AudioEffectHighPassFilter").parent("AudioEffectFilter"));
+    register_class(
+        ClassRegistration::new("AudioEffectHighShelfFilter").parent("AudioEffectFilter"),
+    );
+    register_class(ClassRegistration::new("AudioEffectLowPassFilter").parent("AudioEffectFilter"));
+    register_class(ClassRegistration::new("AudioEffectLowShelfFilter").parent("AudioEffectFilter"));
+    register_class(ClassRegistration::new("AudioEffectNotchFilter").parent("AudioEffectFilter"));
+    register_class(ClassRegistration::new("AudioStreamMP3").parent("AudioStream"));
+    register_class(ClassRegistration::new("AudioStreamWAV").parent("AudioStream"));
+    register_class(ClassRegistration::new("CompressedCubemap").parent("CompressedTextureLayered"));
+    register_class(
+        ClassRegistration::new("CompressedCubemapArray").parent("CompressedTextureLayered"),
+    );
+    register_class(
+        ClassRegistration::new("CompressedTexture2DArray").parent("CompressedTextureLayered"),
+    );
+    register_class(ClassRegistration::new("Curve").parent("Resource"));
+    register_class(ClassRegistration::new("ENetConnection").parent("RefCounted"));
+    register_class(
+        ClassRegistration::new("ENetPacketPeer")
+            .parent("PacketPeer")
+            .abstract_class(),
+    );
+    register_class(ClassRegistration::new("GDScript").parent("Script"));
+    register_class(ClassRegistration::new("Geometry2D").parent("Object"));
+    register_class(ClassRegistration::new("Geometry3D").parent("Object"));
+    register_class(ClassRegistration::new("Gradient").parent("Resource"));
+    register_class(ClassRegistration::new("GradientTexture1D").parent("Texture2D"));
+    register_class(ClassRegistration::new("GradientTexture2D").parent("Texture2D"));
+    register_class(
+        ClassRegistration::new("IP")
+            .parent("Object")
+            .abstract_class(),
+    );
+    register_class(ClassRegistration::new("Image").parent("Resource"));
+    register_class(ClassRegistration::new("ImageTexture").parent("Texture2D"));
+    register_class(
+        ClassRegistration::new("Input")
+            .parent("Object")
+            .abstract_class(),
+    );
+    register_class(ClassRegistration::new("InputMap").parent("Object"));
+    register_class(ClassRegistration::new("JSONRPC").parent("Object"));
+    register_class(ClassRegistration::new("NativeMenu").parent("Object"));
+    register_class(
+        ClassRegistration::new("NavigationServer2D")
+            .parent("Object")
+            .abstract_class(),
+    );
+    register_class(ClassRegistration::new("NavigationServer2DManager").parent("Object"));
+    register_class(
+        ClassRegistration::new("NavigationServer3D")
+            .parent("Object")
+            .abstract_class(),
+    );
+    register_class(ClassRegistration::new("NavigationServer3DManager").parent("Object"));
+    register_class(ClassRegistration::new("PackedScene").parent("Resource"));
+    register_class(
+        ClassRegistration::new("PhysicsDirectBodyState2DExtension")
+            .parent("PhysicsDirectBodyState2D"),
+    );
+    register_class(
+        ClassRegistration::new("PhysicsDirectBodyState3DExtension")
+            .parent("PhysicsDirectBodyState3D"),
+    );
+    register_class(
+        ClassRegistration::new("RenderingServer")
+            .parent("Object")
+            .abstract_class(),
+    );
+    register_class(ClassRegistration::new("ResourceLoader").parent("Object"));
+    register_class(ClassRegistration::new("ResourceSaver").parent("Object"));
+    register_class(
+        ClassRegistration::new("ResourceUID")
+            .parent("Object")
+            .abstract_class(),
+    );
+    register_class(ClassRegistration::new("RetargetModifier3D").parent("SkeletonModifier3D"));
+    register_class(ClassRegistration::new("SkeletonIK3D").parent("SkeletonModifier3D"));
+    register_class(ClassRegistration::new("StreamPeerGZIP").parent("StreamPeer"));
+    register_class(ClassRegistration::new("TextLine").parent("RefCounted"));
+    register_class(ClassRegistration::new("TextParagraph").parent("RefCounted"));
+    register_class(ClassRegistration::new("TextServerAdvanced").parent("TextServerExtension"));
+    register_class(ClassRegistration::new("TextServerDummy").parent("TextServerExtension"));
+    register_class(ClassRegistration::new("TextServerFallback").parent("TextServerExtension"));
+    register_class(ClassRegistration::new("TextServerManager").parent("Object"));
+    register_class(ClassRegistration::new("UPNP").parent("RefCounted"));
+    register_class(ClassRegistration::new("UPNPDevice").parent("RefCounted"));
+    register_class(ClassRegistration::new("VideoStreamTheora").parent("VideoStream"));
+    register_class(
+        ClassRegistration::new("VisualShaderNodeTexture2DArrayParameter")
+            .parent("VisualShaderNodeTextureParameter"),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeTexture2DParameter")
+            .parent("VisualShaderNodeTextureParameter"),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeTexture3DParameter")
+            .parent("VisualShaderNodeTextureParameter"),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeTextureParameterTriplanar")
+            .parent("VisualShaderNodeTextureParameter"),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeVectorCompose")
+            .parent("VisualShaderNodeVectorBase"),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeVectorDecompose")
+            .parent("VisualShaderNodeVectorBase"),
+    );
+    register_class(
+        ClassRegistration::new("VisualShaderNodeVectorDistance")
+            .parent("VisualShaderNodeVectorBase"),
+    );
+}
+
 pub fn register_all_classes() {
     // Base chain first: Object -> Node -> Viewport -> Window.
     register_root_window_chain();
@@ -30018,6 +30513,11 @@ pub fn register_all_classes() {
     // The server `*Extension` seams (pat-s3rrv.231): registration surface
     // only, so `extends PhysicsServer2DExtension` resolves its base.
     register_server_extension_classes();
+    // Core Godot classes that had no ClassDB entry at all (pat-mgixk.101):
+    // PackedScene, Image, Curve, Gradient, GDScript and the engine singletons.
+    // Last of the non-editor registrars, so every parent chain it refers to is
+    // already installed.
+    register_core_object_classes();
     // Registers the editor-only classes on top; its own fan-out to the six
     // tables above is a no-op by the time it runs.
     register_editor_classes();
@@ -30047,7 +30547,11 @@ pub fn register_editor_classes() {
 
     // -- SceneState (pat-nzgdu.167): PackedScene.get_state() introspection --
     if !class_exists("SceneState") {
-        register_class(ClassRegistration::new("SceneState").parent("RefCounted"));
+        register_class(
+            ClassRegistration::new("SceneState")
+                .parent("RefCounted")
+                .abstract_class(),
+        );
     }
 
     // -- Separators (pat-nzgdu.197) MOVED to `register_2d_classes` -----------
@@ -30797,7 +31301,6 @@ pub fn register_editor_classes() {
         register_class(
             ClassRegistration::new("MovieWriter")
                 .parent("Object")
-                .abstract_class()
                 .method(
                     MethodInfo::new("_handles_file", 1)
                         .virtual_method()
@@ -30955,7 +31458,8 @@ pub fn register_editor_classes() {
     if !class_exists("EditorInterface") {
         register_class(
             ClassRegistration::new("EditorInterface")
-                .parent("Node")
+                .parent("Object")
+                .abstract_class()
                 .method(MethodInfo::new("get_editor_settings", 0).const_method())
                 .method(MethodInfo::new("get_selection", 0).const_method())
                 .method(MethodInfo::new("get_inspector", 0).const_method())
@@ -31013,6 +31517,7 @@ fn register_editor_filesystem_classes() {
         register_class(
             ClassRegistration::new("EditorFileSystem")
                 .parent("Node")
+                .abstract_class()
                 .method(MethodInfo::new("get_file_type", 1).const_method())
                 .method(MethodInfo::new("get_filesystem", 0))
                 .method(MethodInfo::new("get_filesystem_path", 1))
@@ -31118,6 +31623,7 @@ fn register_editor_filesystem_classes() {
         register_class(
             ClassRegistration::new("EditorResourcePreview")
                 .parent("Node")
+                .abstract_class()
                 .method(MethodInfo::new("add_preview_generator", 1))
                 .method(MethodInfo::new("check_for_invalidation", 1))
                 .method(MethodInfo::new("queue_edited_resource_preview", 4))
@@ -33244,15 +33750,20 @@ mod tests {
         let _guard = setup();
         register_audio_classes();
 
-        // The base is an abstract RefCounted — NOT a Resource: Godot separates
-        // the AudioStream resource from the playback instance it hands out.
+        // The base is a RefCounted — NOT a Resource: Godot separates the
+        // AudioStream resource from the playback instance it hands out.
         assert!(class_exists("AudioStreamPlayback"));
         assert!(is_parent_class("AudioStreamPlayback", "RefCounted"));
         assert!(is_parent_class("AudioStreamPlayback", "Object"));
-        assert!(is_abstract("AudioStreamPlayback"));
+        // pat-mgixk.97: both of these asserted `is_abstract`. Upstream is
+        // `GDREGISTER_CLASS(AudioStreamPlayback)` — plain, not even virtual —
+        // and `GDREGISTER_VIRTUAL_CLASS(AudioStreamPlaybackResampled)`
+        // (servers/register_server_types.cpp:167-168). Both keep a creation
+        // func, and extension_api.json reports is_instantiable = true for each.
+        assert!(!is_abstract("AudioStreamPlayback"));
         assert!(class_has_method("AudioStreamPlayback", "mix"));
 
-        assert!(is_abstract("AudioStreamPlaybackResampled"));
+        assert!(!is_abstract("AudioStreamPlaybackResampled"));
         assert!(is_parent_class(
             "AudioStreamPlaybackResampled",
             "AudioStreamPlayback"
@@ -33338,7 +33849,13 @@ mod tests {
         assert!(class_exists("JavaScriptObject"));
         assert!(is_parent_class("JavaScriptObject", "RefCounted"));
         assert!(is_parent_class("JavaScriptObject", "Object"));
-        assert!(can_instantiate("JavaScriptObject"));
+        // pat-mgixk.97: this asserted `can_instantiate`. Upstream is
+        // `GDREGISTER_ABSTRACT_CLASS(JavaScriptObject)`
+        // (platform/web/api/javascript_bridge_singleton.cpp:40) — genuinely
+        // abstract, with no creation func — and extension_api.json reports
+        // is_instantiable = false. A script receives one from
+        // `eval`/`get_interface`/`create_object`; it never constructs one.
+        assert!(!can_instantiate("JavaScriptObject"));
     }
 
     /// pat-nzgdu.140: the VisualShader node-graph family is registered with the
@@ -33561,9 +34078,18 @@ mod tests {
         ] {
             assert!(class_exists(cls), "{cls} is registered in ClassDB");
         }
-        // The two bases are abstract; the concrete primitives derive them.
-        assert!(is_abstract("Mesh"), "Mesh is abstract");
-        assert!(is_abstract("PrimitiveMesh"), "PrimitiveMesh is abstract");
+        // pat-mgixk.97: both bases are VIRTUAL, not abstract —
+        // `GDREGISTER_VIRTUAL_CLASS(Mesh)` / `(PrimitiveMesh)`
+        // (register_scene_types.cpp:982, 993). A virtual registration still
+        // installs a creation func (`class_db.h:255-261`) and `is_abstract` is
+        // `creation_func == nullptr`, so Godot instantiates both and
+        // extension_api.json reports is_instantiable = true for each. These two
+        // lines asserted the opposite.
+        assert!(!is_abstract("Mesh"), "Mesh is virtual, not abstract");
+        assert!(
+            !is_abstract("PrimitiveMesh"),
+            "PrimitiveMesh is virtual, not abstract"
+        );
         assert!(is_parent_class("BoxMesh", "PrimitiveMesh"));
         assert!(is_parent_class("BoxMesh", "Mesh"));
         assert!(is_parent_class("PrimitiveMesh", "Resource"));
@@ -34430,8 +34956,11 @@ mod tests {
         assert!(is_parent_class("StandardMaterial3D", "BaseMaterial3D"));
         assert!(is_parent_class("StandardMaterial3D", "Material"));
 
-        // Material is abstract; ShaderMaterial is instantiable.
-        assert!(is_abstract("Material"));
+        // pat-mgixk.97: Material is VIRTUAL, so it is instantiable too —
+        // `GDREGISTER_VIRTUAL_CLASS(Material)` (register_scene_types.cpp:439).
+        // This line asserted `is_abstract("Material")`.
+        assert!(!is_abstract("Material"));
+        assert!(can_instantiate("Material"));
         assert!(can_instantiate("ShaderMaterial"));
 
         // ShaderMaterial exposes the shader-parameter methods GDScript calls.

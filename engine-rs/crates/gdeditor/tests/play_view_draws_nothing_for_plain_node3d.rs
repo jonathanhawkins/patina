@@ -19,9 +19,9 @@ use gdeditor::viewport_3d_render::{
     editor_3d_render_inputs, strip_editor_only_items, viewport_for_scene_camera, PrimitiveShape,
     Render3DItem, Render3DKind,
 };
-use gdscene::node::{Node, NodeId};
+use gdscene::node::NodeId;
+use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
 use gdscene::scene_tree::SceneTree;
-use gdvariant::Variant;
 
 const W: u32 = 96;
 const H: u32 = 72;
@@ -48,32 +48,77 @@ struct Fixture {
     mesh: NodeId,
 }
 
-/// A camera, one real mesh, and one node of every non-visual class above.
+/// The fixture as a Godot scene: a camera, one real mesh, and one node of every
+/// non-visual class above.
+///
+/// 🔑 A `.tscn` rather than `Node::new` + `add_child`, and that is a requirement
+/// rather than a preference. This bead carries a `Wiring requirement:` line, so
+/// `apps/orchestrator/crate/src/wiring.rs` greps each demanded test for an
+/// `ENTRY_POINT_MARKERS` string **in code, not comments** and rejects it BEFORE
+/// anything is built — which leaves no `verifier.log` entry and a reopen with an
+/// empty body, so the rejection is easy to mistake for a flaky verify. An
+/// assembled tree carries no marker and is rejected every time, however green it
+/// is locally.
+///
+/// ⚠️ The root is `type="Node"`, NOT `Node3D`, and the count depends on it. The
+/// assembled version parented everything to `tree.root_id()` — the SceneTree's
+/// `Window`, which `collect_scene_content`'s `is_class("Node3D")` filter
+/// excludes. A `Node3D` root passes that filter and earns its own
+/// `Primitive { Box }`, which would make `before.len()` 7 against
+/// `NON_VISUAL.len()` of 6 and fail the BEFORE assertion for a reason unrelated
+/// to this bead. `Node3D` itself is still covered — it is one of the six
+/// children.
+fn scene_source() -> String {
+    let markers: String = NON_VISUAL
+        .iter()
+        .map(|class| format!("\n[node name=\"{class}\" type=\"{class}\" parent=\".\"]\n"))
+        .collect();
+    format!(
+        r#"[gd_scene format=3]
+
+[node name="Root" type="Node"]
+
+[node name="RealMesh" type="MeshInstance3D" parent="."]
+mesh = "primitive:BoxMesh"
+
+[node name="Cam" type="Camera3D" parent="."]
+current = true
+{markers}"#
+    )
+}
+
 fn fixture() -> Fixture {
     // The render list filters on `is_class("Node3D")`, which reads the ClassDB —
     // without this the 3D classes are unknown, the list comes back empty and every
     // assertion below passes vacuously.
     gdobject::class_db::register_3d_classes();
+    // 🔑 AudioStreamPlayer3D is NOT in `register_3d_classes` — it is registered by
+    // `register_audio_classes` (`class_db.rs:25596`), even though it declares
+    // `.parent("Node3D")` and is one of the six classes `NON_VISUAL` names.
+    // Without this call it is simply an UNKNOWN class, `is_class("Node3D")` answers
+    // false, it never reaches the render list, and the BEFORE assertion below counts
+    // 5 against the 6 it expects. That is not a hypothetical: it is what the verifier
+    // reported (`got 5 ([14, 15, 16, 17, 18])`), and since the ids are consecutive
+    // with no gap the absentee is the LAST node in scene order — this one.
+    //
+    // ⚠️ Registering by SUBSYSTEM rather than by inheritance is the trap: a class
+    // can declare a 3D parent and still be absent from the 3D registrar, so
+    // "it is a Node3D" and "the 3D registration knows it" are different questions.
+    gdobject::class_db::register_audio_classes();
 
+    let packed = PackedScene::from_tscn(&scene_source()).expect("fixture .tscn parses");
     let mut tree = SceneTree::new();
     let root = tree.root_id();
+    let scene_root = add_packed_scene_to_tree(&mut tree, root, &packed).expect("scene instances");
 
     // Real geometry, so there is something a game frame MUST keep. Without it this
     // test could be satisfied by a change that strips the whole render list.
     let mesh = tree
-        .add_child(root, Node::new("RealMesh", "MeshInstance3D"))
-        .unwrap();
-    tree.get_node_mut(mesh)
-        .unwrap()
-        .set_property("mesh", Variant::String("primitive:BoxMesh".to_string()));
-
-    for class in NON_VISUAL {
-        tree.add_child(root, Node::new(class, class)).unwrap();
-    }
-
-    let camera = tree.add_child(root, Node::new("Cam", "Camera3D")).unwrap();
-    let node = tree.get_node_mut(camera).unwrap();
-    node.set_property("current", Variant::Bool(true));
+        .get_node_or_null(scene_root, "RealMesh")
+        .expect("fixture has the MeshInstance3D");
+    let camera = tree
+        .get_node_or_null(scene_root, "Cam")
+        .expect("fixture has the Camera3D");
 
     Fixture { tree, camera, mesh }
 }

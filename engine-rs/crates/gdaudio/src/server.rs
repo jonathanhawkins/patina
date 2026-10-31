@@ -114,6 +114,26 @@ impl AudioServer {
         }
     }
 
+    /// Retunes a LIVE server to `sample_rate` (pat-mgixk.88).
+    ///
+    /// 🔑 A setter rather than a rebuild, and that is the whole point. The
+    /// project's `audio/driver/mix_rate` is known at
+    /// `MainLoop::configure_from_project_settings`, but by the time the runner
+    /// has booted far enough to read it the bridge may already hold a loaded
+    /// bus layout — and replacing the server with
+    /// [`from_project_settings`](Self::from_project_settings) would silently
+    /// discard those buses and their effect chains. Mutating the one field
+    /// avoids the ordering hazard entirely, so the caller does not have to be
+    /// sequenced against the layout load.
+    ///
+    /// Safe to call at any point because the rate is not cached anywhere: it is
+    /// read fresh per `mix` (for `dt` and the resample step) and per
+    /// `process_effects`. Clamped like the constructor, so a malformed project
+    /// value cannot make `dt` degenerate.
+    pub fn set_output_sample_rate(&mut self, sample_rate: u32) {
+        self.output_sample_rate = sample_rate.clamp(8_000, 384_000);
+    }
+
     /// Build a server honouring a project's `audio/driver/mix_rate`.
     ///
     /// Godot reads this at startup (`audio_server.cpp`) and defaults it to

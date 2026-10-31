@@ -134,6 +134,15 @@ fn track_from_props(props: &HashMap<String, Variant>, idx: usize) -> Option<Anim
     if property_path.is_empty() {
         property_path = implicit_property_path(track_type)?.to_string();
     }
+    // 🔑 A blend_shape track's `path` is `MeshInstance3D:ShapeName`, so its
+    // subname is the bare shape name — but the renderer reads the weight from
+    // `blend_shapes/<name>` (`render_server_3d.rs`). The glTF importer already
+    // builds its tracks that way (`animation.rs`, `blend_shapes/morph_<slot>`),
+    // so this brings the `.tscn` producer into line rather than inventing a
+    // spelling. Guarded so an already-prefixed path is left alone.
+    if track_type == TrackType::BlendShape && !property_path.starts_with("blend_shapes/") {
+        property_path = format!("blend_shapes/{property_path}");
+    }
 
     let mut track = AnimationTrack::with_type(node_path, property_path, track_type);
 
@@ -160,6 +169,15 @@ fn track_from_props(props: &HashMap<String, Variant>, idx: usize) -> Option<Anim
             if matches!(keys, Variant::PackedFloat32Array(_) | Variant::Array(_)) =>
         {
             fill_transform_track(&mut track, track_type, keys, per_key_transition);
+        }
+        // Godot stores blend_shape keys as a FLAT float array too, stride 3
+        // (`animation.cpp`, `BLEND_SHAPE_TRACK_SIZE`) — so this fell through to
+        // the dictionary filler, which returns on a non-Dictionary, leaving the
+        // track with no keys to be dropped below (pat-mgixk.81).
+        TrackType::BlendShape
+            if matches!(keys, Variant::PackedFloat32Array(_) | Variant::Array(_)) =>
+        {
+            fill_blend_shape_track(&mut track, keys, per_key_transition);
         }
         // Both of these use `times` alongside a payload array that is neither
         // `values` nor interleaved transform floats, so neither fits the
@@ -320,16 +338,36 @@ fn fill_dictionary_track(
         None => Vec::new(),
     };
     // Godot's per-key `transitions` entry is an easing *exponent*, not a curve
-    // selector, and is 1.0 (plain linear) for every key the editor writes.
-    // Patina's `TransitionType` has no exponent form, so the exponent is not
-    // read — the track-level `interp` above carries the curve.
+    // selector (pat-mgixk.80). It is 1.0 for every key the editor writes by
+    // default, which is why ignoring it went unnoticed — but an author who sets
+    // ease-in/out on a key, or 0 to hold its value, writes it here and the clip
+    // played plain linear regardless.
+    //
+    // `KeyFrame::ease` carries it; 1.0 means no ease, so an ordinary clip
+    // samples bit-identically to before.
+    let transitions: Vec<f64> = d
+        .get("transitions")
+        // ⚠️ `.as_ref()` is load-bearing: `get` hands back an OWNED
+        // `Option<Variant>`, and `variant_to_f64_vec` takes `&Variant`, so
+        // mapping the function reference without it is an E0631 signature
+        // mismatch. The `times` parse above has the same `.as_ref()` for the
+        // same reason.
+        .as_ref()
+        .map(variant_to_f64_vec)
+        .unwrap_or_default();
 
     // `update` only applies to value tracks (Godot writes it there only).
     if track_type == TrackType::Property {
         track.update_mode = match d.get("update").as_ref().and_then(variant_to_i64) {
-            // 1 = discrete, 2 = trigger (fires at the key, never interpolates).
-            Some(1) | Some(2) => TrackUpdateMode::Discrete,
-            Some(3) => TrackUpdateMode::Capture,
+            // 🔑 Godot **4**: `UPDATE_CONTINUOUS = 0, UPDATE_DISCRETE = 1,
+            // UPDATE_CAPTURE = 2` (`scene/resources/animation.h:68-72`).
+            //
+            // This table was Godot **3**'s, which had `TRIGGER = 2` and
+            // `CAPTURE = 3`. So a 4.x scene's `update = 2` — capture — was read
+            // as discrete, and capture never matched at all because Godot 4
+            // never writes 3 (pat-mgixk.80).
+            Some(1) => TrackUpdateMode::Discrete,
+            Some(2) => TrackUpdateMode::Capture,
             _ => TrackUpdateMode::Continuous,
         };
     }
@@ -343,7 +381,11 @@ fn fill_dictionary_track(
             },
             _ => value.clone(),
         };
-        track.add_keyframe(KeyFrame::new(time, value, per_key_transition));
+        let mut key = KeyFrame::new(time, value, per_key_transition);
+        // Absent or short `transitions` means 1.0 — Godot's default — and NOT
+        // 0.0, which would hold every key and freeze the clip.
+        key.ease = transitions.get(i).copied().unwrap_or(1.0) as f32;
+        track.add_keyframe(key);
     }
 }
 
@@ -403,7 +445,41 @@ fn fill_transform_track(
                 chunk[4] as f32,
             ))
         };
-        track.add_keyframe(KeyFrame::new(time, value, per_key_transition));
+        let mut key = KeyFrame::new(time, value, per_key_transition);
+        // 🔑 A transform key carries its own exponent at `chunk[1]` — the slot
+        // between the time and the components, which this loop skips to read
+        // the value. There is no `transitions` array for these tracks, so
+        // reading it from the array (as the property loop above does) would
+        // leave every position/rotation/scale key un-eased.
+        key.ease = chunk[1] as f32;
+        track.add_keyframe(key);
+    }
+}
+
+/// Fills a `blend_shape` track from Godot's flat `(time, transition, value)`
+/// triples.
+///
+/// 🔑 Stride 3, not 5: `BLEND_SHAPE_TRACK_SIZE` in
+/// `scene/resources/animation.h`. The weight is a single float, so there are no
+/// components between the exponent and the value — `chunk[2]` IS the weight.
+///
+/// Shaped on `fill_transform_track` above, including reading the per-key easing
+/// exponent out of `chunk[1]`: these flat-array tracks carry no `transitions`
+/// array, so the exponent is only available positionally.
+fn fill_blend_shape_track(
+    track: &mut AnimationTrack,
+    keys: &Variant,
+    per_key_transition: TransitionType,
+) {
+    const STRIDE: usize = 3;
+    let floats = variant_to_f64_vec(keys);
+    if STRIDE > floats.len() {
+        return;
+    }
+    for chunk in floats.chunks_exact(STRIDE) {
+        let mut key = KeyFrame::new(chunk[0], Variant::Float(chunk[2]), per_key_transition);
+        key.ease = chunk[1] as f32;
+        track.add_keyframe(key);
     }
 }
 

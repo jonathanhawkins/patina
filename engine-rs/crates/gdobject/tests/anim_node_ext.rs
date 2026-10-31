@@ -34,7 +34,7 @@ fn animation_node_extension_is_registered_under_animation_node() {
 /// flag — the natural move — would make the class un-constructible and defeat
 /// the point of an "Extension" base.
 #[test]
-fn it_is_virtual_not_abstract_unlike_its_parent() {
+fn it_is_virtual_not_abstract_and_neither_is_its_parent() {
     register_3d_classes();
 
     assert!(
@@ -42,10 +42,16 @@ fn it_is_virtual_not_abstract_unlike_its_parent() {
         "GDREGISTER_VIRTUAL_CLASS keeps a creation func, so Godot reports \
          is_abstract == false; a script must be able to construct one"
     );
+    // pat-mgixk.97: this used to assert the parent IS abstract, "exactly why the
+    // flag cannot be inherited by eye". The rule stated two asserts above is the
+    // right one and it applies here too — `GDREGISTER_CLASS(AnimationNode)`
+    // (register_scene_types.cpp:584) is not even virtual, it is a plain
+    // registration, so it is the most instantiable kind there is.
     assert!(
-        is_abstract("AnimationNode"),
-        "the parent IS abstract — this pair is exactly why the flag cannot be \
-         inherited by eye"
+        !is_abstract("AnimationNode"),
+        "GDREGISTER_CLASS(AnimationNode) — plain, so it has a creation func and \
+         `AnimationNode.new()` works in Godot. extension_api.json agrees: \
+         is_instantiable = true"
     );
 }
 

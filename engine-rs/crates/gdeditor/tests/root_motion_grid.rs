@@ -61,17 +61,57 @@ fn find(tree: &SceneTree, name: &str) -> NodeId {
         .unwrap_or_else(|| panic!("no node named {name}"))
 }
 
-/// Moves the node root motion drives, as `apply_root_motion_delta` does each
-/// animation frame.
+/// Drives `travel` of root motion through the REAL animation pipeline, so the
+/// mixer's accumulator fills — which is what the grid reads (pat-mgixk.78).
+///
+/// 🔑 This used to write `Character.position` directly, which was a faithful
+/// stand-in only while `apply_root_motion_delta` did the same thing each frame.
+/// The grid now reads `AnimationPlayer::root_motion().position_accumulator`, so
+/// poking the property would no longer reach the quantity under test and both
+/// offset assertions would fail while the grid was working correctly.
+///
+/// ⚠️ The clip is `0 -> ZERO`, `2 -> travel * 2`, advanced by `1.0`, so the
+/// sampled delta is exactly `travel` at the HALFWAY point. Landing mid-clip is
+/// deliberate: a step to the end could stop or loop the clip, and a loop would
+/// wrap the new time back to 0 and invert the delta. The shape is copied from
+/// `animation_root_motion_method_test.rs:126-140`.
+///
+/// ⚠️ `root_motion_track` names a `TrackType::Property` track, not a bone track
+/// — which is what `root_motion_frame` has to accept for this to report
+/// anything at all.
 fn advance_root_motion(tree: &mut SceneTree, travel: gdcore::math::Vector3) {
-    let character = find(tree, "Character");
-    let cur = match tree.get_node(character).map(|n| n.get_property("position")) {
-        Some(Variant::Vector3(v)) => v,
-        _ => gdcore::math::Vector3::ZERO,
-    };
-    tree.get_node_mut(character)
-        .unwrap()
-        .set_property("position", Variant::Vector3(cur + travel));
+    use gdscene::animation::{Animation, AnimationPlayer, AnimationTrack, KeyFrame, TrackType};
+
+    let anim_node = find(tree, "Anim");
+
+    let mut anim = Animation::new("walk", 2.0);
+    let mut pos = AnimationTrack::with_type("", "position", TrackType::Property);
+    pos.add_keyframe(KeyFrame::linear(
+        0.0,
+        Variant::Vector3(gdcore::math::Vector3::ZERO),
+    ));
+    pos.add_keyframe(KeyFrame::linear(
+        2.0,
+        Variant::Vector3(gdcore::math::Vector3::new(
+            travel.x * 2.0,
+            travel.y * 2.0,
+            travel.z * 2.0,
+        )),
+    ));
+    anim.tracks.push(pos);
+
+    let mut player = AnimationPlayer::new();
+    player.add_animation(anim);
+    player.play("walk");
+    // `".."` to match the `root_node` NODE property ClassDB seeds on every
+    // `.tscn` mixer (`class_db.rs:5428`), so the auto-apply that is still in
+    // place targets `Character` exactly as the old helper did. The struct
+    // field's own default is `"."`, which would target the player itself.
+    player.root_node = "..".to_string();
+    player.root_motion_track = Some("position".to_string());
+    tree.attach_animation_player(anim_node, player).unwrap();
+
+    tree.process_animations(1.0);
 }
 
 /// **The acceptance test.** The editor snapshot carries a grid whose offset moves

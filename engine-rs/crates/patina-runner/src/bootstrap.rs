@@ -602,6 +602,30 @@ impl EngineBootstrap {
             &self.config.project_dir.join("project.godot"),
         )
         .unwrap_or_default();
+
+        // The project's audio settings — `audio/driver/mix_rate` and the two
+        // global panning strengths (pat-mgixk.88).
+        //
+        // 🔑 This boot path reached NONE of them. `configure_from_project_settings`
+        // is called from `main.rs:604`, `conformance.rs:289` and
+        // `project_runtime.rs:55` — but never from here, so a project booted
+        // through `EngineBootstrap` always mixed at 44100 however it was
+        // configured, and Godot's 0.5 global panning default never applied.
+        //
+        // ⚠️ The BRIDGE's configure, not `MainLoop::configure_from_project_settings`.
+        // The latter also installs physics tick rate, gravity and interpolation,
+        // none of which this boot path applies today either — adding all of that
+        // here would change behaviour for every test that boots a project with
+        // physics settings, which is well outside this bead. That gap is real and
+        // wants its own bead; this call is deliberately the audio slice only.
+        //
+        // Order against the bus-layout load below does not matter:
+        // `AudioServer::set_output_sample_rate` retunes the live server instead of
+        // replacing it, so the buses loaded next (or already loaded) survive.
+        main_loop
+            .audio_bridge_mut()
+            .configure_from_project_settings(&settings);
+
         let layout_path = settings
             .get("audio/buses/default_bus_layout")
             .and_then(|v| v.as_string())

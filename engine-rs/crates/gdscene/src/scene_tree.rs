@@ -523,6 +523,19 @@ struct OpenPopup {
     bar_title: Option<usize>,
 }
 
+/// Reserved node-property keys backing the Object API surface (pat-mgixk.99).
+///
+/// These live in the node's property map rather than in new `Node`/`SceneTree`
+/// fields, which is the convention this engine already uses for engine-internal
+/// per-node state (`__material__*`, `__shape__*`, `__extres__*`,
+/// `__canvas_texture__*`). It also leaves every existing struct initializer
+/// untouched — a missed field in one of those is an E0063 that breaks the whole
+/// crate for everyone, which is not a risk worth taking for four flags.
+const BLOCK_SIGNALS_KEY: &str = "__object_block_signals__";
+const USER_SIGNALS_KEY: &str = "__object_user_signals__";
+const CAN_TRANSLATE_KEY: &str = "__object_can_translate__";
+const TRANSLATION_DOMAIN_KEY: &str = "__object_translation_domain__";
+
 pub struct SceneTree {
     /// Arena storage: every node in the tree lives here.
     nodes: HashMap<NodeId, Node>,
@@ -3238,6 +3251,28 @@ impl SceneTree {
             }
         }
 
+        // 🔑 Which nodes have ALREADY had their READY (pat-mgixk.406). Godot's
+        // `_propagate_ready` notifies a node once; reparenting fires
+        // EXIT_TREE/ENTER_TREE but not READY again (`scene/main/node.cpp`).
+        // Before this, every reparent replayed `_ready` for the whole moved
+        // subtree — and `SceneTreeAccessor::add_child` routes an
+        // already-parented node through here, so the editor's drag-reparent
+        // re-ran user callbacks too.
+        //
+        // ⚠️ Snapshotted BEFORE `exit_tree`, which clears the flag on the way
+        // out. Reading it afterwards would find every node un-readied and skip
+        // nothing.
+        //
+        // A node whose `request_ready()` was called is NOT in this list, so its
+        // `_ready` runs again on re-entry — which is exactly what that method is
+        // for.
+        let already_ready: Vec<NodeId> = {
+            let mut ids = Vec::new();
+            self.collect_subtree_top_down(node_id, &mut ids);
+            ids.retain(|id| self.nodes.get(id).is_some_and(|n| n.is_ready()));
+            ids
+        };
+
         // Godot reparents by delegating to remove_child + add_child, so the moved
         // subtree leaves and re-enters the tree. `remove_child` propagates
         // EXIT_TREE bottom-up only when the node is actually in the tree
@@ -3308,7 +3343,8 @@ impl SceneTree {
             .map(|n| n.is_inside_tree())
             .unwrap_or(false);
         if new_parent_in_tree {
-            LifecycleManager::enter_tree(self, node_id);
+            // ...minus READY for anything that already had it (pat-mgixk.406).
+            LifecycleManager::enter_tree_skipping_ready(self, node_id, &already_ready);
         }
 
         Ok(())
@@ -4135,8 +4171,23 @@ impl SceneTree {
         signal_name: &str,
         connection: gdobject::signal::Connection,
     ) {
+        let _ = self.try_connect_signal(source, signal_name, connection);
+    }
+
+    /// As [`connect_signal`](Self::connect_signal), reporting Godot's duplicate
+    /// outcome (pat-mgixk.98).
+    ///
+    /// `Err(AlreadyConnected)` means this `(target, method)` pair was already
+    /// connected and the call did not pass `CONNECT_REFERENCE_COUNTED`; the
+    /// existing single connection is left alone, as upstream leaves it.
+    pub fn try_connect_signal(
+        &mut self,
+        source: NodeId,
+        signal_name: &str,
+        connection: gdobject::signal::Connection,
+    ) -> Result<(), gdobject::signal::SignalConnectError> {
         self.signal_store_mut(source)
-            .connect(signal_name, connection);
+            .try_connect(signal_name, connection)
     }
 
     /// Emits a signal on the given node. For each connection:
@@ -4151,6 +4202,17 @@ impl SceneTree {
         signal_name: &str,
         args: &[gdvariant::Variant],
     ) -> Vec<gdvariant::Variant> {
+        // Godot's `Object::emit_signalp` returns early when the object is
+        // blocking signals (`core/object/object.cpp:1275`), so a blocked emit
+        // reaches no connection at all (pat-mgixk.99).
+        //
+        // ⚠️ Gated BEFORE `trace_record`, deliberately. Tracing first would put a
+        // SignalEmit event in the trace for an emit that never happened, and the
+        // trace is used as an oracle for emission-vs-delivery questions — it
+        // would then assert the opposite of the truth.
+        if self.is_blocking_signals(source) {
+            return Vec::new();
+        }
         self.trace_record(source, TraceEventType::SignalEmit, signal_name);
 
         // Collect connection info to avoid borrow conflicts.
@@ -4175,12 +4237,32 @@ impl SceneTree {
                     .connections()
                     .iter()
                     .map(|c| {
+                        // `CONNECT_APPEND_SOURCE_OBJECT` (16): Godot appends the
+                        // EMITTER to the signal's own argument list inside
+                        // `emit_signalp`, *before* the Callable applies its
+                        // binds and unbinds (pat-mgixk.98).
+                        //
+                        // 🔑 Feeding it through `resolve_args` rather than
+                        // appending after is what makes the ordering match
+                        // upstream: an `unbind` truncates from the tail and so
+                        // drops the source exactly as Godot's does, and
+                        // `bind` arguments still land after it. Appending
+                        // afterwards would put the source last unconditionally
+                        // and make it immune to `unbind`.
+                        let resolved =
+                            if c.flags & gdobject::signal::CONNECT_APPEND_SOURCE_OBJECT != 0 {
+                                let mut with_source = args.to_vec();
+                                with_source.push(gdvariant::Variant::ObjectId(source.object_id()));
+                                c.resolve_args(&with_source)
+                            } else {
+                                c.resolve_args(args)
+                            };
                         (
                             c.target_id,
                             c.method.clone(),
                             c.has_callback(),
                             c.deferred,
-                            c.resolve_args(args),
+                            resolved,
                         )
                     })
                     .collect()
@@ -4595,7 +4677,7 @@ impl SceneTree {
             // returned tuple: widening that tuple would re-indent the whole
             // match arm, and this file carries other agents' uncommitted work.
             let mut clip_starts: Vec<(String, String)> = Vec::new();
-            let (values, skip, method_calls, audio_keys, root_motion, root_node, signals, current) =
+            let (values, skip, method_calls, audio_keys, root_node, signals, current) =
                 match self.animation_players.get_mut(&node_id) {
                     Some(player) => {
                         let prev = player.position();
@@ -4614,7 +4696,12 @@ impl SceneTree {
                         // Audio keys crossed this frame; applied below like
                         // method tracks (pat-0q2kx.157).
                         let audio_keys = audio_keys_in_range(player, prev, curr);
-                        let root_motion = player.consume_root_motion(prev, curr);
+                        // Publish this frame's root motion for the script
+                        // getters to read in the SAME frame (pat-mgixk.78).
+                        // This is the only point that knows the interval just
+                        // advanced over, and nothing here applies the motion to
+                        // a node — see the note further down.
+                        player.record_root_motion_frame(prev, curr);
                         let root_node = player.root_node.clone();
                         // Playback signals queued by `advance` (and by the
                         // autoplay `play` at scene load) — re-emitted below as
@@ -4631,7 +4718,6 @@ impl SceneTree {
                             skip,
                             method_calls,
                             audio_keys,
-                            root_motion,
                             root_node,
                             signals,
                             current,
@@ -4678,14 +4764,23 @@ impl SceneTree {
                 }
             }
 
-            // Root motion accumulates onto the resolved root node — the node the
-            // mixer drives (`root_node` relative to the player owner). Godot
-            // applies root motion in the space of the AnimationMixer root, so a
-            // non-default `root_node` moves that target rather than the player.
-            // With the default root_node "." this is the player's owner node.
-            if let Some(node) = self.nodes.get_mut(&base_node) {
-                apply_root_motion_delta(node, &root_motion);
-            }
+            // 🔑 Root motion is NOT applied to the node (pat-mgixk.78).
+            //
+            // Godot's `AnimationMixer` cancels the root-motion track from the
+            // visual pose and publishes the motion through
+            // `get_root_motion_position/rotation/scale` and the `*_accumulator`
+            // getters, leaving the user to apply it — typically
+            // `velocity = mixer.get_root_motion_position() / delta` followed by
+            // `move_and_slide` (`AnimationMixer.xml:323-326`).
+            //
+            // Patina used to add the delta onto this node's `position` and
+            // `rotation.y` here, which meant a ported controller doing exactly
+            // that moved TWICE. `player.record_root_motion_frame` above is the
+            // replacement: it publishes the frame's delta and accumulators for
+            // the getters to read in this same frame.
+            //
+            // `base_node` is still resolved above because the property and
+            // method track dispatch below both target it.
 
             // Dispatch each method-track call to the node named by the track's
             // `node_path`, resolved relative to `base_node` exactly like property
@@ -5034,6 +5129,60 @@ impl SceneTree {
         self.process_animation_trees_in_mode(delta, AnimationCallbackMode::Idle);
     }
 
+    /// Snapshots the properties a transition's `advance_expression` is evaluated
+    /// against: those of the node named by the tree's
+    /// `advance_expression_base_node` (pat-mgixk.82).
+    ///
+    /// `None` when that path does not resolve. Upstream treats that as "skip the
+    /// expression", not "fail it" — a `WARN_PRINT_ONCE` and a fall-through to
+    /// `true` (`animation_node_state_machine.cpp:1143-1145`) — so the caller
+    /// maps it to a satisfied gate rather than a closed one.
+    ///
+    /// Both halves of the node are read, engine properties first and the script
+    /// instance's members over the top, which is the order a bareword resolves
+    /// in: an expression saying `speed` means the script's `var speed` where the
+    /// node has a script declaring one, and the node's own property otherwise.
+    ///
+    /// ⚠️ Values come from `get_property`, never from
+    /// `ScriptPropertyInfo::default_value` — the latter is parse-time metadata,
+    /// so using it would pin every expression to the declared initialiser and
+    /// the gate would never see a value the game had changed.
+    fn advance_expression_scope(&self, tree_node: NodeId) -> Option<HashMap<String, Variant>> {
+        let path = self
+            .animation_trees
+            .get(&tree_node)
+            .map(|t| t.advance_expression_base_node.clone())?;
+        // Godot's default is `NodePath(".")` — the AnimationTree node itself.
+        let base = if path.is_empty() || path == "." {
+            tree_node
+        } else {
+            self.get_node_or_null(tree_node, &path)?
+        };
+
+        let mut scope: HashMap<String, Variant> = HashMap::new();
+        if let Some(node) = self.nodes.get(&base) {
+            let keys: Vec<String> = node
+                .get_property_list()
+                .into_iter()
+                .map(String::from)
+                .collect();
+            for key in keys {
+                let value = node.get_property(&key);
+                if !value.is_nil() {
+                    scope.insert(key, value);
+                }
+            }
+        }
+        if let Some(script) = self.get_script(base) {
+            for info in script.list_properties() {
+                if let Some(value) = script.get_property(&info.name) {
+                    scope.insert(info.name, value);
+                }
+            }
+        }
+        Some(scope)
+    }
+
     /// Advances every `AnimationTree` whose owner node's `callback_mode_process`
     /// selects `mode` (pat-s3rrv.23).
     ///
@@ -5058,16 +5207,64 @@ impl SceneTree {
             .filter(|id| self.animation_callback_mode(*id) == mode)
             .collect();
         for node_id in node_ids {
-            let (values, root_node) = match self.animation_trees.get_mut(&node_id) {
-                Some(anim_tree) if anim_tree.active => {
-                    anim_tree.advance(delta);
-                    (
-                        anim_tree.get_current_values_targeted(),
-                        anim_tree.root_node.clone(),
-                    )
-                }
-                _ => continue,
+            // Read before the tree is borrowed mutably below: evaluating an
+            // `advance_expression` reads the base node out of the same arena, so
+            // the snapshot has to be taken first (pat-mgixk.82).
+            //
+            // Gated on the graph actually carrying an expression, because the
+            // snapshot costs a property-list walk plus a script call per tree
+            // per frame and almost no tree has one.
+            let expression_scope = self
+                .animation_trees
+                .get(&node_id)
+                .is_some_and(|t| t.has_advance_expressions())
+                .then(|| self.advance_expression_scope(node_id))
+                .flatten();
+            // `code: &str` is annotated and the trait object spelled out so the
+            // closure takes a HIGHER-RANKED lifetime. Left to inference it can
+            // be pinned to one concrete lifetime, and the mismatch then surfaces
+            // at the call below instead of here.
+            let evaluate: &dyn Fn(&str) -> Option<bool> = &|code: &str| match &expression_scope {
+                Some(scope) => crate::advance_expression::eval_advance_expression(code, scope),
+                // `advance_expression_base_node` did not resolve: upstream warns
+                // once and lets the edge through, skipping the expression rather
+                // than failing it (`animation_node_state_machine.cpp:1143-1145`).
+                // Unreachable when the graph has no expression at all — nothing
+                // calls this then.
+                None => Some(true),
             };
+            let (values, skip, types, method_calls, root_node) =
+                match self.animation_trees.get_mut(&node_id) {
+                    Some(anim_tree) if anim_tree.active => {
+                        anim_tree.advance_with_expressions(delta, Some(evaluate));
+                        // Drained, not read: leaving the queue in place would
+                        // re-dispatch every crossed key on every later frame
+                        // (pat-mgixk.77).
+                        let method_calls = anim_tree.drain_method_calls();
+                        // `get_current_values_targeted` erases the track type, so
+                        // without these two the loop below wrote EVERY sampled value
+                        // as an ordinary property: a method key's value (the method
+                        // NAME) became a `footstep` string, and a `rotation_3d` bone
+                        // key became a stray `Arm` property on the Skeleton3D
+                        // (pat-mgixk.77).
+                        let skip: HashSet<String> =
+                            anim_tree.non_property_track_paths().into_iter().collect();
+                        let types: HashMap<(String, String), crate::animation::TrackType> =
+                            anim_tree
+                                .current_track_types()
+                                .into_iter()
+                                .map(|(n, p, t)| ((n, p), t))
+                                .collect();
+                        (
+                            anim_tree.get_current_values_targeted(),
+                            skip,
+                            types,
+                            method_calls,
+                            anim_tree.root_node.clone(),
+                        )
+                    }
+                    _ => continue,
+                };
 
             let base_node = if root_node.is_empty() || root_node == "." {
                 node_id
@@ -5080,6 +5277,11 @@ impl SceneTree {
             };
 
             for (track_node_path, path, value) in values {
+                // Method and nested-animation tracks, exactly as the player
+                // path skips them (`advance_animation_players`).
+                if skip.contains(&path) {
+                    continue;
+                }
                 let target = if track_node_path.is_empty() || track_node_path == "." {
                     base_node
                 } else {
@@ -5088,6 +5290,33 @@ impl SceneTree {
                         None => continue,
                     }
                 };
+                // A 3D transform track whose path resolves to a `Skeleton3D`
+                // addresses a BONE POSE (`Skeleton3D:BoneName`), and
+                // `skeleton3d::apply_animation_bone_tracks` applies it as one
+                // later in the same frame. Writing it here as well is what left
+                // the stray `Arm` property the bead names.
+                //
+                // ⚠️ Deliberately gated on the resolved target's class, not on
+                // the track type alone: a plain `Node3D` legitimately keyed with
+                // a `position_3d`/`rotation_3d` track has an ordinary `position`
+                // or `quaternion` PROPERTY, and skipping by type alone would
+                // stop animating it (see
+                // `node3d_tween_and_animation_drive_rendered_transform`).
+                let is_bone_pose = matches!(
+                    types.get(&(track_node_path.clone(), path.clone())),
+                    Some(
+                        crate::animation::TrackType::Position3D
+                            | crate::animation::TrackType::Rotation3D
+                            | crate::animation::TrackType::Scale3D
+                    )
+                ) && self
+                    .nodes
+                    .get(&target)
+                    .map(|n| n.class_name() == crate::skeleton3d::SKELETON_CLASS)
+                    .unwrap_or(false);
+                if is_bone_pose {
+                    continue;
+                }
                 if let Some(node) = self.nodes.get_mut(&target) {
                     // `path` may address a COMPONENT of a compound property
                     // (`position:x`) — Godot's bézier tracks always do, and a
@@ -5096,6 +5325,23 @@ impl SceneTree {
                     // (pat-s3rrv.44).
                     set_animated_property_path(node, &path, value);
                 }
+            }
+
+            // Method tracks, dispatched as calls — the same resolution and the
+            // same `call_script_with_access` the player path uses, so a
+            // `footstep()` key behaves identically whichever mixer crossed it.
+            // Godot's method track can target any node, and an empty/"." path
+            // means `root_node` (`animation_mixer.cpp` `_blend_process`).
+            for call in method_calls {
+                let target = if call.node_path.is_empty() || call.node_path == "." {
+                    base_node
+                } else {
+                    match self.get_node_or_null(base_node, &call.node_path) {
+                        Some(t) => t,
+                        None => continue,
+                    }
+                };
+                self.call_script_with_access(target, &call.method, &call.args);
             }
         }
     }
@@ -5323,7 +5569,40 @@ impl SceneTree {
     // -- script store -------------------------------------------------------
 
     /// Attaches a script instance to a node.
-    pub fn attach_script(&mut self, node_id: NodeId, mut script: Box<dyn ScriptInstance>) {
+    pub fn attach_script(&mut self, node_id: NodeId, script: Box<dyn ScriptInstance>) {
+        self.attach_script_with_init_args(node_id, script, &[]);
+    }
+
+    /// `attach_script`, passing `init_args` to the script's `_init`
+    /// (pat-mgixk.100).
+    ///
+    /// 🔑 Godot runs `_init` when the script instance is CONSTRUCTED —
+    /// `GDScript::_create_instance` calls the initializer with the `.new()`
+    /// arguments (`modules/gdscript/gdscript.cpp`) — and `_init` had no caller
+    /// anywhere in Patina: the only `"_init"` in the workspace outside ClassDB
+    /// was `call_super`'s fallback name. So a `func _init():` body never ran,
+    /// and `load(p).new(21)` dropped its argument.
+    ///
+    /// ⚠️ Called BEFORE the `.tscn` property replay below, which is Godot's
+    /// order: the object is constructed (running `_init`), then
+    /// `SceneState::instantiate` applies the scene's stored values. Running it
+    /// after would let a constructor silently overwrite an authored override.
+    ///
+    /// ⚠️ Invoked on the script directly, with no `SceneAccess` bound, and that
+    /// is faithful rather than a shortcut: in Godot `_init` runs before the node
+    /// is in the tree, so `get_tree()` is null inside it. A failure is ignored
+    /// for the same reason the local-to-scene setup callback is silent — a
+    /// script that does not define `_init`, or whose `_init` raises, is still a
+    /// valid instance.
+    pub fn attach_script_with_init_args(
+        &mut self,
+        node_id: NodeId,
+        mut script: Box<dyn ScriptInstance>,
+        init_args: &[Variant],
+    ) {
+        if script.has_method("_init") {
+            let _ = script.call_method("_init", init_args);
+        }
         // Godot applies a scene's stored node properties through `Object::set` as
         // it instantiates (packed_scene.cpp `SceneState::instantiate`), which
         // routes each exported value into the script instance and runs that
@@ -8670,6 +8949,153 @@ impl SceneTree {
         }
     }
 
+    /// Godot `Object.is_queued_for_deletion` — whether [`queue_free`] has been
+    /// called on `node_id` and [`process_deletions`] has not yet run.
+    ///
+    /// [`queue_free`]: Self::queue_free
+    /// [`process_deletions`]: Self::process_deletions
+    pub fn is_queued_for_deletion(&self, node_id: NodeId) -> bool {
+        self.pending_deletions.contains(&node_id)
+    }
+
+    /// Godot `Object.cancel_free` — undoes a pending [`queue_free`](Self::queue_free).
+    ///
+    /// Godot's own `cancel_free` clears the deletion flag, so a node that was
+    /// queued and then cancelled survives the frame. Removing every occurrence
+    /// rather than the first is defensive only: `queue_free` already dedupes.
+    pub fn cancel_free(&mut self, node_id: NodeId) {
+        self.pending_deletions.retain(|id| *id != node_id);
+    }
+
+    /// Godot `Object.set_block_signals` — while set, every
+    /// [`emit_signal`](Self::emit_signal) from this node returns without
+    /// reaching a connection.
+    ///
+    /// Stored as a reserved node property rather than a new struct field, which
+    /// is the convention this engine already uses for engine-internal state
+    /// (`__material__*`, `__shape__*`, `__extres__*`). It also keeps
+    /// `SceneTree`'s initializers untouched.
+    pub fn set_block_signals(&mut self, node_id: NodeId, blocked: bool) {
+        if let Some(node) = self.get_node_mut(node_id) {
+            node.set_property(BLOCK_SIGNALS_KEY, gdvariant::Variant::Bool(blocked));
+        }
+    }
+
+    /// Godot `Object.is_blocking_signals`. Defaults to `false` for a node that
+    /// has never been told either way.
+    pub fn is_blocking_signals(&self, node_id: NodeId) -> bool {
+        matches!(
+            self.get_node(node_id)
+                .map(|n| n.get_property(BLOCK_SIGNALS_KEY)),
+            Some(gdvariant::Variant::Bool(true))
+        )
+    }
+
+    /// Godot `Object.add_user_signal` — registers a signal at runtime so it can
+    /// be connected and emitted like a declared one.
+    ///
+    /// The name is also recorded in a reserved per-node list, because
+    /// `has_user_signal` must answer `true` ONLY for runtime-added signals: the
+    /// store itself cannot tell a user signal apart from a class or script
+    /// signal once both are in it.
+    pub fn add_user_signal(&mut self, node_id: NodeId, name: &str) {
+        self.signal_store_mut(node_id).add_signal(name);
+        let mut names = self.user_signal_names(node_id);
+        if !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+            self.write_user_signal_names(node_id, &names);
+        }
+    }
+
+    /// Godot `Object.has_user_signal` — true only for a signal added by
+    /// [`add_user_signal`](Self::add_user_signal).
+    pub fn has_user_signal(&self, node_id: NodeId, name: &str) -> bool {
+        self.user_signal_names(node_id).iter().any(|n| n == name)
+    }
+
+    /// Godot `Object.remove_user_signal`.
+    pub fn remove_user_signal(&mut self, node_id: NodeId, name: &str) {
+        let mut names = self.user_signal_names(node_id);
+        let before = names.len();
+        names.retain(|n| n != name);
+        if names.len() != before {
+            self.write_user_signal_names(node_id, &names);
+            self.signal_store_mut(node_id).remove_signal(name);
+        }
+    }
+
+    /// The reserved per-node list of runtime-added signal names.
+    fn user_signal_names(&self, node_id: NodeId) -> Vec<String> {
+        match self
+            .get_node(node_id)
+            .map(|n| n.get_property(USER_SIGNALS_KEY))
+        {
+            Some(gdvariant::Variant::Array(items)) => items
+                .to_vec()
+                .into_iter()
+                .filter_map(|v| match v {
+                    gdvariant::Variant::String(s) => Some(s),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn write_user_signal_names(&mut self, node_id: NodeId, names: &[String]) {
+        let array = names
+            .iter()
+            .cloned()
+            .map(gdvariant::Variant::String)
+            .collect();
+        if let Some(node) = self.get_node_mut(node_id) {
+            node.set_property(USER_SIGNALS_KEY, gdvariant::Variant::Array(array));
+        }
+    }
+
+    /// Godot `Object.set_message_translation` — when `false`, `tr()` returns its
+    /// key unchanged for this object.
+    pub fn set_message_translation(&mut self, node_id: NodeId, enabled: bool) {
+        if let Some(node) = self.get_node_mut(node_id) {
+            node.set_property(CAN_TRANSLATE_KEY, gdvariant::Variant::Bool(enabled));
+        }
+    }
+
+    /// Godot `Object.can_translate_messages`.
+    ///
+    /// ⚠️ Defaults to **true**: translation is on unless a script turns it off,
+    /// so the absent property must read as enabled. Defaulting to false would
+    /// silently disable `tr()` for every node that never called the setter.
+    pub fn can_translate_messages(&self, node_id: NodeId) -> bool {
+        !matches!(
+            self.get_node(node_id)
+                .map(|n| n.get_property(CAN_TRANSLATE_KEY)),
+            Some(gdvariant::Variant::Bool(false))
+        )
+    }
+
+    /// Godot `Object.set_translation_domain`.
+    pub fn set_translation_domain(&mut self, node_id: NodeId, domain: &str) {
+        if let Some(node) = self.get_node_mut(node_id) {
+            node.set_property(
+                TRANSLATION_DOMAIN_KEY,
+                gdvariant::Variant::String(domain.to_string()),
+            );
+        }
+    }
+
+    /// Godot `Object.get_translation_domain`. The empty string is Godot's
+    /// "default domain".
+    pub fn get_translation_domain(&self, node_id: NodeId) -> String {
+        match self
+            .get_node(node_id)
+            .map(|n| n.get_property(TRANSLATION_DOMAIN_KEY))
+        {
+            Some(gdvariant::Variant::String(s)) => s,
+            _ => String::new(),
+        }
+    }
+
     /// Removes all nodes that were marked with [`queue_free`](Self::queue_free)
     /// during this frame.
     ///
@@ -9132,37 +9558,6 @@ fn set_animated_property_path(node: &mut Node, path: &str, value: Variant) {
         (prop, None) => {
             node.set_property(prop, value);
         }
-    }
-}
-
-fn apply_root_motion_delta(node: &mut Node, delta: &crate::animation::RootMotionDelta) {
-    // ⚠️ Root motion is a READ-MODIFY-WRITE, so BOTH halves had to move onto the
-    // canonical transform (pat-mgixk.29). Reading the raw `position` was the
-    // subtler bug of the two: on a `.tscn` Node3D that property can be absent
-    // or stale, so the delta accumulated onto `Vector3::ZERO` — teleporting the
-    // character to near the origin — and was then written where nothing reads.
-    let current = crate::node3d::local_transform_of(node);
-    if delta.position != gdcore::math::Vector3::ZERO {
-        crate::node3d::set_transform_component(
-            node,
-            "position",
-            &Variant::Vector3(current.origin + delta.position),
-        );
-    }
-    if delta.rotation_y != 0.0 {
-        // Re-read: the position write above restored every component view, and
-        // composing from a transform this function already replaced would undo
-        // it.
-        let euler = crate::node3d::local_rotation_of(node);
-        crate::node3d::set_transform_component(
-            node,
-            "rotation",
-            &Variant::Vector3(gdcore::math::Vector3::new(
-                euler.x,
-                euler.y + delta.rotation_y,
-                euler.z,
-            )),
-        );
     }
 }
 
@@ -9726,6 +10121,23 @@ impl SceneTree {
             Vec::new()
         };
 
+        // Godot emits `replacing_by(node)` on the OUTGOING node, before any of
+        // the splice happens (`node.cpp:3246`). It was registered in the ClassDB
+        // but never emitted, so `connect("replacing_by", ...)` succeeded and the
+        // handler was silently dead (pat-mgixk.64).
+        //
+        // ⚠️ Emitted HERE, after the early returns but before the first mutation,
+        // and both halves of that matter. After the guards, so a rejected call
+        // (unknown id, root, self-replace) does not announce a replacement that
+        // never happens. Before the splice, so a handler still sees `old` with
+        // its children and its place among its siblings — which is the only
+        // moment that information exists, and the whole point of the signal.
+        self.emit_signal(
+            old,
+            "replacing_by",
+            &[Variant::ObjectId(new_node.object_id())],
+        );
+
         // Re-parent the children first, while `old` still owns them.
         for child in children {
             if let Some(c) = self.nodes.get_mut(&child) {
@@ -10065,7 +10477,34 @@ impl SceneTree {
     /// Godot `SceneTree.set_group(group, property, value)` — set a property on
     /// every member.
     pub fn set_group(&mut self, group: &str, property: &str, value: Variant) {
-        for id in self.nodes_in_group_ordered(group) {
+        self.set_group_flags(GROUP_CALL_DEFAULT, group, property, value);
+    }
+
+    /// Godot `SceneTree.set_group_flags(flags, group, property, value)`.
+    ///
+    /// The flagged counterpart of [`set_group`](Self::set_group), completing the
+    /// trio with [`call_group_flags`](Self::call_group_flags) and
+    /// [`notify_group_flags`](Self::notify_group_flags) — a script reaching for
+    /// the documented spelling used to raise `UndefinedFunction` because only
+    /// the unflagged `set_group` existed (pat-mgixk.59).
+    ///
+    /// `set_group` delegates here rather than keeping its own loop: two copies
+    /// of "find the members, honour the ordering, write the property" would be
+    /// free to disagree about the ordering.
+    ///
+    /// ⚠️ `GROUP_CALL_REVERSE` is honoured. `GROUP_CALL_DEFERRED` is **not**,
+    /// for the same reason it is not in
+    /// [`notify_group_flags`](Self::notify_group_flags) and documented here for
+    /// the same reason: the deferred queue carries method calls
+    /// (`DeferredCall { node_id, method, args }`), and a property write is not a
+    /// method call, so deferring one needs a queue that does not exist yet. A
+    /// caller passing it gets the immediate behaviour rather than silence.
+    pub fn set_group_flags(&mut self, flags: u32, group: &str, property: &str, value: Variant) {
+        let mut members = self.nodes_in_group_ordered(group);
+        if flags & GROUP_CALL_REVERSE != 0 {
+            members.reverse();
+        }
+        for id in members {
             if let Some(node) = self.nodes.get_mut(&id) {
                 node.set_property(property, value.clone());
             }
@@ -11340,8 +11779,18 @@ mod tests {
             assert_eq!(tree.get_node(id).unwrap().get_property("hit"), Variant::Nil);
         }
 
+        /// Root motion is PUBLISHED, not applied (pat-mgixk.78).
+        ///
+        /// ⚠️ This test used to be `process_animations_applies_root_motion_delta`
+        /// and asserted the opposite: that the delta was added onto the node's
+        /// `position`. Godot's `AnimationMixer` never moves the node
+        /// (`AnimationMixer.xml:323-326`) — it reports the motion and the user
+        /// applies it — so the old assertion pinned the defect this bead removes.
+        /// It is renamed as well as rewritten, because a test called
+        /// `..._applies_root_motion_delta` that asserts nothing is applied is a
+        /// trap for the next reader.
         #[test]
-        fn process_animations_applies_root_motion_delta() {
+        fn process_animations_publishes_root_motion_without_moving_the_node() {
             let (mut tree, id) = tree_with_node();
             // Seed a starting position on the node.
             tree.get_node_mut(id)
@@ -11362,20 +11811,44 @@ mod tests {
             player.root_motion_track = Some("position".to_string());
             tree.attach_animation_player(id, player).unwrap();
 
-            // At t=1.0 the linear track delta is half of (4,0,0) = (2,0,0),
-            // added onto the seeded position → (12,0,0). The track is applied
-            // as a delta, never as its absolute (2,0,0) value.
+            // At t=1.0 the linear track delta is half of (4,0,0) = (2,0,0).
             tree.process_animations(1.0);
+
+            // -- the node did NOT move ------------------------------------
+            //
+            // The seeded (10,0,0) must be untouched. Asserting the seed rather
+            // than "not 12" is what makes this fail if some other path starts
+            // writing the node: any movement at all breaks it.
             let pos = tree.get_node(id).unwrap().get_property("position");
             if let Variant::Vector3(v) = pos {
                 assert!(
-                    (v.x - 12.0).abs() < 1e-3,
-                    "expected root-motion translation, got {v:?}"
+                    (v.x - 10.0).abs() < 1e-3 && v.y.abs() < 1e-3 && v.z.abs() < 1e-3,
+                    "the mixer must NOT move the node — Godot reports root motion \
+                     and the user applies it. Expected the seeded (10,0,0), got {v:?}"
                 );
-                assert!((v.y).abs() < 1e-3 && (v.z).abs() < 1e-3, "got {v:?}");
             } else {
                 panic!("expected Vector3, got {pos:?}");
             }
+
+            // -- …and the motion was published instead ---------------------
+            //
+            // 🔑 The other half, and the reason the clause above is not just
+            // "the feature was deleted": the delta a game reads through
+            // `get_root_motion_position()` has to be the (2,0,0) the clip
+            // actually travelled, in the same frame.
+            let rm = *tree.get_animation_player(id).unwrap().root_motion();
+            assert!(
+                (rm.position_delta.x - 2.0).abs() < 1e-3
+                    && rm.position_delta.y.abs() < 1e-3
+                    && rm.position_delta.z.abs() < 1e-3,
+                "this frame's published delta must be the clip's travel, got {:?}",
+                rm.position_delta
+            );
+            assert!(
+                (rm.position_accumulator.x - 2.0).abs() < 1e-3,
+                "the accumulator must carry the same travel after one frame, got {:?}",
+                rm.position_accumulator
+            );
         }
 
         #[test]

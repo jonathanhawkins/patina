@@ -17,6 +17,7 @@
 
 #![warn(clippy::all)]
 
+pub mod advance_expression;
 pub mod animation;
 pub mod animation_tree;
 pub mod animation_tree_tscn;
@@ -62,6 +63,7 @@ pub mod line_edit;
 pub mod local_to_scene;
 pub mod main_loop;
 pub mod menu;
+pub mod mesh_instance3d;
 pub mod multiplayer;
 pub mod nav_polygon;
 pub mod nav_simplify;
@@ -114,6 +116,9 @@ pub mod transform_inspector;
 pub mod tween;
 pub mod video_stream;
 pub mod viewport;
+/// Resolving the `Environment3D` a running game renders with — the scene's
+/// `WorldEnvironment` / `Camera3D.environment` / project default (pat-mgixk.51).
+pub mod world_environment;
 pub mod xr_nodes;
 pub mod visibility_3d;
 // Turning a parsed `.tres` VisualShader into a compilable graph. Lives here

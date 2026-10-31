@@ -60,6 +60,51 @@ pub struct Connection {
     /// When `true`, the connection fires in the deferred queue rather than
     /// immediately (Godot's `CONNECT_DEFERRED` flag).
     pub deferred: bool,
+    /// The Godot `ConnectFlags` bitmask this connection was made with
+    /// (pat-mgixk.98).
+    ///
+    /// Kept WHOLE as well as decoded into `one_shot`/`deferred` above, because
+    /// `Object.get_signal_connection_list` has to report the original bitmask
+    /// back to a script — it cannot be reconstructed from two booleans without
+    /// losing `PERSIST`, `REFERENCE_COUNTED` and `APPEND_SOURCE_OBJECT`.
+    pub flags: u32,
+    /// `CONNECT_REFERENCE_COUNTED` reference count; 1 for an ordinary
+    /// connection (pat-mgixk.98).
+    ///
+    /// Godot (`core/object/object.cpp:1646-1666`) refuses a duplicate connect
+    /// outright *unless* the caller passes `CONNECT_REFERENCE_COUNTED`, in
+    /// which case it increments this instead of adding a second connection —
+    /// and `disconnect` only removes the connection once the count falls back
+    /// to zero.
+    pub ref_count: u32,
+}
+
+/// Godot's `Object::ConnectFlags`, from `core/object/object.h:574-578`.
+///
+/// ⚠️ `gdscene::packed_scene` carries its own `pub const CONNECT_DEFERRED` and
+/// `CONNECT_ONE_SHOT` (packed_scene.rs:3868-3871), which predate these. The
+/// values agree, so there is no behavioural divergence — but this set is the
+/// canonical one, living in the crate that owns `Connection`, and gdscene
+/// cannot be the home for it because gdobject sits below gdscene. Consolidating
+/// the two is a separate cleanup, deliberately not bundled here.
+pub const CONNECT_DEFERRED: u32 = 1;
+/// Godot `CONNECT_PERSIST` — the connection is saved with the scene.
+pub const CONNECT_PERSIST: u32 = 2;
+/// Godot `CONNECT_ONE_SHOT` — disconnects itself after firing once.
+pub const CONNECT_ONE_SHOT: u32 = 4;
+/// Godot `CONNECT_REFERENCE_COUNTED` — a duplicate connect bumps a refcount
+/// instead of being refused.
+pub const CONNECT_REFERENCE_COUNTED: u32 = 8;
+/// Godot `CONNECT_APPEND_SOURCE_OBJECT` — the emitter is appended to the
+/// handler's arguments.
+pub const CONNECT_APPEND_SOURCE_OBJECT: u32 = 16;
+
+/// Why [`Signal::try_connect`] refused a connection (pat-mgixk.98).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalConnectError {
+    /// This `(target, method)` pair is already connected and the call did not
+    /// pass `CONNECT_REFERENCE_COUNTED`. Godot returns `ERR_INVALID_PARAMETER`.
+    AlreadyConnected,
 }
 
 impl Connection {
@@ -73,6 +118,10 @@ impl Connection {
             binds: Vec::new(),
             unbinds: 0,
             deferred: false,
+            flags: 0,
+            // 1, not 0: an ordinary connection is held once, so the
+            // refcount-aware `disconnect` removes it on the first call.
+            ref_count: 1,
         }
     }
 
@@ -90,6 +139,8 @@ impl Connection {
             binds: Vec::new(),
             unbinds: 0,
             deferred: false,
+            flags: 0,
+            ref_count: 1,
         }
     }
 
@@ -102,6 +153,19 @@ impl Connection {
     /// Returns a copy of this connection with the deferred flag set.
     pub fn as_deferred(mut self) -> Self {
         self.deferred = true;
+        self
+    }
+
+    /// Returns a copy carrying Godot `ConnectFlags`, decoding the two the
+    /// dispatcher reads directly (pat-mgixk.98).
+    ///
+    /// ⚠️ Decodes `one_shot`/`deferred` as well as storing the mask, so a
+    /// caller cannot set flags and silently leave the dispatcher's own booleans
+    /// disagreeing with them.
+    pub fn with_flags(mut self, flags: u32) -> Self {
+        self.flags = flags;
+        self.deferred = flags & CONNECT_DEFERRED != 0;
+        self.one_shot = flags & CONNECT_ONE_SHOT != 0;
         self
     }
 
@@ -162,6 +226,8 @@ impl Clone for Connection {
             binds: self.binds.clone(),
             unbinds: self.unbinds,
             deferred: self.deferred,
+            flags: self.flags,
+            ref_count: self.ref_count,
         }
     }
 }
@@ -192,21 +258,67 @@ impl Signal {
         &self.name
     }
 
-    /// Adds a connection. Duplicates (same target + method) are allowed,
-    /// matching Godot's default behavior.
+    /// Adds a connection, applying Godot's duplicate rules.
+    ///
+    /// ⚠️ This used to push unconditionally, under a doc comment claiming
+    /// "Duplicates (same target + method) are allowed, matching Godot's default
+    /// behavior". That was backwards: `Object::connect`
+    /// (`core/object/object.cpp:1646-1666`) ERRORS on an already-connected
+    /// `(target, method)` pair and leaves the single existing connection in
+    /// place. The old behaviour meant a re-entered `_ready` that connected
+    /// twice fired its handler twice on every emit (pat-mgixk.98).
+    ///
+    /// The outcome is discarded here so the existing call sites — scene
+    /// wiring, the editor, the deferred queue — keep their signature. The
+    /// script bridge calls [`try_connect`](Self::try_connect) instead, because
+    /// it has to hand an `Error` code back to GDScript.
     pub fn connect(&mut self, connection: Connection) {
+        let _ = self.try_connect(connection);
+    }
+
+    /// As [`connect`](Self::connect), reporting what Godot would report.
+    ///
+    /// Returns `Err(SignalConnectError::AlreadyConnected)` for a duplicate
+    /// `(target, method)` unless the incoming call carries
+    /// `CONNECT_REFERENCE_COUNTED`, in which case the existing connection's
+    /// `ref_count` is incremented and no second connection is added.
+    pub fn try_connect(&mut self, connection: Connection) -> Result<(), SignalConnectError> {
+        if let Some(existing) = self
+            .connections
+            .iter_mut()
+            .find(|c| c.target_id == connection.target_id && c.method == connection.method)
+        {
+            // 🔑 The flag is read off the INCOMING call, not off the stored
+            // connection: Godot decides per `connect()` whether *this*
+            // duplicate is counted or refused, so a first connect without the
+            // flag followed by one with it still increments.
+            if connection.flags & CONNECT_REFERENCE_COUNTED != 0 {
+                existing.ref_count = existing.ref_count.saturating_add(1);
+                return Ok(());
+            }
+            return Err(SignalConnectError::AlreadyConnected);
+        }
         self.connections.push(connection);
+        Ok(())
     }
 
     /// Removes the first connection matching the given target and method.
     ///
-    /// Returns `true` if a connection was removed.
+    /// Returns `true` if the disconnect applied — which for a
+    /// `CONNECT_REFERENCE_COUNTED` connection held more than once means its
+    /// count was decremented rather than the connection removed
+    /// (`core/object/object.cpp:1646-1666`). An ordinary connection has
+    /// `ref_count == 1` and is removed on the first call, exactly as before.
     pub fn disconnect(&mut self, target_id: ObjectId, method: &str) -> bool {
         if let Some(pos) = self
             .connections
             .iter()
             .position(|c| c.target_id == target_id && c.method == method)
         {
+            if self.connections[pos].ref_count > 1 {
+                self.connections[pos].ref_count -= 1;
+                return true;
+            }
             self.connections.remove(pos);
             true
         } else {
@@ -298,12 +410,33 @@ impl SignalStore {
             .or_insert_with(|| Signal::new(name));
     }
 
+    /// Undeclares a signal, dropping it and every connection made to it.
+    /// Returns `true` if a signal was removed (Godot `Object.remove_user_signal`).
+    ///
+    /// ⚠️ Removing the signal is the whole point: leaving the entry behind and
+    /// merely forgetting that it was user-added would keep `has_signal` true and
+    /// keep `emit_signal` delivering to its connections, which is the
+    /// registered-but-dead shape this engine's ClassDB sweeps exist to remove.
+    pub fn remove_signal(&mut self, name: &str) -> bool {
+        self.signals.remove(name).is_some()
+    }
+
     /// Connects a callback to the named signal, creating the signal if needed.
     pub fn connect(&mut self, signal_name: &str, connection: Connection) {
+        let _ = self.try_connect(signal_name, connection);
+    }
+
+    /// As [`connect`](Self::connect), reporting Godot's duplicate outcome so a
+    /// caller that has to answer a script can (pat-mgixk.98).
+    pub fn try_connect(
+        &mut self,
+        signal_name: &str,
+        connection: Connection,
+    ) -> Result<(), SignalConnectError> {
         self.signals
             .entry(signal_name.to_owned())
             .or_insert_with(|| Signal::new(signal_name))
-            .connect(connection);
+            .try_connect(connection)
     }
 
     /// Disconnects the first matching connection from a signal.
@@ -555,28 +688,78 @@ mod tests {
         assert!(results.is_empty());
     }
 
+    /// ⚠️ This test previously asserted the OPPOSITE — it was called
+    /// `connect_same_callback_twice_fires_twice` and pinned
+    /// `connection_count() == 2`. That encoded a parity bug, not a
+    /// requirement: `Object::connect` (`core/object/object.cpp:1646-1666`)
+    /// refuses an already-connected `(target, method)` pair. Rewritten with the
+    /// bead's ground truth rather than deleted, so the old claim stays visible
+    /// (pat-mgixk.98).
     #[test]
-    fn connect_same_callback_twice_fires_twice() {
+    fn connect_same_callback_twice_is_refused() {
         let mut signal = Signal::new("doubled");
         let target_id = ObjectId::next();
 
         let call_count = Arc::new(AtomicUsize::new(0));
+        let mut outcomes = Vec::new();
         for _ in 0..2 {
             let counter = call_count.clone();
-            signal.connect(Connection::with_callback(
+            outcomes.push(signal.try_connect(Connection::with_callback(
                 target_id,
                 "on_doubled",
                 move |_| {
                     counter.fetch_add(1, Ordering::SeqCst);
                     Variant::Nil
                 },
-            ));
+            )));
         }
 
-        assert_eq!(signal.connection_count(), 2);
+        assert_eq!(outcomes[0], Ok(()));
+        assert_eq!(
+            outcomes[1],
+            Err(SignalConnectError::AlreadyConnected),
+            "the second connect must be refused, as Godot's is"
+        );
+        assert_eq!(signal.connection_count(), 1);
         let results = signal.emit(&[]);
-        assert_eq!(results.len(), 2);
-        assert_eq!(call_count.load(Ordering::SeqCst), 2);
+        assert_eq!(results.len(), 1, "one connection, so one dispatch");
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    /// The `CONNECT_REFERENCE_COUNTED` escape hatch: a duplicate is counted
+    /// rather than refused, still as ONE connection, and survives exactly as
+    /// many disconnects as it had connects.
+    #[test]
+    fn reference_counted_duplicate_connect_counts_instead_of_refusing() {
+        let mut signal = Signal::new("counted");
+        let target_id = ObjectId::next();
+        let conn =
+            || Connection::new(target_id, "on_counted").with_flags(CONNECT_REFERENCE_COUNTED);
+
+        assert_eq!(signal.try_connect(conn()), Ok(()));
+        assert_eq!(
+            signal.try_connect(conn()),
+            Ok(()),
+            "with REFERENCE_COUNTED a duplicate is accepted, not refused"
+        );
+        assert_eq!(
+            signal.connection_count(),
+            1,
+            "counted twice, but still ONE connection — so it dispatches once"
+        );
+
+        assert!(signal.disconnect(target_id, "on_counted"));
+        assert_eq!(
+            signal.connection_count(),
+            1,
+            "the first disconnect only drops the count to 1"
+        );
+        assert!(signal.disconnect(target_id, "on_counted"));
+        assert_eq!(
+            signal.connection_count(),
+            0,
+            "the second disconnect removes it"
+        );
     }
 
     #[test]

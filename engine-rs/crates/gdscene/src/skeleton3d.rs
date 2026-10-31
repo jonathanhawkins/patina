@@ -587,6 +587,34 @@ pub fn bone_rest_array(tree: &SceneTree, node_id: NodeId) -> Vec<Transform3D> {
 }
 
 /// Resets all bone poses to identity (clears animation overrides).
+/// Resets bone `idx`'s pose to its **rest**, as Godot's `reset_bone_pose`
+/// does (`skeleton_3d.cpp:908-914`).
+///
+/// 🔑 **Both storage layers must be written.** The pose lives twice: as the
+/// composed `bones/N/pose` Transform3D, and as the per-component
+/// `bones/N/position` / `_rotation` / `_scale` keys. `get_bone_pose_position`
+/// and its siblings read the **component** key first (:337) and fall back to
+/// the rest only when none is stored. So writing just the composed transform
+/// is not a reset: a bone previously moved by `set_bone_pose_position` keeps
+/// answering the OLD position from its stale component key while
+/// `get_bone_pose` answers the rest — the two readers disagree, and the
+/// skinning pass sees whichever one it happens to consult.
+pub fn reset_bone_pose(tree: &mut SceneTree, node_id: NodeId, idx: usize) {
+    if idx >= get_bone_count(tree, node_id) {
+        return;
+    }
+    let rest = get_bone_rest(tree, node_id, idx);
+    // The three component writes, exactly as Godot does them.
+    set_bone_pose_position(tree, node_id, idx, rest.origin);
+    set_bone_pose_rotation(tree, node_id, idx, rest.basis.get_rotation_quaternion());
+    set_bone_pose_scale(tree, node_id, idx, rest.basis.get_scale());
+    // ...then overwrite the pose those three recomposed with the rest
+    // transform WHOLE. Decompose-then-recompose is not the identity on a basis
+    // carrying shear or a mirrored axis (see `get_bone_pose`), so this keeps an
+    // unposed sheared rig bit-exact while leaving the components consistent.
+    set_bone_pose(tree, node_id, idx, rest);
+}
+
 /// Resets every bone's pose to its **rest**, as Godot's `reset_bone_poses`
 /// does (`skeleton_3d.cpp:908`).
 ///
@@ -597,8 +625,7 @@ pub fn bone_rest_array(tree: &SceneTree, node_id: NodeId) -> Vec<Transform3D> {
 pub fn clear_bones_pose(tree: &mut SceneTree, node_id: NodeId) {
     let count = get_bone_count(tree, node_id);
     for i in 0..count {
-        let rest = get_bone_rest(tree, node_id, i);
-        set_bone_pose(tree, node_id, i, rest);
+        reset_bone_pose(tree, node_id, i);
     }
 }
 
@@ -1864,6 +1891,24 @@ pub fn apply_animation_bone_tracks(tree: &mut SceneTree) {
         if types.is_empty() {
             continue;
         }
+        // Tracks that must NOT become a pose. Godot cancels `root_motion_track`
+        // from the visual skeleton and reports it through the root-motion
+        // getters instead, and that track is commonly a BONE track
+        // (`root_motion_track = "Skeleton3D:Root"`) — so without this the root
+        // bone kept animating and the motion was applied twice over
+        // (pat-mgixk.78).
+        //
+        // 🔑 Reuses `non_property_track_paths`, the SAME set the property-track
+        // path already consults (`scene_tree.rs`) and the same one
+        // `consume_root_motion` is keyed to, rather than re-reading
+        // `root_motion_track` here. One definition of "not a pose" cannot drift
+        // from the other two; a second copy could.
+        //
+        // The set also holds Method and Animation track paths, which costs
+        // nothing: `types` is pre-filtered to the three bone track kinds, so
+        // only a bone track ever reaches the lookup below.
+        let not_a_pose: std::collections::HashSet<String> =
+            player.non_property_track_paths().into_iter().collect();
         // Same base-node resolution the property-track path uses: the player's
         // `root_node`, relative to the node the player is attached to.
         let root_node = player.root_node.clone();
@@ -1874,6 +1919,76 @@ pub fn apply_animation_bone_tracks(tree: &mut SceneTree) {
         };
 
         for (track_node, prop, value) in player.get_current_values_targeted() {
+            let track_type = match types.get(&(track_node.clone(), prop.clone())) {
+                Some(t) => *t,
+                None => continue,
+            };
+            // ⚠️ Keyed on the PROPERTY path, which is what the set holds:
+            // `consume_root_motion` matches `t.property_path == track_path`
+            // (`animation.rs:1698`) and `non_property_track_paths` pushes
+            // `property_path`. Keying on `track_node` here would never match
+            // and the skip would be a silent no-op.
+            if not_a_pose.contains(&prop) {
+                continue;
+            }
+            let target = if track_node.is_empty() || track_node == "." {
+                base
+            } else {
+                match tree.get_node_or_null(base, &track_node) {
+                    Some(t) => t,
+                    None => continue,
+                }
+            };
+            if tree.get_node(target).map(|n| n.class_name()) != Some(SKELETON_CLASS) {
+                continue;
+            }
+            // The track's sub-path names the bone (`Skeleton3D:BoneName`).
+            let bone = match find_bone(tree, target, &prop) {
+                Some(b) => b,
+                None => continue,
+            };
+            writes.push((target, bone, track_type, value));
+        }
+    }
+
+    // Second source: AnimationTree. Godot's AnimationTree IS an AnimationMixer,
+    // so its blended result goes through the same track application as a
+    // player's — 3D transform tracks become bone poses
+    // (`upstream/godot/scene/animation/animation_mixer.cpp _blend_process`).
+    //
+    // Patina gathered only from `get_animation_player`, so a state-machine-driven
+    // `Skeleton3D:Arm` rotation_3d track was written as a stray `Arm` PROPERTY on
+    // the Skeleton3D and the rig never deformed — the main AnimationTree use
+    // case produced no motion at all (pat-mgixk.77).
+    //
+    // ⚠️ Feeds the SAME `writes` vector and the same apply loop below, rather
+    // than applying poses itself. Two sources, one writer: a second writer would
+    // be free to disagree with this one about blend order or about which value
+    // wins when a player and a tree both key the same bone.
+    for id in tree.all_nodes_in_tree_order() {
+        let anim_tree = match tree.get_animation_tree(id) {
+            Some(t) => t,
+            None => continue,
+        };
+        let types: HashMap<(String, String), TrackType> = anim_tree
+            .current_track_types()
+            .into_iter()
+            .filter(|(_, _, t)| is_bone_track(*t))
+            .map(|(n, p, t)| ((n, p), t))
+            .collect();
+        if types.is_empty() {
+            continue;
+        }
+        // Same base resolution as the player branch: the mixer's `root_node`,
+        // relative to the node the mixer is attached to.
+        let root_node = anim_tree.root_node.clone();
+        let base = if root_node.is_empty() || root_node == "." {
+            id
+        } else {
+            tree.get_node_or_null(id, &root_node).unwrap_or(id)
+        };
+
+        for (track_node, prop, value) in anim_tree.get_current_values_targeted() {
             let track_type = match types.get(&(track_node.clone(), prop.clone())) {
                 Some(t) => *t,
                 None => continue,
@@ -2141,6 +2256,60 @@ pub fn call_skeleton_method(
                 _ => return None,
             };
             set_bone_enabled(tree, node, i, enabled);
+            Some(Variant::Nil)
+        }
+        // pat-mgixk.94: registered in ClassDB (`clear_bones` at class_db.rs:3813,
+        // `reset_bone_poses` at :3829) with NO dispatch arm, so `has_method`
+        // answered true and the call returned Nil — the silent half of the
+        // registered-but-unwired pair.
+        //
+        // 🔑 `reset_bone_poses` writes each bone's POSE back to its REST, which
+        // is the state `apply_animation_bone_tracks` and the skinning pass read,
+        // so this changes what the frame loop draws rather than a bookkeeping
+        // flag.
+        //
+        // ⚠️ This PINS the pose, and that is correct — do not "fix" it to clear
+        // the pose instead. `add_bone` above deliberately leaves a new bone's
+        // pose UNSET so `get_bone_pose` falls back to the rest dynamically
+        // (pat-mgixk.3), and that comment reads like an argument for clearing
+        // here. It is not: an *unset* pose is the right DEFAULT for a fresh
+        // bone, whereas an explicit `reset_bone_pose` call writes the values in
+        // Godot too — `set_bone_pose_position/rotation/scale` from
+        // `bones[p_bone].rest` (`scene/3d/skeleton_3d.cpp:908-914`).
+        //
+        // ⚠️ Delegate to `reset_bone_pose`; do NOT inline
+        // `set_bone_pose(.., get_bone_rest(..))` here. That writes only the
+        // composed `bones/N/pose` and leaves the per-component keys stale, so
+        // `get_bone_pose_position` keeps answering the pre-reset value. See the
+        // helper's doc comment.
+        "reset_bone_poses" => {
+            for i in 0..count {
+                reset_bone_pose(tree, node, i);
+            }
+            Some(Variant::Nil)
+        }
+        "reset_bone_pose" => {
+            reset_bone_pose(tree, node, idx(0)?);
+            Some(Variant::Nil)
+        }
+        // `clear_bones_pose` resets every bone's pose to its rest and KEEPS the
+        // bone list.
+        //
+        // ⚠️ This is NOT a ClassDB name. ClassDB registers `clear_bones`
+        // (class_db.rs:4267, arity 0), whose Godot semantics are to remove every
+        // bone — a storage change here, since Patina models a skeleton as
+        // `_bone_count` plus `bones/{idx}/...` node properties rather than a
+        // bone vector. `clear_bones` therefore stays registered-but-unwired and
+        // is reported as remainder on pat-mgixk.94. Do NOT "close" it by
+        // pointing it at this arm: that would silently reset poses while the
+        // caller expected an empty skeleton, which is worse than the Nil.
+        //
+        // This arm is still reachable despite having no registration:
+        // `call_node_method` is tried BEFORE the `responds` registration check
+        // (interpreter.rs:17162), so a script calling `clear_bones_pose()` gets
+        // the reset even though `has_method("clear_bones_pose")` answers false.
+        "clear_bones_pose" => {
+            clear_bones_pose(tree, node);
             Some(Variant::Nil)
         }
         _ => None,

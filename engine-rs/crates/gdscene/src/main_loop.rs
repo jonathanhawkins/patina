@@ -2709,6 +2709,19 @@ impl MainLoop {
     pub fn configure_from_project_settings(&mut self, settings: &gdcore::ProjectSettings) {
         use gdcore::{SettingsValue, Vector2, Vector3};
 
+        // Audio: `audio/driver/mix_rate` and the two global panning strengths
+        // (pat-mgixk.88). `AudioServer::from_project_settings` existed with NO
+        // caller, so every project mixed at 44100 however it was configured —
+        // audibly wrong pitch on a 48 kHz project, since the resample step is
+        // `src_rate / output_rate`.
+        //
+        // ⚠️ Done through the bridge's own `configure_from_project_settings`,
+        // which RETUNES the live server instead of replacing it. Replacing it
+        // would discard a bus layout `bootstrap.rs` may already have loaded in
+        // the same boot, which is why this does not have to be ordered against
+        // that load.
+        self.audio_bridge.configure_from_project_settings(settings);
+
         // Physics tick rate. Ignore non-positive values (Godot requires > 0).
         if let Some(tps) = settings
             .get("physics/common/physics_ticks_per_second")

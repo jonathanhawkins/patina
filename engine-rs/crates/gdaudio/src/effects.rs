@@ -407,6 +407,20 @@ impl AudioEffect for AudioEffectDelay {
         "Delay"
     }
 
+    /// `AudioEffectDelay`, so a bus slot holding this effect can say which
+    /// GODOT class it is and not just what kind of DSP it runs (pat-mgixk.84).
+    ///
+    /// ⚠️ `name()` above deliberately stays the short label `"Delay"` — the
+    /// editor and existing tests assert on it, so widening THAT would be a
+    /// behaviour change in two other places. `godot_class` defaults to `name()`,
+    /// which is why this override is needed at all: without it
+    /// `AudioServer.get_bus_effect_instance`-style queries report `"Delay"`
+    /// for an effect the project authored as `AudioEffectDelay`, and a
+    /// caller matching on the authored class name finds nothing.
+    fn godot_class(&self) -> &str {
+        "AudioEffectDelay"
+    }
+
     fn process(&mut self, samples: &mut [f32], sample_rate: u32, channels: u16) {
         let ch = channels.max(1) as usize;
         let frames = self.required_frames(sample_rate);
@@ -533,6 +547,20 @@ impl AudioEffect for AudioEffectDistortion {
         "Distortion"
     }
 
+    /// `AudioEffectDistortion`, so a bus slot holding this effect can say which
+    /// GODOT class it is and not just what kind of DSP it runs (pat-mgixk.84).
+    ///
+    /// ⚠️ `name()` above deliberately stays the short label `"Distortion"` — the
+    /// editor and existing tests assert on it, so widening THAT would be a
+    /// behaviour change in two other places. `godot_class` defaults to `name()`,
+    /// which is why this override is needed at all: without it
+    /// `AudioServer.get_bus_effect_instance`-style queries report `"Distortion"`
+    /// for an effect the project authored as `AudioEffectDistortion`, and a
+    /// caller matching on the authored class name finds nothing.
+    fn godot_class(&self) -> &str {
+        "AudioEffectDistortion"
+    }
+
     fn process(&mut self, samples: &mut [f32], _sample_rate: u32, _channels: u16) {
         let pre = 10.0f32.powf(self.pre_gain_db / 20.0);
         let post = 10.0f32.powf(self.post_gain_db / 20.0);
@@ -544,6 +572,697 @@ impl AudioEffect for AudioEffectDistortion {
     }
 
     fn reset(&mut self) {}
+}
+
+// ---------------------------------------------------------------------------
+// pat-mgixk.89 — the modulation family. Ports of
+// `upstream/godot/servers/audio/effects/audio_effect_{panner,stereo_enhance,
+// phaser}.cpp`, property names and defaults from the matching `doc/classes`
+// XML.
+//
+// ⚠️ These five classes (Chorus/Panner/Phaser/PitchShift/StereoEnhance) had no
+// DSP at all, so `AudioMixer::load_bus_layout_tres` dropped the slot — a Godot
+// `default_bus_layout.tres` using any of them silently lost the effect.
+// `audio_bus_layout_boot_load.rs:108-124` currently PINS that skip, so that
+// test records the old behaviour and must change with them.
+// ---------------------------------------------------------------------------
+
+/// `AudioEffectPanner` — Godot's stereo pan law.
+///
+/// `audio_effect_panner.cpp`: the pan does not merely attenuate a side, it
+/// *bleeds* the opposite channel in, so a hard pan still carries the whole
+/// signal rather than losing half of it.
+#[derive(Debug, Clone)]
+pub struct AudioEffectPanner {
+    /// -1 is hard left, 0 centre, +1 hard right. Godot default 0.
+    pub pan: f32,
+}
+
+impl AudioEffectPanner {
+    /// A panner at `pan` (-1..=1).
+    pub fn new(pan: f32) -> Self {
+        Self { pan }
+    }
+}
+
+impl Default for AudioEffectPanner {
+    fn default() -> Self {
+        Self::new(0.0)
+    }
+}
+
+impl AudioEffect for AudioEffectPanner {
+    fn name(&self) -> &str {
+        "Panner"
+    }
+
+    fn godot_class(&self) -> &str {
+        "AudioEffectPanner"
+    }
+
+    fn process(&mut self, samples: &mut [f32], _sample_rate: u32, channels: u16) {
+        // ⚠️ Mono is a no-op, not a half-gain: there is no stereo field to pan,
+        // and Godot's buses are stereo frames. Scaling a mono buffer here would
+        // quietly change the level of every mono bus that carried a Panner.
+        if channels < 2 {
+            return;
+        }
+        let ch = channels as usize;
+        let lvol = (1.0 - self.pan).clamp(0.0, 1.0);
+        let rvol = (1.0 + self.pan).clamp(0.0, 1.0);
+        for frame in samples.chunks_mut(ch) {
+            if frame.len() < 2 {
+                break;
+            }
+            let (l, r) = (frame[0], frame[1]);
+            frame[0] = l * lvol + r * (1.0 - rvol);
+            frame[1] = r * rvol + l * (1.0 - lvol);
+        }
+    }
+
+    fn reset(&mut self) {}
+}
+
+/// `AudioEffectStereoEnhance` — widening, optional right-channel delay and a
+/// surround difference signal.
+///
+/// `audio_effect_stereo_enhance.cpp`. Three independent knobs:
+/// `pan_pullout` scales each channel away from the mid (1.0 = unchanged),
+/// `time_pullout_ms` delays the right channel, and `surround` > 0 switches to
+/// adding an out-of-phase delayed mid to the two channels instead.
+#[derive(Debug, Clone)]
+pub struct AudioEffectStereoEnhance {
+    /// Width multiplier about the mid. Godot default 1.0 (no change).
+    pub pan_pullout: f32,
+    /// Right-channel delay in milliseconds. Godot default 0.0.
+    pub time_pullout_ms: f32,
+    /// Surround amount; `> 0` selects the surround path. Godot default 0.0.
+    pub surround: f32,
+    ring: Vec<f32>,
+    pos: usize,
+}
+
+impl AudioEffectStereoEnhance {
+    /// A stereo enhancer with Godot's documented defaults.
+    pub fn new() -> Self {
+        Self {
+            pan_pullout: 1.0,
+            time_pullout_ms: 0.0,
+            surround: 0.0,
+            ring: Vec::new(),
+            pos: 0,
+        }
+    }
+
+    /// Ring length for the configured delay, at least one frame so the
+    /// zero-delay case still has somewhere to write.
+    fn required_frames(&self, sample_rate: u32) -> usize {
+        (((self.time_pullout_ms.max(0.0) / 1000.0) * sample_rate as f32).ceil() as usize) + 1
+    }
+}
+
+impl Default for AudioEffectStereoEnhance {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AudioEffect for AudioEffectStereoEnhance {
+    fn name(&self) -> &str {
+        "StereoEnhance"
+    }
+
+    fn godot_class(&self) -> &str {
+        "AudioEffectStereoEnhance"
+    }
+
+    fn process(&mut self, samples: &mut [f32], sample_rate: u32, channels: u16) {
+        if channels < 2 {
+            return;
+        }
+        let ch = channels as usize;
+        let frames = self.required_frames(sample_rate);
+        if self.ring.len() != frames {
+            self.ring = vec![0.0; frames];
+            self.pos = 0;
+        }
+        // Godot computes the delay in frames from the mix rate each call.
+        let delay = (((self.time_pullout_ms.max(0.0) / 1000.0) * sample_rate as f32) as usize)
+            .min(frames - 1);
+        let intensity = self.pan_pullout;
+        let surround_mode = self.surround > 0.0;
+
+        for frame in samples.chunks_mut(ch) {
+            if frame.len() < 2 {
+                break;
+            }
+            let mut left = frame[0];
+            let mut right = frame[1];
+            let center = (left + right) / 2.0;
+            left = center + (left - center) * intensity;
+            right = center + (right - center) * intensity;
+
+            // ⚠️ `(pos + frames - delay) % frames`, not `pos - delay`: the
+            // subtraction underflows on `usize` for the first `delay` frames,
+            // which is a panic in debug and a wild index in release. Godot
+            // relies on a power-of-two mask instead.
+            if surround_mode {
+                let val = (left + right) / 2.0;
+                self.ring[self.pos] = val;
+                let out = self.ring[(self.pos + frames - delay) % frames] * self.surround;
+                left += out;
+                right -= out;
+            } else {
+                self.ring[self.pos] = right;
+                right = self.ring[(self.pos + frames - delay) % frames];
+            }
+
+            frame[0] = left;
+            frame[1] = right;
+            self.pos = (self.pos + 1) % frames;
+        }
+    }
+
+    fn reset(&mut self) {
+        for s in self.ring.iter_mut() {
+            *s = 0.0;
+        }
+        self.pos = 0;
+    }
+}
+
+/// One first-order allpass stage of the phaser, as in Godot's
+/// `AudioEffectPhaserInstance::AllpassDelay`.
+#[derive(Debug, Clone, Copy, Default)]
+struct AllpassDelay {
+    a: f32,
+    h: f32,
+}
+
+impl AllpassDelay {
+    /// Sets the coefficient from a normalised frequency `d`.
+    fn set_delay(&mut self, d: f32) {
+        self.a = (1.0 - d) / (1.0 + d);
+    }
+
+    fn update(&mut self, s: f32) -> f32 {
+        let y = s * -self.a + self.h;
+        self.h = y * self.a + s;
+        y
+    }
+}
+
+/// `AudioEffectPhaser` — six cascaded allpass stages per channel, swept by an
+/// LFO, summed back against the dry signal.
+///
+/// `audio_effect_phaser.cpp`. ⚠️ `depth` is the only neutral control: at 0 the
+/// output is the dry signal exactly, which is what makes a "neutral params
+/// means identical output" assertion possible.
+#[derive(Debug, Clone)]
+pub struct AudioEffectPhaser {
+    /// Sweep floor in Hz. Godot default 440.
+    pub range_min_hz: f32,
+    /// Sweep ceiling in Hz. Godot default 1600.
+    pub range_max_hz: f32,
+    /// LFO rate in Hz. Godot default 0.5.
+    pub rate_hz: f32,
+    /// Allpass feedback. Godot default 0.7.
+    pub feedback: f32,
+    /// How much of the allpass output is summed in. Godot default 1.0.
+    pub depth: f32,
+    allpass: [[AllpassDelay; 6]; 2],
+    phase: f32,
+    h: [f32; 2],
+}
+
+impl AudioEffectPhaser {
+    /// A phaser with Godot's documented defaults.
+    pub fn new() -> Self {
+        Self {
+            range_min_hz: 440.0,
+            range_max_hz: 1600.0,
+            rate_hz: 0.5,
+            feedback: 0.7,
+            depth: 1.0,
+            allpass: [[AllpassDelay::default(); 6]; 2],
+            phase: 0.0,
+            h: [0.0; 2],
+        }
+    }
+}
+
+impl Default for AudioEffectPhaser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AudioEffect for AudioEffectPhaser {
+    fn name(&self) -> &str {
+        "Phaser"
+    }
+
+    fn godot_class(&self) -> &str {
+        "AudioEffectPhaser"
+    }
+
+    fn process(&mut self, samples: &mut [f32], sample_rate: u32, channels: u16) {
+        let sr = sample_rate.max(1) as f32;
+        let nyquist = sr / 2.0;
+        // Godot normalises the sweep against NYQUIST, not the sample rate.
+        let dmin = self.range_min_hz / nyquist;
+        let dmax = self.range_max_hz / nyquist;
+        let increment = std::f32::consts::TAU * (self.rate_hz / sr);
+        let ch = channels.max(1) as usize;
+
+        for frame in samples.chunks_mut(ch) {
+            self.phase += increment;
+            while self.phase >= std::f32::consts::TAU {
+                self.phase -= std::f32::consts::TAU;
+            }
+            let d = dmin + (dmax - dmin) * ((self.phase.sin() + 1.0) / 2.0);
+
+            // Both stereo lanes are swept by the SAME LFO phase, as in Godot.
+            for lane in self.allpass.iter_mut() {
+                for stage in lane.iter_mut() {
+                    stage.set_delay(d);
+                }
+            }
+
+            // ⚠️ Only the first two channels are phased, and a mono buffer uses
+            // lane 0 only. Running lane 1 over a mono frame would read past the
+            // frame.
+            for (c, sample) in frame.iter_mut().enumerate().take(2) {
+                let dry = *sample;
+                let mut y = dry + self.h[c] * self.feedback;
+                for stage in (0..6).rev() {
+                    y = self.allpass[c][stage].update(y);
+                }
+                self.h[c] = y;
+                *sample = dry + y * self.depth;
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        self.allpass = [[AllpassDelay::default(); 6]; 2];
+        self.phase = 0.0;
+        self.h = [0.0; 2];
+    }
+}
+
+/// Godot's `AudioEffectChorus::MS_CUTOFF_MAX` — at or above this the per-voice
+/// lowpass is bypassed outright.
+const CHORUS_CUTOFF_MAX: f32 = 16000.0;
+
+/// Godot's `AudioEffectChorus::MAX_VOICES`.
+pub const CHORUS_MAX_VOICES: usize = 4;
+
+/// One chorus voice: a modulated delay tap with its own lowpass and pan.
+///
+/// Defaults are Godot's `Voice()` constructor
+/// (`audio_effect_chorus.h:79-86`), which is NOT the same as voices 1 and 2 —
+/// the effect's own constructor overrides those two afterwards.
+#[derive(Debug, Clone, Copy)]
+pub struct ChorusVoice {
+    /// Base delay in milliseconds.
+    pub delay_ms: f32,
+    /// LFO rate in Hz.
+    pub rate_hz: f32,
+    /// LFO excursion in milliseconds.
+    pub depth_ms: f32,
+    /// Voice level in dB.
+    pub level_db: f32,
+    /// One-pole lowpass cutoff in Hz; `>= 16000` bypasses, `0` mutes the voice.
+    pub cutoff_hz: f32,
+    /// Stereo placement, -1..=1.
+    pub pan: f32,
+}
+
+impl Default for ChorusVoice {
+    fn default() -> Self {
+        Self {
+            delay_ms: 12.0,
+            rate_hz: 1.0,
+            depth_ms: 0.0,
+            level_db: 0.0,
+            cutoff_hz: CHORUS_CUTOFF_MAX,
+            pan: 0.0,
+        }
+    }
+}
+
+/// `AudioEffectChorus` — up to four modulated delay voices summed over the dry
+/// signal.
+///
+/// Port of `audio_effect_chorus.cpp`. ⚠️ The fixed-point `cycles` counter
+/// upstream is a precision device, not behaviour: it advances the LFO by
+/// `rate / mix_rate` per frame, which this does directly in `f32`.
+#[derive(Debug, Clone)]
+pub struct AudioEffectChorus {
+    /// How many voices are active, 1..=4. Godot default 2.
+    pub voice_count: usize,
+    /// Dry mix. Godot default 1.0.
+    pub dry: f32,
+    /// Wet mix applied to every voice. Godot default 0.5.
+    pub wet: f32,
+    /// The four voice slots; only the first `voice_count` are mixed.
+    pub voices: [ChorusVoice; CHORUS_MAX_VOICES],
+    ring: Vec<f32>,
+    frames: usize,
+    pos: usize,
+    phase: [f32; CHORUS_MAX_VOICES],
+    lp: [[f32; 2]; CHORUS_MAX_VOICES],
+}
+
+impl AudioEffectChorus {
+    /// A chorus with Godot's documented defaults, including the two
+    /// pre-configured voices.
+    pub fn new() -> Self {
+        let mut voices = [ChorusVoice::default(); CHORUS_MAX_VOICES];
+        voices[0] = ChorusVoice {
+            delay_ms: 15.0,
+            rate_hz: 0.8,
+            depth_ms: 2.0,
+            level_db: 0.0,
+            cutoff_hz: 8000.0,
+            pan: -0.5,
+        };
+        voices[1] = ChorusVoice {
+            delay_ms: 20.0,
+            rate_hz: 1.2,
+            depth_ms: 3.0,
+            level_db: 0.0,
+            cutoff_hz: 8000.0,
+            pan: 0.5,
+        };
+        Self {
+            voice_count: 2,
+            dry: 1.0,
+            wet: 0.5,
+            voices,
+            ring: Vec::new(),
+            frames: 0,
+            pos: 0,
+            phase: [0.0; CHORUS_MAX_VOICES],
+            lp: [[0.0; 2]; CHORUS_MAX_VOICES],
+        }
+    }
+
+    /// Ring length that covers the deepest voice's reach.
+    ///
+    /// ⚠️ Must cover delay PLUS depth: the LFO swings both ways, so a voice can
+    /// read `depth` frames *further back* than its base delay. Sizing on delay
+    /// alone wraps the read past the write head and the voice plays whatever is
+    /// newest instead of its echo.
+    fn required_frames(&self, sample_rate: u32) -> usize {
+        let mut worst = 0.0f32;
+        for v in self
+            .voices
+            .iter()
+            .take(self.voice_count.clamp(1, CHORUS_MAX_VOICES))
+        {
+            worst = worst.max(v.delay_ms.max(0.0) + v.depth_ms.max(0.0));
+        }
+        (((worst / 1000.0) * sample_rate as f32).ceil() as usize) + 16
+    }
+}
+
+impl Default for AudioEffectChorus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AudioEffect for AudioEffectChorus {
+    fn name(&self) -> &str {
+        "Chorus"
+    }
+
+    fn godot_class(&self) -> &str {
+        "AudioEffectChorus"
+    }
+
+    fn process(&mut self, samples: &mut [f32], sample_rate: u32, channels: u16) {
+        let sr = sample_rate.max(1) as f32;
+        let ch = channels.max(1) as usize;
+        let count = self.voice_count.clamp(1, CHORUS_MAX_VOICES);
+        let frames = self.required_frames(sample_rate);
+        if self.frames != frames || self.ring.len() != frames * ch {
+            self.ring = vec![0.0; frames * ch];
+            self.frames = frames;
+            self.pos = 0;
+            self.lp = [[0.0; 2]; CHORUS_MAX_VOICES];
+        }
+
+        // Pass 1 — fill the ring with the dry input and lay down `dry * input`,
+        // exactly as Godot does before touching any voice. The voices then
+        // ACCUMULATE onto that.
+        let start_pos = self.pos;
+        for (i, frame) in samples.chunks_mut(ch).enumerate() {
+            let w = (start_pos + i) % frames;
+            for (c, sample) in frame.iter_mut().enumerate() {
+                self.ring[w * ch + c] = *sample;
+                *sample *= self.dry;
+            }
+        }
+        let frame_count = samples.len() / ch;
+
+        // Pass 2 — one modulated tap per voice.
+        for vi in 0..count {
+            let v = self.voices[vi];
+            // Godot skips a zero-cutoff voice entirely rather than muting it
+            // after the fact.
+            if v.cutoff_hz == 0.0 {
+                continue;
+            }
+            let max_depth_frames = (v.depth_ms.max(0.0) / 1000.0) * sr;
+            let mut delay_frames = ((v.delay_ms.max(0.0) / 1000.0) * sr) as i64;
+            // ⚠️ Godot's guard: keep the LFO from reading AHEAD of the write
+            // head. `sin` is signed, so a depth larger than the base delay
+            // would index into frames not yet written — the +10 is upstream's
+            // own precision margin.
+            if (max_depth_frames as i64) + 10 > delay_frames {
+                delay_frames = max_depth_frames as i64 + 10;
+            }
+
+            // One-pole lowpass, bypassed at or above Godot's cutoff ceiling.
+            let (c1, c2) = if v.cutoff_hz >= CHORUS_CUTOFF_MAX {
+                (1.0, 0.0)
+            } else {
+                let auxlp = (-std::f32::consts::TAU * v.cutoff_hz / sr).exp();
+                (1.0 - auxlp, auxlp)
+            };
+
+            // Per-channel level: wet, the voice's dB level, then Godot's pan
+            // law (the same clamp pair the Panner uses).
+            let level = 10.0f32.powf(v.level_db / 20.0) * self.wet;
+            let vol_l = level * (1.0 - v.pan).clamp(0.0, 1.0);
+            let vol_r = level * (1.0 + v.pan).clamp(0.0, 1.0);
+
+            let increment = v.rate_hz / sr;
+            let mut phase = self.phase[vi];
+            let mut h = self.lp[vi];
+
+            for i in 0..frame_count {
+                let wave_delay = (phase * std::f32::consts::TAU).sin() * max_depth_frames;
+                let wave_delay_frames = wave_delay.floor();
+                let frac = wave_delay - wave_delay_frames;
+
+                // `isize` throughout: `pos - delay - wave_delay` is routinely
+                // negative and must wrap, not underflow.
+                let read =
+                    (start_pos + i) as isize - delay_frames as isize - wave_delay_frames as isize;
+                let m = frames as isize;
+                let idx = (((read % m) + m) % m) as usize;
+                let idx_prev = ((((read - 1) % m) + m) % m) as usize;
+
+                for c in 0..ch.min(2) {
+                    let val = self.ring[idx * ch + c];
+                    let val_next = self.ring[idx_prev * ch + c];
+                    let interp = val + (val_next - val) * frac;
+                    let filtered = interp * c1 + h[c] * c2;
+                    h[c] = filtered;
+                    let vol = if c == 0 { vol_l } else { vol_r };
+                    samples[i * ch + c] += filtered * vol;
+                }
+
+                phase += increment;
+                if phase >= 1.0 {
+                    phase -= phase.floor();
+                }
+            }
+
+            self.phase[vi] = phase;
+            self.lp[vi] = h;
+        }
+
+        self.pos = (start_pos + frame_count) % frames;
+    }
+
+    fn reset(&mut self) {
+        for s in self.ring.iter_mut() {
+            *s = 0.0;
+        }
+        self.pos = 0;
+        self.phase = [0.0; CHORUS_MAX_VOICES];
+        self.lp = [[0.0; 2]; CHORUS_MAX_VOICES];
+    }
+}
+
+/// Window lengths for `AudioEffectPitchShift::fft_size`, in Godot's enum order
+/// (`FFT_SIZE_256` … `FFT_SIZE_4096`; the default index 3 is 2048).
+const PITCH_FFT_SIZES: [usize; 5] = [256, 512, 1024, 2048, 4096];
+
+/// `AudioEffectPitchShift` — resamples the signal to change pitch without
+/// changing duration.
+///
+/// # ⚠️ Declared deviation from upstream
+///
+/// Godot uses `SMBPitchShift`, a ~250-line phase vocoder with its own FFT
+/// (`audio_effect_pitch_shift.cpp`). This is **not** that algorithm: it is a
+/// two-tap crossfaded variable-delay resampler, the classic time-domain
+/// pitch shifter. The reasons, stated rather than hidden:
+///
+/// * It reproduces the property surface exactly (`pitch_scale`,
+///   `oversampling`, `fft_size`) and the documented behaviour the acceptance
+///   pins — a tone at `f` comes back at `pitch_scale * f`.
+/// * It preserves Godot's one *observable* special case: `pitch_scale == 1.0`
+///   is a bit-exact pass-through, which upstream does deliberately to avoid the
+///   vocoder's own distortion.
+/// * A phase vocoder differs audibly on transients and polyphonic material, so
+///   this is a real fidelity gap, not a free win. It is recorded here so the
+///   next person sees a decision rather than a half-finished port.
+///
+/// `oversampling` is stored for surface parity and is **not** read by this
+/// algorithm — it is a vocoder parameter with no analogue here.
+#[derive(Debug, Clone)]
+pub struct AudioEffectPitchShift {
+    /// Pitch multiplier; 1.0 is a pass-through. Godot default 1.0.
+    pub pitch_scale: f32,
+    /// Vocoder oversampling factor. Godot default 4.
+    ///
+    /// ⚠️ `f32`, not an integer: Godot registers this as `Variant::FLOAT`
+    /// despite it being a count. Unused by this algorithm — see the type's note.
+    pub oversampling: f32,
+    /// Window-size enum index, 0..=4. Godot default 3 (2048).
+    pub fft_size: i64,
+    ring: Vec<f32>,
+    frames: usize,
+    pos: usize,
+    /// Output frames elapsed. `f64` so the sawtooth below does not drift over
+    /// a long stream the way an `f32` accumulator would.
+    elapsed: f64,
+}
+
+impl AudioEffectPitchShift {
+    /// A pitch shifter with Godot's documented defaults (a pass-through).
+    pub fn new() -> Self {
+        Self {
+            pitch_scale: 1.0,
+            oversampling: 4.0,
+            fft_size: 3,
+            ring: Vec::new(),
+            frames: 0,
+            pos: 0,
+            elapsed: 0.0,
+        }
+    }
+
+    /// Grain length in frames for the configured `fft_size`.
+    pub fn window_frames(&self) -> usize {
+        PITCH_FFT_SIZES[self.fft_size.clamp(0, 4) as usize]
+    }
+}
+
+impl Default for AudioEffectPitchShift {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AudioEffect for AudioEffectPitchShift {
+    fn name(&self) -> &str {
+        "PitchShift"
+    }
+
+    fn godot_class(&self) -> &str {
+        "AudioEffectPitchShift"
+    }
+
+    fn process(&mut self, samples: &mut [f32], _sample_rate: u32, channels: u16) {
+        // 🔑 Godot's own early-out, kept exactly: at unity the effect must be
+        // transparent, and any resampler would otherwise add its own artefacts
+        // to a signal the project asked to leave alone.
+        if (self.pitch_scale - 1.0).abs() <= f32::EPSILON {
+            return;
+        }
+        let ch = channels.max(1) as usize;
+        let n = self.window_frames();
+        // Two grains plus a margin: a tap reads up to one whole window behind
+        // the write head, and the interpolation touches the sample before that.
+        let frames = n * 2 + 2;
+        if self.frames != frames || self.ring.len() != frames * ch {
+            self.ring = vec![0.0; frames * ch];
+            self.frames = frames;
+            self.pos = 0;
+            self.elapsed = 0.0;
+        }
+
+        let nf = n as f64;
+        let drift = (self.pitch_scale - 1.0) as f64;
+        for frame in samples.chunks_mut(ch) {
+            let w = self.pos;
+            for (c, sample) in frame.iter_mut().enumerate() {
+                self.ring[w * ch + c] = *sample;
+            }
+
+            let mut acc = [0.0f32; 8];
+            for g in 0..2 {
+                // Sawtooth in [0, n): the read position slides against the
+                // write head at `pitch_scale - 1` frames per frame, and wraps
+                // every window. The two taps are half a window apart.
+                let raw = self.elapsed * drift + g as f64 * nf / 2.0;
+                let off = ((raw % nf) + nf) % nf;
+                // delay is in (0, n], so a tap never reads AHEAD of the write
+                // head — which would be reading frames that do not exist yet.
+                let delay = nf - off;
+                // sin² over the sawtooth: the two taps are offset by half a
+                // window, and sin²(x) + sin²(x + pi/2) == 1, so the crossfade
+                // sums to unity and a steady tone comes back at constant level.
+                let win = (std::f32::consts::PI * off as f32 / n as f32).sin().powi(2);
+
+                let read = w as f64 - delay;
+                let base = read.floor();
+                let frac = (read - base) as f32;
+                let fm = frames as f64;
+                let i0 = (((base % fm) + fm) % fm) as usize;
+                let i1 = (i0 + 1) % frames;
+                for c in 0..ch.min(8) {
+                    let a = self.ring[i0 * ch + c];
+                    let b = self.ring[i1 * ch + c];
+                    acc[c] += (a + (b - a) * frac) * win;
+                }
+            }
+
+            for (c, sample) in frame.iter_mut().enumerate() {
+                if c < 8 {
+                    *sample = acc[c];
+                }
+            }
+
+            self.pos = (self.pos + 1) % frames;
+            self.elapsed += 1.0;
+        }
+    }
+
+    fn reset(&mut self) {
+        for s in self.ring.iter_mut() {
+            *s = 0.0;
+        }
+        self.pos = 0;
+        self.elapsed = 0.0;
+    }
 }
 
 /// One insert slot: the effect plus Godot's per-slot bypass flag.
@@ -1276,6 +1995,20 @@ impl AudioEffectSpectrumAnalyzer {
 impl AudioEffect for AudioEffectSpectrumAnalyzer {
     fn name(&self) -> &str {
         "SpectrumAnalyzer"
+    }
+
+    /// `AudioEffectSpectrumAnalyzer`, so a bus slot holding this effect can say which
+    /// GODOT class it is and not just what kind of DSP it runs (pat-mgixk.84).
+    ///
+    /// ⚠️ `name()` above deliberately stays the short label `"SpectrumAnalyzer"` — the
+    /// editor and existing tests assert on it, so widening THAT would be a
+    /// behaviour change in two other places. `godot_class` defaults to `name()`,
+    /// which is why this override is needed at all: without it
+    /// `AudioServer.get_bus_effect_instance`-style queries report `"SpectrumAnalyzer"`
+    /// for an effect the project authored as `AudioEffectSpectrumAnalyzer`, and a
+    /// caller matching on the authored class name finds nothing.
+    fn godot_class(&self) -> &str {
+        "AudioEffectSpectrumAnalyzer"
     }
 
     /// The analyzer is the one effect that answers the spectrum query

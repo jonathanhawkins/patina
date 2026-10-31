@@ -48,9 +48,13 @@ fn root_motion_view_is_registered_under_visualinstance3d() {
     assert!(is_parent_class("RootMotionView", "Node"));
     assert!(is_parent_class("RootMotionView", "Object"));
 
-    // ⚠️ VisualInstance3D is abstract, but RootMotionView is not — an editor
-    // gizmo you can actually add to a scene.
-    assert!(is_abstract("VisualInstance3D"));
+    // pat-mgixk.97: this asserted `is_abstract("VisualInstance3D")`.
+    // `GDREGISTER_VIRTUAL_CLASS(VisualInstance3D)`
+    // (scene/register_scene_types.cpp:621) — virtual keeps a creation func, so
+    // `is_abstract` is false and extension_api.json reports
+    // is_instantiable = true. RootMotionView is a plain GDREGISTER_CLASS, so
+    // both are constructible and the contrast this line drew was not real.
+    assert!(!is_abstract("VisualInstance3D"));
     assert!(!is_abstract("RootMotionView"));
     assert!(can_instantiate("RootMotionView"));
     let obj = instantiate("RootMotionView").expect("RootMotionView instantiates");

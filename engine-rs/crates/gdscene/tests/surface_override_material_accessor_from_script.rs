@@ -141,7 +141,30 @@ fn surface_override_material_accessor_from_script() {
          set on surface 1, not null"
     );
 
-    // 🔑 The setter landed on the INDEXED key the render path reads.
+    // 🔑 The setter landed on the right KEY and the right INDEX.
+    //
+    // ⚠️ What this does NOT show is that a pixel changed, and an earlier
+    // revision of this comment claimed it did. `surface_materials_for_node`
+    // (`render_server_3d.rs:3207`) does `const PREFIX: &str = "__surfmat"` and
+    // then `strip_prefix(PREFIX)` — it never looks at
+    // `surface_material_override/N`. Both render channels go through that one
+    // function (the editor viewport at `viewport_3d_render.rs:190`, whose own
+    // comment says it resolves overrides "through the SAME
+    // `surface_materials_for_node` the render-server adapter uses"), so neither
+    // reads this key.
+    //
+    // Those `__surfmat<idx>__*` companions are written at **LOAD** time by
+    // `packed_scene.rs:667-698`, from a `Variant::String("SubResource:<id>")`
+    // value, and `idx == 0` is skipped there because surface 0 belongs to the
+    // `__material__*` pass. So a script write produces no companion at all, at
+    // any index.
+    //
+    // Making a script write observable needs a runtime path — either
+    // `surface_materials_for_node` resolving the raw key itself (which means
+    // materialising a resource reference inside the render path), or this arm
+    // writing the companions. Both are their own bead; see pat-mgixk.31's
+    // split recommendation. Until then these assertions pin the dispatch and
+    // the indexing, which is all they can honestly claim.
     let moved = node_prop(&tree, mesh, "surface_material_override/0");
     let source = node_prop(&tree, mesh, "surface_material_override/1");
     assert!(

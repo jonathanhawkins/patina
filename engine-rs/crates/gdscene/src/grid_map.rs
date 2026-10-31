@@ -547,6 +547,329 @@ impl GridMap {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Script-facing method dispatch (pat-mgixk.93)
+// ---------------------------------------------------------------------------
+
+/// Re-encodes one cell into Godot's `data/cells` triple.
+///
+/// The exact inverse of [`GridMap::decode_cells_full`]: `item : 16`, `rot : 5`,
+/// `layer : 8`, with the three signed `int16` coordinates split across the
+/// first two words. `item < 0` encodes to `0xFFFF`, the sentinel the decoder
+/// skips, because `-1i32 as u32 & 0xFFFF` is exactly `INVALID_CELL_ITEM`.
+fn encode_cell_triple(cell: GridCell, item: i32, orientation: u8, layer: u8) -> [i32; 3] {
+    let lo = (cell.x as i16 as u16 as u32) | ((cell.y as i16 as u16 as u32) << 16);
+    let hi = cell.z as i16 as u16 as u32;
+    let value = (item as u32 & 0xFFFF)
+        | ((orientation as u32 & 0x1F) << 16)
+        | ((layer as u32 & 0xFF) << 21);
+    [lo as i32, hi as i32, value as i32]
+}
+
+/// Decodes just the coordinates of the triple starting at `i`.
+fn decode_triple_cell(data: &[i32], i: usize) -> GridCell {
+    let lo = data[i] as u32;
+    let hi = data[i + 1] as u32;
+    GridCell {
+        x: (lo & 0xFFFF) as u16 as i16 as i32,
+        y: ((lo >> 16) & 0xFFFF) as u16 as i16 as i32,
+        z: (hi & 0xFFFF) as u16 as i16 as i32,
+    }
+}
+
+/// Applies one `set_cell_item` to a raw `data/cells` array **in place**.
+///
+/// 🔑 Surgical on purpose. Re-encoding the whole array from a [`GridMap`] would
+/// be simpler and silently lossy: [`GridMap::load_cells`] drops each cell's
+/// `layer` field (it passes only cell/item/orientation to
+/// `set_cell_item_oriented`), so a round trip through the struct would zero the
+/// layer of every cell in the scene — including cells this call never touched.
+/// Editing the one triple keeps every other cell's bits verbatim, and preserves
+/// the edited cell's own layer by reading it back out of the old value.
+fn apply_set_cell_item(data: &mut Vec<i32>, cell: GridCell, item: i32, orientation: u8) {
+    let mut i = 0;
+    while i + 3 <= data.len() {
+        if decode_triple_cell(data, i) == cell {
+            if item < 0 {
+                // Godot erases the cell rather than storing a negative item.
+                data.drain(i..i + 3);
+            } else {
+                let layer = ((data[i + 2] as u32 >> 21) & 0xFF) as u8;
+                let triple = encode_cell_triple(cell, item, orientation, layer);
+                data[i..i + 3].copy_from_slice(&triple);
+            }
+            return;
+        }
+        i += 3;
+    }
+    // Not present: appending an erase would write a cell the decoder skips, so
+    // only a real item is added.
+    if item >= 0 {
+        data.extend_from_slice(&encode_cell_triple(cell, item, orientation, 0));
+    }
+}
+
+/// Reads the node's raw `data/cells` array.
+fn node_cell_data(tree: &crate::scene_tree::SceneTree, node_id: crate::node::NodeId) -> Vec<i32> {
+    match tree.get_node(node_id).map(|n| n.get_property("data")) {
+        // `SharedDictionary::get` hands back an OWNED Variant, not a reference.
+        Some(Variant::Dictionary(dict)) => match dict.get("cells") {
+            Some(Variant::PackedInt32Array(cells)) => cells,
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// Writes `cells` back onto the node's `data` dictionary.
+///
+/// This is the whole wiring requirement: `GridMap::from_node` — which the render
+/// path goes through — reads `data = { "cells": PackedInt32Array(...) }`, so a
+/// script's `set_cell_item` only reaches the next frame's render snapshot by
+/// landing here. Any other `data` keys the scene authored are preserved.
+fn write_node_cell_data(
+    tree: &mut crate::scene_tree::SceneTree,
+    node_id: crate::node::NodeId,
+    cells: &[i32],
+) {
+    let existing = tree.get_node(node_id).map(|n| n.get_property("data"));
+    let dict = match existing {
+        Some(Variant::Dictionary(d)) => d,
+        _ => gdvariant::SharedDictionary::new(),
+    };
+    // ⚠️ `SharedDictionary::insert` takes `&self` (interior mutability) and
+    // RETURNS A RESULT: it refuses a read-only or key-typed dictionary. Dropping
+    // that error would leave the cells unwritten while every accessor still
+    // answered from the old array — a set_cell_item that reports success and
+    // changes nothing. A refusal falls back to a fresh dictionary so the write
+    // stays observable.
+    let value = Variant::PackedInt32Array(cells.to_vec());
+    if dict.insert("cells", value.clone()).is_err() {
+        let fresh = gdvariant::SharedDictionary::new();
+        let _ = fresh.insert("cells", value);
+        if let Some(node) = tree.get_node_mut(node_id) {
+            node.set_property("data", Variant::Dictionary(fresh));
+        }
+        return;
+    }
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("data", Variant::Dictionary(dict));
+    }
+}
+
+/// The node's uniform cell size. Godot stores a per-axis `Vector3`; this engine
+/// keeps one uniform size and takes `x`, exactly as `GridMap::from_node` does.
+fn node_cell_size(tree: &crate::scene_tree::SceneTree, node_id: crate::node::NodeId) -> f32 {
+    match tree.get_node(node_id).map(|n| n.get_property("cell_size")) {
+        Some(Variant::Vector3(v)) if v.x != 0.0 => v.x,
+        _ => GridMap::new().cell_size,
+    }
+}
+
+/// Godot's `_get_offset`: half a cell on each axis whose `cell_center_*` is set.
+///
+/// ⚠️ ClassDB seeds `cell_center_x/y/z` to `true` (`class_db.rs:15903-15905`),
+/// matching Godot, so an unauthored GridMap centres — reading the property is
+/// therefore correct rather than merely defaulting.
+fn node_cell_offset(tree: &crate::scene_tree::SceneTree, node_id: crate::node::NodeId) -> Vector3 {
+    let cs = node_cell_size(tree, node_id);
+    let centered = |key: &str| match tree.get_node(node_id).map(|n| n.get_property(key)) {
+        Some(Variant::Bool(b)) => b,
+        // Absent reads as Godot's default of true.
+        _ => true,
+    };
+    Vector3::new(
+        if centered("cell_center_x") {
+            cs * 0.5
+        } else {
+            0.0
+        },
+        if centered("cell_center_y") {
+            cs * 0.5
+        } else {
+            0.0
+        },
+        if centered("cell_center_z") {
+            cs * 0.5
+        } else {
+            0.0
+        },
+    )
+}
+
+/// Dispatches `GridMap`'s registered methods, declining every other class.
+///
+/// # What was broken
+///
+/// `set_cell_item`, `get_cell_item`, `get_used_cells`, `local_to_map` and the
+/// rest are all registered in ClassDB (`class_db.rs:15129`), so `has_method`
+/// answered **true** and a call returned **Nil** — the silent failure this
+/// sweep exists to close. The implementations already existed on [`GridMap`];
+/// nothing connected them to a script.
+pub fn call_gridmap_method(
+    tree: &mut crate::scene_tree::SceneTree,
+    node_id: crate::node::NodeId,
+    method: &str,
+    args: &[Variant],
+) -> Option<Variant> {
+    if tree.get_node(node_id)?.class_name() != "GridMap" {
+        return None;
+    }
+
+    // A script may hand a float `Vector3` to a coordinate parameter; Godot
+    // coerces rather than failing.
+    let cell_arg = |i: usize| -> GridCell {
+        match args.get(i) {
+            Some(Variant::Vector3i(v)) => GridCell {
+                x: v.x,
+                y: v.y,
+                z: v.z,
+            },
+            Some(Variant::Vector3(v)) => GridCell {
+                x: v.x as i32,
+                y: v.y as i32,
+                z: v.z as i32,
+            },
+            _ => GridCell { x: 0, y: 0, z: 0 },
+        }
+    };
+    let int_arg = |i: usize, default: i32| -> i32 {
+        match args.get(i) {
+            Some(Variant::Int(v)) => *v as i32,
+            Some(Variant::Float(f)) => *f as i32,
+            _ => default,
+        }
+    };
+
+    Some(match method {
+        "set_cell_item" => {
+            let cell = cell_arg(0);
+            // Godot's signature is (position, item, orientation = 0).
+            let item = int_arg(1, -1);
+            let orientation = int_arg(2, 0).clamp(0, 31) as u8;
+            let mut data = node_cell_data(tree, node_id);
+            apply_set_cell_item(&mut data, cell, item, orientation);
+            write_node_cell_data(tree, node_id, &data);
+            Variant::Nil
+        }
+        "get_cell_item" => {
+            let cell = cell_arg(0);
+            let grid = GridMap::from_node(tree, node_id)?;
+            // Already Godot's script-facing `INVALID_CELL_ITEM` (-1) for an
+            // empty cell; the 0xFFFF sentinel is the packed form only.
+            Variant::Int(grid.get_cell_item(cell) as i64)
+        }
+        "get_cell_item_orientation" => {
+            let cell = cell_arg(0);
+            let grid = GridMap::from_node(tree, node_id)?;
+            // Godot answers -1 for an empty cell, not orientation 0 — which is a
+            // real orientation and would read as "present, unrotated".
+            if grid.get_cell_item(cell) < 0 {
+                Variant::Int(-1)
+            } else {
+                Variant::Int(grid.cell_orientation(cell) as i64)
+            }
+        }
+        "get_cell_item_basis" => {
+            let cell = cell_arg(0);
+            let grid = GridMap::from_node(tree, node_id)?;
+            Variant::Basis(orientation_basis(grid.cell_orientation(cell)))
+        }
+        "get_used_cells" => {
+            let grid = GridMap::from_node(tree, node_id)?;
+            Variant::Array(
+                grid.used_cells()
+                    .into_iter()
+                    .map(|c| Variant::Vector3i(gdcore::math::Vector3i::new(c.x, c.y, c.z)))
+                    .collect(),
+            )
+        }
+        "get_used_cells_by_item" => {
+            let item = int_arg(0, -1);
+            let grid = GridMap::from_node(tree, node_id)?;
+            Variant::Array(
+                grid.used_cells()
+                    .into_iter()
+                    .filter(|c| grid.get_cell_item(*c) == item)
+                    .map(|c| Variant::Vector3i(gdcore::math::Vector3i::new(c.x, c.y, c.z)))
+                    .collect(),
+            )
+        }
+        "local_to_map" => {
+            let cs = node_cell_size(tree, node_id);
+            let p = match args.first() {
+                Some(Variant::Vector3(v)) => *v,
+                Some(Variant::Vector3i(v)) => Vector3::new(v.x as f32, v.y as f32, v.z as f32),
+                _ => Vector3::ZERO,
+            };
+            // Godot floors the scaled position and does NOT subtract the centre
+            // offset, which is what makes map_to_local round-trip back to the
+            // same cell.
+            Variant::Vector3i(gdcore::math::Vector3i::new(
+                (p.x / cs).floor() as i32,
+                (p.y / cs).floor() as i32,
+                (p.z / cs).floor() as i32,
+            ))
+        }
+        "map_to_local" => {
+            let cell = cell_arg(0);
+            let cs = node_cell_size(tree, node_id);
+            let off = node_cell_offset(tree, node_id);
+            // ⚠️ Godot's map_to_local returns the cell CENTRE. The render path
+            // places each cell's mesh at the cell CORNER
+            // (`mesh_instances_oriented`: `cell * cell_size`, no offset), so the
+            // two disagree by half a cell. That divergence is PRE-EXISTING and
+            // deliberately not changed here: shifting mesh placement would move
+            // every cell of every existing GridMap render. Reported, not fixed.
+            Variant::Vector3(Vector3::new(
+                cell.x as f32 * cs + off.x,
+                cell.y as f32 * cs + off.y,
+                cell.z as f32 * cs + off.z,
+            ))
+        }
+        "clear" => {
+            write_node_cell_data(tree, node_id, &[]);
+            Variant::Nil
+        }
+        "get_cell_size" => {
+            let cs = node_cell_size(tree, node_id);
+            Variant::Vector3(Vector3::new(cs, cs, cs))
+        }
+        "set_cell_size" => {
+            if let Some(Variant::Vector3(v)) = args.first() {
+                let v = *v;
+                if let Some(node) = tree.get_node_mut(node_id) {
+                    node.set_property("cell_size", Variant::Vector3(v));
+                }
+            }
+            Variant::Nil
+        }
+        "get_mesh_library" => tree
+            .get_node(node_id)
+            .map(|n| match n.get_property("__extres__mesh_library") {
+                Variant::String(p) => Variant::String(p),
+                _ => n.get_property("mesh_library"),
+            })
+            .unwrap_or(Variant::Nil),
+        "set_mesh_library" => {
+            if let Some(Variant::String(path)) = args.first() {
+                let path = path.clone();
+                if let Some(node) = tree.get_node_mut(node_id) {
+                    // The companion is what `from_node` prefers, so writing it
+                    // is what actually re-points the library.
+                    node.set_property("__extres__mesh_library", Variant::String(path));
+                }
+            }
+            Variant::Nil
+        }
+        // This engine bakes no meshes, so there is nothing to discard. Returning
+        // Nil is the correct OUTCOME here rather than the "registered but
+        // unarmed" Nil this bead removes elsewhere.
+        "clear_baked_meshes" | "make_baked_meshes" => Variant::Nil,
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests_orientation {
     use super::*;

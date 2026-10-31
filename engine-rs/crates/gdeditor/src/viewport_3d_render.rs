@@ -178,10 +178,31 @@ impl Viewport3D {
                 // Read while `tree` is in scope, for the same reason `material`
                 // is. `None` for every node without a ShaderMaterial, which is
                 // the overwhelming majority (pat-mgixk.50).
-                let shader_material =
+                let mut shader_material =
                     gdscene::render_server_3d::RenderServer3DAdapter::resolve_shader_material(
                         tree, nid,
                     );
+                // 🔑 Load each `sampler2D` uniform's image before the material
+                // leaves the tree behind (pat-mgixk.50).
+                // `resolve_shader_material` collects `shader_parameter/<name>`
+                // into `parameters`, but a Variant holds a resource PATH, not
+                // pixels, and the fragment stage samples the material's TEXTURE
+                // MAP. So the first pass of this bead carried the ShaderMaterial
+                // here with an empty map, and every `texture(tex, UV)` on the
+                // editor/Play path sampled the missing-binding white placeholder
+                // — the shader ran, and read white.
+                //
+                // ⚠️ `bind_shader_textures` used to be a PRIVATE method on
+                // `RenderServer3DAdapter`, so this path could not reach it
+                // without owning an adapter it does not have. It is now a free
+                // function taking a cache, and this passes the SAME
+                // `material_textures` the authored `material` and the
+                // per-surface overrides already load through — so a texture
+                // shared between a StandardMaterial3D and a shader uniform
+                // decodes once.
+                if let Some(mat) = shader_material.as_mut() {
+                    gdscene::render_server_3d::bind_shader_textures(mat, &mut material_textures);
+                }
                 // `surface_material_override/N`, resolved here for the same
                 // reason — and through the SAME `surface_materials_for_node`
                 // the render-server adapter uses, so the two paths cannot
@@ -2020,16 +2041,23 @@ pub fn editor_3d_render_inputs(viewport: &Viewport3D, tree: &SceneTree) -> Edito
 /// The scene's `RootMotionView` grid, counter-scrolled by its AnimationMixer's
 /// root motion (pat-0q2kx.249).
 ///
-/// **Why this needs no stored scroll state.** Root motion is not kept in an
-/// accumulator anywhere: `SceneTree::process_animations` applies each delta
-/// straight onto the mixer's root node (`apply_root_motion_delta`), so the node's
-/// *current position* already is the accumulated travel. Reading it per frame and
-/// wrapping gives the same scroll Godot shows, with nothing to keep between
-/// frames and no `&mut SceneTree` — which is what lets this run inside the
-/// read-only input snapshot.
+/// **Why this needs no stored scroll state.** The mixer keeps the running total
+/// itself — `AnimationPlayer::root_motion().position_accumulator` is the travel
+/// since the last reset (pat-mgixk.78). Reading it per frame and wrapping gives
+/// the same scroll Godot shows, with nothing to keep between frames and no
+/// `&mut SceneTree` — which is what lets this run inside the read-only input
+/// snapshot.
 ///
-/// `animation_path` names the mixer; the mixer's `root_node` (default `"."`, i.e.
-/// the mixer itself) is the node root motion moves.
+/// ⚠️ This used to read the DRIVEN NODE'S POSITION, which worked only because
+/// `process_animations` added each delta onto it. That auto-apply is gone —
+/// Godot's mixer never moves the node — so reading the node would now leave the
+/// grid motionless, and **nothing would have failed**, because the reason for
+/// reading the node was the behaviour that was removed.
+///
+/// `animation_path` names the mixer and the accumulator is read from it
+/// directly, so the mixer's `root_node` no longer matters here. (It never
+/// defaulted to `"."` either, whatever the old note said: ClassDB seeds
+/// `AnimationMixer.root_node` as `NodePath("..")`.)
 fn root_motion_grid(tree: &SceneTree) -> Option<RootMotionGridOverlay> {
     use gdscene::root_motion_view::RootMotionView;
 
@@ -2055,7 +2083,7 @@ fn root_motion_grid(tree: &SceneTree) -> Option<RootMotionGridOverlay> {
     // Resolve `animation_path` -> mixer -> the node root motion drives. A missing
     // or unresolvable path leaves the grid parked at the origin rather than
     // hiding it: Godot still draws the grid, it simply does not scroll.
-    let travel = animation_path_root_position(tree, view_id, view_node).unwrap_or(Vector3::ZERO);
+    let travel = animation_path_root_travel(tree, view_id, view_node).unwrap_or(Vector3::ZERO);
     view.accumulate(&gdscene::animation::RootMotionDelta {
         position: travel,
         rotation_y: 0.0,
@@ -2070,7 +2098,7 @@ fn root_motion_grid(tree: &SceneTree) -> Option<RootMotionGridOverlay> {
 }
 
 /// The position of the node the `RootMotionView`'s mixer drives, if it resolves.
-fn animation_path_root_position(
+fn animation_path_root_travel(
     tree: &SceneTree,
     view_id: NodeId,
     view_node: &gdscene::node::Node,
@@ -2084,17 +2112,36 @@ fn animation_path_root_position(
         return None;
     }
     let mixer = tree.get_node_or_null(view_id, &path)?;
-    // `root_node` defaults to "." — the mixer itself.
-    let root_path = match tree.get_node(mixer).map(|n| n.get_property("root_node")) {
-        Some(gdvariant::Variant::NodePath(p)) => p.to_string(),
-        Some(gdvariant::Variant::String(s)) if !s.is_empty() => s,
-        _ => ".".to_string(),
-    };
-    let root = tree.get_node_or_null(mixer, &root_path).unwrap_or(mixer);
-    match tree.get_node(root).map(|n| n.get_property("position")) {
-        Some(gdvariant::Variant::Vector3(v)) => Some(v),
-        _ => None,
-    }
+    // (The comment this replaces claimed `root_node` defaults to "." — the
+    // mixer itself. It does not: ClassDB seeds `AnimationMixer.root_node` as
+    // `NodePath("..")` (`class_db.rs:5428`), so every `.tscn` mixer resolved to
+    // its PARENT. The resolution is gone either way, but the claim was wrong.)
+    //
+    // 🔑 The mixer's own root-motion ACCUMULATOR, not the driven node's
+    // position (pat-mgixk.78).
+    //
+    // This used to resolve `root_node` and read that node's `position`, which
+    // worked only because `apply_root_motion_delta` added each delta straight
+    // onto it — so the node's current position *was* the accumulated travel.
+    // That auto-apply is what this bead removes (Godot's `AnimationMixer` never
+    // moves the node), and the grid would then have sat still with no test
+    // failing, because its own reason for reading the node was the behaviour
+    // being deleted.
+    //
+    // Reading the accumulator is also strictly more correct today: it is TRUE
+    // travel, whereas the node's position includes wherever the rig was placed.
+    // The two agree only for a rig that starts at the origin.
+    //
+    // ⚠️ `None` for an `AnimationTree` mixer, which has no root-motion track
+    // field at all yet (see the note on `AnimationTree::non_property_track_paths`),
+    // so there is genuinely nothing to report — and the caller's
+    // `unwrap_or(Vector3::ZERO)` parks the grid rather than hiding it, which is
+    // what it already did for an unresolvable path.
+    Some(
+        tree.get_animation_player(mixer)?
+            .root_motion()
+            .position_accumulator,
+    )
 }
 
 /// Reads a float node property, accepting an `Int` spelling too (a `.tscn`
@@ -2510,6 +2557,13 @@ fn setup_editor_lighting_3d(
     scene_lights: &[SceneLight3D],
 ) {
     if scene_lights.is_empty() {
+        // pat-mgixk.51: Godot's runtime has no preview sun. A scene that
+        // authored its own environment is being rendered as a GAME, so an
+        // unlit scene must come out unlit (ambient only) rather than being
+        // handed a light it never placed.
+        if viewport.environment.authored {
+            return;
+        }
         // No scene light: shine the preview sun from its configured direction,
         // color, and energy (Godot's Sun and Environment settings).
         let mut light = Light3D::directional(Light3DId(9_000_001));
@@ -2671,6 +2725,14 @@ pub(crate) fn editor_render_environment(
     // reach the renderer — not just the background. Then override the
     // background per the Preview Environment / Preview Sky toggles.
     let mut env = viewport.environment.environment.clone();
+    // pat-mgixk.51: a game frame renders the environment the SCENE authored, so
+    // the Preview Environment / Preview Sky toggles — which are editor chrome —
+    // must not reach it. Without this early return the override below forced
+    // `background_mode = Sky` on every frame whose preview was enabled, which is
+    // the default, so an authored `background_mode = Color` could never be seen.
+    if viewport.environment.authored {
+        return env;
+    }
     if viewport.environment.enabled && viewport.environment.sky_visible {
         env.background_mode = gdserver3d::environment::BackgroundMode::Sky;
         if env.sky.is_none() {
@@ -2800,6 +2862,41 @@ pub fn viewport_for_scene_camera(
     viewport.camera.v_offset = gdscene::camera3d::get_v_offset(tree, camera_node) as f32;
     viewport.camera.frustum_offset = gdscene::camera3d::get_frustum_offset(tree, camera_node);
     viewport
+}
+
+/// Installs the environment a **running game** renders this scene with onto
+/// `viewport`, in place of the editor preview (pat-mgixk.51).
+///
+/// Resolution order is Godot's, and lives in
+/// [`gdscene::world_environment::runtime_environment_3d`] so the editor's Play
+/// view and `RenderServer3DAdapter` cannot disagree about what a scene asked
+/// for: the camera's own `environment`, then the scene's `WorldEnvironment`,
+/// then `rendering/environment/defaults/default_environment`, then the project's
+/// `default_clear_color`.
+///
+/// Returns `true` when something was installed. `false` leaves the preview
+/// untouched, which is what a scene that authors no environment and has no
+/// readable project still gets — so this cannot change a frame that had nothing
+/// to say.
+///
+/// ⚠️ Setting `environment.authored` is half the point: it is what suppresses
+/// the Preview Sky background override in [`editor_render_environment`] and the
+/// preview sun in `setup_editor_lighting_3d`. Assigning the environment without
+/// it would leave an authored `background_mode = Color` overridden to `Sky` and
+/// an unlit scene lit by a sun it never placed.
+pub fn apply_runtime_environment_3d(
+    tree: &SceneTree,
+    camera: NodeId,
+    viewport: &mut Viewport3D,
+) -> bool {
+    match gdscene::world_environment::runtime_environment_3d(tree, Some(camera)) {
+        Some(env) => {
+            viewport.environment.environment = env;
+            viewport.environment.authored = true;
+            true
+        }
+        None => false,
+    }
 }
 
 /// `true` for a render item that exists only to make an invisible node visible in
@@ -2938,6 +3035,8 @@ pub fn render_game_3d_frame(tree: &SceneTree, width: u32, height: u32) -> Option
     // no selection outline can leak in either.
     viewport.grid.visible = false;
     viewport.show_origin = false;
+    // The scene's own environment, not the editor preview (pat-mgixk.51).
+    apply_runtime_environment_3d(tree, camera, &mut viewport);
 
     let inputs = game_3d_render_inputs(tree, camera, &viewport);
     Some(render_editor_3d_frame_from_inputs(&viewport, &inputs))

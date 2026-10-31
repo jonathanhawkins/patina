@@ -82,15 +82,34 @@ const H: u32 = 72;
 /// z = +1.0 — between the camera at +2 and the mesh at the origin — so it is
 /// unambiguously inside the frustum. That placement is the point: a marker
 /// off-screen would make the frame comparison pass for the wrong reason.
+/// The three non-visual nodes whose marker cubes must vanish from a game frame
+/// and survive in the editor viewport.
+///
+/// 🔑 **They are offset to x = 0.6, and that is load-bearing.** With all three
+/// at the origin's z = 1 they shared a transform with `Splat`, the `Decal` that
+/// is present in BOTH arms of the control — and a Decal is a `Node3D`, so
+/// `collect_scene_content` admits it (no exclusion for Decal/VisualInstance) and
+/// `render_item_for` falls through to `Primitive { Box }` for any class without
+/// "Camera"/"Light" in its name. The Decal painted its own grey cube at exactly
+/// this spot, coincident with the markers, so REMOVING the markers changed no
+/// pixel and the editor-side control passed vacuously — it reported "all 6912
+/// pixels match", i.e. the thing it varies was being supplied by something else.
+///
+/// ⚠️ x = 0.6 rather than a rounder 0.9: at the default 75 deg VERTICAL fov the
+/// half-extent at distance 1 is tan(37.5) = 0.767, so 1.02 horizontally at
+/// 96x72 — a 0.4-wide cube at 0.9 would span [0.7, 1.1] and clip. At 0.6 it
+/// spans [0.4, 0.8], while the Box's near face covers only screen |x| <= 0.33
+/// and the Decal's cube only |x| <= 0.2. So these are measured against the
+/// BACKGROUND, with nothing else able to refill them.
 const MARKERS: &str = r#"
 [node name="Pivot" type="Node3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.6, 0, 1)
 
 [node name="Mark" type="Marker3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.6, 0, 1)
 
 [node name="Zone" type="Area3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.6, 0, 1)
 "#;
 
 /// A lit mesh at the origin with a `Camera3D` two units down +Z looking at it
@@ -118,8 +137,16 @@ current = true
     )
 }
 
-/// Returns the tree, the scene root, and the mesh-less `MeshInstance3D` whose
-/// `Box` placeholder must survive the strip.
+/// Returns the tree, the scene root, and the `MeshInstance3D` whose REAL mesh
+/// (`mesh = "primitive:BoxMesh"`) must survive the strip.
+///
+/// ⚠️ An earlier revision of this fixture left that node mesh-LESS, and this
+/// comment still said so. Under the design this test pins, the two readings are
+/// opposites: a mesh-less `MeshInstance3D` stays `Render3DKind::Primitive` and
+/// is *correctly* stripped from a game frame, so taking the mesh away would make
+/// the "real scene content survives" assertion fail rather than pass. Read this
+/// as the warning it is — the doc comment that attempt 1 of this bead deleted
+/// ("box markers are kept: those stand in for scene content") was also right.
 fn fixture(with_markers: bool) -> (SceneTree, NodeId, NodeId) {
     // The render list filters on `is_class("Node3D")`, which reads the ClassDB.
     // Without this the 3D classes are unknown, the list comes back EMPTY, and
@@ -137,10 +164,95 @@ fn fixture(with_markers: bool) -> (SceneTree, NodeId, NodeId) {
     (tree, scene_root, mesh)
 }
 
+/// The EDITOR render list (markers NOT stripped), rendered with the editor's own
+/// chrome turned OFF.
+///
+/// 🔑 `grid.visible = false` and `show_origin = false` are the whole point, and
+/// they STRENGTHEN the clause below rather than weakening it. The editor draws
+/// its ground grid and its coloured origin axes **with no depth test**, over
+/// whatever geometry is behind them. The fixture's markers sit on the camera's
+/// forward axis, so they project to the exact centre of frame — which is also
+/// where the origin axes and the edge-on grid land. Chrome drawn with no depth
+/// test can only ever MASK a difference between the two frames, never create
+/// one, so leaving it on makes "the frames match" ambiguous between "the markers
+/// drew nothing" and "the markers drew and the chrome painted over both".
+///
+/// Turning it off is exactly what `render_game_3d_frame` does for the game path
+/// (`viewport.grid.visible = false; viewport.show_origin = false;`), so this is
+/// the same viewport configuration, differing from the game frame only in that
+/// the render list is UNSTRIPPED — which is the one variable the clause is about.
+///
+/// ⚠️ This is also why the sibling clause in `shaded_box_tscn`'s file renders
+/// through `render_game_3d_frame`: an earlier revision of THAT test asserted a
+/// control had zero red-dominant pixels and failed with 28, because the editor's
+/// red X axis is alpha-blended over the thing under test.
 fn editor_frame(tree: &SceneTree) -> Vec<gdcore::math::Color> {
     let camera = current_camera3d(tree).expect("fixture has a current Camera3D");
-    let viewport = viewport_for_scene_camera(tree, camera, W, H);
+    let mut viewport = viewport_for_scene_camera(tree, camera, W, H);
+    viewport.grid.visible = false;
+    viewport.show_origin = false;
     render_editor_3d_frame(&viewport, tree).pixels
+}
+
+/// Number of distinct colours in `pixels`, capped at `cap`.
+///
+/// A frame of one flat colour compares equal to any other frame of that same
+/// colour, so a difference assertion over two such frames is vacuous. The game
+/// clause has had this guard from the start; the editor clause did not, which is
+/// why its failure could not be read.
+fn distinct_colours(pixels: &[gdcore::math::Color], cap: usize) -> usize {
+    let mut seen: Vec<gdcore::math::Color> = Vec::new();
+    for px in pixels {
+        if !seen.iter().any(|c| c == px) {
+            seen.push(*px);
+        }
+        if seen.len() >= cap {
+            break;
+        }
+    }
+    seen.len()
+}
+
+/// Indices where two equal-length frames differ.
+///
+/// 🔑 THE REASON THIS EXISTS IS DIAGNOSABILITY, not style. The frame clauses
+/// below used to be `assert_eq!(a.pixels, b.pixels, "...")` over 96x72 = 6912
+/// `Color`s. On a failure that Debug-prints ~13800 lines, and the verifier
+/// captures only a TAIL of the output — so the custom message and the
+/// `file:line`, which `assert_eq!` prints FIRST, scrolled out every single time.
+/// Three separate runs of this test, under three different implementations, left
+/// nothing in the log but the end of a `Vec<Color>` dump with the same
+/// `r: 0.2433896, g: 0.20244378, b: 0.15651318` tail, and a
+/// `grep -E "assertion|left|right|panicked"` over the whole captured window
+/// returned NOTHING. The test was unfalsifiable in practice.
+///
+/// Returning indices lets the assertions report a COUNT plus the first offending
+/// pixel's coordinates and the two colours — a one-line diagnosis — while
+/// bounding the output to a constant. Test-only, so it cannot move the red
+/// check.
+fn differing_pixels(a: &[gdcore::math::Color], b: &[gdcore::math::Color]) -> Vec<usize> {
+    a.iter()
+        .zip(b.iter())
+        .enumerate()
+        .filter(|(_, (x, y))| x != y)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// `(count, "first difference at (x, y): <a> vs <b>")` for a failure message.
+fn diff_report(a: &[gdcore::math::Color], b: &[gdcore::math::Color]) -> (usize, String) {
+    let diff = differing_pixels(a, b);
+    let detail = match diff.first() {
+        Some(&i) => format!(
+            "first at index {i} = ({}, {}): {:?} vs {:?}",
+            i % (W as usize),
+            i / (W as usize),
+            a[i],
+            b[i]
+        ),
+        None => "no pixel differs".to_string(),
+    };
+    (diff.len(), detail)
 }
 
 fn shape_count(items: &[Render3DItem], want: PrimitiveShape) -> usize {
@@ -173,46 +285,24 @@ fn play3d_no_marker_cubes() {
     // -- guard: the frame has real content ----------------------------------
     //
     // Two flat background images would compare equal and prove nothing.
-    let distinct = {
-        let mut seen: Vec<gdcore::math::Color> = Vec::new();
-        for px in &game_with.pixels {
-            if !seen.iter().any(|c| c == px) {
-                seen.push(*px);
-            }
-            if seen.len() > 1 {
-                break;
-            }
-        }
-        seen.len()
-    };
+    let distinct = distinct_colours(&game_with.pixels, 2);
     assert!(
         distinct > 1,
         "the game frame must show the lit mesh against the background, not one \
          flat colour — otherwise frame equality below is vacuous",
     );
 
-    // -- (1) the markers contribute NOTHING to a game frame ------------------
-    assert_eq!(
-        (game_with.width, game_with.height),
-        (game_without.width, game_without.height),
-    );
-    assert_eq!(
-        game_with.pixels, game_without.pixels,
-        "a Play frame with a Node3D pivot, Marker3D, Area3D and Decal in front \
-         of the mesh must be pixel-identical to the same scene without them",
-    );
-
-    // -- (2) …and they really were in view, and the editor still shows them --
+    // -- (1) the strip removed them, not the collection step -----------------
     //
-    // This is what rules out "the frames matched because nothing was drawn".
-    assert_ne!(
-        editor_frame(&with),
-        editor_frame(&without),
-        "the EDITOR frame must still draw the markers; if these match, the \
-         marker nodes were never visible and assertion (1) proved nothing",
-    );
-
-    // -- (3) the strip removed them, not the collection step -----------------
+    // 🔑 ORDERED FIRST on purpose. These are the deterministic, chrome-free
+    // claims: they read the render LISTS, so a failure names the node and the
+    // shape instead of a pixel count. The frame comparisons below are the
+    // observable confirmation, but they are also the noisier signal — a
+    // failure there with these passing says the lists are right and something
+    // outside the item list (lighting, `env_effects`, the editor's own grid
+    // and depth-test-free origin axes) moved the pixels. Running them last is
+    // what makes that distinction readable in one log line; with the old
+    // order, a frame failure aborted the test before any list was inspected.
     let camera = current_camera3d(&with).expect("current camera");
     let viewport = viewport_for_scene_camera(&with, camera, W, H);
     let editor_items = editor_3d_render_inputs(&viewport, &with).items;
@@ -266,5 +356,53 @@ fn play3d_no_marker_cubes() {
     assert!(
         !game_items.iter().any(|item| item.node_id == splat.raw()),
         "the Decal must contribute no render item to a game frame",
+    );
+
+    // -- (2) the markers contribute NOTHING to a game frame ------------------
+    assert_eq!(
+        (game_with.width, game_with.height),
+        (game_without.width, game_without.height),
+    );
+    let (game_diff_count, game_diff_detail) = diff_report(&game_with.pixels, &game_without.pixels);
+    assert_eq!(
+        game_diff_count,
+        0,
+        "a Play frame with a Node3D pivot, Marker3D, Area3D and Decal in front \
+         of the mesh must be pixel-identical to the same scene without them; \
+         {game_diff_count} of {} pixels differ, {game_diff_detail}",
+        game_with.pixels.len(),
+    );
+
+    // -- (3) …and they really were in view, and the editor still shows them --
+    //
+    // This is what rules out "the frames matched because nothing was drawn".
+    let editor_with = editor_frame(&with);
+    let editor_without = editor_frame(&without);
+    // 🔑 GUARD FIRST, so a failure below is readable. Without this, "the two
+    // editor frames match" has two very different causes and the log cannot tell
+    // them apart: the markers drew nothing, or the editor frame drew nothing at
+    // all (which would make the clause a statement about the editor's camera
+    // setup rather than about this bead). The game clause has always had the
+    // equivalent guard.
+    let editor_palette = distinct_colours(&editor_with, 2);
+    assert!(
+        editor_palette > 1,
+        "the EDITOR frame must show scene geometry against the background, not \
+         one flat colour — otherwise the difference assertion below is vacuous. \
+         A flat frame here means the editor render produced nothing for this \
+         fixture's camera, which is a different defect from the one this bead \
+         is about",
+    );
+    let (editor_diff_count, editor_diff_detail) = diff_report(&editor_with, &editor_without);
+    assert!(
+        editor_diff_count > 0,
+        "the EDITOR frame must still draw the markers; all {} pixels match \
+         ({editor_diff_detail}), which means the marker nodes were never \
+         visible and assertion (2) proved nothing. The grid and origin axes are \
+         OFF for this render and the frame is confirmed non-flat by the guard \
+         above, so editor chrome masking the difference is already excluded — a \
+         failure here is the `Primitive {{ Box }}` draw itself not reaching \
+         pixels, even though clause (1) proved the items are in this very list",
+        editor_with.len(),
     );
 }

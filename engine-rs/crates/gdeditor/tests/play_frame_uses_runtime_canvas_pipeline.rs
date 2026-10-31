@@ -72,6 +72,38 @@ const SCALE: f32 = 2.0;
 ///   that distinguishes a flattened group from per-child blending.
 /// * `Wall` + `Lamp` — a Sprite2D with a CanvasTexture normal map beside a
 ///   PointLight2D.
+/// * `Snap` — the ONLY node whose origin lands on an exact HALF pixel, and the
+///   whole reason clause 5 can observe anything.
+///
+///   🔑 Snapping is a no-op at almost every offset, and that is a property of
+///   this rasterizer rather than a gap in it: `fill_rect_transformed`
+///   (`gdrender2d/src/draw.rs`) samples at pixel CENTRES against a binary
+///   inside/outside test, so an edge is always hard and there is no partial
+///   coverage to move. The first covered column is `ceil(ox - 0.5)` unsnapped
+///   and `floor(ox + 0.5)` snapped, and those agree for every `ox` **except an
+///   exact half-integer**. `tests/canvas_quality.rs` documents this and pins it
+///   in `snap_changes_the_raster_at_a_half_pixel_origin` (10.5 -> column 10
+///   unsnapped, 11 snapped); that test is the reference this node copies.
+///
+///   So the fraction has to survive the 2x stretch AS a half: canvas
+///   **160.25 -> final 320.5**. An earlier revision used 160.4, which stretches
+///   to 320.8 — one of the offsets where the two formulas agree, so it provably
+///   could not change a pixel, and clause 5 failed identically with it in place.
+///   Every other node sits on a whole canvas pixel (10, 100, 110, 230, 60), so
+///   without this one the snapped and unsnapped frames are identical however
+///   correctly `CanvasQuality` is wired — which is what clause 5 was really
+///   failing on, not the "settings were never read" its message suggests.
+///
+///   ⚠️ A ColorRect, not a Sprite2D: the rule above was measured on
+///   `fill_rect_transformed`, the ColorRect path. The acceptance text names "a
+///   Sprite2D at x=10.4", but 10.4 cannot work for the reason above and a
+///   sprite blit is a different sampler, so this follows the proven path.
+///   `y = 130` stays whole, so only the x axis moves.
+///
+///   Placed in EMPTY canvas space (x 160.25..180.25, y 130..150): clear of
+///   `Plate` (10..20), the group rects (100..130), `Patch` (x <= 92), `Wall`
+///   (x >= 198) and every sampled band, so it cannot perturb clauses 1-4; and it
+///   is in both arms of clause 2's differential, so it cancels there.
 /// * `Patch` — a Sprite2D with a NoiseTexture2D.
 const SCENE: &str = r#"[gd_scene load_steps=5 format=3]
 
@@ -118,6 +150,11 @@ energy = 4.0
 [node name="Patch" type="Sprite2D" parent="."]
 position = Vector2(60, 130)
 texture = SubResource("NoiseTexture2D_1")
+
+[node name="Snap" type="ColorRect" parent="."]
+position = Vector2(160.25, 130)
+size = Vector2(20, 20)
+color = Color(1, 1, 1, 1)
 "#;
 
 /// `window/stretch/mode=canvas_items` with the 320x180 base, and the snap flag

@@ -30,6 +30,33 @@ impl LifecycleManager {
     /// 1. `ENTER_TREE` top-down (parent first, then children depth-first).
     /// 2. `READY` bottom-up (deepest children first, then parent).
     pub fn enter_tree(tree: &mut SceneTree, subtree_root: NodeId) {
+        Self::enter_tree_skipping_ready(tree, subtree_root, &[]);
+    }
+
+    /// [`enter_tree`](Self::enter_tree), but READY is **not** delivered to any
+    /// node listed in `skip_ready` (pat-mgixk.406).
+    ///
+    /// 🔑 For `SceneTree::reparent`. Godot fires EXIT_TREE/ENTER_TREE for a moved
+    /// subtree but does **not** re-run READY — `_propagate_ready` notifies a node
+    /// only once, re-armable through `Node.request_ready()`
+    /// (`scene/main/node.cpp`). Without this, every reparent replayed `_ready`
+    /// for the whole moved subtree, and the editor's drag-reparent re-ran user
+    /// callbacks.
+    ///
+    /// ⚠️ The filter is a PARAMETER rather than a check on the node's own ready
+    /// flag, and that distinction is the whole design. Patina's hosts assemble a
+    /// tree with `add_child` — which readies each node immediately — and only
+    /// then attach scripts, relying on a second `enter_tree` pass to deliver
+    /// `_ready` to the scripts that were not there the first time.
+    /// `EngineBootstrap::init_lifecycle` does exactly that for the main scene.
+    /// A node-level "already ready, skip" guard therefore silently stops `_ready`
+    /// running at boot; only the CALLER knows whether a pass is a re-entry or a
+    /// first real dispatch.
+    pub fn enter_tree_skipping_ready(
+        tree: &mut SceneTree,
+        subtree_root: NodeId,
+        skip_ready: &[NodeId],
+    ) {
         // Phase 1: ENTER_TREE — top-down.
         let mut top_down = Vec::new();
         tree.collect_subtree_top_down(subtree_root, &mut top_down);
@@ -79,31 +106,9 @@ impl LifecycleManager {
         tree.collect_subtree_bottom_up(subtree_root, &mut bottom_up);
 
         for &id in &bottom_up {
-            // 🔑 READY RUNS ONCE PER NODE (pat-mgixk.406). Godot's
-            // `Node::_propagate_ready` notifies READY only for a node that has
-            // not been readied yet, re-armable through `Node.request_ready()`
-            // (`scene/main/node.cpp`); entering the tree again fires
-            // EXIT_TREE/ENTER_TREE but **not** READY.
-            //
-            // Without this guard every re-entry replayed `_ready`, and re-entry
-            // is not a rare event:
-            //
-            // * `SceneTree::reparent` ends by calling this function, so any
-            //   reparent re-ran `_ready` for the whole moved subtree.
-            // * `SceneTreeAccessor::add_child` routes an ALREADY-PARENTED node
-            //   through `reparent`, and `instantiate_packed_scene` parents its
-            //   result under the root — so the ordinary GDScript idiom
-            //   `var e = scene.instantiate(); add_child(e)` ran the child's
-            //   `_ready` twice.
-            // * The editor's drag-reparent runs user callbacks a second time too.
-            //
-            // ⚠️ Guarding HERE rather than special-casing `reparent` is what
-            // makes the rule Godot's: it is a property of the node, not of the
-            // call path, so every present and future re-entry point inherits it,
-            // and `request_ready()` keeps working because it clears the same
-            // flag this reads. The two rewind helpers below also clear it
-            // deliberately, which is how a premature pass is allowed to re-run.
-            if tree.get_node(id).is_some_and(|n| n.is_ready()) {
+            // Caller-supplied re-entry filter (pat-mgixk.406); empty for every
+            // ordinary `enter_tree`.
+            if skip_ready.contains(&id) {
                 continue;
             }
             tree.trace_record(id, TraceEventType::Notification, "READY");
@@ -221,20 +226,7 @@ impl LifecycleManager {
         for &id in &bottom_up {
             tree.trace_record(id, TraceEventType::Notification, "EXIT_TREE");
             if let Some(node) = tree.get_node_mut(id) {
-                // 🔑 The ready flag SURVIVES leaving the tree (pat-mgixk.406).
-                // Godot's `_propagate_exit_tree` clears `inside_tree` but NOT
-                // `data.ready_notified` — only `Node.request_ready()` does
-                // (`scene/main/node.cpp`). That is precisely what makes "_ready
-                // runs once per node" hold across a re-entry.
-                //
-                // ⚠️ Clearing it here made the ready-once guard in `enter_tree`
-                // inert for the case it exists for: `SceneTree::reparent` runs
-                // `exit_tree` and then `enter_tree`, so the flag was false again
-                // by the time the guard read it and `_ready` replayed anyway.
-                // The two changes are one fix and neither works alone.
-                //
-                // `rewind_for_redispatch` still clears the flag explicitly —
-                // that is a deliberate rewind of a premature pass, not an exit.
+                node.set_ready(false);
                 node.set_inside_tree(false);
                 node.receive_notification(NOTIFICATION_EXIT_TREE);
             }
@@ -609,16 +601,6 @@ mod tests {
             ]
         );
         assert!(!tree.get_node(child1_id).unwrap().is_inside_tree());
-        // ⚠️ REVISED for pat-mgixk.406: this asserted `!is_ready()`, which
-        // encoded Patina's old behaviour of clearing the flag on EXIT_TREE.
-        // Godot keeps `ready_notified` set after a node leaves the tree —
-        // `Node.is_node_ready()` keeps reporting true, and only
-        // `request_ready()` re-arms it. Keeping the flag is what stops a
-        // reparent replaying `_ready`.
-        assert!(
-            tree.get_node(child1_id).unwrap().is_ready(),
-            "the ready flag must survive EXIT_TREE: _ready has run for this \
-             node and only request_ready() may undo that"
-        );
+        assert!(!tree.get_node(child1_id).unwrap().is_ready());
     }
 }

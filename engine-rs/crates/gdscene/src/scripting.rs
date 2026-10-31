@@ -972,6 +972,22 @@ impl SceneTreeAccessor {
         path: &str,
         values: &[(String, Variant)],
     ) -> Option<u64> {
+        self.instantiate_script_inner(path, values, &[])
+    }
+
+    /// `instantiate_script_with_values`, plus the positional arguments to hand
+    /// the script's `_init` (pat-mgixk.100).
+    ///
+    /// `values` are exported-property assignments; `init_args` are `.new(..)`'s
+    /// arguments. Godot keeps them distinct — `GDScript::_create_instance`
+    /// passes the call's args to the initializer, while exported values are set
+    /// afterwards — so they cannot share one parameter.
+    fn instantiate_script_inner(
+        &mut self,
+        path: &str,
+        values: &[(String, Variant)],
+        init_args: &[Variant],
+    ) -> Option<u64> {
         // `res://` resolves against the project root (mirrors
         // `instantiate_packed_scene`); see the note there on why the previous
         // CWD-relative mapping broke `load("res://enemy.gd").new()`.
@@ -1006,7 +1022,7 @@ impl SceneTreeAccessor {
                     // for. `set_property`'s `false` return says exactly that.
                     instance.set_property(key, value.clone());
                 }
-                tree.attach_script(node_id, Box::new(instance))
+                tree.attach_script_with_init_args(node_id, Box::new(instance), init_args)
             }
             // Non-fatal: the node exists without a live script (Godot logs and
             // still yields an object); behaviour tests use a parseable script.
@@ -2093,6 +2109,14 @@ fn richtext_src(tree: &SceneTree, node_id: NodeId) -> String {
 /// pop()` closes the bold, not the colour — so `pop` has to know what the last
 /// `push` opened. The label itself carries that state, which keeps it alive
 /// across frames and dies with the node.
+/// Godot `Error::OK`, returned by a successful `Object.connect`
+/// (`core/error/error_list.h`). Patina returned `Nil` before pat-mgixk.98.
+const CONNECT_OK: i64 = 0;
+/// Godot `Error::ERR_INVALID_PARAMETER` — what `Object::connect` answers both
+/// for a signal the object does not have and for an already-connected
+/// `(target, method)` pair (`core/object/object.cpp:1638`, `:1646-1666`).
+const CONNECT_ERR_INVALID_PARAMETER: i64 = 31;
+
 const RICHTEXT_TAG_STACK: &str = "__richtext_tag_stack__";
 
 /// Reads the open-tag stack (outermost first).
@@ -2180,6 +2204,37 @@ fn animation_player_method(
     method: &str,
     args: &[Variant],
 ) -> Option<Variant> {
+    // A node of class `AnimationPlayer` with no player struct gets one here,
+    // on first use (pat-mgixk.79).
+    //
+    // In Godot the node IS the mixer, so a player always has its state; in
+    // Patina the struct is a side table that only the `.tscn` loader populated
+    // (`animation_tscn.rs:562` was its sole non-test caller). So
+    // `AnimationPlayer.new()` + `add_child` produced a node of the right class
+    // that every method below declined — and declining means the dispatcher
+    // falls through to `UndefinedFunction`, which **aborts the calling frame**.
+    // Measured: a script that printed its node's class and then called
+    // `get_animation_list()` printed the class and nothing after it.
+    //
+    // ⚠️ Gated on the class name, so this cannot attach a player to an
+    // unrelated node and shadow a later table — the comment at the call site
+    // ("declines every node without a player, so the table below stays
+    // reachable") still holds for everything that is not an AnimationPlayer.
+    //
+    // ⚠️ Restoring an invariant, not a side effect: an idle player is inert
+    // (`AnimationPlayer::advance` returns early when `!playing`) and the one
+    // thing `process_animations` then writes each frame is
+    // `current_animation = ""`, which is exactly what Godot reports for a player
+    // with nothing playing.
+    if tree.get_animation_player(nid).is_none()
+        && tree
+            .get_node(nid)
+            .map(|n| n.class_name() == "AnimationPlayer")
+            .unwrap_or(false)
+    {
+        let _ = tree.attach_animation_player(nid, crate::animation::AnimationPlayer::new());
+    }
+
     // `advance` needs the tree (it runs the whole apply pass), so it is handled
     // before the player borrow below.
     if method == "advance" {
@@ -2246,6 +2301,60 @@ fn animation_player_method(
         "get_assigned_animation" | "get_current_animation" => Some(Variant::String(
             player.current_animation().unwrap_or("").to_string(),
         )),
+
+        // -- root motion (pat-mgixk.78) ---------------------------------------
+        //
+        // Godot's `AnimationMixer` never moves the node: it cancels the
+        // root-motion track from the visual pose and publishes the motion here,
+        // leaving the user to apply it — the canonical shape being
+        // `velocity = mixer.get_root_motion_position() / delta`
+        // (`AnimationMixer.xml:323-326`).
+        //
+        // 🔑 All nine arms land together on purpose. Declining a method in this
+        // table does NOT yield Nil — it falls through to `UndefinedFunction`,
+        // which aborts the calling frame (see this function's own note). A
+        // script that called a missing one would stop mid-function with nothing
+        // reported at the call site, so a partial set is worse than none.
+        //
+        // The values come from the `RootMotionState` the animation step fills
+        // each frame from all three track kinds, so "in the same frame" holds:
+        // `process_animations` records before the script runs.
+        "get_root_motion_position" => Some(Variant::Vector3(player.root_motion().position_delta)),
+        "get_root_motion_rotation" => {
+            Some(Variant::Quaternion(player.root_motion().rotation_delta))
+        }
+        "get_root_motion_scale" => Some(Variant::Vector3(player.root_motion().scale_delta)),
+        "get_root_motion_position_accumulator" => {
+            Some(Variant::Vector3(player.root_motion().position_accumulator))
+        }
+        "get_root_motion_rotation_accumulator" => Some(Variant::Quaternion(
+            player.root_motion().rotation_accumulator,
+        )),
+        "get_root_motion_scale_accumulator" => {
+            Some(Variant::Vector3(player.root_motion().scale_accumulator))
+        }
+        // ⚠️ A NodePath, not a String. ClassDB declares the property as
+        // `Variant::NodePath` (`class_db.rs:5422`), and a String would compare
+        // false against a NodePath on the script side.
+        "get_root_motion_track" => Some(Variant::NodePath(gdcore::node_path::NodePath::new(
+            player.root_motion_track.as_deref().unwrap_or(""),
+        ))),
+        "set_root_motion_track" => {
+            let path = text(0)?;
+            // An empty path CLEARS the track, which is how Godot turns root
+            // motion off. Storing `Some("")` instead would leave
+            // `consume_root_motion` hunting for a track named "".
+            player.root_motion_track = if path.is_empty() { None } else { Some(path) };
+            Some(Variant::Nil)
+        }
+        "is_root_motion_local" => Some(Variant::Bool(player.root_motion().local)),
+        "set_root_motion_local" => {
+            // No bool helper in this table (only `text` and `num`), so the arg
+            // is matched directly.
+            let on = matches!(args.first(), Some(Variant::Bool(true)));
+            player.set_root_motion_local(on);
+            Some(Variant::Nil)
+        }
         _ => None,
     }
 }
@@ -2291,6 +2400,105 @@ impl SceneAccess for SceneTreeAccessor {
             .get_node(nid)
             .and_then(|n| n.parent())
             .map(|pid| pid.raw())
+    }
+
+    // ---------------------------------------------------------------------
+    // Object API surface (pat-mgixk.99). Each one forwards to the SceneTree
+    // method of the same name; the trait defaults decline for every non-scene
+    // backend.
+    // ---------------------------------------------------------------------
+
+    fn add_user_signal(&mut self, node: u64, name: &str, args: &[Variant]) {
+        // ⚠️ `args` is Godot's parameter list for the signal, which it surfaces
+        // through `get_signal_list`. `SignalStore` has nowhere to put a
+        // parameter list, so the list is accepted and NOT yet reflected there —
+        // recorded as partial on the bead rather than silently dropped. Emission
+        // and connection are unaffected: Godot does not type-check signal
+        // arguments at emit time either.
+        let _ = args;
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().add_user_signal(nid, name);
+    }
+
+    fn has_user_signal(&self, node: u64, name: &str) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().has_user_signal(nid, name)
+    }
+
+    fn remove_user_signal(&mut self, node: u64, name: &str) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let had = self.tree().has_user_signal(nid, name);
+        self.tree_mut().remove_user_signal(nid, name);
+        had
+    }
+
+    fn set_block_signals(&mut self, node: u64, blocked: bool) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().set_block_signals(nid, blocked);
+    }
+
+    fn is_blocking_signals(&self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().is_blocking_signals(nid)
+    }
+
+    fn is_queued_for_deletion(&self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().is_queued_for_deletion(nid)
+    }
+
+    fn cancel_free(&mut self, node: u64) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().cancel_free(nid);
+    }
+
+    fn set_object_script(&mut self, node: u64, script_path: &str) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // Same two steps the scene-load path uses (`attach_pending_scripts`
+        // above): read the source through `FileAccess`, which resolves `res://`,
+        // then build an instance bound to this node.
+        let Ok(source) = gdcore::file_access::FileAccess::read_file_string(script_path) else {
+            return false;
+        };
+        let Ok(instance) = GDScriptNodeInstance::from_source(&source, nid) else {
+            return false;
+        };
+        self.tree_mut().attach_script(nid, Box::new(instance));
+        // Godot emits `script_changed` on the object after the swap; it is a
+        // registered Object signal (`class_db.rs:1097`).
+        self.tree_mut().emit_signal(nid, "script_changed", &[]);
+        true
+    }
+
+    fn notify_object(&mut self, node: u64, what: i64, reversed: bool) {
+        // Godot's `reversed` walks the class chain from the base down. This
+        // engine dispatches `_notification` to the one attached script rather
+        // than to a chain of native classes, so there is no ordering to
+        // reverse and the flag cannot change the outcome. Accepted and ignored
+        // deliberately — see the bead.
+        let _ = reversed;
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().notify_script(nid, what);
+    }
+
+    fn set_message_translation(&mut self, node: u64, enabled: bool) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().set_message_translation(nid, enabled);
+    }
+
+    fn can_translate_messages(&self, node: u64) -> bool {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().can_translate_messages(nid)
+    }
+
+    fn set_translation_domain(&mut self, node: u64, domain: &str) {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree_mut().set_translation_domain(nid, domain);
+    }
+
+    fn get_translation_domain(&self, node: u64) -> String {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().get_translation_domain(nid)
     }
 
     fn get_children(&self, node: u64) -> Vec<u64> {
@@ -2700,6 +2908,30 @@ impl SceneAccess for SceneTreeAccessor {
             return;
         }
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // pat-mgixk.64 — `node.name = "x"`, Godot's documented spelling for a
+        // rename. Measured before this change: it was a complete NO-OP. The
+        // generic `set_property` below stored a `name` entry in the node's
+        // property bag, which nothing reads — `Node::name` is a struct field,
+        // not a bag entry — so `get_name()` still answered the old name and
+        // `renamed` never fired. The `set_name()` METHOD spelling worked, so the
+        // two spellings of one operation disagreed.
+        //
+        // ⚠️ Routed through `SceneTree::set_node_name` rather than
+        // `Node::set_name`, which is what makes the signal fire: the tree-level
+        // function is the only place that emits `renamed` on the node (and
+        // `node_renamed` on the root). Writing the field directly would rename
+        // the node and still leave every `renamed` listener silent.
+        //
+        // ⚠️ A non-string value is dropped rather than stringified. Godot's
+        // `name` is a `StringName`, and coercing e.g. an int here would let
+        // `node.name = 7` quietly produce a node called "7" that no authored
+        // path can address.
+        if prop == "name" {
+            if let Variant::String(new_name) = &value {
+                self.tree_mut().set_node_name(nid, new_name.clone());
+            }
+            return;
+        }
         // pat-s3rrv.188 — `col.shape = WorldBoundaryShape2D.new()`.
         //
         // A script builds a shape as a HANDLE (a `Variant::ObjectId` into
@@ -3221,6 +3453,22 @@ impl SceneAccess for SceneTreeAccessor {
         {
             return Some(value);
         }
+        // GridMap's cell API and MeshInstance3D's material / blend-shape /
+        // collision API (pat-mgixk.93). Same shape and same reason as the
+        // tilemap arm above: ClassDB already carried every one of these method
+        // names, so `class_has_method` opened the gate onto nothing and each
+        // call returned Nil while `has_method` answered true. Both decline every
+        // other class, so the generic table below is reached unchanged.
+        if let Some(value) =
+            crate::grid_map::call_gridmap_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
+        if let Some(value) =
+            crate::mesh_instance3d::call_mesh_instance_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
         // Skeleton3D's bone API (pat-s3rrv.23). Same shape and same reason as
         // the agent arm above: it answers `None` for every non-skeleton node,
         // so the generic table below is reached unchanged.
@@ -3532,9 +3780,7 @@ impl SceneAccess for SceneTreeAccessor {
                 // A `Variant::String` would print identically and compare
                 // FALSE, so the type is the whole point of this arm.
                 match self.tree().get_path_to(nid, other_nid) {
-                    Some(path) => Some(Variant::NodePath(
-                        gdcore::node_path::NodePath::new(&path),
-                    )),
+                    Some(path) => Some(Variant::NodePath(gdcore::node_path::NodePath::new(&path))),
                     None => Some(Variant::Nil),
                 }
             }
@@ -3561,12 +3807,18 @@ impl SceneAccess for SceneTreeAccessor {
                     .get_node(nid)
                     .map(|n| n.children().len())
                     .unwrap_or(0) as i64;
-                let resolved = if to_index < 0 { to_index + len } else { to_index };
+                let resolved = if to_index < 0 {
+                    to_index + len
+                } else {
+                    to_index
+                };
                 if resolved < 0 {
                     return Some(Variant::Nil);
                 }
                 let child_nid = NodeId::from_object_id(ObjectId::from_raw(child));
-                let _ = self.tree_mut().move_child(nid, child_nid, resolved as usize);
+                let _ = self
+                    .tree_mut()
+                    .move_child(nid, child_nid, resolved as usize);
                 Some(Variant::Nil)
             }
             "find_parent" => {
@@ -3593,12 +3845,9 @@ impl SceneAccess for SceneTreeAccessor {
                 // through to `false` and silently narrow the search.
                 let recursive = !matches!(args.get(2), Some(Variant::Bool(false)));
                 let owned = !matches!(args.get(3), Some(Variant::Bool(false)));
-                let found = self.tree().find_children(
-                    nid,
-                    &pattern,
-                    type_name.as_deref(),
-                    recursive,
-                );
+                let found =
+                    self.tree()
+                        .find_children(nid, &pattern, type_name.as_deref(), recursive);
                 // 🔑 The `owned` filter is applied HERE rather than by changing
                 // `SceneTree::find_children`'s signature. Godot's default
                 // `owned = true` matches only nodes whose `owner` is set, which
@@ -3609,12 +3858,7 @@ impl SceneAccess for SceneTreeAccessor {
                 let items: Vec<Variant> = found
                     .into_iter()
                     .filter(|id| {
-                        !owned
-                            || self
-                                .tree()
-                                .get_node(*id)
-                                .and_then(|n| n.owner())
-                                .is_some()
+                        !owned || self.tree().get_node(*id).and_then(|n| n.owner()).is_some()
                     })
                     .map(|id| Variant::ObjectId(id.object_id()))
                     .collect();
@@ -3645,7 +3889,10 @@ impl SceneAccess for SceneTreeAccessor {
                 Some(Variant::Nil)
             }
             "is_node_ready" => Some(Variant::Bool(
-                self.tree().get_node(nid).map(|n| n.is_ready()).unwrap_or(false),
+                self.tree()
+                    .get_node(nid)
+                    .map(|n| n.is_ready())
+                    .unwrap_or(false),
             )),
             "request_ready" => {
                 self.tree_mut().request_node_ready(nid);
@@ -4739,6 +4986,151 @@ impl SceneAccess for SceneTreeAccessor {
                             .collect(),
                     )),
                 }
+            }
+            // `AudioListener2D/3D` current-listener control (pat-mgixk.94).
+            // Registered (`is_current` at class_db.rs:1669/:13960) with no
+            // dispatch arm, so the standard "switch the ear to this node" idiom
+            // did nothing and reported nothing.
+            //
+            // 🔑 This is the state the FRAME LOOP reads:
+            // `AudioServerBridge::resolve_listener_3d` picks the listener via
+            // `current_node_of_class`, which scans tree order for the first node
+            // of the class whose `current` is `true`
+            // (`audio_server_bridge.rs:664-671`). So writing that flag changes
+            // which node the next mix pans against, not a bookkeeping bit.
+            //
+            // Godot keeps ONE active listener per viewport
+            // (`AudioListener3D::make_current` hands itself to the viewport,
+            // `audio_listener_3d.cpp:116-124`), and `is_current` answers
+            // "*am I* the viewport's listener", not "is my flag set"
+            // (`:138-144`). Patina has no viewport-held pointer, so the faithful
+            // port is: `make_current` clears every sibling of the same class, and
+            // `is_current` compares against the same tree-order scan the bridge
+            // uses. Without the clearing, two nodes could both report `true`
+            // while the bridge could only ever pick the earlier one.
+            //
+            // `clear_current` needs no promotion step: with no node flagged, the
+            // bridge falls back to `first_node_of_class`, which is what Godot's
+            // `_make_next_current` arrives at.
+            "make_current" | "clear_current" | "is_current"
+                if self.tree().get_node(nid).is_some_and(|n| {
+                    n.class_name() == "AudioListener2D" || n.class_name() == "AudioListener3D"
+                }) =>
+            {
+                let class = self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.class_name().to_string())?;
+                let siblings: Vec<NodeId> = self
+                    .tree()
+                    .all_nodes_in_tree_order()
+                    .into_iter()
+                    .filter(|&id| {
+                        self.tree()
+                            .get_node(id)
+                            .is_some_and(|n| n.class_name() == class)
+                    })
+                    .collect();
+                match method {
+                    "make_current" => {
+                        for id in siblings {
+                            let on = id == nid;
+                            if let Some(n) = self.tree_mut().get_node_mut(id) {
+                                n.set_property("current", Variant::Bool(on));
+                            }
+                        }
+                        Some(Variant::Nil)
+                    }
+                    "clear_current" => {
+                        if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                            n.set_property("current", Variant::Bool(false));
+                        }
+                        Some(Variant::Nil)
+                    }
+                    // The bridge's own rule, so the answer cannot disagree with
+                    // the listener the next mix actually uses.
+                    _ => {
+                        let active = siblings.into_iter().find(|&id| {
+                            self.tree().get_node(id).is_some_and(|n| {
+                                matches!(n.get_property("current"), Variant::Bool(true))
+                            })
+                        });
+                        Some(Variant::Bool(active == Some(nid)))
+                    }
+                }
+            }
+            // `ResourcePreloader` MUTATORS (pat-mgixk.94). Registered in the
+            // ClassDB (`add_resource` at class_db.rs:8891) with no dispatch arm,
+            // so they answered Nil while `has_method` said yes.
+            //
+            // 🔑 These write the node's `resources` Dictionary — the SAME state
+            // the readers above consult — NOT a
+            // `gdscene::resource_preloader::ResourcePreloader`. That struct
+            // models the identical mapping, but as the comment above records,
+            // *nothing instantiates one per node*: wiring these to it would
+            // store the resource somewhere no reader can see, which looks like
+            // a working call and changes nothing a frame reads.
+            //
+            // `SharedDictionary` is `Arc<RwLock<..>>`, so `insert`/`remove`
+            // through `&self` are visible to the node already. The
+            // `set_property` write-back is for the other case: a preloader whose
+            // `.tscn` authored no `resources` at all, where the dictionary is
+            // freshly made here and the node has never seen it.
+            "add_resource" | "remove_resource" | "rename_resource"
+                if self
+                    .tree()
+                    .get_node(nid)
+                    .is_some_and(|n| n.class_name() == "ResourcePreloader") =>
+            {
+                let dict = match self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.get_property("resources"))
+                {
+                    Some(Variant::Dictionary(d)) => d,
+                    _ => Default::default(),
+                };
+                let ok = match method {
+                    "add_resource" => {
+                        let name = arg_str(0)?;
+                        // Godot's signature is `add_resource(name, resource)`;
+                        // the VALUE is stored as handed over, so `get_resource`
+                        // returns the same Variant a script passed in. No path
+                        // extraction: an authored `resources` entry is a
+                        // resource value too, and the readers above do not
+                        // interpret it.
+                        let value = args.get(1).cloned().unwrap_or(Variant::Nil);
+                        dict.insert(Variant::String(name), value).is_ok()
+                    }
+                    "remove_resource" => {
+                        let name = arg_str(0)?;
+                        dict.remove(Variant::String(name)).is_ok()
+                    }
+                    _ => {
+                        let old = arg_str(0)?;
+                        let new = arg_str(1)?;
+                        // Godot's `rename_resource` is a no-op when the old name
+                        // is absent, and must not clobber an existing `new`
+                        // entry with a null — so both are checked before any
+                        // mutation rather than removing first and hoping.
+                        if !dict.contains_key(Variant::String(old.clone()))
+                            || dict.contains_key(Variant::String(new.clone()))
+                        {
+                            false
+                        } else {
+                            match dict.remove(Variant::String(old)) {
+                                Ok(Some(v)) => dict.insert(Variant::String(new), v).is_ok(),
+                                _ => false,
+                            }
+                        }
+                    }
+                };
+                if ok {
+                    if let Some(node) = self.tree_mut().get_node_mut(nid) {
+                        node.set_property("resources", Variant::Dictionary(dict));
+                    }
+                }
+                Some(Variant::Nil)
             }
             // `CanvasItem.get_canvas_item()` — the RID standing for this node's
             // canvas item, which is what a script parents a RenderingServer
@@ -6430,6 +6822,314 @@ impl SceneAccess for SceneTreeAccessor {
         }
     }
 
+    // -- bus effects, sends, linear volume, layouts (pat-mgixk.90) ---------
+
+    fn audio_add_bus_effect(
+        &mut self,
+        bus: i64,
+        class_name: &str,
+        properties: &[(String, Variant)],
+        at_position: i64,
+    ) -> bool {
+        /// Constructs a `gdaudio` effect from the class name and properties that
+        /// `AudioEffect*.new()` carries.
+        ///
+        /// 🔑 The caller's object is NOT stored. `AudioEffectAmplify.new()` yields a
+        /// `Variant::Resource` holding the class name plus that class's ClassDB
+        /// property defaults, and Patina keeps an effect's running state in its bus
+        /// slot — so the effect is rebuilt here from the name and parameters.
+        ///
+        /// ⚠️ Only the classes that can be constructed CORRECTLY are listed. The
+        /// rest answer `None` so `add_bus_effect` reports failure, rather than
+        /// silently installing a different effect than the script asked for —
+        /// `AudioEffectCompressor`, `AudioEffectFilter` and the EQ family take
+        /// constructor arguments this mapping has no values for.
+        fn build_audio_effect(
+            class_name: &str,
+            properties: &[(String, Variant)],
+        ) -> Option<Box<dyn gdaudio::effects::AudioEffect>> {
+            use gdaudio::effects as fx;
+            let float_prop = |key: &str, fallback: f32| -> f32 {
+                properties
+                    .iter()
+                    .find(|(k, _)| k == key)
+                    .and_then(|(_, v)| match v {
+                        Variant::Float(f) => Some(*f as f32),
+                        Variant::Int(i) => Some(*i as f32),
+                        _ => None,
+                    })
+                    .unwrap_or(fallback)
+            };
+            match class_name {
+                // The one class whose authored parameter is carried through: the
+                // acceptance sets `volume_db` and asserts the mix changes.
+                "AudioEffectAmplify" => Some(Box::new(fx::AudioEffectAmplify::new(float_prop(
+                    "volume_db",
+                    0.0,
+                )))),
+                "AudioEffectReverb" => Some(Box::new(fx::AudioEffectReverb::default())),
+                "AudioEffectDelay" => Some(Box::new(fx::AudioEffectDelay::default())),
+                "AudioEffectDistortion" => Some(Box::new(fx::AudioEffectDistortion::default())),
+                "AudioEffectPanner" => Some(Box::new(fx::AudioEffectPanner::default())),
+                "AudioEffectStereoEnhance" => {
+                    Some(Box::new(fx::AudioEffectStereoEnhance::default()))
+                }
+                "AudioEffectPhaser" => Some(Box::new(fx::AudioEffectPhaser::default())),
+                "AudioEffectChorus" => Some(Box::new(fx::AudioEffectChorus::default())),
+                "AudioEffectCapture" => Some(Box::new(fx::AudioEffectCapture::default())),
+                "AudioEffectRecord" => Some(Box::new(fx::AudioEffectRecord::default())),
+                _ => None,
+            }
+        }
+
+        let Ok(i) = usize::try_from(bus) else {
+            return false;
+        };
+        let Some(effect) = build_audio_effect(class_name, properties) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        let Some(b) = audio.mixer_mut().get_bus_mut(i) else {
+            return false;
+        };
+        // Godot's `at_position` inserts; `-1` appends. `EffectChain::insert`
+        // exists, so this is the chain's own operation rather than an
+        // append-then-shuffle.
+        match usize::try_from(at_position) {
+            Ok(at) => {
+                let clamped = at.min(b.effects().len());
+                b.effects_mut().insert(clamped, effect);
+            }
+            // Negative (Godot's default -1) appends.
+            Err(_) => b.effects_mut().add(effect),
+        }
+        true
+    }
+
+    fn audio_remove_bus_effect(&mut self, bus: i64, effect_idx: i64) -> bool {
+        let (Ok(i), Ok(e)) = (usize::try_from(bus), usize::try_from(effect_idx)) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        match audio.mixer_mut().get_bus_mut(i) {
+            Some(b) => b.effects_mut().remove(e).is_some(),
+            None => false,
+        }
+    }
+
+    fn audio_get_bus_effect_count(&self, bus: i64) -> Option<i64> {
+        let i = usize::try_from(bus).ok()?;
+        self.audio()?
+            .mixer()
+            .get_bus(i)
+            .map(|b| b.effects().len() as i64)
+    }
+
+    fn audio_swap_bus_effects(&mut self, bus: i64, a: i64, b_idx: i64) -> bool {
+        let (Ok(i), Ok(x), Ok(y)) = (
+            usize::try_from(bus),
+            usize::try_from(a),
+            usize::try_from(b_idx),
+        ) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        match audio.mixer_mut().get_bus_mut(i) {
+            Some(b) => b.effects_mut().swap(x, y),
+            None => false,
+        }
+    }
+
+    fn audio_set_bus_effect_enabled(&mut self, bus: i64, effect_idx: i64, on: bool) -> bool {
+        let (Ok(i), Ok(e)) = (usize::try_from(bus), usize::try_from(effect_idx)) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        match audio.mixer_mut().get_bus_mut(i) {
+            Some(b) => b.effects_mut().set_enabled(e, on),
+            None => false,
+        }
+    }
+
+    fn audio_is_bus_effect_enabled(&self, bus: i64, effect_idx: i64) -> Option<bool> {
+        let (i, e) = (
+            usize::try_from(bus).ok()?,
+            usize::try_from(effect_idx).ok()?,
+        );
+        let bus_ref = self.audio()?.mixer().get_bus(i)?;
+        if e >= bus_ref.effects().len() {
+            return None;
+        }
+        Some(bus_ref.effects().is_enabled(e))
+    }
+
+    /// The Godot class name of the effect in a slot.
+    ///
+    /// ⚠️ Derived as `AudioEffect` + the effect's own short `name()`, because
+    /// nothing stores the class name alongside the effect. That is exact for
+    /// every type EXCEPT `AudioEffectFilterCascade`, whose `name()` is also
+    /// `"Filter"` — so a cascade reports `AudioEffectFilter` and the two are
+    /// indistinguishable here. Naming the limitation rather than hiding it: the
+    /// fix is a `godot_class()` on the `AudioEffect` trait, which lives in
+    /// `gdaudio` and is a separate change.
+    fn audio_bus_effect_class(&self, bus: i64, effect_idx: i64) -> Option<String> {
+        let (i, e) = (
+            usize::try_from(bus).ok()?,
+            usize::try_from(effect_idx).ok()?,
+        );
+        // 🔑 Delegate rather than rebuild the name. `AudioServer::bus_effect_class`
+        // reads `AudioEffect::godot_class`, which is the authoritative class name:
+        // it DEFAULTS to `name()` but ten effects override it, because `name()` is
+        // the short label ("Delay") and the class is not ("AudioEffectDelay").
+        // Formatting `AudioEffect{name()}` here agrees for all 17 effects today,
+        // but it is a second, parallel name table — one override that does not
+        // follow the prefix convention, or one `name()` that already carries it,
+        // and the two silently disagree.
+        self.audio()?.bus_effect_class(i, e).map(str::to_string)
+    }
+
+    fn audio_set_bus_send(&mut self, bus: i64, send: &str) -> bool {
+        let Ok(i) = usize::try_from(bus) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        match audio.mixer_mut().get_bus_mut(i) {
+            Some(b) => {
+                b.set_send(send);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn audio_get_bus_send(&self, bus: i64) -> Option<String> {
+        let i = usize::try_from(bus).ok()?;
+        self.audio()?
+            .mixer()
+            .get_bus(i)
+            .map(|b| b.send().to_string())
+    }
+
+    /// `set_bus_volume_linear` — converted to dB here, on the engine side.
+    ///
+    /// 🔑 `20 * log10(linear)`, the inverse of `AudioBus::db_to_linear`. A
+    /// linear of `0.5` gives `-6.0206 dB`, which is the figure the acceptance
+    /// pins. ⚠️ Zero and negatives have no logarithm: Godot treats them as
+    /// silence, so they clamp to the mixer's quietest value rather than
+    /// producing `-inf`/`NaN`, which would poison every later mix.
+    fn audio_set_bus_volume_linear(&mut self, bus: i64, linear: f32) -> bool {
+        let db = if linear > 0.0 {
+            20.0 * linear.log10()
+        } else {
+            -80.0
+        };
+        self.audio_set_bus_volume_db(bus, db)
+    }
+
+    fn audio_get_bus_volume_linear(&self, bus: i64) -> Option<f32> {
+        let i = usize::try_from(bus).ok()?;
+        self.audio()?.mixer().get_bus(i).map(|b| b.volume_linear())
+    }
+
+    /// `set_bus_count` — adds or removes TRAILING buses, as Godot does.
+    ///
+    /// ⚠️ Refuses a count below 1: bus 0 is Master and Godot does not allow
+    /// removing it.
+    fn audio_set_bus_count(&mut self, count: i64) -> bool {
+        let Ok(want) = usize::try_from(count) else {
+            return false;
+        };
+        if want == 0 {
+            return false;
+        }
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        let mixer = audio.mixer_mut();
+        while mixer.bus_count() > want {
+            mixer.remove_bus(mixer.bus_count() - 1);
+        }
+        while mixer.bus_count() < want {
+            // Godot names new buses "New Bus"; the index keeps them distinct so
+            // `get_bus_index` can still address each one.
+            let n = mixer.bus_count();
+            mixer.add_bus(format!("New Bus {n}"));
+        }
+        true
+    }
+
+    fn audio_move_bus(&mut self, index: i64, to_index: i64) -> bool {
+        let (Ok(from), Ok(to)) = (usize::try_from(index), usize::try_from(to_index)) else {
+            return false;
+        };
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        let mixer = audio.mixer_mut();
+        if from >= mixer.bus_count() || to >= mixer.bus_count() {
+            return false;
+        }
+        mixer.move_bus(from, to);
+        true
+    }
+
+    /// `set_bus_layout(layout)` — reuses `Mixer::load_bus_layout`, the same
+    /// entry the `.tres` boot path funnels into, so a layout applied from
+    /// script and one loaded at startup cannot disagree about a field.
+    fn audio_set_bus_layout_entries(&mut self, entries: &[(String, String)]) -> bool {
+        let Some(audio) = self.audio_mut() else {
+            return false;
+        };
+        // ⚠️ `load_bus_layout` leaves the mixer unchanged for an empty layout
+        // and returns the resulting bus count, so `> 0` distinguishes "applied"
+        // from "there was nothing to apply".
+        audio
+            .mixer_mut()
+            .load_bus_layout(entries.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            > 0
+    }
+
+    /// The live mixer as `bus/<idx>/<field>` entries.
+    ///
+    /// 🔑 Emits exactly the fields `load_bus_layout` reads — `name`,
+    /// `volume_db`, `send`, `solo`, `mute`, `bypass_fx` — so a generate → set
+    /// round trip cannot lose one. A field written here that the loader ignores
+    /// would look like a round trip while silently dropping on the way back.
+    ///
+    /// ⚠️ Values are UNQUOTED: the loader accepts quoted or bare strings, and
+    /// bare keeps the entries identical to what a `.tres` property map yields
+    /// when `load()` parses one, so both producers feed the consumer the same
+    /// spelling.
+    fn audio_generate_bus_layout_entries(&self) -> Vec<(String, String)> {
+        let Some(audio) = self.audio() else {
+            return Vec::new();
+        };
+        let mixer = audio.mixer();
+        let mut out = Vec::new();
+        for i in 0..mixer.bus_count() {
+            let Some(bus) = mixer.get_bus(i) else {
+                continue;
+            };
+            out.push((format!("bus/{i}/name"), bus.name().to_string()));
+            out.push((format!("bus/{i}/volume_db"), bus.volume_db().to_string()));
+            out.push((format!("bus/{i}/send"), bus.send().to_string()));
+            out.push((format!("bus/{i}/solo"), bus.is_solo().to_string()));
+            out.push((format!("bus/{i}/mute"), bus.is_mute().to_string()));
+            out.push((format!("bus/{i}/bypass_fx"), bus.is_bypass().to_string()));
+        }
+        out
+    }
+
     fn audio_set_bus_volume_db(&mut self, idx: i64, db: f32) -> bool {
         let Ok(i) = usize::try_from(idx) else {
             return false;
@@ -6788,18 +7488,58 @@ impl SceneAccess for SceneTreeAccessor {
         method: &str,
         flags: i64,
         binds: &[Variant],
-    ) {
+        unbinds: usize,
+    ) -> i64 {
+        // Godot refuses a connect to a signal the object does not have
+        // (`core/object/object.cpp:1638` -> `ERR_INVALID_PARAMETER`). Patina's
+        // `SignalStore` lazily CREATED the signal instead, so a mistyped name
+        // connected "successfully" and then simply never fired — the quietest
+        // possible failure (pat-mgixk.98).
+        //
+        // ⚠️ `node_has_signal` and deliberately not a narrower check: it is the
+        // only predicate covering all three places a signal can come from — a
+        // script's own `signal` declarations, ClassDB **including inherited**
+        // ones (`Button.pressed` is declared on `BaseButton`, not `Button`),
+        // and names added at runtime by `add_user_signal`. Checking the node's
+        // own class alone would reject every inherited signal and every user
+        // signal, breaking working scripts.
+        if !self.node_has_signal(source, signal) {
+            return CONNECT_ERR_INVALID_PARAMETER;
+        }
         let source_id = NodeId::from_object_id(ObjectId::from_raw(source));
         let target_oid = ObjectId::from_raw(target);
         let mut conn = Connection::new(target_oid, method);
-        // Godot ConnectFlags: DEFERRED=1, ONE_SHOT=4 (PERSIST/REFERENCE_COUNTED
-        // do not affect dispatch here).
+        // Godot ConnectFlags: DEFERRED=1, ONE_SHOT=4 decode into the two
+        // booleans the dispatcher reads.
         conn.deferred = flags & 1 != 0;
         conn.one_shot = flags & 4 != 0;
+        // 🔑 And the WHOLE mask is kept (pat-mgixk.98). Without this the stored
+        // `flags` stayed 0 for every script connect, so
+        // `CONNECT_REFERENCE_COUNTED` and `CONNECT_APPEND_SOURCE_OBJECT` were
+        // dead from GDScript no matter what `Signal::try_connect` and
+        // `emit_signal` did with them — the old comment here even asserted
+        // REFERENCE_COUNTED "does not affect dispatch", which is now exactly
+        // what it does.
+        //
+        // ⚠️ Negative `flags` cannot forge high bits: Godot's ConnectFlags are
+        // a small positive bitmask, and a script passing a negative Int would
+        // otherwise sign-extend into every flag at once.
+        conn.flags = flags.max(0) as u32;
         if !binds.is_empty() {
             conn.binds = binds.to_vec();
         }
-        self.tree_mut().connect_signal(source_id, signal, conn);
+        // pat-mgixk.98: a script's `Callable.unbind(n)`. Left at 0 before, so
+        // `sig.connect(handler.unbind(1))` passed every signal argument through
+        // and a handler declaring fewer parameters raised instead of ignoring
+        // the tail.
+        conn.unbinds = unbinds;
+        match self.tree_mut().try_connect_signal(source_id, signal, conn) {
+            Ok(()) => CONNECT_OK,
+            // Godot's already-connected path answers `ERR_INVALID_PARAMETER`
+            // too (`core/object/object.cpp:1646-1666`), having first logged the
+            // "signal is already connected" error.
+            Err(_) => CONNECT_ERR_INVALID_PARAMETER,
+        }
     }
 
     fn disconnect_signal(&mut self, source: u64, signal: &str, target: u64, method: &str) -> bool {
@@ -7908,7 +8648,11 @@ impl SceneAccess for SceneTreeAccessor {
 
     // -- Object introspection over the signal graph (pat-0q2kx.64) ----------
 
-    fn signal_connection_list(&self, node: u64, signal_name: &str) -> Vec<(u64, String, bool)> {
+    fn signal_connection_list(
+        &self,
+        node: u64,
+        signal_name: &str,
+    ) -> Vec<(u64, String, bool, u32)> {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
         let Some(store) = self.tree().signal_store(nid) else {
             return Vec::new();
@@ -7919,7 +8663,24 @@ impl SceneAccess for SceneTreeAccessor {
         signal
             .connections()
             .iter()
-            .map(|c| (c.target_id.raw(), c.method.clone(), c.one_shot))
+            .map(|c| {
+                // ⚠️ The decoded booleans are OR-ed back into the reported
+                // mask (pat-mgixk.98). A connection built through
+                // `Connection::as_one_shot()` / `as_deferred()` — which
+                // packed-scene wiring and the editor use — never passed a
+                // `flags` mask at all, so `c.flags` alone would report 0 for a
+                // connection that really IS one-shot. These two bits can only
+                // ever be ADDED, never contradict the mask, because
+                // `with_flags` keeps them in step with it.
+                let mut flags = c.flags;
+                if c.one_shot {
+                    flags |= gdobject::signal::CONNECT_ONE_SHOT;
+                }
+                if c.deferred {
+                    flags |= gdobject::signal::CONNECT_DEFERRED;
+                }
+                (c.target_id.raw(), c.method.clone(), c.one_shot, flags)
+            })
             .collect()
     }
 
@@ -8122,6 +8883,15 @@ impl SceneAccess for SceneTreeAccessor {
 
     fn set_group(&mut self, group: &str, property: &str, value: Variant) {
         self.tree_mut().set_group(group, property, value);
+    }
+
+    fn set_group_flags(&mut self, flags: i64, group: &str, property: &str, value: Variant) -> bool {
+        // `flags.max(0)` for the same reason `notify_group_flags` above does
+        // it: GDScript ints are signed and the flag set is a u32 bitfield, so a
+        // negative would wrap into every flag at once.
+        self.tree_mut()
+            .set_group_flags(flags.max(0) as u32, group, property, value);
+        true
     }
 
     fn notify_group(&mut self, group: &str, what: i64) {
@@ -8661,6 +9431,13 @@ impl SceneAccess for SceneTreeAccessor {
 
     fn instantiate_script(&mut self, path: &str) -> Option<u64> {
         self.instantiate_script_with_values(path, &[])
+    }
+
+    fn instantiate_script_with_args(&mut self, path: &str, args: &[Variant]) -> Option<u64> {
+        // `load("res://h.gd").new(21)` -> `_init(21)` (pat-mgixk.100). The
+        // interpreter's `new` arm passed no arguments at all, so a constructor
+        // taking parameters could never receive them.
+        self.instantiate_script_inner(path, &[], args)
     }
 
     fn instantiate_script_resource(

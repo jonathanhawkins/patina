@@ -554,6 +554,17 @@ pub struct EnvironmentPreview3D {
     pub sun_energy: f32,
     /// Fog volumes present in the scene (collected from WorldEnvironment / FogVolume nodes).
     pub fog_volumes: Vec<FogVolume>,
+    /// `true` when `environment` is the **scene's own** resolved runtime
+    /// environment rather than this editor preview (pat-mgixk.51).
+    ///
+    /// 🔑 Every other field here describes the editor's *preview*, and two of
+    /// them override what a scene authored: `editor_render_environment` forces
+    /// `background_mode = Sky` whenever `enabled && sky_visible`, and
+    /// `setup_editor_lighting_3d` injects the preview sun whenever the scene has
+    /// no light of its own. Both are right for the editor viewport and wrong for
+    /// a game frame — Godot's runtime has no preview sky and no preview sun. This
+    /// flag is what tells those two functions apart; nothing else reads it.
+    pub authored: bool,
 }
 
 /// Builds the editor preview sky exactly like Godot's
@@ -613,6 +624,8 @@ impl Default for EnvironmentPreview3D {
             sun_color: Color::WHITE,
             sun_energy: 1.0,
             fog_volumes: Vec::new(),
+            // The default IS the editor preview; only the game path sets this.
+            authored: false,
         }
     }
 }

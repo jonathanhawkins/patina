@@ -1,4 +1,3 @@
-
 //! pat-mgixk.47 acceptance — the 2D editor viewport renders the edited scene
 //! through the **runtime canvas list**, not a hand-written icon match.
 //!
@@ -164,7 +163,15 @@ fn editor_viewport_renders_real_canvas() {
          {bh}"
     );
 
-    // -- 3. (the acceptance's Label clause is NOT covered — see below) -------
+    // -- 3. (the acceptance's Label clause lives in the test below) ----------
+    //
+    // 🔑 `editor_viewport_renders_control_text_through_the_control_pass`
+    // covers it, through `render_scene_with_zoom_pan_mut` — on a Button rather
+    // than a Label, because the immutable path already draws Label text (see
+    // that test's own note). This test stays on the
+    // immutable entry on purpose: it is the one `render_scene` and every other
+    // pre-existing wrapper funnel into, so keeping a clause here pins that the
+    // Node2D-side canvas list did not regress when the Control pass was added.
     //
     // ⚠️ The alpha clause below also had to move off `ColorRect` for the same
     // reason. A ColorRect is a **Control**: its size comes from `offset_*`
@@ -176,16 +183,10 @@ fn editor_viewport_renders_real_canvas() {
     // exactly this and picks Polygon2D for it. Modulate is the thing under
     // test, not the node class, so the plate is a Node2D-based Polygon2D.
     //
-    // ⚠️ Deliberately absent, and reported rather than faked. Label/Button TEXT
-    // comes from the themed Control pass, and
-    // `build_control_render_items` takes `&mut SceneTree` because it lays
-    // containers out before measuring them. `render_scene_inner` holds
-    // `&SceneTree`, and threading `&mut` down would change every public
-    // wrapper plus their callers in `editor_server.rs`.
-    //
-    // What DOES arrive through the immutable path: the Node2D-based
-    // CanvasItems — Polygon2D, Line2D, Sprite2D — which is what every clause
-    // here is built from.
+    // What arrives through the IMMUTABLE path: the Node2D-side CanvasItems —
+    // Polygon2D, Line2D, Sprite2D — which is what every clause here is built
+    // from. Controls produce no items at all on it, which is why the plate
+    // above is a Polygon2D rather than the acceptance's ColorRect.
 
     // -- 4. 🔑 modulate alpha blends over the grid ---------------------------
     //
@@ -214,5 +215,118 @@ fn editor_viewport_renders_real_canvas() {
          so modulate is being ignored",
         still_white_at_half,
         pure_white.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Clause 3 of the acceptance: Control TEXT in the edit viewport.
+// ---------------------------------------------------------------------------
+
+/// A `Control` root with one positioned `Button`.
+///
+/// 🔑 A **Button**, not the acceptance's `Label`, and the reason is measured
+/// rather than stylistic: `render_kind_for` already has a `"Label"` arm
+/// (`canvas_render.rs:1747`) returning `Render2DKind::Text`, and `Label` is
+/// registered with `.parent("Control")` inside `register_2d_classes`
+/// (`class_db.rs:19388-19402`), so `collect_canvas_items`' `is_class("CanvasItem")`
+/// gate admits it and the IMMUTABLE path draws Label text already. A Label
+/// clause here would therefore pass without the Control pass — it would be
+/// vacuous. `render_kind_for` has arms for only MeshInstance2D,
+/// BackBufferCopy, MultiMeshInstance2D, Sprite2D/AnimatedSprite2D, Polygon2D,
+/// Line2D, Path2D, TileMapLayer/TileMap, ColorRect, Label and the two particle
+/// classes: **Button, Panel, TextureRect and RichTextLabel fall to `Marker`**,
+/// so for those the themed Control pass is the only thing that can draw them.
+///
+/// ⚠️ `position`/`size`, NOT `offset_left`/`offset_top`. Nothing in the control
+/// draw path reads the offsets — `control::get_size` reads `"size"` only
+/// (`control.rs`), and `default_theme_text_renders_ttf_in_play_view.rs:105`
+/// documents the same trap. Authoring the rect directly also keeps the clause
+/// independent of `sort_container_tree`: there is no container here, so the
+/// geometry under test is the Button's own.
+fn button_scene(text: &str) -> String {
+    format!(
+        r#"[gd_scene format=3]
+
+[node name="Root" type="Control"]
+
+[node name="Press" type="Button" parent="."]
+position = Vector2(40, 80)
+size = Vector2(120, 40)
+text = "{text}"
+"#
+    )
+}
+
+/// Renders `button_scene` through either editor entry.
+///
+/// `controls = false` is the pre-existing immutable wrapper — the behaviour at
+/// HEAD. `controls = true` is the new one. Both are driven here so the clause
+/// below is a DIFFERENTIAL rather than an absolute claim about one render.
+fn render_button(text: &str, controls: bool) -> FrameBuffer {
+    gdobject::class_db::register_2d_classes();
+    let packed = PackedScene::from_tscn(&button_scene(text)).expect("button scene parses");
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    add_packed_scene_to_tree(&mut tree, root, &packed).expect("button scene instances");
+    if controls {
+        gdeditor::scene_renderer::render_scene_with_zoom_pan_mut(
+            &mut tree,
+            None,
+            W,
+            H,
+            1.0,
+            (0.0, 0.0),
+        )
+    } else {
+        gdeditor::scene_renderer::render_scene_with_zoom_pan(&tree, None, W, H, 1.0, (0.0, 0.0))
+    }
+}
+
+/// How many pixels differ between two frames.
+///
+/// 🔑 Deliberately COLOUR-FREE. The first revision of this clause keyed on a
+/// `theme_override_colors/font_color` and could never pass:
+/// `Render2DKind::Text` (`canvas_render.rs:259-270`) carries text, font_size,
+/// h_align and font_path and **no colour at all**, so a font-colour override
+/// cannot reach the pixels through this pipeline no matter which pass emits
+/// the item. Asking only "did the pixels change" avoids encoding any claim
+/// about what colour the engine picks.
+fn differing(a: &FrameBuffer, b: &FrameBuffer) -> usize {
+    let mut n = 0;
+    for i in 0..(a.width * a.height) as usize {
+        let (p, q) = (a.pixels[i], b.pixels[i]);
+        if (p.r - q.r).abs() > 0.01 || (p.g - q.g).abs() > 0.01 || (p.b - q.b).abs() > 0.01 {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// **The acceptance's Control-text clause.** A Control's TEXT reaches the 2D
+/// edit viewport, and it is the themed Control pass that puts it there.
+#[test]
+fn editor_viewport_renders_control_text_through_the_control_pass() {
+    // Emptying the string is the ONE input that changes between the two frames
+    // of each arm. The placeholder rect and the themed stylebox are both sized
+    // from `size`, which does not move, so whatever differs is the GLYPHS.
+    let with_controls = differing(&render_button("Hi", true), &render_button("", true));
+    let immutable = differing(&render_button("Hi", false), &render_button("", false));
+
+    // -- 1. the glyphs are there --------------------------------------------
+    assert!(
+        with_controls > 10,
+        "a Button's text must rasterize in the 2D edit viewport: emptying the          string changed only {with_controls} pixels, so either the themed          Control pass is not reaching the editor frame or the opaque          COLOR_CONTROL placeholder is still being painted over it"
+    );
+
+    // -- 2. 🔑 it is the Control pass that delivers it ------------------------
+    //
+    // `render_kind_for` has no Button arm, so on the immutable path the node
+    // falls to `Marker` and the class match draws `draw_button_rect` — sized
+    // from `size`, with the text never read. Emptying the string must therefore
+    // change NOTHING there. That is what makes clause 1 a statement about the
+    // new path rather than about the fixture.
+    assert_eq!(
+        immutable, 0,
+        "the immutable entry cannot build Control render items and has no          Button arm in `render_kind_for`, so its frame must be byte-identical          whatever the Button's text says; {immutable} pixels moved, which means          this clause is not measuring the Control pass and would pass without it"
     );
 }

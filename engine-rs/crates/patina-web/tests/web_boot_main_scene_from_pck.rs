@@ -134,13 +134,25 @@ fn script_var(engine: &WebEngine, path: &str, var: &str) -> Variant {
     let id = tree
         .get_node_by_path(path)
         .unwrap_or_else(|| panic!("`{path}` must be in the booted tree"));
-    tree.get_script(id)
-        .unwrap_or_else(|| panic!("`{path}` must have a script to read `{var}`"))
-        .list_properties()
-        .into_iter()
-        .find(|p| p.name == var)
-        .map(|p| p.default_value)
-        .unwrap_or(Variant::Nil)
+    let script = tree
+        .get_script(id)
+        .unwrap_or_else(|| panic!("`{path}` must have a script to read `{var}`"));
+    // 🔑 `get_property`, NOT `list_properties().default_value`.
+    //
+    // This reader used to take `PropertyInfo::default_value`, which is the
+    // variable's *declared* initializer — metadata fixed at parse time. It never
+    // changes, so `ready_ran` read `false` and `ticks` read `0` no matter what
+    // the script did, and the three verifies of this bead that failed on
+    // `ready_ran` were failing on the READER while the boot underneath may well
+    // have been correct. The previous owner built the `probe_ticks` control
+    // below precisely to catch this ("`script_var` is reporting declared
+    // defaults rather than live values") and the run that would have shown it
+    // never happened.
+    //
+    // `SceneTree`'s own write-back uses exactly this split — `list_properties()`
+    // for the NAMES and `get_property()` for the VALUES (`scene_tree.rs:6115`).
+    // Taking the value from the name list is the trap.
+    script.get_property(var).unwrap_or(Variant::Nil)
 }
 
 /// **The acceptance test.**
@@ -186,6 +198,69 @@ fn web_boot_main_scene_from_pck() {
          a live script. None with the property present means the pass ran and \
          skipped it — it reads the source through `FileAccess`, so the likely \
          cause is `res://main.gd` not being readable out of the mounted pack."
+    );
+
+    // -- did the ENGINE deliver READY to the node at all? -------------------
+    //
+    // 🔑 The last discriminator. With `_script_path` correct and a script
+    // attached (both asserted above), `_ready` not running has exactly two
+    // causes left, and the script variable cannot tell them apart:
+    //
+    //   * the node never received NOTIFICATION_READY  -> `enter_tree` was not
+    //     run on this subtree, so the boot never drove the lifecycle;
+    //   * the node DID receive it -> the engine dispatched, and the failure is
+    //     in the script call itself (`process_script_ready` ->
+    //     `call_script_with_access`), not in the boot.
+    //
+    // Asserted on the node's own notification log, which is engine-side and
+    // cannot be affected by whether the script executed.
+    let got_ready = engine
+        .tree()
+        .get_node(main_id)
+        .map(|n| {
+            n.notification_log()
+                .iter()
+                .any(|note| note.code() == gdobject::notification::NOTIFICATION_READY.code())
+        })
+        .unwrap_or(false);
+    assert!(
+        got_ready,
+        "the main scene root must receive NOTIFICATION_READY during boot. \
+         Absent means `boot_mounted_project` never ran `LifecycleManager::\
+         enter_tree` over the main scene — the tree was assembled and left \
+         un-entered. Present (with `ready_ran` still false below) would instead \
+         mean the engine dispatched and the SCRIPT call did not take effect."
+    );
+
+    // -- does the script EXECUTE at all, read the same way? -----------------
+    //
+    // 🔑 Stepping frames here, before asserting `_ready`, turns `_process` into
+    // a control for two things at once:
+    //
+    //   * if `ticks > 0`, the script executes AND `script_var` reads live values
+    //     correctly (same helper, same node) — so a false `ready_ran` below
+    //     means `_ready` SPECIFICALLY did not dispatch, nothing more;
+    //   * if `ticks == 0` as well, the script never runs at all, or the reader
+    //     is reporting declared defaults rather than current values.
+    //
+    // Without this, `ready_ran == false` cannot distinguish "`_ready` did not
+    // fire" from "I am reading the variable wrongly", and I have no way to tell
+    // those apart from the verifier's output alone.
+    let mut now_probe = 0.0;
+    for _ in 0..3 {
+        now_probe += 1000.0 / 60.0;
+        engine.frame(now_probe);
+    }
+    let probe_ticks = match script_var(&engine, "/root/Main", "ticks") {
+        Variant::Int(n) => n,
+        other => panic!("`ticks` should be an Int, got {other:?}"),
+    };
+    assert!(
+        probe_ticks > 0,
+        "`_process` must have run across 3 frames: got {probe_ticks}. Zero means \
+         the script never executes (despite being attached) or `script_var` is \
+         reporting declared defaults instead of live values — either way the \
+         `_ready` assertion below would be measuring the wrong thing."
     );
 
     // -- fixture check: did the script attach and run at all? ---------------

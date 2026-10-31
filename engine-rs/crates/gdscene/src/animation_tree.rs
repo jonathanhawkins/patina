@@ -79,6 +79,25 @@ impl AnimationLeafOptions {
         self.use_custom_timeline && self.timeline_length > 0.0
     }
 
+    /// Whether a BACKWARD step of this leaf's position means the playhead
+    /// wrapped past the end, rather than genuinely moving back in time.
+    ///
+    /// [`advance`](Self::advance) only ever adds `delta * time_scale`, and
+    /// `time_scale` is never negative, so a leaf's position cannot decrease by
+    /// playing in reverse — `play_mode` is honoured when SAMPLING, not when
+    /// advancing. Every backward step is therefore a wrap except the
+    /// [`LoopMode::PingPong`] fold-back, which is a real reversal.
+    ///
+    /// Needed because the two things demand opposite treatment when deciding
+    /// which method keys an interval crossed, and the interval's two endpoints
+    /// alone cannot tell them apart (pat-mgixk.77).
+    fn backward_is_wrap(&self) -> bool {
+        // Non-custom and custom-Linear both `rem_euclid` the window; custom
+        // `None` clamps and so never steps backward at all, which makes the
+        // answer for it moot.
+        !self.custom() || self.loop_mode == LoopMode::Linear
+    }
+
     /// Playback rate multiplier. With `stretch_time_scale` the clip is squeezed
     /// or stretched so all of it fits `timeline_length`; otherwise it plays at
     /// its authored rate and the timeline just bounds the window.
@@ -1129,6 +1148,60 @@ fn find_state_machine<'a>(node: &'a AnimationNode, name: &str) -> Option<&'a Sta
     }
 }
 
+/// Whether any transition anywhere under `node` carries an `advance_expression`
+/// (pat-mgixk.82).
+///
+/// Exists so the scene-tree loop can skip the work of snapshotting the
+/// expression base node's properties — which costs a property-list walk and a
+/// script call per tree per frame — for the overwhelmingly common tree that has
+/// no expression at all.
+///
+/// ⚠️ Matched exhaustively, deliberately: a new container variant added without
+/// a case here would silently answer "no expressions" and switch those edges
+/// off, whereas this way it fails to compile.
+fn has_advance_expression(node: &AnimationNode) -> bool {
+    match node {
+        AnimationNode::StateMachine(sm) => {
+            sm.transitions
+                .iter()
+                .any(|t| !t.advance_expression.is_empty())
+                || sm.states.values().any(has_advance_expression)
+        }
+        AnimationNode::Named { inner, .. } => has_advance_expression(inner),
+        AnimationNode::BlendTree(bt) => bt.nodes.values().any(has_advance_expression),
+        AnimationNode::Transition(t) => t
+            .inputs
+            .iter()
+            .any(|(_, child)| has_advance_expression(child)),
+        AnimationNode::OneShot(one_shot) => {
+            has_advance_expression(&one_shot.base) || has_advance_expression(&one_shot.shot)
+        }
+        AnimationNode::Blend2 { a, b, .. } => {
+            has_advance_expression(a) || has_advance_expression(b)
+        }
+        AnimationNode::Blend3 { a, b, c, .. } => {
+            has_advance_expression(a) || has_advance_expression(b) || has_advance_expression(c)
+        }
+        AnimationNode::Add2 { base, add, .. } => {
+            has_advance_expression(base) || has_advance_expression(add)
+        }
+        AnimationNode::Add3 { base, neg, pos, .. } => {
+            has_advance_expression(base)
+                || has_advance_expression(neg)
+                || has_advance_expression(pos)
+        }
+        AnimationNode::Sub2 { base, sub, .. } => {
+            has_advance_expression(base) || has_advance_expression(sub)
+        }
+        AnimationNode::TimeScale { child, .. } | AnimationNode::TimeSeek { child, .. } => {
+            has_advance_expression(child)
+        }
+        AnimationNode::Animation { .. }
+        | AnimationNode::BlendSpace1D(_)
+        | AnimationNode::BlendSpace2D(_) => false,
+    }
+}
+
 /// Mutable counterpart of [`find_state_machine`].
 ///
 /// Each "found it" test runs as a scoped *immutable* reborrow before the
@@ -1256,6 +1329,159 @@ fn node_clip_name(node: &AnimationNode) -> Option<&str> {
     }
 }
 
+/// One playing clip's clock: its name, its position, and whether a backward
+/// step of that position means it wrapped (see
+/// [`AnimationLeafOptions::backward_is_wrap`]).
+type ClipClock = (String, f64, bool);
+
+/// Every playing clip beneath `node` as a [`ClipClock`].
+///
+/// The plural counterpart of [`node_play_position`], which reports only the
+/// leftmost clip because that is the one Godot names for a state. Method-track
+/// dispatch needs them **all**: a key crossed by a blended-in clip is still
+/// crossed (pat-mgixk.77).
+///
+/// ⚠️ A state machine mid-crossfade contributes BOTH the state it is entering
+/// and the one it is leaving. The outgoing clip is still advancing, so dropping
+/// it would silently swallow every key in its tail whenever a transition
+/// happened to span one.
+///
+/// ⚠️ Variants not listed here contribute nothing, matching
+/// [`node_play_position`]'s own `_ => None`. That is a known limitation shared
+/// with the existing helpers rather than a new one: a blend space's clips are
+/// sampled from the library by position and have no leaf node to read a clock
+/// from.
+fn clip_positions(node: &AnimationNode, out: &mut Vec<ClipClock>) {
+    match node {
+        AnimationNode::Animation {
+            name,
+            position,
+            opts,
+        } => {
+            out.push((name.clone(), *position, opts.backward_is_wrap()));
+        }
+        AnimationNode::Named { inner, .. } => clip_positions(inner, out),
+        AnimationNode::TimeScale { child, .. } | AnimationNode::TimeSeek { child, .. } => {
+            clip_positions(child, out)
+        }
+        AnimationNode::Blend2 { a, b, .. } => {
+            clip_positions(a, out);
+            clip_positions(b, out);
+        }
+        AnimationNode::Blend3 { a, b, c, .. } => {
+            clip_positions(a, out);
+            clip_positions(b, out);
+            clip_positions(c, out);
+        }
+        AnimationNode::Add2 { base, add, .. } => {
+            clip_positions(base, out);
+            clip_positions(add, out);
+        }
+        AnimationNode::Add3 { base, neg, pos, .. } => {
+            clip_positions(base, out);
+            clip_positions(neg, out);
+            clip_positions(pos, out);
+        }
+        AnimationNode::Sub2 { base, sub, .. } => {
+            clip_positions(base, out);
+            clip_positions(sub, out);
+        }
+        AnimationNode::OneShot(one_shot) => {
+            clip_positions(&one_shot.base, out);
+            if one_shot.active {
+                clip_positions(&one_shot.shot, out);
+            }
+        }
+        AnimationNode::StateMachine(sm) => {
+            if let Some(state) = sm.states.get(&sm.current) {
+                clip_positions(state, out);
+            }
+            if let Some(active) = &sm.transition {
+                clip_positions(&active.from_node, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Method-track keys crossed between two [`clip_positions`] snapshots taken
+/// around one `advance_node` call.
+///
+/// ⚠️ Leaves are paired by `(clip name, nth occurrence of that name)` rather
+/// than by index in the walk. A state machine can change which state is current
+/// **during** the very advance being measured, so the two snapshots may differ
+/// in length and in order; pairing by index would then compare one leaf's
+/// `before` against another's `after` and invent crossings.
+fn method_calls_crossed(
+    library: &HashMap<String, Animation>,
+    before: &[ClipClock],
+    after: &[ClipClock],
+) -> Vec<crate::animation::MethodCall> {
+    use crate::animation::TrackType;
+
+    let mut calls = Vec::new();
+    let mut nth_of_name: HashMap<&str, usize> = HashMap::new();
+    for (name, curr, backward_is_wrap) in after {
+        let nth = nth_of_name.entry(name.as_str()).or_insert(0);
+        let prev = before
+            .iter()
+            .filter(|(n, _, _)| n == name)
+            .nth(*nth)
+            .map(|(_, p, _)| *p);
+        *nth += 1;
+        // A leaf that was not playing before this advance has no interval, so
+        // nothing was crossed; its keys fire from the next frame on. Dropping it
+        // is the safe direction — substituting 0.0 for the missing `prev` would
+        // fire every key before `curr` on the frame a state is entered.
+        let (prev, anim) = match (prev, library.get(name)) {
+            (Some(p), Some(a)) => (p, a),
+            _ => continue,
+        };
+        // Going backwards means two different things, and guessing wrong either
+        // drops keys or fires a whole clip's worth:
+        //
+        // * the playhead WRAPPED past the end, so the tail after `prev` and the
+        //   head up to `curr` were both played;
+        // * the leaf genuinely reversed (a `PingPong` fold-back), which plays
+        //   the span backwards — the case
+        //   `AnimationPlayer::method_calls_in_range` handles.
+        //
+        // ⚠️ The deciding flag comes from the LEAF, not from
+        // `Animation::loop_mode`. A default tree leaf `rem_euclid`s the clip
+        // length whatever the clip's own loop mode says
+        // (`AnimationLeafOptions::advance`), so keying this off `anim.loop_mode`
+        // would have read every wrap of a `LoopMode::None` clip as a reversal
+        // and dropped the keys in its tail.
+        //
+        // ⚠️ A `TimeSeek` jump backwards is indistinguishable from a wrap here
+        // and will fire the tail's keys. Known and narrow: both endpoints of the
+        // interval are all this sees, and a seek is an explicit discontinuity.
+        let wrapped = *curr < prev && *backward_is_wrap;
+        for track in &anim.tracks {
+            if track.track_type != TrackType::Method {
+                continue;
+            }
+            for kf in track.keyframes() {
+                let crossed = if *curr >= prev {
+                    kf.time > prev && kf.time <= *curr
+                } else if wrapped {
+                    kf.time > prev || kf.time <= *curr
+                } else {
+                    kf.time < prev && kf.time >= *curr
+                };
+                if crossed {
+                    if let Some(call) =
+                        crate::animation::method_call_from_value(&track.node_path, &kf.value)
+                    {
+                        calls.push(call);
+                    }
+                }
+            }
+        }
+    }
+    calls
+}
+
 /// A declarative transition between two states.
 #[derive(Debug, Clone)]
 pub struct StateTransition {
@@ -1273,11 +1499,18 @@ pub struct StateTransition {
     /// Whether the edge is usable at all, only by `travel()`, or automatically
     /// (Godot `advance_mode`).
     pub advance_mode: TransitionAdvanceMode,
-    /// Godot `advance_expression`: a const expression that must also evaluate
-    /// true for an AUTO edge. Stored so it round-trips; **not evaluated** —
-    /// Patina has no `Expression` type, and an expression treated as "always
-    /// true" would fire transitions a real project deliberately gates.
-    /// An edge that carries one is therefore treated as not auto-advancing.
+    /// Godot `advance_expression`: an expression that must also evaluate true
+    /// for an AUTO edge to fire.
+    ///
+    /// Evaluated as of pat-mgixk.82, against the node named by
+    /// [`AnimationTree::advance_expression_base_node`] — see
+    /// [`crate::advance_expression`]. The note that used to sit here said it was
+    /// stored but never evaluated "because Patina has no `Expression` type";
+    /// that was never quite true (`gdscript-interop` has implemented Godot's
+    /// `Expression` since pat-0q2kx.207), and the reasoning it gave still holds
+    /// where it matters: an expression treated as "always true" would fire
+    /// transitions a real project deliberately gates, so an edge whose
+    /// expression cannot be evaluated is still treated as not auto-advancing.
     pub advance_expression: String,
     /// Lower wins when several edges out of the same state are eligible (Godot
     /// `priority`, default 1).
@@ -1389,6 +1622,28 @@ pub struct AnimationTree {
     /// default (Godot's `NodePath("")`); recorded for round-tripping and for the
     /// scene-load wiring pass.
     pub anim_player: String,
+    /// Godot `AnimationTree.advance_expression_base_node` — the node that a
+    /// transition's `advance_expression` is evaluated against, as a node path
+    /// relative to the tree's own node (pat-mgixk.82).
+    ///
+    /// ⚠️ Tree-level, not per-transition: upstream stores one base node on the
+    /// `AnimationTree` and every expression in the graph resolves its barewords
+    /// against it (`animation_node_state_machine.cpp:1134`). Godot's default is
+    /// `NodePath(".")` — the tree node ITSELF, not its parent
+    /// (`animation_tree.h:278`), so an unauthored base node means expressions
+    /// read the `AnimationTree`'s own properties and a character's `speed` is
+    /// simply absent.
+    pub advance_expression_base_node: String,
+    /// Method-track invocations crossed by [`advance`](Self::advance) and not
+    /// yet dispatched, drained by [`drain_method_calls`](Self::drain_method_calls).
+    ///
+    /// Queued rather than returned from `advance` so the tree is the one place
+    /// that knows its clocks, mirroring
+    /// [`AnimationPlayer::drain_signals`](crate::animation::AnimationPlayer::drain_signals).
+    /// Private: a caller that read it without draining would re-dispatch every
+    /// frame, which is exactly the "exactly once per key crossing" failure the
+    /// bead names.
+    pending_method_calls: Vec<crate::animation::MethodCall>,
 }
 
 impl AnimationTree {
@@ -1401,7 +1656,26 @@ impl AnimationTree {
             active: true,
             root_node: "..".to_string(),
             anim_player: String::new(),
+            // Godot's own default, and NOT the same as `root_node`'s
+            // (`animation_tree.h:278`).
+            advance_expression_base_node: ".".to_string(),
+            pending_method_calls: Vec::new(),
         }
+    }
+
+    /// Takes the method-track invocations crossed since the last drain.
+    ///
+    /// Mirrors [`AnimationPlayer::method_calls_in_range`](crate::animation::AnimationPlayer::method_calls_in_range)
+    /// in what it yields, but not in how it is asked: a player has a single
+    /// position so a caller can pass `(prev, curr)`, while a tree has one clock
+    /// per leaf and only [`advance`](Self::advance) sees both ends of each
+    /// leaf's interval. So the tree records and the caller drains.
+    ///
+    /// ⚠️ Draining is what makes dispatch happen **once** per crossing. Leaving
+    /// the queue in place and reading it would re-fire a `footstep()` on every
+    /// subsequent frame until the key was crossed again.
+    pub fn drain_method_calls(&mut self) -> Vec<crate::animation::MethodCall> {
+        std::mem::take(&mut self.pending_method_calls)
     }
 
     pub fn add_animation(&mut self, anim: Animation) {
@@ -1481,7 +1755,44 @@ impl AnimationTree {
 
     /// Advances all time-dependent nodes by `delta` seconds, resolving
     /// transition conditions and blend parameters from both parameter maps.
+    ///
+    /// Transitions carrying an `advance_expression` cannot fire through this
+    /// entry point — evaluating one needs the scene, which a tree does not have.
+    /// See [`advance_with_expressions`](Self::advance_with_expressions), which is
+    /// what the scene-tree loop calls.
     pub fn advance(&mut self, delta: f64) {
+        self.advance_with_expressions(delta, None);
+    }
+
+    /// Whether any transition in this graph carries an `advance_expression`
+    /// (pat-mgixk.82).
+    ///
+    /// The scene-tree loop asks this before paying for an expression scope — see
+    /// [`advance_with_expressions`](Self::advance_with_expressions).
+    pub fn has_advance_expressions(&self) -> bool {
+        self.root.as_ref().is_some_and(has_advance_expression)
+    }
+
+    /// [`advance`](Self::advance), with an evaluator for the `advance_expression`
+    /// on auto transitions (pat-mgixk.82).
+    ///
+    /// `expr` is called with the expression's source text and answers
+    /// `Some(true)`/`Some(false)`/`None` for satisfied / unsatisfied / could not
+    /// be evaluated. It is a callback rather than a scene reference because this
+    /// module is deliberately free of scene access: the caller resolves
+    /// [`advance_expression_base_node`](Self::advance_expression_base_node) and
+    /// snapshots its properties, and
+    /// [`crate::advance_expression::eval_advance_expression`] is the evaluator
+    /// the engine passes.
+    ///
+    /// `None` reproduces the behaviour this bead replaced — every expression edge
+    /// skipped — which is what keeps hand-built trees and this module's own tests
+    /// unaffected.
+    pub fn advance_with_expressions(
+        &mut self,
+        delta: f64,
+        expr: Option<&dyn Fn(&str) -> Option<bool>>,
+    ) {
         if !self.active || delta == 0.0 {
             return;
         }
@@ -1492,12 +1803,26 @@ impl AnimationTree {
         let params = EvalParams {
             bools: &self.parameters,
             vars: &self.params,
+            expr,
         };
         // The root node is unnamed in Godot, so its own parameters live directly
         // at `parameters/<param>` (e.g. `parameters/blend_position` for a root
         // blend space). Named children are handled inside `advance_node`.
         apply_named_params("", &mut root, params);
+
+        // Method keys crossed by this advance are recorded here, where the
+        // graph's own clocks are, and drained by the scene-tree loop —
+        // `AnimationPlayer` can hand out `(prev, curr)` because it has ONE
+        // position, but a tree has a clock per leaf and `advance_node` is what
+        // moves them. Snapshotting around the call is the only place both sides
+        // of each leaf's interval exist (pat-mgixk.77).
+        let mut before = Vec::new();
+        clip_positions(&root, &mut before);
         advance_node(&mut root, delta, &self.animations, params);
+        let mut after = Vec::new();
+        clip_positions(&root, &mut after);
+        self.pending_method_calls
+            .extend(method_calls_crossed(&self.animations, &before, &after));
 
         // Godot's graph nodes push read-back values into the parameter map as
         // they process — `parameters/<name>/active` is how a script asks
@@ -1540,6 +1865,81 @@ impl AnimationTree {
                 .collect(),
             None => Vec::new(),
         }
+    }
+
+    /// The [`TrackType`](crate::animation::TrackType) of every track the graph's
+    /// clips declare, as `(node_path, property_path, track_type)`.
+    ///
+    /// Mirrors
+    /// [`AnimationPlayer::current_track_types`](crate::animation::AnimationPlayer::current_track_types)
+    /// so a caller can classify what
+    /// [`get_current_values_targeted`](Self::get_current_values_targeted)
+    /// handed back. That sampler reports values by `(node_path, property)` only,
+    /// which is why a tree-driven `rotation_3d` bone track used to be written as
+    /// a stray property on the Skeleton3D and the rig never deformed — and why
+    /// method and audio keys landed as junk properties (pat-mgixk.77).
+    ///
+    /// ⚠️ Collected from EVERY clip in the graph, not only the currently active
+    /// ones. That is deliberate and safe: the result is a lookup table, and the
+    /// only pairs ever looked up are the ones the sampler actually returned.
+    /// Walking the live graph instead would have to re-derive which leaves are
+    /// playing, duplicating `sample_node`'s traversal for no gain — and would
+    /// silently lose the type for a pair that is mid-crossfade out of one clip
+    /// and into another.
+    ///
+    /// ⚠️ A pair keyed by several clips must agree on its type; blending
+    /// requires that, so the last writer wins without ambiguity in practice.
+    pub fn current_track_types(&self) -> Vec<(String, String, crate::animation::TrackType)> {
+        let mut out = Vec::new();
+        for anim in self.animations.values() {
+            for track in &anim.tracks {
+                out.push((
+                    track.node_path.clone(),
+                    track.property_path.clone(),
+                    track.track_type,
+                ));
+            }
+        }
+        out
+    }
+
+    /// The property paths that must NOT be written to nodes as ordinary
+    /// properties: method tracks (dispatched as calls) and nested-animation
+    /// tracks (whose sampled value is a CLIP NAME, not a value).
+    ///
+    /// Mirrors
+    /// [`AnimationPlayer::non_property_track_paths`](crate::animation::AnimationPlayer::non_property_track_paths)
+    /// deliberately, including which track types it excludes. The two mixers
+    /// have to agree about what "not a property" means — Godot applies one rule
+    /// for both — and the shared mixer-output path this feeds will consume a
+    /// single rule, not one per mixer kind. Choosing a cleverer rule here would
+    /// be a new inconsistency rather than a fix (pat-mgixk.77).
+    ///
+    /// ⚠️ Without this set the tree path wrote a method track's sampled value —
+    /// the method NAME — onto the node as if it were a property, which is how a
+    /// `footstep()` key became a stray `footstep` string.
+    ///
+    /// ⚠️ The player's version also contributes its `root_motion_track`.
+    /// `AnimationTree` has no root-motion track field at all yet, so there is
+    /// nothing to add here; that is a real gap, not an omission in this method,
+    /// and `consume_root_motion` cannot be ported until the field exists.
+    ///
+    /// ⚠️ Collected across every clip in the graph, for the same reason
+    /// [`current_track_types`](Self::current_track_types) is: the result is a
+    /// skip-set, and over-listing a path that is not currently sampled costs
+    /// nothing, whereas missing one mid-crossfade writes junk onto a node.
+    pub fn non_property_track_paths(&self) -> Vec<String> {
+        use crate::animation::TrackType;
+        let mut paths = Vec::new();
+        for anim in self.animations.values() {
+            for track in &anim.tracks {
+                if track.track_type == TrackType::Method || track.track_type == TrackType::Animation
+                {
+                    paths.push(track.property_path.clone());
+                }
+            }
+        }
+        paths
     }
 }
 
@@ -1591,6 +1991,13 @@ type TrackKey = (String, String);
 struct EvalParams<'a> {
     bools: &'a HashMap<String, bool>,
     vars: &'a HashMap<String, Variant>,
+    /// Evaluates a transition's `advance_expression` (pat-mgixk.82), or `None`
+    /// when the caller supplied no evaluator — see
+    /// [`AnimationTree::advance_with_expressions`].
+    ///
+    /// A shared reference, so this struct stays `Copy` and keeps threading
+    /// through the `advance_*` family by value.
+    expr: Option<&'a dyn Fn(&str) -> Option<bool>>,
 }
 
 impl EvalParams<'_> {
@@ -1622,6 +2029,18 @@ impl EvalParams<'_> {
     }
 
     /// [`Vector2`] parameter at `path`.
+    /// A name-ish parameter, for Godot's by-name requests
+    /// (`transition_request`). Accepts both spellings a script can produce:
+    /// `set(..., "b")` yields a `String`, a `StringName("b")` literal the other
+    /// (pat-mgixk.76).
+    fn string(&self, path: &str) -> Option<String> {
+        match self.vars.get(path) {
+            Some(Variant::String(s)) => Some(s.clone()),
+            Some(Variant::StringName(s)) => Some(s.as_str().to_string()),
+            _ => None,
+        }
+    }
+
     fn vector2(&self, path: &str) -> Option<Vector2> {
         match self.vars.get(path) {
             Some(Variant::Vector2(v)) => Some(*v),
@@ -1786,6 +2205,25 @@ fn apply_named_params(name: &str, inner: &mut AnimationNode, params: EvalParams<
             }
         }
         AnimationNode::Transition(t) => {
+            // 🔑 Godot 4 switches a transition by INPUT NAME:
+            // `set("parameters/T/transition_request", "b")`
+            // (`doc/classes/AnimationNodeTransition.xml`). Only the integer
+            // `current_index` below was ever read, and `transition_request`
+            // appeared NOWHERE in the engine — so the documented call did
+            // nothing at all (pat-mgixk.76).
+            //
+            // ⚠️ Acted on only when the string names a REAL input, so a typo
+            // leaves the current input playing instead of resetting to port 0.
+            // `inputs` already carries the names, so this needs no new state.
+            // Checked before `current_index` and left non-exclusive: the integer
+            // spelling keeps working for anything already using it.
+            if let Some(wanted) = params.string(&param_path(name, "transition_request")) {
+                if let Some(idx) = t.inputs.iter().position(|(n, _)| *n == wanted) {
+                    if idx != t.current {
+                        t.request_switch(idx);
+                    }
+                }
+            }
             // Godot drives a transition through `current_index` (and mirrors it
             // in `current_state`); a switch fires when the value CHANGES, so a
             // script re-setting the same index does not restart the clip.
@@ -1931,12 +2369,29 @@ fn select_auto_transition(
         if t.advance_mode != TransitionAdvanceMode::Auto {
             continue;
         }
-        // An expression this engine cannot evaluate must not be treated as
-        // satisfied: doing so would fire an edge the project deliberately gated.
-        if !t.advance_expression.is_empty() {
+        if !t.condition.is_empty() && !params.condition(&t.condition) {
             continue;
         }
-        if !t.condition.is_empty() && !params.condition(&t.condition) {
+        // An expression this engine cannot evaluate must not be treated as
+        // satisfied: doing so would fire an edge the project deliberately gated.
+        //
+        // 🔑 So the gate is spelled POSITIVELY (pat-mgixk.82): the edge opens
+        // only on an explicit `Some(true)`. No evaluator wired, an expression
+        // that fails to parse, and one referencing something the base node does
+        // not carry all land on `continue` — which is byte-for-byte the
+        // behaviour before this bead, so a hand-built tree and this module's own
+        // tests are unaffected. Upstream arrives at the same place by a
+        // different route: a malformed expression still leaves `expression`
+        // valid, so `execute` runs, fails, and
+        // `_check_advance_condition` returns false
+        // (`animation_node_state_machine.cpp:1140-1143`).
+        //
+        // ⚠️ Checked AFTER `advance_condition`, which is both upstream's order
+        // (:1125-1128 precedes :1130) and the cheaper one — the condition is a
+        // map lookup, the expression runs an interpreter.
+        if !t.advance_expression.is_empty()
+            && params.expr.and_then(|f| f(&t.advance_expression)) != Some(true)
+        {
             continue;
         }
         // `AtEnd` defers until the source clip has played out — the mode exists

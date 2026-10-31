@@ -37,7 +37,7 @@ use crate::animation::{Animation, LoopMode};
 use crate::animation_tree::{
     AnimationLeafOptions, AnimationNode, AnimationPlayMode, AnimationTree, BlendSpace1D,
     BlendSpace2D, BlendSpaceBlendMode, OneShot, OneShotMixMode, StateMachine, StateTransition,
-    SwitchMode, TransitionAdvanceMode,
+    SwitchMode, TransitionAdvanceMode, TransitionNode,
 };
 use crate::node::NodeId;
 use crate::packed_scene::PackedScene;
@@ -164,6 +164,15 @@ pub fn build_animation_tree(
         anim_tree.root_node = root_node;
     }
     anim_tree.anim_player = node_path_string(props.get("anim_player"));
+    // The base node a transition's `advance_expression` resolves its barewords
+    // against (pat-mgixk.82). Only overwritten when authored, so an unauthored
+    // property keeps Godot's `NodePath(".")` default rather than becoming the
+    // empty path — which resolves to nothing and would make upstream skip the
+    // expression entirely.
+    let expression_base = node_path_string(props.get("advance_expression_base_node"));
+    if !expression_base.is_empty() {
+        anim_tree.advance_expression_base_node = expression_base;
+    }
 
     // `parameters/...` node properties are the tree's initial parameter values —
     // conditions, blend amounts, blend positions, one-shot requests. Godot writes
@@ -586,8 +595,110 @@ fn build_blend_tree_node(
             }
             AnimationNode::OneShot(one_shot)
         }
+        // ── pat-mgixk.76: the additive/time/transition family ───────────
+        //
+        // 🔑 The EVALUATOR already supported all of these
+        // (`animation_tree.rs:198-240`) and so did their runtime parameters
+        // (`apply_named_params`: `add_amount` :1768, `sub_amount` :1773,
+        // `scale` :1778, `seek_request` :1783). Only this loader was missing
+        // them, and the cost was out of all proportion: an unmatched type fell
+        // to the generic conversion, which answers `None`, and because every
+        // arm below resolves its ports with `input(N)?` that `None` propagated
+        // to the root — ONE `TimeScale` node left a real project with no
+        // AnimationTree at all.
+        //
+        // ⚠️ The amounts are left at their DEFAULTS rather than read from the
+        // sub-resource, exactly as `Blend2` above leaves `weight: 0.0`. In Godot
+        // these are per-frame PARAMETERS (`parameters/<node>/add_amount`), not
+        // resource properties, and `apply_named_params` writes them just before
+        // evaluation — reading a stale value here would be overwritten anyway.
+        "AnimationNodeAdd2" => AnimationNode::Add2 {
+            base: Box::new(input(0)?),
+            add: Box::new(input(1)?),
+            amount: 0.0,
+        },
+        "AnimationNodeAdd3" => AnimationNode::Add3 {
+            base: Box::new(input(0)?),
+            neg: Box::new(input(1)?),
+            pos: Box::new(input(2)?),
+            amount: 0.0,
+        },
+        "AnimationNodeSub2" => AnimationNode::Sub2 {
+            base: Box::new(input(0)?),
+            sub: Box::new(input(1)?),
+            amount: 0.0,
+        },
+        // Scale 1.0, not 0.0: the default must be "play at normal speed", and a
+        // 0.0 default would freeze every tree that never sets the parameter.
+        "AnimationNodeTimeScale" => AnimationNode::TimeScale {
+            child: Box::new(input(0)?),
+            scale: 1.0,
+        },
+        // ⚠️ `-1.0`, not 0.0, is "no seek pending". A 0.0 default would be a
+        // standing request to seek to the start of the clip every frame.
+        "AnimationNodeTimeSeek" => AnimationNode::TimeSeek {
+            child: Box::new(input(0)?),
+            seek_request: -1.0,
+        },
+        "AnimationNodeTransition" => {
+            // Godot's surface: `input_count` plus `input_<i>/name` per port
+            // (`animation_blend_tree.cpp`). The name is what a script switches
+            // on, so it is carried into `TransitionNode.inputs` rather than
+            // discarded.
+            let count = int_of(props.get("input_count")).unwrap_or(0).max(0) as usize;
+            let mut entries: Vec<(String, AnimationNode)> = Vec::new();
+            for i in 0..count {
+                // An unnamed port still has to be addressable; Godot shows the
+                // index, so fall back to that rather than skipping the port and
+                // silently renumbering the ones after it.
+                let label = string_of(props.get(&format!("input_{i}/name")))
+                    .unwrap_or_else(|| i.to_string());
+                if let Some(child) = input(i) {
+                    entries.push((label, child));
+                }
+            }
+            if entries.is_empty() {
+                return None;
+            }
+            let mut transition = TransitionNode::new(entries);
+            if let Some(v) = float_of(props.get("xfade_time")) {
+                transition.xfade_time = v as f64;
+            }
+            AnimationNode::Transition(transition)
+        }
         // Nested containers and leaves reuse the generic conversion.
-        _ => build_animation_node(scene, sub_id, animations)?,
+        //
+        // 🔑 DEGRADES instead of dropping the tree (pat-mgixk.76). The generic
+        // conversion answers `None` for a type nothing understands; propagating
+        // that costs the project every animation rather than one node. Godot's
+        // own behaviour for a node it cannot evaluate is to contribute nothing,
+        // so: pass the first input through if there is one (which is right for
+        // any single-input effect node), otherwise rest.
+        //
+        // ⚠️ SCOPED TO THE BLEND TREE, and that is why
+        // `unsupported_graph_node_builds_nothing` still holds: that test calls
+        // `build_animation_node` — the ROOT/generic path — which still answers
+        // `None`. Degrading there would be meaningless anyway, since a tree
+        // whose ROOT is an unknown type has no input to pass through and no
+        // siblings to save. The bead expected that test to need replacing; it
+        // does not, because the fix lives one level down.
+        _ => match build_animation_node(scene, sub_id, animations) {
+            Some(built) => built,
+            None => {
+                tracing::warn!(
+                    "AnimationTree: blend-tree node '{name}' has unsupported type \
+                     '{class}'; passing its first input through (pat-mgixk.76)"
+                );
+                match input(0) {
+                    Some(passthrough) => passthrough,
+                    None => AnimationNode::Animation {
+                        name: String::new(),
+                        position: 0.0,
+                        opts: AnimationLeafOptions::default(),
+                    },
+                }
+            }
+        },
     };
 
     // The name makes this node's parameters addressable as

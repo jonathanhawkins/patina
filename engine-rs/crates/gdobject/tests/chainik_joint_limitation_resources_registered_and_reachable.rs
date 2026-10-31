@@ -80,11 +80,17 @@ fn only_the_concrete_limitation_can_be_instantiated() {
         instantiate("JointLimitationCone3D").is_some(),
         "…and instantiate() must actually hand one back"
     );
+    // pat-mgixk.97: this asserted `!can_instantiate("JointLimitation3D")`,
+    // reading "GDREGISTER_VIRTUAL_CLASS upstream" as "an abstract base". Virtual
+    // is not abstract: `register_class(bool p_virtual)` installs a creation func
+    // either way (`core/object/class_db.h:255-261`), so Godot DOES construct a
+    // bare JointLimitation3D and extension_api.json reports
+    // is_instantiable = true. The worry about "a limitation with no shape" is a
+    // real one, but upstream does not express it through ClassDB.
     assert!(
-        !can_instantiate("JointLimitation3D"),
-        "JointLimitation3D is GDREGISTER_VIRTUAL_CLASS upstream — an abstract \
-         base. Reporting it constructible would let a script build a limitation \
-         with no shape at all"
+        can_instantiate("JointLimitation3D"),
+        "JointLimitation3D is GDREGISTER_VIRTUAL_CLASS (scene/3d:668), which \
+         keeps a creation func, so Godot reports it constructible"
     );
 }
 

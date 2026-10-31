@@ -506,7 +506,17 @@ fn rect_intersection(a: Rect2, b: Rect2) -> Rect2 {
     )
 }
 
-fn is_control(tree: &SceneTree, node_id: NodeId) -> bool {
+/// Whether `node_id` is a Control, by the SAME rule the control draw walk
+/// uses to decide what it renders.
+///
+/// Public so a caller that composites the control pass into its own frame can
+/// suppress its own per-class placeholder for exactly the nodes this pass
+/// painted (`gdeditor::scene_renderer`). A hand-copied class list there would
+/// drift from `CONTROL_CLASSES` silently.
+///
+/// ⚠️ The `is_class` half needs ClassDB populated; the `CONTROL_CLASSES` half
+/// does not, which is why both are kept.
+pub fn is_control(tree: &SceneTree, node_id: NodeId) -> bool {
     tree.get_node(node_id)
         .map(|n| n.is_class("Control") || CONTROL_CLASSES.contains(&n.class_name()))
         .unwrap_or(false)

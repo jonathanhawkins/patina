@@ -144,11 +144,359 @@ fn vec2_arg(args: &[Variant], idx: usize) -> gdcore::math::Vector2 {
 }
 
 /// Extracts a scalar method argument (Float or Int, defaulting to zero).
+/// Renders a layout property value the way `Mixer::load_bus_layout` reads it
+/// (pat-mgixk.90).
+///
+/// ⚠️ A `.tres` property map and a generated layout must produce the SAME
+/// spelling, or a round trip changes a value: a `Float` must not pick up an
+/// `f64` debug suffix and a `Bool` must be `true`/`false` rather than `True`.
+/// Strings pass through unquoted — the loader strips quotes but does not
+/// require them.
+fn variant_to_layout_value(v: &Variant) -> String {
+    match v {
+        Variant::String(s) => s.clone(),
+        Variant::StringName(s) => s.as_str().to_string(),
+        Variant::Float(f) => f.to_string(),
+        Variant::Int(i) => i.to_string(),
+        Variant::Bool(b) => b.to_string(),
+        // Anything else is not a field this layout models; an empty value is
+        // ignored by the loader rather than parsed as zero.
+        _ => String::new(),
+    }
+}
+
 fn float_arg(args: &[Variant], idx: usize) -> f64 {
     match args.get(idx) {
         Some(Variant::Float(f)) => *f,
         Some(Variant::Int(i)) => *i as f64,
         _ => 0.0,
+    }
+}
+
+// -------------------------------------------------------------------------
+// pat-mgixk.96 — readers for a `Variant::Resource` property bag, and the
+// per-class method implementations that need no interpreter state.
+// -------------------------------------------------------------------------
+
+/// Reads a bag property as `f32`, accepting either numeric Variant.
+///
+/// ⚠️ Accepts `Int` as well as `Float`: `n.frequency = 1` is a perfectly good
+/// GDScript assignment and arrives as an `Int`, which a `Float`-only match
+/// would silently replace with the fallback.
+fn bag_f32(res_ref: &ResourceRef, key: &str, fallback: f32) -> f32 {
+    match res_ref.properties.get(key) {
+        Some(Variant::Float(f)) => *f as f32,
+        Some(Variant::Int(i)) => *i as f32,
+        _ => fallback,
+    }
+}
+
+/// Reads a bag property as `i64`, accepting either numeric Variant.
+fn bag_i64(res_ref: &ResourceRef, key: &str, fallback: i64) -> i64 {
+    match res_ref.properties.get(key) {
+        Some(Variant::Int(i)) => *i,
+        Some(Variant::Float(f)) => *f as i64,
+        _ => fallback,
+    }
+}
+
+/// Reads a bag property as a `bool`. Absent or non-bool reads as `false`.
+fn bag_bool(res_ref: &ResourceRef, key: &str) -> bool {
+    matches!(res_ref.properties.get(key), Some(Variant::Bool(true)))
+}
+
+/// A string argument as its plain TEXT.
+///
+/// ⚠️ NOT `variant_to_gd_string`, which is the GDScript **repr** formatter and
+/// wraps a `String` in quotes (`interpreter.rs`: `format!("\"{}\"", ..)`).
+/// Using it here made `Shader.set_code("shader_type canvas_item;")` store
+/// `"\"shader_type canvas_item;\""` — the quotes became part of the shader
+/// source, and the same mistake would have put them inside every translated
+/// message and bind name.
+fn arg_text(args: &[Variant], idx: usize) -> String {
+    match args.get(idx) {
+        Some(Variant::String(s)) => s.clone(),
+        Some(Variant::StringName(s)) => s.as_str().to_string(),
+        // Godot coerces a number to its text at a String parameter.
+        Some(Variant::Int(i)) => i.to_string(),
+        Some(Variant::Float(f)) => f.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Reads a bag property as a `String`, accepting `StringName` too.
+fn bag_string(res_ref: &ResourceRef, key: &str) -> String {
+    match res_ref.properties.get(key) {
+        Some(Variant::String(s)) => s.clone(),
+        Some(Variant::StringName(s)) => s.as_str().to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Reads a bag property as a `PackedStringArray`.
+fn translation_strings(res_ref: &ResourceRef, key: &str) -> Vec<String> {
+    match res_ref.properties.get(key) {
+        Some(Variant::PackedStringArray(v)) => v.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// An integer argument, accepting a whole `Float` as GDScript's arithmetic
+/// routinely produces one.
+fn arg_i64(args: &[Variant], idx: usize) -> Option<i64> {
+    match args.get(idx) {
+        Some(Variant::Int(i)) => Some(*i),
+        Some(Variant::Float(f)) => Some(*f as i64),
+        _ => None,
+    }
+}
+
+/// A `Vector2i` argument, accepting a float `Vector2`: `Vector2i(4, 4)` and
+/// `Vector2(4, 4)` are interchangeable at a GDScript call site.
+fn arg_vector2i(args: &[Variant], idx: usize) -> Option<gdcore::math::Vector2i> {
+    match args.get(idx) {
+        Some(Variant::Vector2i(v)) => Some(*v),
+        Some(Variant::Vector2(v)) => Some(gdcore::math::Vector2i::new(v.x as i32, v.y as i32)),
+        _ => None,
+    }
+}
+
+/// Builds the noise generator a `FastNoiseLite` bag describes.
+///
+/// 🔑 Rebuilt per call rather than cached: the bag IS the resource, so a script
+/// that assigns `seed` between two samples must see the new field, and
+/// `FastNoiseLite` here is a plain value with no setup cost.
+///
+/// ⚠️ The enum values are MAPPED, never cast. Godot's `noise_type` ordering is
+/// `SIMPLEX=0, SIMPLEX_SMOOTH=1, CELLULAR=2, PERLIN=3, VALUE_CUBIC=4, VALUE=5`
+/// and does not agree with `gdresource::noise::NoiseType`;
+/// `noise_type_from_godot` is the single place that correspondence lives, and
+/// its second return value says whether the request was served exactly or
+/// substituted (Patina implements Value and Perlin only).
+fn noise_from_bag(res_ref: &ResourceRef) -> gdresource::noise::FastNoiseLite {
+    let (noise_type, _exact) =
+        gdresource::noise::noise_type_from_godot(bag_i64(res_ref, "noise_type", 1));
+    gdresource::noise::FastNoiseLite::new()
+        .seed(bag_i64(res_ref, "seed", 0) as i32)
+        .frequency(bag_f32(res_ref, "frequency", 0.01))
+        .noise_type(noise_type)
+        .fractal(gdresource::noise::fractal_type_from_godot(bag_i64(
+            res_ref,
+            "fractal_type",
+            1,
+        )))
+        .octaves(bag_i64(res_ref, "fractal_octaves", 5) as i32)
+        .lacunarity(bag_f32(res_ref, "fractal_lacunarity", 2.0))
+        .gain(bag_f32(res_ref, "fractal_gain", 0.5))
+        .weighted_strength(bag_f32(res_ref, "fractal_weighted_strength", 0.0))
+        .ping_pong_strength(bag_f32(res_ref, "fractal_ping_pong_strength", 2.0))
+}
+
+/// `Noise` / `FastNoiseLite` sampling (pat-mgixk.96).
+///
+/// The image bakers (`get_image`, `get_image_3d`, `get_seamless_image*`) are
+/// deliberately absent even though `gdresource::noise::bake_image_l8` exists:
+/// they return an `Image` resource, and there is no bag layout for one yet, so
+/// they keep raising rather than answering something an `ImageTexture` cannot
+/// use.
+fn noise_resource_method(
+    res_ref: &ResourceRef,
+    method: &str,
+    args: &[Variant],
+) -> Option<Result<Variant, RuntimeError>> {
+    if !matches!(
+        method,
+        "get_noise_1d" | "get_noise_2d" | "get_noise_2dv" | "get_noise_3d" | "get_noise_3dv"
+    ) {
+        return None;
+    }
+    let noise = noise_from_bag(res_ref);
+    // ⚠️ Godot adds `offset` to the SAMPLE COORDINATES inside every
+    // `get_noise_*` (`modules/noise/fastnoise_lite.cpp`), not to the field
+    // definition — so a registered `offset` that nothing read would make the
+    // property an inert no-op.
+    let offset = match res_ref.properties.get("offset") {
+        Some(Variant::Vector3(v)) => *v,
+        _ => gdcore::math::Vector3::new(0.0, 0.0, 0.0),
+    };
+    let value = match method {
+        // Godot's 1D sampler IS the 2D one at y = 0.
+        "get_noise_1d" => {
+            let x = float_arg(args, 0) as f32;
+            noise.get_noise_2d(x + offset.x, offset.y)
+        }
+        "get_noise_2d" => {
+            let (x, y) = (float_arg(args, 0) as f32, float_arg(args, 1) as f32);
+            noise.get_noise_2d(x + offset.x, y + offset.y)
+        }
+        "get_noise_2dv" => match args.first() {
+            Some(Variant::Vector2(v)) => noise.get_noise_2d(v.x + offset.x, v.y + offset.y),
+            Some(Variant::Vector2i(v)) => {
+                noise.get_noise_2d(v.x as f32 + offset.x, v.y as f32 + offset.y)
+            }
+            _ => {
+                return Some(Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Noise.get_noise_2dv() takes a Vector2".into(),
+                ))));
+            }
+        },
+        "get_noise_3d" => {
+            let (x, y, z) = (
+                float_arg(args, 0) as f32,
+                float_arg(args, 1) as f32,
+                float_arg(args, 2) as f32,
+            );
+            noise.get_noise_3d(x + offset.x, y + offset.y, z + offset.z)
+        }
+        _ => match args.first() {
+            Some(Variant::Vector3(v)) => {
+                noise.get_noise_3d(v.x + offset.x, v.y + offset.y, v.z + offset.z)
+            }
+            Some(Variant::Vector3i(v)) => noise.get_noise_3d(
+                v.x as f32 + offset.x,
+                v.y as f32 + offset.y,
+                v.z as f32 + offset.z,
+            ),
+            _ => {
+                return Some(Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Noise.get_noise_3dv() takes a Vector3".into(),
+                ))));
+            }
+        },
+    };
+    Some(Ok(Variant::Float(value as f64)))
+}
+
+/// Floats per instance in a `MULTIMESH_TRANSFORM_3D` buffer: a 3x4 matrix, each
+/// basis ROW followed by one origin component.
+const MM_XFORM_3D: usize = 12;
+/// Floats per instance in a `MULTIMESH_TRANSFORM_2D` buffer (a 2x4 matrix).
+const MM_XFORM_2D: usize = 8;
+/// The per-instance Color block that follows the transform.
+const MM_COLOR: usize = 4;
+
+/// `(per-instance stride, transform floats)` for a MultiMesh bag.
+///
+/// ⚠️ `transform_format` defaults to 0 = TRANSFORM_2D (`MultiMesh.xml` gives
+/// `default="0"`), so a 3D MultiMesh has to say `transform_format = 1`.
+///
+/// ⚠️ Godot's stride is transform, then colour, then custom data
+/// (`servers/rendering/renderer_rd/storage_rd/mesh_storage.cpp`). The
+/// scene-side reader `gdscene::node3d::multimesh_stride` accounts for
+/// `use_colors` but NOT for `use_custom_data`, so a MultiMesh with custom data
+/// enabled is decoded at the wrong offset on the render path. This follows
+/// Godot rather than copying that omission; the gap is reported separately
+/// rather than mirrored here, because mirroring it would make the custom-data
+/// accessors below wrong too.
+fn multimesh_stride(res_ref: &ResourceRef) -> (usize, usize) {
+    let xform = if bag_i64(res_ref, "transform_format", 0) == 1 {
+        MM_XFORM_3D
+    } else {
+        MM_XFORM_2D
+    };
+    let mut stride = xform;
+    if bag_bool(res_ref, "use_colors") {
+        stride += MM_COLOR;
+    }
+    if bag_bool(res_ref, "use_custom_data") {
+        stride += MM_COLOR;
+    }
+    (stride, xform)
+}
+
+/// The MultiMesh bag's instance buffer, Godot's own `buffer` property.
+fn multimesh_buffer(res_ref: &ResourceRef) -> Vec<f32> {
+    match res_ref.properties.get("buffer") {
+        Some(Variant::PackedFloat32Array(v)) => v.clone(),
+        _ => Vec::new(),
+    }
+}
+
+/// Decodes a `BitMap` bag into `(width, height, bitmask)`.
+///
+/// 🔑 Godot's own storage: the `data` property is a Dictionary carrying `size`
+/// (Vector2i) and `data` (PackedByteArray), one BIT per pixel packed row-major
+/// with the least significant bit first in each byte — `scene/resources/
+/// bit_map.cpp`'s `_set_data`/`_get_data` and `set_bit`'s
+/// `ofs = width * p_y + p_x`. Reading that layout means a `.tres`-authored
+/// BitMap and a script-built one are the same bytes; a private flat layout
+/// would read an authored BitMap as entirely empty.
+fn bitmap_data(res_ref: &ResourceRef) -> (i32, i32, Vec<u8>) {
+    let dict = match res_ref.properties.get("data") {
+        Some(Variant::Dictionary(d)) => d,
+        _ => return (0, 0, Vec::new()),
+    };
+    let size = match dict.get("size") {
+        Some(Variant::Vector2i(v)) => v,
+        Some(Variant::Vector2(v)) => gdcore::math::Vector2i::new(v.x as i32, v.y as i32),
+        _ => gdcore::math::Vector2i::new(0, 0),
+    };
+    let bits = match dict.get("data") {
+        Some(Variant::PackedByteArray(b)) => b,
+        _ => Vec::new(),
+    };
+    (size.x, size.y, bits)
+}
+
+/// Writes a `BitMap` bag's `data` Dictionary back in Godot's layout.
+fn bitmap_store(res_ref: &mut ResourceRef, width: i32, height: i32, bits: Vec<u8>) {
+    let mut dict = Dictionary::new();
+    dict.insert(
+        "size",
+        Variant::Vector2i(gdcore::math::Vector2i::new(width, height)),
+    );
+    dict.insert("data", Variant::PackedByteArray(bits));
+    res_ref
+        .properties
+        .insert("data".to_string(), Variant::Dictionary(dict.into()));
+}
+
+/// The `(x, y)` a BitMap accessor addresses, from either the scalar or the
+/// `v`-suffixed form.
+///
+/// ⚠️ Decided by the ARGUMENT SHAPE, not by the method name, so `set_bit` and
+/// `set_bitv` can share one implementation after their trailing value argument
+/// is sliced off.
+fn bitmap_coords(method: &str, args: &[Variant]) -> Result<(i32, i32), RuntimeError> {
+    if args.len() == 1 {
+        return arg_vector2i(args, 0).map(|v| (v.x, v.y)).ok_or_else(|| {
+            RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "BitMap.{method}() takes a Vector2i position"
+            )))
+        });
+    }
+    match (arg_i64(args, 0), arg_i64(args, 1)) {
+        (Some(x), Some(y)) => Ok((x as i32, y as i32)),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "BitMap.{method}() takes an x and a y"
+        )))),
+    }
+}
+
+/// Reads one bit. Out of bounds is `false`, as Godot's bounds-checked getter is.
+fn bitmap_get(width: i32, height: i32, bits: &[u8], x: i32, y: i32) -> bool {
+    if x < 0 || y < 0 || x >= width || y >= height {
+        return false;
+    }
+    let ofs = (width as usize) * (y as usize) + (x as usize);
+    bits.get(ofs / 8)
+        .is_some_and(|b| b & (1u8 << (ofs % 8)) != 0)
+}
+
+/// Writes one bit, ignoring an out-of-bounds coordinate.
+fn bitmap_set(width: i32, height: i32, bits: &mut Vec<u8>, x: i32, y: i32, value: bool) {
+    if x < 0 || y < 0 || x >= width || y >= height {
+        return;
+    }
+    let ofs = (width as usize) * (y as usize) + (x as usize);
+    let byte = ofs / 8;
+    if bits.len() <= byte {
+        bits.resize(byte + 1, 0);
+    }
+    if value {
+        bits[byte] |= 1u8 << (ofs % 8);
+    } else {
+        bits[byte] &= !(1u8 << (ofs % 8));
     }
 }
 
@@ -921,6 +1269,38 @@ pub struct ClassDef {
     pub inner_classes: HashMap<String, ClassDef>,
     /// Class-level `const` declarations, in declaration order.
     pub constants: Vec<(String, Expr)>,
+}
+
+/// Writes a finished call frame's property mutations back onto `instance`
+/// without clobbering a mutation some *other* frame made in the meantime.
+///
+/// ⚠️ A method body runs against a CLONE (`self_instance = instance.clone()`),
+/// so the obvious `instance.properties = updated.properties.clone()` is a
+/// wholesale overwrite from a snapshot taken before the body ran. That is a
+/// lost update the moment a call re-enters the same instance: `Player._process`
+/// calls `$Enemy.take_damage()`, `Enemy` emits `died`, `Player._on_enemy_died`
+/// raises `died_count` to 1 and writes it back — and then `_process` returns and
+/// restores its own stale view, where `died_count` is still 0 (pat-mgixk.9
+/// part 2). The re-entrant dispatch was working the whole time; its result was
+/// being overwritten on the way out.
+///
+/// So write back only the keys THIS frame actually changed, measured against
+/// `entry` — the values it saw on the way in. A key the frame never touched is
+/// left exactly as it stands, which is what lets the re-entrant handler's
+/// increment survive.
+fn merge_frame_property_writes(
+    instance: &mut ClassInstance,
+    updated: Option<&ClassInstance>,
+    entry: &HashMap<String, Variant>,
+) {
+    let Some(updated) = updated else {
+        return;
+    };
+    for (name, value) in &updated.properties {
+        if entry.get(name) != Some(value) {
+            instance.properties.insert(name.clone(), value.clone());
+        }
+    }
 }
 
 /// A live instance of a class.
@@ -1824,6 +2204,7 @@ impl Interpreter {
     ) -> Result<R, RuntimeError> {
         let prev_self = self.self_instance.take();
         self.self_instance = Some(instance.clone());
+        let entry_props = instance.properties.clone();
         // ROOT-FIRST, so a derived override replaces the inherited entry
         // rather than the other way round. This registry is what lets a bare
         // `hit()` inside a body resolve, so without the base's methods here an
@@ -1836,9 +2217,7 @@ impl Interpreter {
             }
         }
         let result = f(self);
-        if let Some(ref updated) = self.self_instance {
-            instance.properties = updated.properties.clone();
-        }
+        merge_frame_property_writes(instance, self.self_instance.as_ref(), &entry_props);
         self.self_instance = prev_self;
         result
     }
@@ -6359,6 +6738,27 @@ impl Interpreter {
                 }
                 Variant::Nil
             }
+            // `set_group_flags(flags, group, property, value)` — the flagged
+            // spelling of `set_group`. Only the unflagged one was bound, so a
+            // script using the documented flagged form raised
+            // `UndefinedFunction` and aborted (pat-mgixk.59).
+            //
+            // ⚠️ Argument ORDER differs from `set_group`: Godot puts the flags
+            // FIRST, so this is `(flags, group, property, value)` against
+            // `set_group`'s `(group, property, value)`. Reading the group from
+            // index 0 here would pass the flag integer as the group name and
+            // silently match nothing.
+            "set_group_flags" => {
+                Self::require_args("set_group_flags", args, 4)?;
+                let flags = Self::scene_tree_arg_int("set_group_flags", args, 0, 0)?;
+                let group = Self::scene_tree_arg_string("set_group_flags", args, 1)?;
+                let property = Self::scene_tree_arg_string("set_group_flags", args, 2)?;
+                let value = args[3].clone();
+                if let Some(ref mut access) = self.scene_access {
+                    access.set_group_flags(flags, &group, &property, value);
+                }
+                Variant::Nil
+            }
             // -- pat-mgixk.8: the rest of the SceneTree surface --------------
             //
             // `change_scene_to_packed(scene)` — the PackedScene form of a scene
@@ -6588,6 +6988,23 @@ impl Interpreter {
                         )))
                     }
                 };
+
+                // Godot: `Object.set_message_translation(false)` makes `tr()`
+                // return the message UNCHANGED for this object
+                // (`Object::tr` checks `_can_translate` first) — pat-mgixk.99.
+                //
+                // ⚠️ After the key is extracted, so a missing/!string argument
+                // still raises as before, and before the catalog lookup, which is
+                // the only thing being suppressed. Absent scene access leaves the
+                // old behaviour untouched rather than defaulting to "cannot
+                // translate", which would disable i18n for every non-scene host.
+                if let (Some(ref access), Some(node_id)) =
+                    (&self.scene_access, self.current_node_id)
+                {
+                    if !access.can_translate_messages(node_id) {
+                        return Ok(Some(Variant::String(key)));
+                    }
+                }
                 // `tr(message, context)` — the second argument was accepted and
                 // then DROPPED, so a context-qualified lookup silently returned
                 // the context-free translation (pat-s3rrv.128).
@@ -6623,6 +7040,23 @@ impl Interpreter {
                         )))
                     }
                 };
+
+                // Godot: `Object.set_message_translation(false)` makes `tr()`
+                // return the message UNCHANGED for this object
+                // (`Object::tr` checks `_can_translate` first) — pat-mgixk.99.
+                //
+                // ⚠️ After the key is extracted, so a missing/!string argument
+                // still raises as before, and before the catalog lookup, which is
+                // the only thing being suppressed. Absent scene access leaves the
+                // old behaviour untouched rather than defaulting to "cannot
+                // translate", which would disable i18n for every non-scene host.
+                if let (Some(ref access), Some(node_id)) =
+                    (&self.scene_access, self.current_node_id)
+                {
+                    if !access.can_translate_messages(node_id) {
+                        return Ok(Some(Variant::String(key)));
+                    }
+                }
                 let plural = match &args[1] {
                     Variant::String(s) => s.clone(),
                     Variant::StringName(sn) => sn.as_str().to_string(),
@@ -7679,6 +8113,10 @@ impl Interpreter {
                         "connect() target must be a Callable or a method name".into(),
                     )));
                 };
+                // pat-mgixk.98: `callable_target` resolves THROUGH the
+                // `Bound`/`Unbound` wrappers, so the bindings have to be read
+                // off the Callable separately or `.bind(x)` is lost here.
+                let (binds, unbinds) = callable_bindings(&args[1]);
                 // Godot ConnectFlags bitmask (DEFERRED=1, ONE_SHOT=4, ...).
                 // One arg earlier than the object arm's legacy 3-arg shape,
                 // because a bare call has no receiver to spend a slot on.
@@ -7687,21 +8125,21 @@ impl Interpreter {
                     _ => 0,
                 };
                 if let (Some(ref mut access), Some(node_id)) = (&mut self.scene_access, self_node) {
-                    access.connect_signal_flags(
+                    let code = access.connect_signal_flags(
                         node_id,
                         &signal,
                         target_id,
                         &method_name,
                         flags,
-                        &[],
+                        &binds,
+                        unbinds,
                     );
-                    // ⚠️ `Nil`, matching the object-level arm. Godot returns an
-                    // `Error` int (OK == 0), so BOTH arms are inaccurate here —
-                    // but making only the new one correct would leave
-                    // `obj.connect()` and `connect()` returning different types
-                    // for the same operation. Fixing both belongs in its own
-                    // change.
-                    Ok(Some(Variant::Nil))
+                    // pat-mgixk.98 is the "own change" the note here used to
+                    // defer to: Godot's `connect` returns an `Error`, and `OK`
+                    // is 0. Both this arm and the object-level one returned
+                    // `Nil`; they are changed together, so the two shapes still
+                    // agree with each other as well as with Godot.
+                    Ok(Some(Variant::Int(code)))
                 } else {
                     Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "connect() requires scene access".into(),
@@ -7794,6 +8232,214 @@ impl Interpreter {
                 } else {
                     Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "queue_free() requires scene access".into(),
+                    )))
+                }
+            }
+
+            // ---------------------------------------------------------------
+            // Object API surface, SELF-CALL form (pat-mgixk.99).
+            //
+            // ⚠️ This is a DIFFERENT match from the ObjectId arms further down:
+            // a bare `set_block_signals(true)` inside a script never reaches
+            // those, and four of this bead's six acceptance clauses use the bare
+            // form. Same bodies, but the node comes from `current_node_id` and
+            // the result is wrapped in `Some`.
+            // ---------------------------------------------------------------
+            "add_user_signal" => {
+                let name = match args.first() {
+                    Some(Variant::String(s)) => s.clone(),
+                    Some(Variant::StringName(s)) => s.to_string(),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "add_user_signal() needs a signal name".into(),
+                        )))
+                    }
+                };
+                let sig_args: Vec<Variant> = match args.get(1) {
+                    Some(Variant::Array(items)) => items.to_vec(),
+                    _ => Vec::new(),
+                };
+                if let (Some(ref mut access), Some(node_id)) =
+                    (&mut self.scene_access, self.current_node_id)
+                {
+                    access.add_user_signal(node_id, &name, &sig_args);
+                    Ok(Some(Variant::Nil))
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "add_user_signal() requires scene access".into(),
+                    )))
+                }
+            }
+            "has_user_signal" => {
+                let name = match args.first() {
+                    Some(Variant::String(s)) => s.clone(),
+                    Some(Variant::StringName(s)) => s.to_string(),
+                    _ => String::new(),
+                };
+                if let (Some(ref access), Some(node_id)) =
+                    (&self.scene_access, self.current_node_id)
+                {
+                    Ok(Some(Variant::Bool(access.has_user_signal(node_id, &name))))
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "has_user_signal() requires scene access".into(),
+                    )))
+                }
+            }
+            "remove_user_signal" => {
+                let name = match args.first() {
+                    Some(Variant::String(s)) => s.clone(),
+                    Some(Variant::StringName(s)) => s.to_string(),
+                    _ => String::new(),
+                };
+                if let (Some(ref mut access), Some(node_id)) =
+                    (&mut self.scene_access, self.current_node_id)
+                {
+                    access.remove_user_signal(node_id, &name);
+                    Ok(Some(Variant::Nil))
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "remove_user_signal() requires scene access".into(),
+                    )))
+                }
+            }
+            "set_block_signals" => {
+                let blocked = args.first().map(|v| v.is_truthy()).unwrap_or(false);
+                if let (Some(ref mut access), Some(node_id)) =
+                    (&mut self.scene_access, self.current_node_id)
+                {
+                    access.set_block_signals(node_id, blocked);
+                    Ok(Some(Variant::Nil))
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "set_block_signals() requires scene access".into(),
+                    )))
+                }
+            }
+            "is_blocking_signals" => {
+                if let (Some(ref access), Some(node_id)) =
+                    (&self.scene_access, self.current_node_id)
+                {
+                    Ok(Some(Variant::Bool(access.is_blocking_signals(node_id))))
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "is_blocking_signals() requires scene access".into(),
+                    )))
+                }
+            }
+            "is_queued_for_deletion" => {
+                if let (Some(ref access), Some(node_id)) =
+                    (&self.scene_access, self.current_node_id)
+                {
+                    Ok(Some(Variant::Bool(access.is_queued_for_deletion(node_id))))
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "is_queued_for_deletion() requires scene access".into(),
+                    )))
+                }
+            }
+            "cancel_free" => {
+                if let (Some(ref mut access), Some(node_id)) =
+                    (&mut self.scene_access, self.current_node_id)
+                {
+                    access.cancel_free(node_id);
+                    Ok(Some(Variant::Nil))
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "cancel_free() requires scene access".into(),
+                    )))
+                }
+            }
+            "set_script" => {
+                let path = match args.first() {
+                    Some(Variant::Resource(r)) => r.path.clone(),
+                    Some(Variant::String(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                if path.is_empty() {
+                    return Ok(Some(Variant::Bool(false)));
+                }
+                if let (Some(ref mut access), Some(node_id)) =
+                    (&mut self.scene_access, self.current_node_id)
+                {
+                    Ok(Some(Variant::Bool(
+                        access.set_object_script(node_id, &path),
+                    )))
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "set_script() requires scene access".into(),
+                    )))
+                }
+            }
+            "notification" => {
+                let what = match args.first() {
+                    Some(Variant::Int(v)) => *v,
+                    Some(Variant::Float(f)) => *f as i64,
+                    _ => 0,
+                };
+                let reversed = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+                if let (Some(ref mut access), Some(node_id)) =
+                    (&mut self.scene_access, self.current_node_id)
+                {
+                    access.notify_object(node_id, what, reversed);
+                    Ok(Some(Variant::Nil))
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "notification() requires scene access".into(),
+                    )))
+                }
+            }
+            "set_message_translation" => {
+                let enabled = args.first().map(|v| v.is_truthy()).unwrap_or(true);
+                if let (Some(ref mut access), Some(node_id)) =
+                    (&mut self.scene_access, self.current_node_id)
+                {
+                    access.set_message_translation(node_id, enabled);
+                    Ok(Some(Variant::Nil))
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "set_message_translation() requires scene access".into(),
+                    )))
+                }
+            }
+            "can_translate_messages" => {
+                if let (Some(ref access), Some(node_id)) =
+                    (&self.scene_access, self.current_node_id)
+                {
+                    Ok(Some(Variant::Bool(access.can_translate_messages(node_id))))
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "can_translate_messages() requires scene access".into(),
+                    )))
+                }
+            }
+            "set_translation_domain" => {
+                let domain = match args.first() {
+                    Some(Variant::String(s)) => s.clone(),
+                    Some(Variant::StringName(s)) => s.to_string(),
+                    _ => String::new(),
+                };
+                if let (Some(ref mut access), Some(node_id)) =
+                    (&mut self.scene_access, self.current_node_id)
+                {
+                    access.set_translation_domain(node_id, &domain);
+                    Ok(Some(Variant::Nil))
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "set_translation_domain() requires scene access".into(),
+                    )))
+                }
+            }
+            "get_translation_domain" => {
+                if let (Some(ref access), Some(node_id)) =
+                    (&self.scene_access, self.current_node_id)
+                {
+                    Ok(Some(Variant::String(
+                        access.get_translation_domain(node_id),
+                    )))
+                } else {
+                    Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "get_translation_domain() requires scene access".into(),
                     )))
                 }
             }
@@ -11157,6 +11803,317 @@ impl Interpreter {
                 }
             }
 
+            // -- bus routing, linear volume and the effect chain (pat-mgixk.83)
+            //
+            // Every arm below forwards to a gdaudio operation that already
+            // existed and had NO script caller, so `AudioServer.set_bus_send`
+            // and friends reached this dispatcher and fell through to
+            // `UndefinedFunction` — a script could not route a bus or toggle an
+            // effect at all, while the mixer underneath had done both for
+            // releases.
+            "set_bus_send" => {
+                arity(2)?;
+                let idx = idx_arg(args, 0);
+                let send = str_arg(args, 1);
+                if let Some(a) = self.scene_access.as_mut() {
+                    a.audio_set_bus_send(idx, &send);
+                }
+                Ok(Variant::Nil)
+            }
+            "get_bus_send" => {
+                arity(1)?;
+                let idx = idx_arg(args, 0);
+                // Godot returns an empty StringName for an unknown bus, not a
+                // null, so a script can concatenate the result unconditionally.
+                Ok(Variant::String(
+                    self.scene_access
+                        .as_ref()
+                        .and_then(|a| a.audio_get_bus_send(idx))
+                        .unwrap_or_default(),
+                ))
+            }
+            "move_bus" => {
+                arity(2)?;
+                let (from, to) = (idx_arg(args, 0), idx_arg(args, 1));
+                if let Some(a) = self.scene_access.as_mut() {
+                    a.audio_move_bus(from, to);
+                }
+                Ok(Variant::Nil)
+            }
+            "set_bus_volume_linear" => {
+                arity(2)?;
+                let idx = idx_arg(args, 0);
+                let linear = float_arg(args, 1) as f32;
+                if let Some(a) = self.scene_access.as_mut() {
+                    a.audio_set_bus_volume_linear(idx, linear);
+                }
+                Ok(Variant::Nil)
+            }
+            "get_bus_volume_linear" => {
+                arity(1)?;
+                let idx = idx_arg(args, 0);
+                // 1.0, not 0.0, for an unknown bus: unity gain is the harmless
+                // answer, and 0.0 reads as "this bus is silent".
+                Ok(Variant::Float(
+                    self.scene_access
+                        .as_ref()
+                        .and_then(|a| a.audio_get_bus_volume_linear(idx))
+                        .unwrap_or(1.0) as f64,
+                ))
+            }
+            "get_bus_effect_count" => {
+                arity(1)?;
+                let bus = idx_arg(args, 0);
+                // The hook answers `None` for a bus that does not exist
+                // (pat-mgixk.90's trait distinguishes that from "zero
+                // effects"); Godot's own `ERR_FAIL_INDEX_V(p_bus,
+                // buses.size(), 0)` reports 0 to the script either way, so the
+                // distinction is flattened HERE rather than in the hook.
+                Ok(Variant::Int(
+                    self.scene_access
+                        .as_ref()
+                        .and_then(|a| a.audio_get_bus_effect_count(bus))
+                        .unwrap_or(0),
+                ))
+            }
+            "set_bus_effect_enabled" => {
+                arity(3)?;
+                let (bus, effect) = (idx_arg(args, 0), idx_arg(args, 1));
+                let on = bool_arg(args, 2);
+                if let Some(a) = self.scene_access.as_mut() {
+                    a.audio_set_bus_effect_enabled(bus, effect, on);
+                }
+                Ok(Variant::Nil)
+            }
+            "is_bus_effect_enabled" => {
+                arity(2)?;
+                let (bus, effect) = (idx_arg(args, 0), idx_arg(args, 1));
+                // `None` (missing bus or empty slot) reads as `false`, which
+                // is what Godot returns for an out-of-range index.
+                Ok(Variant::Bool(
+                    self.scene_access
+                        .as_ref()
+                        .and_then(|a| a.audio_is_bus_effect_enabled(bus, effect))
+                        .unwrap_or(false),
+                ))
+            }
+            "remove_bus_effect" => {
+                arity(2)?;
+                let (bus, effect) = (idx_arg(args, 0), idx_arg(args, 1));
+                if let Some(a) = self.scene_access.as_mut() {
+                    a.audio_remove_bus_effect(bus, effect);
+                }
+                Ok(Variant::Nil)
+            }
+            "swap_bus_effects" => {
+                arity(3)?;
+                let bus = idx_arg(args, 0);
+                let (x, y) = (idx_arg(args, 1), idx_arg(args, 2));
+                if let Some(a) = self.scene_access.as_mut() {
+                    a.audio_swap_bus_effects(bus, x, y);
+                }
+                Ok(Variant::Nil)
+            }
+
+            // -- bus table size (pat-mgixk.83) -----------------------------
+            "set_bus_count" => {
+                arity(1)?;
+                let amount = idx_arg(args, 0);
+                if let Some(a) = self.scene_access.as_mut() {
+                    a.audio_set_bus_count(amount);
+                }
+                Ok(Variant::Nil)
+            }
+
+            // -- device / speaker queries (pat-mgixk.83) --------------------
+            //
+            // 🔑 Answered HERE rather than through a `SceneAccess` hook,
+            // because none of them has anything to ask the mixer: Patina mixes
+            // interleaved stereo unconditionally and has no device enumeration.
+            // A hook would be three more defaulted methods that every
+            // implementor answers identically — see the timing trio I removed
+            // for exactly that reason.
+            //
+            // The VALUES are the bead's, not invented here: speaker mode
+            // stereo = 0, and a single "Default" output device.
+            "get_speaker_mode" => {
+                arity(0)?;
+                // `AudioServer.SPEAKER_MODE_STEREO` (`audio_server.h`). Patina's
+                // mix is interleaved stereo throughout, so this is the honest
+                // answer rather than a placeholder.
+                Ok(Variant::Int(0))
+            }
+            "get_output_device_list" => {
+                arity(0)?;
+                Ok(Variant::PackedStringArray(vec!["Default".to_string()]))
+            }
+            "get_output_device" => {
+                arity(0)?;
+                Ok(Variant::String("Default".to_string()))
+            }
+            "get_driver_name" => {
+                arity(0)?;
+                // Godot: `AudioDriver::get_singleton()->get_name()`
+                // (audio_server.cpp:1487). Patina has no named driver to report
+                // — `AudioOutputStream` (gdaudio/src/sample.rs:70-81) exposes
+                // only `write_samples` / `sample_rate` / `channels`, no name —
+                // so the faithful answer is the name Godot itself uses when no
+                // real backend is active: `AudioDriverDummy::get_name()` returns
+                // "Dummy" (audio_driver_dummy.h:61-63). Read from the vendored
+                // source rather than guessed.
+                Ok(Variant::String("Dummy".to_string()))
+            }
+            "get_bus_channels" => {
+                arity(1)?;
+                let bus = idx_arg(args, 0);
+                // Godot: `buses[p_bus]->channels.size()`, where `channels` is
+                // sized to `get_channel_count()` (audio_server.cpp:1029-1032,
+                // :822). `get_channel_count()` is **1** for
+                // SPEAKER_MODE_STEREO (audio_server.h:356-368), and the
+                // `ERR_FAIL_INDEX_V(p_bus, buses.size(), 0)` guard yields **0**
+                // for an out-of-range bus.
+                //
+                // 🔑 Patina mixes interleaved stereo throughout, which is the
+                // same thing `get_speaker_mode` reports above — so 1 here is
+                // forced by that answer, not chosen independently. The two
+                // cannot drift apart without one of them becoming wrong.
+                let count = self
+                    .scene_access
+                    .as_ref()
+                    .map(|a| a.audio_get_bus_count())
+                    .unwrap_or(0);
+                Ok(Variant::Int(if bus >= 0 && bus < count { 1 } else { 0 }))
+            }
+            "set_output_device" => {
+                arity(1)?;
+                // Accepted and ignored: there is one device, so selecting it is
+                // a no-op and erroring would break an options menu that offers
+                // the list above. Godot likewise silently keeps the current
+                // device when the name is not in the list.
+                Ok(Variant::Nil)
+            }
+
+            // -- bus layouts (pat-mgixk.90) --------------------------------
+            //
+            // 🔑 The layout travels as `bus/<idx>/<field>` ENTRIES, never as
+            // `.tres` text. `load("res://x.tres")` has already parsed the file
+            // and its `ResourceRef` carries the properties, and
+            // `Mixer::load_bus_layout` consumes exactly those pairs — so there
+            // is no file read here and no second parser to disagree with the
+            // first.
+            "set_bus_layout" => {
+                arity(1)?;
+                let entries: Vec<(String, String)> = match args.first() {
+                    Some(Variant::Resource(r)) => r
+                        .properties
+                        .iter()
+                        .map(|(k, v)| (k.clone(), variant_to_layout_value(v)))
+                        .collect(),
+                    // Godot returns void; a non-resource argument names no
+                    // layout and changes nothing.
+                    _ => return Ok(Variant::Nil),
+                };
+                if let Some(a) = self.scene_access.as_mut() {
+                    a.audio_set_bus_layout_entries(&entries);
+                }
+                Ok(Variant::Nil)
+            }
+            // Godot hands back an `AudioBusLayout` resource. The properties are
+            // the same entries `set_bus_layout` consumes, so the round trip the
+            // acceptance asks for is exact by construction rather than by two
+            // serializers agreeing.
+            "generate_bus_layout" => {
+                arity(0)?;
+                let entries = self
+                    .scene_access
+                    .as_ref()
+                    .map(|a| a.audio_generate_bus_layout_entries())
+                    .unwrap_or_default();
+                let properties = entries
+                    .into_iter()
+                    .map(|(k, v)| (k, Variant::String(v)))
+                    .collect();
+                Ok(Variant::Resource(Box::new(gdvariant::ResourceRef {
+                    path: String::new(),
+                    class_name: "AudioBusLayout".to_string(),
+                    properties,
+                })))
+            }
+
+            // 🔑 `effect` arrives as a `Variant::Resource`: `AudioEffect*.new()`
+            // falls to the generic tail at `:5008`, which answers with a
+            // `ResourceRef` carrying the class name AND that class's ClassDB
+            // property defaults. Patina keeps an effect's state in its bus slot
+            // rather than a registry, so the engine rebuilds the effect from
+            // those two things instead of storing the script's object
+            // (pat-mgixk.90).
+            "add_bus_effect" => {
+                // Godot's signature is `(bus_idx, effect, at_position = -1)`, so
+                // 2 or 3 arguments are both correct — the shared `arity` helper
+                // only checks an exact count.
+                if args.len() != 2 && args.len() != 3 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "AudioServer.add_bus_effect() takes 2 or 3 argument(s), got {}",
+                        args.len()
+                    ))));
+                }
+                let bus = idx_arg(args, 0);
+                // `idx_arg` answers -1 for a missing argument, which is exactly
+                // Godot's `at_position` default (append).
+                let at = idx_arg(args, 2);
+                let (class_name, props) = match args.get(1) {
+                    Some(Variant::Resource(r)) => (
+                        r.class_name.clone(),
+                        r.properties
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect::<Vec<(String, Variant)>>(),
+                    ),
+                    // Anything that is not a resource names no effect. Godot
+                    // returns void here, so a wrong argument is a no-op rather
+                    // than an error.
+                    _ => return Ok(Variant::Nil),
+                };
+                if let Some(a) = self.scene_access.as_mut() {
+                    a.audio_add_bus_effect(bus, &class_name, &props, at);
+                }
+                Ok(Variant::Nil)
+            }
+            // Godot returns the AudioEffect resource in the slot. Patina has
+            // no object to hand back — the effect lives in the slot — so this
+            // answers a `ResourceRef` rebuilt from the slot's class name, which
+            // is what a script reads (`get_class()`, property access) and what
+            // `add_bus_effect` accepts if it is passed to another bus
+            // (pat-mgixk.90).
+            //
+            // ⚠️ The ONLY arm of this group that was not already present. The
+            // other twelve were wired by a concurrent agent onto the same trait
+            // methods while this bead was in flight; duplicating them would
+            // have been dead code behind an `unreachable_patterns` warning.
+            "get_bus_effect" => {
+                arity(2)?;
+                let (bus, idx) = (idx_arg(args, 0), idx_arg(args, 1));
+                let class_name = self
+                    .scene_access
+                    .as_ref()
+                    .and_then(|a| a.audio_bus_effect_class(bus, idx));
+                match class_name {
+                    Some(name) => {
+                        let properties = gdobject::class_db::get_property_list(&name)
+                            .into_iter()
+                            .map(|p| (p.name, p.default_value))
+                            .collect();
+                        Ok(Variant::Resource(Box::new(gdvariant::ResourceRef {
+                            path: String::new(),
+                            class_name: name,
+                            properties,
+                        })))
+                    }
+                    // An empty slot is `null` in Godot.
+                    None => Ok(Variant::Nil),
+                }
+            }
+
             other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                 format!("AudioServer.{other}"),
             ))),
@@ -11658,6 +12615,738 @@ impl Interpreter {
         Ok(items)
     }
 
+    // ---------------------------------------------------------------------
+    // pat-mgixk.96 — Resource-receiver methods, dispatched by CLASS.
+    // ---------------------------------------------------------------------
+
+    /// Dispatches a method whose receiver is a `Variant::Resource` property
+    /// bag, keyed on the bag's ClassDB class name.
+    ///
+    /// Every RefCounted class a script constructs becomes a [`ResourceRef`]
+    /// property bag seeded from the ClassDB property list (the `ClassName.new()`
+    /// branch above), so its *properties* have always worked while every one of
+    /// its *methods* fell through to `UndefinedFunction("Resource.<m>")` — 784
+    /// registered methods across 132 classes, `FastNoiseLite.get_noise_2d`
+    /// (the standard procedural-generation idiom) among them.
+    ///
+    /// 🔑 Returns `None` for a pair it does not implement, so that name still
+    /// reaches the generic table's loud `UndefinedFunction`. Answering `Nil` for
+    /// everything unhandled would turn a *reported* gap into a silently wrong
+    /// value, which is the failure mode this bead exists to remove. So the
+    /// families below are exactly the ones whose Godot storage format is pinned,
+    /// and every other name keeps raising.
+    fn call_resource_class_method(
+        &mut self,
+        res_ref: &ResourceRef,
+        method: &str,
+        args: &[Variant],
+        object_expr: &Expr,
+    ) -> Option<Result<Variant, RuntimeError>> {
+        let class = res_ref.class_name.clone();
+
+        // -- Noise / FastNoiseLite: pure sampling, nothing to write back -----
+        if gdobject::class_db::is_parent_class(&class, "Noise") {
+            if let Some(result) = noise_resource_method(res_ref, method, args) {
+                return Some(result);
+            }
+        }
+
+        // -- Shader.get_code / set_code --------------------------------------
+        //
+        // The `code` property already existed and round-trips through
+        // `.tscn`/`.tres`; only the two accessors were unbound, so
+        // `shader.set_code(src)` raised while `shader.code = src` worked.
+        if gdobject::class_db::is_parent_class(&class, "Shader") {
+            match method {
+                "get_code" => {
+                    return Some(Ok(Variant::String(bag_string(res_ref, "code"))));
+                }
+                "set_code" => {
+                    if let Err(e) = Self::require_args(method, args, 1) {
+                        return Some(Err(e));
+                    }
+                    let code = arg_text(args, 0);
+                    return Some(self.write_resource_back(res_ref, object_expr, |r| {
+                        r.properties
+                            .insert("code".to_string(), Variant::String(code));
+                    }));
+                }
+                _ => {}
+            }
+        }
+
+        if gdobject::class_db::is_parent_class(&class, "BitMap") {
+            if let Some(result) = self.bitmap_resource_method(res_ref, method, args, object_expr) {
+                return Some(result);
+            }
+        }
+
+        if gdobject::class_db::is_parent_class(&class, "MultiMesh") {
+            if let Some(result) = self.multimesh_resource_method(res_ref, method, args, object_expr)
+            {
+                return Some(result);
+            }
+        }
+
+        if gdobject::class_db::is_parent_class(&class, "Skin") {
+            if let Some(result) = self.skin_resource_method(res_ref, method, args, object_expr) {
+                return Some(result);
+            }
+        }
+
+        if gdobject::class_db::is_parent_class(&class, "Translation") {
+            if let Some(result) =
+                self.translation_resource_method(res_ref, method, args, object_expr)
+            {
+                return Some(result);
+            }
+        }
+
+        None
+    }
+
+    /// Writes a mutated copy of the receiver bag back through the expression it
+    /// was read from, and answers `Nil` the way a Godot void method does.
+    ///
+    /// ⚠️ A `ResourceRef` inside a Variant is a VALUE, not a handle, so a
+    /// mutating method has to re-assign its own receiver — the pattern the
+    /// existing `set_shader_parameter` arm uses. The consequence is that
+    /// `var b = a; b.set_bit(...)` leaves `a` untouched, where Godot (where
+    /// Resource is reference-counted) would mutate both. That divergence is
+    /// the whole `Variant::Resource` model, not something this method can fix;
+    /// it is recorded on the bead rather than worked around here.
+    fn write_resource_back(
+        &mut self,
+        res_ref: &ResourceRef,
+        object_expr: &Expr,
+        edit: impl FnOnce(&mut ResourceRef),
+    ) -> Result<Variant, RuntimeError> {
+        let mut new_ref = res_ref.clone();
+        edit(&mut new_ref);
+        self.write_place(object_expr, Variant::Resource(Box::new(new_ref)))?;
+        Ok(Variant::Nil)
+    }
+
+    /// `BitMap`: the subset whose storage layout is pinned by Godot.
+    ///
+    /// `grow_mask`, `convert_to_image`, `create_from_image_alpha` and
+    /// `opaque_to_polygons` are deliberately NOT here: they need an `Image`
+    /// receiver or Godot's march-squares polygon tracer, and inventing an
+    /// answer for them would replace a loud `UndefinedFunction` with a wrong
+    /// one. `resize` is left out for the same reason — Godot's version
+    /// resamples rather than crops and the exact rule is worth copying, not
+    /// guessing.
+    fn bitmap_resource_method(
+        &mut self,
+        res_ref: &ResourceRef,
+        method: &str,
+        args: &[Variant],
+        object_expr: &Expr,
+    ) -> Option<Result<Variant, RuntimeError>> {
+        let (w, h, bits) = bitmap_data(res_ref);
+        match method {
+            "create" => {
+                if let Err(e) = Self::require_args(method, args, 1) {
+                    return Some(Err(e));
+                }
+                let size = match arg_vector2i(args, 0) {
+                    Some(v) => v,
+                    None => {
+                        return Some(Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "BitMap.create() takes a Vector2i size".into(),
+                        ))));
+                    }
+                };
+                // Godot refuses a degenerate bitmap outright
+                // (`ERR_FAIL_COND(p_size.width < 1 || p_size.height < 1)`)
+                // rather than producing a 0x0 one that every later call
+                // silently no-ops on.
+                if size.x < 1 || size.y < 1 {
+                    return Some(Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        format!(
+                            "BitMap.create() needs a size of at least 1x1, got {}x{}",
+                            size.x, size.y
+                        ),
+                    ))));
+                }
+                let bytes = (size.x as usize * size.y as usize) / 8 + 1;
+                Some(self.write_resource_back(res_ref, object_expr, move |r| {
+                    bitmap_store(r, size.x, size.y, vec![0u8; bytes]);
+                }))
+            }
+            "get_size" => Some(Ok(Variant::Vector2i(gdcore::math::Vector2i::new(w, h)))),
+            "get_bit" | "get_bitv" => {
+                let (x, y) = match bitmap_coords(method, args) {
+                    Ok(c) => c,
+                    Err(e) => return Some(Err(e)),
+                };
+                Some(Ok(Variant::Bool(bitmap_get(w, h, &bits, x, y))))
+            }
+            "set_bit" | "set_bitv" => {
+                // ⚠️ The arity is checked rather than inferred from the slice:
+                // the value is the LAST argument, so a 2-argument `set_bit(x, y)`
+                // would otherwise read `y` as the value and `x` as a position.
+                let arity = if method == "set_bitv" { 2 } else { 3 };
+                if let Err(e) = Self::require_args(method, args, arity) {
+                    return Some(Err(e));
+                }
+                let value = matches!(args.last(), Some(Variant::Bool(true)));
+                let coord_args = &args[..args.len() - 1];
+                let (x, y) = match bitmap_coords(method, coord_args) {
+                    Ok(c) => c,
+                    Err(e) => return Some(Err(e)),
+                };
+                let mut bits = bits;
+                bitmap_set(w, h, &mut bits, x, y, value);
+                Some(self.write_resource_back(res_ref, object_expr, move |r| {
+                    bitmap_store(r, w, h, bits);
+                }))
+            }
+            "set_bit_rect" => {
+                if let Err(e) = Self::require_args(method, args, 2) {
+                    return Some(Err(e));
+                }
+                let rect = match args.first() {
+                    Some(Variant::Rect2i(r)) => *r,
+                    Some(Variant::Rect2(r)) => gdcore::math::Rect2i::new(
+                        gdcore::math::Vector2i::new(r.position.x as i32, r.position.y as i32),
+                        gdcore::math::Vector2i::new(r.size.x as i32, r.size.y as i32),
+                    ),
+                    _ => {
+                        return Some(Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "BitMap.set_bit_rect() takes a Rect2i".into(),
+                        ))));
+                    }
+                };
+                let value = matches!(args.get(1), Some(Variant::Bool(true)));
+                let mut bits = bits;
+                for y in rect.position.y..rect.position.y.saturating_add(rect.size.y) {
+                    for x in rect.position.x..rect.position.x.saturating_add(rect.size.x) {
+                        bitmap_set(w, h, &mut bits, x, y, value);
+                    }
+                }
+                Some(self.write_resource_back(res_ref, object_expr, move |r| {
+                    bitmap_store(r, w, h, bits);
+                }))
+            }
+            "get_true_bit_count" => {
+                // ⚠️ Counted over the DECLARED w*h, not over `bits.len() * 8`:
+                // Godot's byte count is `(w * h) / 8 + 1`, so the final byte
+                // carries up to 7 bits past the end of the bitmap. Popcounting
+                // whole bytes would include them.
+                let mut count = 0i64;
+                for y in 0..h {
+                    for x in 0..w {
+                        if bitmap_get(w, h, &bits, x, y) {
+                            count += 1;
+                        }
+                    }
+                }
+                Some(Ok(Variant::Int(count)))
+            }
+            _ => None,
+        }
+    }
+
+    /// `MultiMesh`: the per-instance transform / colour / custom-data API,
+    /// stored in the `buffer` PackedFloat32Array that is Godot's own storage —
+    /// so the render snapshot, the `.tres` saver and this dispatcher all read
+    /// the same floats.
+    fn multimesh_resource_method(
+        &mut self,
+        res_ref: &ResourceRef,
+        method: &str,
+        args: &[Variant],
+        object_expr: &Expr,
+    ) -> Option<Result<Variant, RuntimeError>> {
+        if !matches!(
+            method,
+            "get_instance_transform"
+                | "set_instance_transform"
+                | "get_instance_transform_2d"
+                | "set_instance_transform_2d"
+                | "get_instance_color"
+                | "set_instance_color"
+                | "get_instance_custom_data"
+                | "set_instance_custom_data"
+        ) {
+            return None;
+        }
+
+        let (stride, xform) = multimesh_stride(res_ref);
+        let count = bag_i64(res_ref, "instance_count", 0);
+        let index = match arg_i64(args, 0) {
+            Some(i) if i >= 0 && i < count => i as usize,
+            Some(i) => {
+                // Godot's `ERR_FAIL_INDEX`. Raising beats clamping: an index
+                // past `instance_count` means the script never resized the
+                // MultiMesh, and silently writing instance 0 instead would
+                // stack every instance at one position.
+                return Some(Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    format!(
+                        "MultiMesh.{method}() index {i} is out of range for \
+                     instance_count {count}; set `instance_count` first"
+                    ),
+                ))));
+            }
+            None => {
+                return Some(Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    format!("MultiMesh.{method}() takes an instance index"),
+                ))));
+            }
+        };
+
+        let want_3d = method.ends_with("_transform");
+        let want_2d = method.ends_with("_transform_2d");
+        if (want_3d && xform != MM_XFORM_3D) || (want_2d && xform != MM_XFORM_2D) {
+            // ⚠️ `transform_format` defaults to 0 = TRANSFORM_2D
+            // (`MultiMesh.xml` gives `default="0"`), so a 3D MultiMesh must say
+            // `transform_format = MultiMesh.TRANSFORM_3D` explicitly. Reading a
+            // 3D transform out of an 8-float buffer would take each instance
+            // from the wrong offset and answer plausible nonsense, so this is
+            // Godot's own hard error.
+            return Some(Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                format!(
+                    "MultiMesh.{method}() needs transform_format = {}, but this \
+                 MultiMesh is in {}D format",
+                    if want_3d {
+                        "TRANSFORM_3D (1)"
+                    } else {
+                        "TRANSFORM_2D (0)"
+                    },
+                    if xform == MM_XFORM_3D { 3 } else { 2 }
+                ),
+            ))));
+        }
+
+        let use_colors = bag_bool(res_ref, "use_colors");
+        let use_custom = bag_bool(res_ref, "use_custom_data");
+        let base = index * stride;
+        let mut buffer = multimesh_buffer(res_ref);
+        // Godot allocates the whole buffer when `instance_count` is set and
+        // ZERO-fills it, so an instance nothing has written reads back as a
+        // zero transform rather than identity. Growing here reproduces that:
+        // `instance_count` is a plain property write that cannot resize the
+        // buffer on its way through the generic setter.
+        let needed = (count as usize) * stride;
+        if buffer.len() < needed {
+            buffer.resize(needed, 0.0);
+        }
+
+        match method {
+            "get_instance_transform" => {
+                let f = &buffer[base..base + MM_XFORM_3D];
+                // 🔑 Godot writes the basis ROWS; our `Basis` stores COLUMNS in
+                // x/y/z, so each column is strided out of the buffer. Reading
+                // f[0..3] into `basis.x` is the natural-looking version and it
+                // is the transpose — invisible for a pure translation, wrong for
+                // any rotation. Mirrors `gdscene::node3d`'s decoder exactly.
+                Some(Ok(Variant::Transform3D(gdcore::math3d::Transform3D {
+                    basis: gdcore::math3d::Basis {
+                        x: gdcore::math::Vector3::new(f[0], f[4], f[8]),
+                        y: gdcore::math::Vector3::new(f[1], f[5], f[9]),
+                        z: gdcore::math::Vector3::new(f[2], f[6], f[10]),
+                    },
+                    origin: gdcore::math::Vector3::new(f[3], f[7], f[11]),
+                })))
+            }
+            "set_instance_transform" => {
+                let t = match args.get(1) {
+                    Some(Variant::Transform3D(t)) => *t,
+                    _ => {
+                        return Some(Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "MultiMesh.set_instance_transform() takes a Transform3D".into(),
+                        ))));
+                    }
+                };
+                let b = t.basis;
+                let rows = [
+                    b.x.x, b.y.x, b.z.x, t.origin.x, //
+                    b.x.y, b.y.y, b.z.y, t.origin.y, //
+                    b.x.z, b.y.z, b.z.z, t.origin.z,
+                ];
+                buffer[base..base + MM_XFORM_3D].copy_from_slice(&rows);
+                Some(self.write_resource_back(res_ref, object_expr, move |r| {
+                    r.properties
+                        .insert("buffer".to_string(), Variant::PackedFloat32Array(buffer));
+                }))
+            }
+            "get_instance_transform_2d" => {
+                let f = &buffer[base..base + MM_XFORM_2D];
+                Some(Ok(Variant::Transform2D(gdcore::math::Transform2D {
+                    x: gdcore::math::Vector2::new(f[0], f[4]),
+                    y: gdcore::math::Vector2::new(f[1], f[5]),
+                    origin: gdcore::math::Vector2::new(f[3], f[7]),
+                })))
+            }
+            "set_instance_transform_2d" => {
+                let t = match args.get(1) {
+                    Some(Variant::Transform2D(t)) => *t,
+                    _ => {
+                        return Some(Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "MultiMesh.set_instance_transform_2d() takes a Transform2D".into(),
+                        ))));
+                    }
+                };
+                // ⚠️ Godot keeps the 2D transform in the same ROW-major 8-float
+                // shape as the 3D one, with the unused third basis column left
+                // at zero (slots 2 and 6) — not a packed 6-float matrix.
+                let rows = [
+                    t.x.x, t.y.x, 0.0, t.origin.x, //
+                    t.x.y, t.y.y, 0.0, t.origin.y,
+                ];
+                buffer[base..base + MM_XFORM_2D].copy_from_slice(&rows);
+                Some(self.write_resource_back(res_ref, object_expr, move |r| {
+                    r.properties
+                        .insert("buffer".to_string(), Variant::PackedFloat32Array(buffer));
+                }))
+            }
+            "get_instance_color" | "set_instance_color" => {
+                if !use_colors {
+                    return Some(Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        format!(
+                            "MultiMesh.{method}() needs `use_colors = true`; the \
+                         per-instance colour block is not allocated otherwise"
+                        ),
+                    ))));
+                }
+                let at = base + xform;
+                self.multimesh_color_block(res_ref, method, args, object_expr, buffer, at)
+            }
+            "get_instance_custom_data" | "set_instance_custom_data" => {
+                if !use_custom {
+                    return Some(Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        format!(
+                            "MultiMesh.{method}() needs `use_custom_data = true`; the \
+                         per-instance custom-data block is not allocated otherwise"
+                        ),
+                    ))));
+                }
+                let at = base + xform + if use_colors { MM_COLOR } else { 0 };
+                self.multimesh_color_block(res_ref, method, args, object_expr, buffer, at)
+            }
+            _ => None,
+        }
+    }
+
+    /// Reads or writes one 4-float Color block of a MultiMesh buffer.
+    ///
+    /// Shared by the colour and custom-data accessors because the two differ
+    /// only in their offset — both are `Color`-shaped in Godot, and custom data
+    /// is a Color precisely so it can ride in the same block layout.
+    fn multimesh_color_block(
+        &mut self,
+        res_ref: &ResourceRef,
+        method: &str,
+        args: &[Variant],
+        object_expr: &Expr,
+        mut buffer: Vec<f32>,
+        at: usize,
+    ) -> Option<Result<Variant, RuntimeError>> {
+        if at + MM_COLOR > buffer.len() {
+            return Some(Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                format!("MultiMesh.{method}() reads past the end of the instance buffer"),
+            ))));
+        }
+        if method.starts_with("get_") {
+            let f = &buffer[at..at + MM_COLOR];
+            return Some(Ok(Variant::Color(gdcore::math::Color::new(
+                f[0], f[1], f[2], f[3],
+            ))));
+        }
+        let c = match args.get(1) {
+            Some(Variant::Color(c)) => *c,
+            _ => {
+                return Some(Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    format!("MultiMesh.{method}() takes a Color"),
+                ))));
+            }
+        };
+        buffer[at..at + MM_COLOR].copy_from_slice(&[c.r, c.g, c.b, c.a]);
+        Some(self.write_resource_back(res_ref, object_expr, move |r| {
+            r.properties
+                .insert("buffer".to_string(), Variant::PackedFloat32Array(buffer));
+        }))
+    }
+
+    /// `Skin`: the 11 bind accessors.
+    ///
+    /// 🔑 Stored under Godot's own `_set`/`_get` property names —
+    /// `bind_count` and `bind/<i>/bone|name|pose`
+    /// (`scene/resources/skin.cpp`) — so a `.tres`-authored Skin and a
+    /// script-built one are the same keys. A private layout would read an
+    /// authored Skin as having no binds.
+    fn skin_resource_method(
+        &mut self,
+        res_ref: &ResourceRef,
+        method: &str,
+        args: &[Variant],
+        object_expr: &Expr,
+    ) -> Option<Result<Variant, RuntimeError>> {
+        let count = bag_i64(res_ref, "bind_count", 0);
+        // A bind index addresses an existing bind; an out-of-range one is a
+        // script bug, not a reason to answer a default pose.
+        let indexed = |m: &str| -> Result<usize, RuntimeError> {
+            match arg_i64(args, 0) {
+                Some(i) if i >= 0 && i < count => Ok(i as usize),
+                Some(i) => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "Skin.{m}() index {i} is out of range for bind_count {count}"
+                )))),
+                None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "Skin.{m}() takes a bind index"
+                )))),
+            }
+        };
+        match method {
+            "get_bind_count" => Some(Ok(Variant::Int(count))),
+            "set_bind_count" => {
+                let n = arg_i64(args, 0).unwrap_or(0).max(0);
+                Some(self.write_resource_back(res_ref, object_expr, move |r| {
+                    // Shrinking drops the binds past the new end, so a later
+                    // `set_bind_count` back up does not resurrect stale bones.
+                    for i in n..count {
+                        r.properties.remove(&format!("bind/{i}/bone"));
+                        r.properties.remove(&format!("bind/{i}/name"));
+                        r.properties.remove(&format!("bind/{i}/pose"));
+                    }
+                    r.properties
+                        .insert("bind_count".to_string(), Variant::Int(n));
+                }))
+            }
+            "clear_binds" => Some(self.write_resource_back(res_ref, object_expr, move |r| {
+                for i in 0..count {
+                    r.properties.remove(&format!("bind/{i}/bone"));
+                    r.properties.remove(&format!("bind/{i}/name"));
+                    r.properties.remove(&format!("bind/{i}/pose"));
+                }
+                r.properties
+                    .insert("bind_count".to_string(), Variant::Int(0));
+            })),
+            "add_bind" | "add_named_bind" => {
+                if let Err(e) = Self::require_args(method, args, 2) {
+                    return Some(Err(e));
+                }
+                let pose = match args.get(1) {
+                    Some(Variant::Transform3D(t)) => *t,
+                    _ => gdcore::math3d::Transform3D::IDENTITY,
+                };
+                let named = method == "add_named_bind";
+                let bone = if named {
+                    // ⚠️ A named bind has NO bone index until a Skeleton3D
+                    // resolves the name, and Godot stores -1 for it. Storing 0
+                    // would silently bind every named bind to the root bone.
+                    -1
+                } else {
+                    arg_i64(args, 0).unwrap_or(-1)
+                };
+                let name = if named {
+                    arg_text(args, 0)
+                } else {
+                    String::new()
+                };
+                Some(self.write_resource_back(res_ref, object_expr, move |r| {
+                    let i = count;
+                    r.properties
+                        .insert(format!("bind/{i}/bone"), Variant::Int(bone));
+                    r.properties
+                        .insert(format!("bind/{i}/name"), Variant::String(name));
+                    r.properties
+                        .insert(format!("bind/{i}/pose"), Variant::Transform3D(pose));
+                    r.properties
+                        .insert("bind_count".to_string(), Variant::Int(count + 1));
+                }))
+            }
+            "get_bind_bone" => match indexed(method) {
+                Ok(i) => Some(Ok(Variant::Int(bag_i64(
+                    res_ref,
+                    &format!("bind/{i}/bone"),
+                    -1,
+                )))),
+                Err(e) => Some(Err(e)),
+            },
+            "get_bind_name" => match indexed(method) {
+                Ok(i) => Some(Ok(Variant::StringName(
+                    bag_string(res_ref, &format!("bind/{i}/name")).into(),
+                ))),
+                Err(e) => Some(Err(e)),
+            },
+            "get_bind_pose" => match indexed(method) {
+                Ok(i) => Some(Ok(Variant::Transform3D(
+                    match res_ref.properties.get(&format!("bind/{i}/pose")) {
+                        Some(Variant::Transform3D(t)) => *t,
+                        _ => gdcore::math3d::Transform3D::IDENTITY,
+                    },
+                ))),
+                Err(e) => Some(Err(e)),
+            },
+            "set_bind_bone" | "set_bind_name" | "set_bind_pose" => {
+                let i = match indexed(method) {
+                    Ok(i) => i,
+                    Err(e) => return Some(Err(e)),
+                };
+                let (key, value) = match method {
+                    "set_bind_bone" => (
+                        format!("bind/{i}/bone"),
+                        Variant::Int(arg_i64(args, 1).unwrap_or(-1)),
+                    ),
+                    "set_bind_name" => {
+                        (format!("bind/{i}/name"), Variant::String(arg_text(args, 1)))
+                    }
+                    _ => (
+                        format!("bind/{i}/pose"),
+                        match args.get(1) {
+                            Some(Variant::Transform3D(t)) => Variant::Transform3D(*t),
+                            _ => Variant::Transform3D(gdcore::math3d::Transform3D::IDENTITY),
+                        },
+                    ),
+                };
+                Some(self.write_resource_back(res_ref, object_expr, move |r| {
+                    r.properties.insert(key, value);
+                }))
+            }
+            _ => None,
+        }
+    }
+
+    /// `Translation`: the message catalogue accessors.
+    ///
+    /// 🔑 The default-context messages live in the `messages`
+    /// PackedStringArray — Godot's own serialized form, a flat
+    /// `[src, xlated, src, xlated, …]` (`Translation::_set`/`_get`,
+    /// `core/string/translation.cpp`). Using that array rather than a private
+    /// map means an imported `.translation` and a script-built catalogue read
+    /// identically, and `get_message_list` enumerates in insertion order
+    /// instead of a `HashMap`'s random one.
+    ///
+    /// ⚠️ Contextual messages go in a separate `__context_messages` array of
+    /// `[ctx, src, xlated]` triples, and the lookup is an EXACT `(context, src)`
+    /// pair with no fall back to the context-free entry — Godot's
+    /// `translation_map.getptr({context, src_text})`, documented at
+    /// `gdcore::translation`'s `contexts` field. Falling back would return the
+    /// wrong translation for a word whose meaning depends on its context, which
+    /// is the entire reason `msgctxt` exists. The triple layout is Patina's,
+    /// not Godot's: upstream folds context into one map whose serialization
+    /// goes through the importer, which this does not round-trip.
+    fn translation_resource_method(
+        &mut self,
+        res_ref: &ResourceRef,
+        method: &str,
+        args: &[Variant],
+        object_expr: &Expr,
+    ) -> Option<Result<Variant, RuntimeError>> {
+        let pairs = translation_strings(res_ref, "messages");
+        let triples = translation_strings(res_ref, "__context_messages");
+        let text = |i: usize| arg_text(args, i);
+        match method {
+            "get_locale" => Some(Ok(Variant::String(bag_string(res_ref, "locale")))),
+            "set_locale" => {
+                let locale = text(0);
+                Some(self.write_resource_back(res_ref, object_expr, move |r| {
+                    r.properties
+                        .insert("locale".to_string(), Variant::String(locale));
+                }))
+            }
+            "add_message" => {
+                // Godot's `context` argument defaults to "", so a 2-argument
+                // call is the common form even though ClassDB records arity 3.
+                let (src, xlated, ctx) = (text(0), text(1), text(2));
+                let mut pairs = pairs;
+                let mut triples = triples;
+                // ⚠️ The search result is bound to a `let` BEFORE the
+                // update. A `match`/`if let` keeps its scrutinee's temporaries
+                // alive for the whole arm, so searching inline would hold a
+                // borrow of the very vector the arm then writes to.
+                if ctx.is_empty() {
+                    let found = pairs.chunks(2).position(|c| c.first() == Some(&src));
+                    match found {
+                        Some(n) => pairs[n * 2 + 1] = xlated,
+                        None => {
+                            pairs.push(src);
+                            pairs.push(xlated);
+                        }
+                    }
+                } else {
+                    let found = triples
+                        .chunks(3)
+                        .position(|c| c.first() == Some(&ctx) && c.get(1) == Some(&src));
+                    match found {
+                        Some(n) => triples[n * 3 + 2] = xlated,
+                        None => {
+                            triples.push(ctx);
+                            triples.push(src);
+                            triples.push(xlated);
+                        }
+                    }
+                }
+                Some(self.write_resource_back(res_ref, object_expr, move |r| {
+                    r.properties
+                        .insert("messages".to_string(), Variant::PackedStringArray(pairs));
+                    r.properties.insert(
+                        "__context_messages".to_string(),
+                        Variant::PackedStringArray(triples),
+                    );
+                }))
+            }
+            "get_message" => {
+                let (src, ctx) = (text(0), text(1));
+                if ctx.is_empty() {
+                    let found = pairs
+                        .chunks(2)
+                        .find(|c| c.first() == Some(&src))
+                        .and_then(|c| c.get(1).cloned());
+                    // ⚠️ A miss answers the EMPTY string, not the source text:
+                    // Godot's `Translation::get_message` returns StringName()
+                    // and it is `tr()` above it that falls back to the key. A
+                    // fallback here would make an untranslated string
+                    // indistinguishable from a translated one.
+                    return Some(Ok(Variant::StringName(found.unwrap_or_default().into())));
+                }
+                let found = triples
+                    .chunks(3)
+                    .find(|c| c.first() == Some(&ctx) && c.get(1) == Some(&src))
+                    .and_then(|c| c.get(2).cloned());
+                Some(Ok(Variant::StringName(found.unwrap_or_default().into())))
+            }
+            "erase_message" => {
+                let (src, ctx) = (text(0), text(1));
+                let mut pairs = pairs;
+                let mut triples = triples;
+                // See `add_message`: bound before the mutation on purpose.
+                if ctx.is_empty() {
+                    let found = pairs.chunks(2).position(|c| c.first() == Some(&src));
+                    if let Some(n) = found {
+                        pairs.drain(n * 2..n * 2 + 2);
+                    }
+                } else {
+                    let found = triples
+                        .chunks(3)
+                        .position(|c| c.first() == Some(&ctx) && c.get(1) == Some(&src));
+                    if let Some(n) = found {
+                        triples.drain(n * 3..n * 3 + 3);
+                    }
+                }
+                Some(self.write_resource_back(res_ref, object_expr, move |r| {
+                    r.properties
+                        .insert("messages".to_string(), Variant::PackedStringArray(pairs));
+                    r.properties.insert(
+                        "__context_messages".to_string(),
+                        Variant::PackedStringArray(triples),
+                    );
+                }))
+            }
+            // ⚠️ Counts the contextual entries too: upstream keeps both in one
+            // `translation_map`, so `get_message_count()` is NOT
+            // `get_message_list().size()`.
+            "get_message_count" => Some(Ok(Variant::Int(
+                (pairs.len() / 2 + triples.len() / 3) as i64,
+            ))),
+            "get_message_list" => Some(Ok(Variant::PackedStringArray(
+                pairs.chunks(2).filter_map(|c| c.first().cloned()).collect(),
+            ))),
+            _ => None,
+        }
+    }
+
     fn call_method_on(
         &mut self,
         obj: &Variant,
@@ -12098,16 +13787,22 @@ impl Interpreter {
                                     Some(Variant::Int(i)) => *i,
                                     _ => 0,
                                 };
-                                access.connect_signal_flags(
+                                // pat-mgixk.98: read off args[0], the
+                                // Callable itself — `callable_target` above has
+                                // already resolved through its wrappers.
+                                let (binds, unbinds) = callable_bindings(&args[0]);
+                                let code = access.connect_signal_flags(
                                     source,
                                     name,
                                     target,
                                     &target_method,
                                     flags,
-                                    &[],
+                                    &binds,
+                                    unbinds,
                                 );
-                                // Godot returns an Error code; OK == 0.
-                                Ok(Variant::Int(0))
+                                // Godot returns an Error code; OK == 0, and a
+                                // refused connect reports it (pat-mgixk.98).
+                                Ok(Variant::Int(code))
                             }
                             "disconnect" => {
                                 access.disconnect_signal(source, name, target, &target_method);
@@ -13588,16 +15283,25 @@ impl Interpreter {
                             Some(Variant::Int(f)) => *f,
                             _ => 0,
                         };
+                        // pat-mgixk.98. ⚠️ Reading args[1] covers BOTH shapes
+                        // without a branch: in the legacy
+                        // `(signal, ObjectId, method)` form args[1] is the
+                        // ObjectId, and `callable_bindings` answers "no
+                        // bindings" for anything that is not a Callable.
+                        let (binds, unbinds) = callable_bindings(&args[1]);
                         if let Some(ref mut access) = self.scene_access {
-                            access.connect_signal_flags(
+                            let code = access.connect_signal_flags(
                                 id,
                                 &signal,
                                 target_id,
                                 &method_name,
                                 flags,
-                                &[],
+                                &binds,
+                                unbinds,
                             );
-                            Ok(Variant::Nil)
+                            // Godot's `Object.connect` returns an Error, not
+                            // Nil; OK == 0 (pat-mgixk.98).
+                            Ok(Variant::Int(code))
                         } else {
                             Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                                 "no scene access".into(),
@@ -13605,32 +15309,66 @@ impl Interpreter {
                         }
                     }
                     "disconnect" => {
-                        if args.len() < 3 {
+                        // Godot 4 spells this `disconnect(signal, Callable)`.
+                        // Patina accepted ONLY the legacy
+                        // `(signal, ObjectId, method)` triple, so the
+                        // documented two-argument form raised
+                        // "disconnect() needs signal, target, method" and a script
+                        // could connect a Callable but never take it off again
+                        // (pat-mgixk.98). Both shapes are kept: scenes in the
+                        // tree use the triple.
+                        if args.len() < 2 {
                             return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                                "disconnect() needs signal, target, method".into(),
+                                "disconnect() needs a signal and a Callable, or a signal, target and method"
+                                    .into(),
                             )));
                         }
                         let signal = match &args[0] {
                             Variant::String(s) => s.clone(),
+                            Variant::StringName(s) => s.as_str().to_string(),
                             _ => {
                                 return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                                     "disconnect() signal must be string".into(),
                                 )))
                             }
                         };
-                        let target_id = match &args[1] {
-                            Variant::ObjectId(tid) => tid.raw(),
-                            _ => {
-                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                                    "disconnect() target must be ObjectId".into(),
-                                )))
+                        // ⚠️ Re-bound per arm: the `connect` arm's own
+                        // `self_node` is scoped to that arm's block, so it is
+                        // not visible here.
+                        let self_node = self.current_node_id;
+                        // ⚠️ Through the SAME `callable_target` the connect arms
+                        // use, so a Callable whose target_id is 0 (meaning
+                        // "self") reduces to the very node+method that
+                        // `connect` stored. A second resolver here is exactly
+                        // how the two would drift apart.
+                        //
+                        // 🔑 Matched on target+method, so a `.bind(x)`-ed
+                        // Callable still finds its connection: the bindings
+                        // live on the Connection, not in its identity.
+                        let (target_id, method_name) = match &args[1] {
+                            Variant::Callable(_) => match callable_target(&args[1], self_node) {
+                                Some(t) => t,
+                                None => {
+                                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                        "disconnect() Callable has no bindable target/method".into(),
+                                    )))
+                                }
+                            },
+                            Variant::ObjectId(tid) => {
+                                let m = match args.get(2) {
+                                    Some(Variant::String(s)) => s.clone(),
+                                    Some(Variant::StringName(s)) => s.as_str().to_string(),
+                                    _ => {
+                                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                            "disconnect() method must be string".into(),
+                                        )))
+                                    }
+                                };
+                                (tid.raw(), m)
                             }
-                        };
-                        let method_name = match &args[2] {
-                            Variant::String(s) => s.clone(),
                             _ => {
                                 return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                                    "disconnect() method must be string".into(),
+                                    "disconnect() target must be a Callable or ObjectId".into(),
                                 )))
                             }
                         };
@@ -13645,32 +15383,66 @@ impl Interpreter {
                         }
                     }
                     "is_connected" => {
-                        if args.len() < 3 {
+                        // Godot 4 spells this `is_connected(signal, Callable)`.
+                        // Patina accepted ONLY the legacy
+                        // `(signal, ObjectId, method)` triple, so the
+                        // documented two-argument form raised
+                        // "is_connected() needs signal, target, method" and a script
+                        // could connect a Callable but never take it off again
+                        // (pat-mgixk.98). Both shapes are kept: scenes in the
+                        // tree use the triple.
+                        if args.len() < 2 {
                             return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                                "is_connected() needs signal, target, method".into(),
+                                "is_connected() needs a signal and a Callable, or a signal, target and method"
+                                    .into(),
                             )));
                         }
                         let signal = match &args[0] {
                             Variant::String(s) => s.clone(),
+                            Variant::StringName(s) => s.as_str().to_string(),
                             _ => {
                                 return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                                     "is_connected() signal must be string".into(),
                                 )))
                             }
                         };
-                        let target_id = match &args[1] {
-                            Variant::ObjectId(tid) => tid.raw(),
-                            _ => {
-                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                                    "is_connected() target must be ObjectId".into(),
-                                )))
+                        // ⚠️ Re-bound per arm: the `connect` arm's own
+                        // `self_node` is scoped to that arm's block, so it is
+                        // not visible here.
+                        let self_node = self.current_node_id;
+                        // ⚠️ Through the SAME `callable_target` the connect arms
+                        // use, so a Callable whose target_id is 0 (meaning
+                        // "self") reduces to the very node+method that
+                        // `connect` stored. A second resolver here is exactly
+                        // how the two would drift apart.
+                        //
+                        // 🔑 Matched on target+method, so a `.bind(x)`-ed
+                        // Callable still finds its connection: the bindings
+                        // live on the Connection, not in its identity.
+                        let (target_id, method_name) = match &args[1] {
+                            Variant::Callable(_) => match callable_target(&args[1], self_node) {
+                                Some(t) => t,
+                                None => {
+                                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                        "is_connected() Callable has no bindable target/method".into(),
+                                    )))
+                                }
+                            },
+                            Variant::ObjectId(tid) => {
+                                let m = match args.get(2) {
+                                    Some(Variant::String(s)) => s.clone(),
+                                    Some(Variant::StringName(s)) => s.as_str().to_string(),
+                                    _ => {
+                                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                            "is_connected() method must be string".into(),
+                                        )))
+                                    }
+                                };
+                                (tid.raw(), m)
                             }
-                        };
-                        let method_name = match &args[2] {
-                            Variant::String(s) => s.clone(),
                             _ => {
                                 return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                                    "is_connected() method must be string".into(),
+                                    "is_connected() target must be a Callable or ObjectId".into(),
                                 )))
                             }
                         };
@@ -13732,6 +15504,181 @@ impl Interpreter {
                             )))
                         }
                     }
+
+                    // -------------------------------------------------------
+                    // Object API surface (pat-mgixk.99). All of these were
+                    // registered in ClassDB with no dispatch arm, so
+                    // `has_method` answered true and the call returned Nil —
+                    // except `notification`, which is non-void and therefore
+                    // RAISED. See the bead.
+                    // -------------------------------------------------------
+                    "add_user_signal" => {
+                        let name = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            Some(Variant::StringName(s)) => s.to_string(),
+                            _ => {
+                                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                    "add_user_signal() needs a signal name".into(),
+                                )))
+                            }
+                        };
+                        // Godot's second parameter is the parameter list and is
+                        // optional.
+                        let sig_args: Vec<Variant> = match args.get(1) {
+                            Some(Variant::Array(items)) => items.to_vec(),
+                            _ => Vec::new(),
+                        };
+                        if let Some(ref mut access) = self.scene_access {
+                            access.add_user_signal(id, &name, &sig_args);
+                            Ok(Variant::Nil)
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "has_user_signal" => {
+                        let name = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            Some(Variant::StringName(s)) => s.to_string(),
+                            _ => String::new(),
+                        };
+                        match self.scene_access {
+                            Some(ref access) => Ok(Variant::Bool(access.has_user_signal(id, &name))),
+                            None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            ))),
+                        }
+                    }
+                    "remove_user_signal" => {
+                        let name = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            Some(Variant::StringName(s)) => s.to_string(),
+                            _ => String::new(),
+                        };
+                        if let Some(ref mut access) = self.scene_access {
+                            access.remove_user_signal(id, &name);
+                            Ok(Variant::Nil)
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "set_block_signals" => {
+                        let blocked = args.first().map(|v| v.is_truthy()).unwrap_or(false);
+                        if let Some(ref mut access) = self.scene_access {
+                            access.set_block_signals(id, blocked);
+                            Ok(Variant::Nil)
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "is_blocking_signals" => match self.scene_access {
+                        Some(ref access) => Ok(Variant::Bool(access.is_blocking_signals(id))),
+                        None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "no scene access".into(),
+                        ))),
+                    },
+                    "is_queued_for_deletion" => match self.scene_access {
+                        Some(ref access) => Ok(Variant::Bool(access.is_queued_for_deletion(id))),
+                        None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "no scene access".into(),
+                        ))),
+                    },
+                    "cancel_free" => {
+                        if let Some(ref mut access) = self.scene_access {
+                            access.cancel_free(id);
+                            Ok(Variant::Nil)
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "set_script" => {
+                        // `load("res://s.gd")` yields a `Variant::Resource` whose
+                        // `path` is what the script named; a bare path string is
+                        // accepted too so `set_script("res://s.gd")` behaves.
+                        //
+                        // ⚠️ Godot's `set_script(null)` DETACHES the script. That
+                        // is not implemented here — there is no detach on
+                        // `SceneAccess` — so Nil declines rather than pretending
+                        // to clear it. Recorded as partial on the bead.
+                        let path = match args.first() {
+                            Some(Variant::Resource(r)) => r.path.clone(),
+                            Some(Variant::String(s)) => s.clone(),
+                            _ => String::new(),
+                        };
+                        if path.is_empty() {
+                            return Ok(Variant::Bool(false));
+                        }
+                        if let Some(ref mut access) = self.scene_access {
+                            Ok(Variant::Bool(access.set_object_script(id, &path)))
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "notification" => {
+                        let what = match args.first() {
+                            Some(Variant::Int(v)) => *v,
+                            Some(Variant::Float(f)) => *f as i64,
+                            _ => 0,
+                        };
+                        let reversed = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+                        if let Some(ref mut access) = self.scene_access {
+                            access.notify_object(id, what, reversed);
+                            Ok(Variant::Nil)
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "set_message_translation" => {
+                        let enabled = args.first().map(|v| v.is_truthy()).unwrap_or(true);
+                        if let Some(ref mut access) = self.scene_access {
+                            access.set_message_translation(id, enabled);
+                            Ok(Variant::Nil)
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "can_translate_messages" => match self.scene_access {
+                        Some(ref access) => Ok(Variant::Bool(access.can_translate_messages(id))),
+                        None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "no scene access".into(),
+                        ))),
+                    },
+                    "set_translation_domain" => {
+                        let domain = match args.first() {
+                            Some(Variant::String(s)) => s.clone(),
+                            Some(Variant::StringName(s)) => s.to_string(),
+                            _ => String::new(),
+                        };
+                        if let Some(ref mut access) = self.scene_access {
+                            access.set_translation_domain(id, &domain);
+                            Ok(Variant::Nil)
+                        } else {
+                            Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "no scene access".into(),
+                            )))
+                        }
+                    }
+                    "get_translation_domain" => match self.scene_access {
+                        Some(ref access) => {
+                            Ok(Variant::String(access.get_translation_domain(id)))
+                        }
+                        None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "no scene access".into(),
+                        ))),
+                    },
                     "free" => {
                         // Godot `Object.free()`: immediate destruction (unlike
                         // `queue_free`, the object is gone the moment this
@@ -13990,13 +15937,39 @@ impl Interpreter {
                             .map(|a| a.signal_connection_list(id, &signal_name))
                             .unwrap_or_default()
                             .into_iter()
-                            .map(|(target, method, one_shot)| {
+                            .map(|(target, method, _one_shot, flags)| {
                                 let mut d = Dictionary::new();
-                                d.insert("signal", Variant::String(signal_name.clone()));
-                                d.insert("callable", Variant::String(method));
+                                // Godot's dict is
+                                // `{signal: Signal, callable: Callable, flags: int}`.
+                                // All three were wrong: `signal` and `callable`
+                                // were plain Strings, so a script could not
+                                // `.connect()`/`.call()` what it got back, and
+                                // `flags` was `i64::from(one_shot)` == 1 under a
+                                // comment claiming ONE_SHOT is 1 — Godot's
+                                // ONE_SHOT is **4** and 1 is CONNECT_DEFERRED,
+                                // so a one-shot connection reported itself as
+                                // deferred and a deferred one as nothing
+                                // (pat-mgixk.98).
+                                d.insert(
+                                    "signal",
+                                    Variant::Signal {
+                                        object_id: id,
+                                        name: signal_name.clone(),
+                                    },
+                                );
+                                d.insert(
+                                    "callable",
+                                    Variant::Callable(Box::new(CallableRef::Method {
+                                        target_id: target,
+                                        method: method.clone(),
+                                    })),
+                                );
+                                // ⚠️ `target` is NOT one of Godot's three keys.
+                                // Kept because it predates this change and
+                                // something may read it; the Callable above now
+                                // carries the same id.
                                 d.insert("target", Variant::Int(target as i64));
-                                // Godot reports the connect flags; ONE_SHOT is 1.
-                                d.insert("flags", Variant::Int(i64::from(one_shot)));
+                                d.insert("flags", Variant::Int(i64::from(flags)));
                                 Variant::Dictionary(d.into())
                             })
                             .collect();
@@ -15459,7 +17432,11 @@ impl Interpreter {
                     }
                     let path = res_ref.path.clone();
                     match self.scene_access.as_mut() {
-                        Some(access) => match access.instantiate_script(&path) {
+                        // `.new(args)` forwards its arguments to `_init`
+                        // (pat-mgixk.100). This passed none, so
+                        // `load("res://h.gd").new(21)` constructed the instance
+                        // and discarded the 21.
+                        Some(access) => match access.instantiate_script_with_args(&path, args) {
                             Some(raw) => Ok(Variant::ObjectId(gdcore::id::ObjectId::from_raw(raw))),
                             None => Ok(Variant::Nil),
                         },
@@ -15468,9 +17445,16 @@ impl Interpreter {
                         ))),
                     }
                 }
-                _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
-                    format!("Resource.{method}"),
-                ))),
+                // pat-mgixk.96: a Resource bag's own CLASS surface, before
+                // the generic error. Noise/Shader/BitMap/MultiMesh/Skin/
+                // Translation methods live here; anything else still raises,
+                // which is deliberate — see `call_resource_class_method`.
+                _ => match self.call_resource_class_method(res_ref, method, args, object_expr) {
+                    Some(result) => result,
+                    None => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                        format!("Resource.{method}"),
+                    ))),
+                },
             },
             packed if packed.is_packed_array() => {
                 self.call_packed_method(packed, method, args, object_expr)
@@ -17622,6 +19606,7 @@ impl Interpreter {
 
         let prev_self = self.self_instance.take();
         self.self_instance = Some(instance.clone());
+        let entry_props = instance.properties.clone();
         // `super()` has to know WHICH method it is inside, and this is the only
         // place that knows. `call_user_func_impl` records this for script-level
         // functions, but instance methods never did — so `call_super` could
@@ -17724,9 +19709,7 @@ impl Interpreter {
                 let remaining_lines = body_lines.get(i..).map(|s| s.to_vec()).unwrap_or_default();
                 self.park_coroutine(remaining, target, method_name, true);
                 self.publish_debug_pause(method_name, stmt_line, remaining_lines);
-                if let Some(ref updated) = self.self_instance {
-                    instance.properties = updated.properties.clone();
-                }
+                merge_frame_property_writes(instance, self.self_instance.as_ref(), &entry_props);
                 self.environment.pop_scope();
                 self.environment.pop_scope();
                 self.self_instance = prev_self;
@@ -17755,9 +19738,11 @@ impl Interpreter {
                 Ok(flow) => flow,
                 Err(err) => {
                     self.environment.pop_scope();
-                    if let Some(ref updated) = self.self_instance {
-                        instance.properties = updated.properties.clone();
-                    }
+                    merge_frame_property_writes(
+                        instance,
+                        self.self_instance.as_ref(),
+                        &entry_props,
+                    );
                     self.environment.pop_scope();
                     self.self_instance = prev_self;
                     self.current_function = prev_function;
@@ -17774,9 +19759,11 @@ impl Interpreter {
                     let remaining = body[i + 1..].to_vec();
                     self.park_coroutine(remaining, target, method_name, true);
                     // Write back any property mutations before parking.
-                    if let Some(ref updated) = self.self_instance {
-                        instance.properties = updated.properties.clone();
-                    }
+                    merge_frame_property_writes(
+                        instance,
+                        self.self_instance.as_ref(),
+                        &entry_props,
+                    );
                     self.environment.pop_scope();
                     self.environment.pop_scope();
                     self.self_instance = prev_self;
@@ -17791,9 +19778,7 @@ impl Interpreter {
         }
         self.environment.pop_scope();
 
-        if let Some(ref updated) = self.self_instance {
-            instance.properties = updated.properties.clone();
-        }
+        merge_frame_property_writes(instance, self.self_instance.as_ref(), &entry_props);
 
         self.environment.pop_scope();
         self.self_instance = prev_self;
@@ -33545,6 +35530,64 @@ fn callable_ref_target(c: &CallableRef, self_node: Option<u64>) -> Option<(u64, 
         // Lambda would drop the bound arguments.
         CallableRef::Lambda { .. } => Some((self_node?, lambda_connection_name(c))),
         _ => None,
+    }
+}
+
+/// The flattened `(binds, unbinds)` a `Callable`'s `.bind()` / `.unbind()`
+/// layers reduce to, for storing on a `Connection` (pat-mgixk.98).
+///
+/// Both script connect paths used to pass `&[]` here, so
+/// `btn.pressed.connect(_on_pressed.bind(i))` silently lost `i` and
+/// `.unbind(1)` was never applied: `callable_target` resolves through
+/// [`CallableRef::inner_callable`], which exists precisely to strip the
+/// `Bound`/`Unbound` wrappers, and nothing else looked at them.
+///
+/// 🔑 The flat `(binds, unbinds)` pair is **exactly** equivalent to any nesting
+/// of those wrappers, not an approximation of it.
+/// [`Connection::resolve_args`] drops `unbinds` trailing signal args and then
+/// appends `binds`; `CallableRef::resolve_args` has `Unbound` truncate the
+/// call-site args *before* delegating inward and `Bound` append *after*, so a
+/// bound argument can never be truncated and the two operations commute.
+/// `f.bind(a).unbind(1)` and `f.unbind(1).bind(a)` therefore both reduce to
+/// `binds=[a], unbinds=1`, which is what each produces through
+/// `CallableRef::resolve_args`.
+///
+/// ⚠️ Returns NOTHING for a lambda, deliberately — this is not an oversight.
+/// [`callable_ref_target`] registers the **outer** callable for a lambda (see
+/// its comment), so the lambda's own `resolve_args` already applies its bound
+/// arguments at dispatch. Extracting them here as well would append every bound
+/// argument TWICE.
+fn callable_bindings(v: &Variant) -> (Vec<Variant>, usize) {
+    let Variant::Callable(c) = v else {
+        // A bare method name carries no bindings.
+        return (Vec::new(), 0);
+    };
+    if matches!(c.inner_callable(), CallableRef::Lambda { .. }) {
+        return (Vec::new(), 0);
+    }
+    callable_ref_bindings(c)
+}
+
+/// Accumulates `Bound`/`Unbound` layers from the outside in.
+///
+/// Bound arguments are appended as the recursion unwinds, so the INNERMOST
+/// `.bind()` lands first — matching `CallableRef::resolve_args`, where the
+/// outermost `Bound` extends last. `f.bind(a).bind(b)` gives `[a, b]`.
+fn callable_ref_bindings(c: &CallableRef) -> (Vec<Variant>, usize) {
+    match c {
+        CallableRef::Bound { inner, bound_args } => {
+            let (mut binds, unbinds) = callable_ref_bindings(inner);
+            binds.extend(bound_args.iter().cloned());
+            (binds, unbinds)
+        }
+        CallableRef::Unbound {
+            inner,
+            unbind_count,
+        } => {
+            let (binds, unbinds) = callable_ref_bindings(inner);
+            (binds, unbinds + unbind_count)
+        }
+        CallableRef::Method { .. } | CallableRef::Lambda { .. } => (Vec::new(), 0),
     }
 }
 

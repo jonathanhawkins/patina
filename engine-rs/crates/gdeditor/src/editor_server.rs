@@ -24780,20 +24780,6 @@ fn import_option_ini_value(value: Option<&serde_json::Value>) -> String {
     }
 }
 
-/// Godot's importer id for a resource type — the `[remap] importer` value a
-/// real `.import` carries (`upstream/godot/editor/import/*`).
-fn godot_importer_id(rty: crate::import_settings::ImportResourceType) -> &'static str {
-    use crate::import_settings::ImportResourceType as T;
-    match rty {
-        T::Texture => "texture",
-        T::Audio => "wav",
-        T::Scene | T::Mesh => "scene",
-        T::Font => "font_data_dynamic",
-        T::Shader => "glsl",
-        T::Script => "script",
-    }
-}
-
 /// `POST /api/import_settings` — persists one import option into the asset's
 /// `.import` sidecar (pat-s3rrv.2).
 ///
@@ -24819,13 +24805,13 @@ fn api_set_import_settings(state: &Arc<Mutex<EditorState>>, body: &str, stream: 
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
-    let rty = match ImportResourceType::from_extension(&ext) {
-        Some(t) => t,
-        None => {
-            send_error(stream, 400, "resource is not importable");
-            return;
-        }
-    };
+    // Importability check only — the id written below is derived from the
+    // EXTENSION, not from this coarse resource type, so nothing needs the
+    // mapped value.
+    if ImportResourceType::from_extension(&ext).is_none() {
+        send_error(stream, 400, "resource is not importable");
+        return;
+    }
 
     let root = fs_project_root(state);
     let source = match resolve_res_path(&root, path) {
@@ -24842,7 +24828,15 @@ fn api_set_import_settings(state: &Arc<Mutex<EditorState>>, body: &str, stream: 
     // source, or the asset reads as never-imported the next time anything opens
     // the project.
     if sc.importer().is_none() {
-        sc.set_remap("importer", godot_importer_id(rty));
+        // ⚠️ From the EXTENSION, matching what the GET handler reports
+        // (`ImportResourceType::godot_importer_name(&ext)` above in
+        // `api_import_settings`). This used to go through a coarse
+        // type-based map whose `Audio` arm answered `"wav"`, so editing any
+        // import option on a `res://*.ogg` with no sidecar yet wrote
+        // `importer="wav"` — where Godot writes `oggvorbisstr`. The dock then
+        // REPORTED `oggvorbisstr` while the file on disk said `wav`, so the
+        // two disagreed about the same asset (pat-mgixk.407).
+        sc.set_remap("importer", ImportResourceType::godot_importer_name(&ext));
     }
     if sc.source_file().is_none() {
         sc.set_dep("source_file", path);

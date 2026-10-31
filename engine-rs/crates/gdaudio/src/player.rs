@@ -171,6 +171,24 @@ impl AudioStreamPlayer {
         self.wants_playing = false;
     }
 
+    /// Releases this player's active voice **without stopping it**, handing the
+    /// caller its handle.
+    ///
+    /// 🔑 This exists for `max_polyphony` (pat-mgixk.85). [`play`](Self::play)
+    /// opens by stopping `self.playback_id`, which is exactly right for Godot's
+    /// monophonic default but wrong the moment one node may hold several voices:
+    /// the voice already sounding has to SURVIVE the retrigger. Taking the
+    /// handle out first leaves `play()` with `None`, so it starts a second voice
+    /// alongside the first instead of replacing it.
+    ///
+    /// ⚠️ Ownership transfers with the handle. Once detached, this player will
+    /// never stop that voice — including from [`stop`](Self::stop), which only
+    /// knows about `self.playback_id`. The caller must stop it or let it play to
+    /// its natural end, or it leaks for the lifetime of the server.
+    pub fn detach_playback(&mut self) -> Option<PlaybackId> {
+        self.playback_id.take()
+    }
+
     /// Returns `true` if this player currently has an active playing stream.
     pub fn is_playing(&self, server: &AudioServer) -> bool {
         match self.playback_id {

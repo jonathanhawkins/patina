@@ -282,6 +282,16 @@ fn main() {
                         Some(camera) => {
                             vp.grid.visible = false;
                             vp.show_origin = false;
+                            // The scene's own environment — its
+                            // `WorldEnvironment`, the camera's `environment`, or
+                            // the project default — in place of the editor
+                            // preview sky and preview sun (pat-mgixk.51). A
+                            // no-op for a scene that authors none.
+                            gdeditor::viewport_3d_render::apply_runtime_environment_3d(
+                                running_tree,
+                                camera,
+                                &mut vp,
+                            );
                             gdeditor::viewport_3d_render::game_3d_render_inputs(
                                 running_tree,
                                 camera,
@@ -544,11 +554,25 @@ fn main() {
                             canvas: None,
                         }
                     } else {
+                        // The three tree-independent inputs are copied into
+                        // locals FIRST so their immutable borrows of `state`
+                        // end before the `&mut` below — the same reason the
+                        // Play branch above dereferences `state` once.
                         let selected = state.selected_node;
                         let zoom = state.viewport_zoom;
                         let pan = state.viewport_pan;
-                        RenderJob::Cpu(gdeditor::scene_renderer::render_scene_with_zoom_pan(
-                            &state.scene_tree,
+                        // `*_mut`, not `render_scene_with_zoom_pan`: the themed
+                        // Control pass resolves container layout, which writes
+                        // each child's rect back onto the node, so it needs
+                        // `&mut SceneTree` (pat-mgixk.47). Without it a Button,
+                        // Panel, TextureRect or RichTextLabel had no arm in
+                        // `render_kind_for` at all and drew as an opaque
+                        // placeholder rect, and no Control got a stylebox or a
+                        // container-resolved rect — while Play, which already
+                        // takes `&mut st.scene_tree` on its fallback branch
+                        // above, showed the same scene correctly.
+                        RenderJob::Cpu(gdeditor::scene_renderer::render_scene_with_zoom_pan_mut(
+                            &mut state.scene_tree,
                             selected,
                             rw,
                             rh,

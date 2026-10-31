@@ -96,7 +96,17 @@ pub fn render_scene_with_zoom_pan(
     zoom: f64,
     pan: (f64, f64),
 ) -> FrameBuffer {
-    render_scene_inner(tree, selected, width, height, zoom, pan, None, None)
+    render_scene_inner(
+        tree,
+        selected,
+        width,
+        height,
+        zoom,
+        pan,
+        None,
+        None,
+        Vec::new(),
+    )
 }
 
 /// Whether `tree` should be drawn through the 3D renderer (rather than the 2D
@@ -351,6 +361,7 @@ pub fn render_scene_with_textures(
         pan,
         Some(texture_cache),
         None,
+        Vec::new(),
     )
 }
 
@@ -383,6 +394,69 @@ pub fn render_scene_with_overlays(
         pan,
         None,
         Some(overlays),
+        Vec::new(),
+    )
+}
+
+/// Renders the edited scene for the 2D editor viewport **including the themed
+/// Control pass** — Button/Panel/TextureRect/RichTextLabel content, Control
+/// styleboxes, container layout and font-size/alignment overrides.
+///
+/// ⚠️ What this does NOT add, measured rather than assumed: **Label text**.
+/// `render_kind_for` already has a `"Label"` arm (`canvas_render.rs:1747`) and
+/// `Label` is registered with `.parent("Control")` inside
+/// `register_2d_classes`, so `collect_canvas_items`' `is_class("CanvasItem")`
+/// gate admits it and the immutable entries draw Label text on their own — IF
+/// ClassDB is populated. The classes with no arm there, which fall to `Marker`
+/// and so can only be drawn by this pass, are `Button`, `Panel`,
+/// `TextureRect` and `RichTextLabel`.
+///
+/// ⚠️ Font COLOUR still does not survive either path: `Render2DKind::Text`
+/// (`canvas_render.rs:259-270`) carries text, font_size, h_align and font_path
+/// and no colour, so a `theme_override_colors/font_color` changes no pixels.
+/// Tracked separately, along with Control `modulate` being forced neutral.
+///
+/// This exists as a separate entry rather than as a `&mut` widening of
+/// [`render_scene_with_zoom_pan`] on purpose. `build_control_render_items` needs
+/// `&mut SceneTree` because container layout writes each child's resolved rect
+/// back onto the node, and widening the existing wrappers would have to reach
+/// ~50 call sites across `gdeditor`, `patina-engine`'s integration tests and
+/// `examples/`, several of which only ever hold a `&SceneTree` (a fixture helper
+/// parameter, or a booted project's `tree()` accessor with no `tree_mut()`).
+/// Adding an entry leaves all of them byte-identical.
+///
+/// 🔑 The call sequence is deliberately the same one `render_play_frame`
+/// (`canvas_render.rs:4126-4128`) runs — runtime list, then root, then control
+/// items against the viewport size — so edit mode and Play agree about what the
+/// UI layer contains. The editor's zoom/pan transform is then applied to every
+/// item together, control items included: they are built with
+/// `CanvasFollow::DefaultCanvas`, so `apply_camera2d_view` transforms them
+/// rather than pinning them, and the UI stays registered with the grid, the
+/// selection outline and the gizmos.
+pub fn render_scene_with_zoom_pan_mut(
+    tree: &mut SceneTree,
+    selected: Option<NodeId>,
+    width: u32,
+    height: u32,
+    zoom: f64,
+    pan: (f64, f64),
+) -> FrameBuffer {
+    // `max(1)` matches `render_play_frame`: a zero-sized viewport would make
+    // every anchored Control resolve to an empty rect.
+    let viewport_size = Vector2::new(width.max(1) as f32, height.max(1) as f32);
+    let root = tree.root_id();
+    let control_items =
+        crate::viewport_2d_render::build_control_render_items(tree, root, viewport_size);
+    render_scene_inner(
+        tree,
+        selected,
+        width,
+        height,
+        zoom,
+        pan,
+        None,
+        None,
+        control_items,
     )
 }
 
@@ -395,6 +469,7 @@ fn render_scene_inner(
     pan: (f64, f64),
     mut texture_cache: Option<&mut TextureCache>,
     overlays: Option<&crate::viewport_2d::OverlaySettings>,
+    control_items: Vec<crate::viewport_2d_render::Render2DItem>,
 ) -> FrameBuffer {
     // `None` means "no overlay set supplied" — draw every gizmo, which is what
     // every pre-existing caller expects. It is NOT the same as an empty set.
@@ -436,18 +511,38 @@ fn render_scene_inner(
     // normal/specular surfaces and the light pass rather than reimplementing
     // any of them.
     //
-    // ⚠️ Node2D-side CanvasItems only — NOT the themed Control pass that
-    // `render_play_frame` adds. `build_control_render_items` takes
-    // `&mut SceneTree` because it lays containers out before measuring them,
-    // and `render_scene_inner` holds `&SceneTree`. Threading `&mut` down here
-    // would change every public wrapper plus their callers in
-    // `editor_server.rs`, so Label/Button TEXT stays unrendered in edit mode
-    // for now and is tracked as remaining scope.
+    // ⚠️ Node2D-side CanvasItems only. The themed Control pass that
+    // `render_play_frame` adds needs `&mut SceneTree` (container layout writes
+    // resolved rects back onto the nodes), which this entry does not hold, so a
+    // caller that wants Label/Button text and Control geometry goes through
+    // `render_scene_with_zoom_pan_mut` and hands the items in.
     //
-    // `ColorRect` is unaffected: it has its own arm in the canvas-item resolver
-    // (`canvas_render.rs:1741`), so it comes through this immutable path along
-    // with Polygon2D, Line2D and Sprite2D.
+    // ⚠️ `ColorRect` is NOT exempt from that, which an earlier revision of this
+    // comment claimed. Having an arm in the canvas-item resolver
+    // (`canvas_render.rs:1741`) is useless when the node has no geometry: a
+    // Control's size comes from `offset_*` resolved by the layout pass, so on
+    // the immutable path a ColorRect is zero-sized and paints nothing.
+    // `canvas_composite.rs:34` warns about exactly this.
     let mut items = crate::viewport_2d_render::build_runtime_render_list(tree);
+    // The themed Control pass, when the caller could supply it (see
+    // `render_scene_with_zoom_pan_mut`). Empty for the immutable wrappers.
+    //
+    // 🔑 Appending here rather than compositing a second buffer afterwards is
+    // what makes this correct rather than merely visible: these items carry
+    // `z_index = CONTROL_Z_BASE + depth`, so the ONE sort inside
+    // `render_canvas_from_list` puts the UI above plain 2D nodes exactly as
+    // Play does.
+    //
+    // ⚠️ These items do NOT register in `canvas_drawn` below the way the
+    // Node2D-side ones do: a control primitive carries `node_id: 0` by design
+    // — "Control primitives are not one-per-node, so there is no single node
+    // id to attribute them to" (`canvas_render.rs:2444-2446`). The placeholder
+    // suppression therefore has to be by CLASS, which is what
+    // `controls_drawn` below does. Getting that wrong is not cosmetic:
+    // `draw_control_rect` is a `fill_rect`, so the opaque purple block would
+    // cover the text this pass just rasterized.
+    let controls_drawn = !control_items.is_empty();
+    items.extend(control_items);
     // The editor's view stands in for Play's Camera2D + window stretch.
     //
     // ⚠️ It MUST reuse the same `z` and `offset_*` the grid was drawn with
@@ -530,6 +625,20 @@ fn render_scene_inner(
             // the CollisionShape2D comment below warns about — a failed guard
             // there lands on `_` and draws a stray dot.)
             _ if canvas_drawn.contains(&node_id.raw()) => {}
+            // Painted by the themed Control pass, which the caller supplied.
+            // The Label/Button/Control arms below are OPAQUE fills
+            // (`draw_control_rect` -> `fill_rect`), so leaving them on would
+            // bury the real text and geometry under a purple block — the
+            // `canvas_drawn` arm above cannot catch these because control
+            // primitives carry no node id (see the note at `items.extend`).
+            //
+            // Uses gdscene's own `is_control`, the same predicate the control
+            // walk uses to choose what it draws, so the two cannot drift.
+            //
+            // ⚠️ Guarded `_` arms are only safe here because a FAILED guard
+            // falls through to the class arms that follow, not to the `_`
+            // catch-all at the end — the same reason the arm above is sound.
+            _ if controls_drawn && gdscene::control_render::is_control(tree, node_id) => {}
             "Node2D" => draw_node2d_diamond(&mut fb, pos, COLOR_NODE2D),
             "Sprite2D" => {
                 draw_sprite2d_with_texture(&mut fb, node, pos, z, &mut texture_cache);

@@ -20,6 +20,10 @@ pub fn global_constant(name: &str) -> Option<Variant> {
         "CONNECT_PERSIST" => 2,
         "CONNECT_ONE_SHOT" => 4,
         "CONNECT_REFERENCE_COUNTED" => 8,
+        // pat-mgixk.98: absent entirely before, so a script naming it got Nil
+        // and `connect(sig, cb, CONNECT_APPEND_SOURCE_OBJECT)` passed no flags
+        // at all (`core/object/object.h:578`).
+        "CONNECT_APPEND_SOURCE_OBJECT" => 16,
         // -- Side (4) --
         "SIDE_LEFT" => 0,
         "SIDE_TOP" => 1,
