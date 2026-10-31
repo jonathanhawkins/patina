@@ -17,10 +17,10 @@ use gdresource::{Resource, ResourceLoader, UidRegistry, UnifiedLoader};
 // Fixture content — matches fixtures/resources/with_ext_refs.tres
 // ===========================================================================
 
-const FIXTURE_WITH_EXT_REFS: &str = r#"[gd_resource type="PackedScene" format=3 uid="uid://scene_with_refs"]
+const FIXTURE_WITH_EXT_REFS: &str = r#"[gd_resource type="PackedScene" format=3 uid="uid://scenewithrefs"]
 
-[ext_resource type="Texture2D" uid="uid://icon_texture" path="res://icon.png" id="1"]
-[ext_resource type="Script" uid="uid://player_script" path="res://scripts/player.gd" id="2"]
+[ext_resource type="Texture2D" uid="uid://icontexture" path="res://icon.png" id="1"]
+[ext_resource type="Script" uid="uid://playerscript" path="res://scripts/player.gd" id="2"]
 [ext_resource type="PackedScene" path="res://scenes/enemy.tscn" id="3"]
 
 [sub_resource type="StyleBoxFlat" id="inline_style"]
@@ -51,7 +51,7 @@ fn ext_resource_fields_parsed_correctly() {
         .get("1")
         .expect("ext_resource id=1 missing");
     assert_eq!(ext1.resource_type, "Texture2D");
-    assert_eq!(ext1.uid, "uid://icon_texture");
+    assert_eq!(ext1.uid, "uid://icontexture");
     assert_eq!(ext1.path, "res://icon.png");
     assert_eq!(ext1.id, "1");
 
@@ -61,7 +61,7 @@ fn ext_resource_fields_parsed_correctly() {
         .get("2")
         .expect("ext_resource id=2 missing");
     assert_eq!(ext2.resource_type, "Script");
-    assert_eq!(ext2.uid, "uid://player_script");
+    assert_eq!(ext2.uid, "uid://playerscript");
     assert_eq!(ext2.path, "res://scripts/player.gd");
     assert_eq!(ext2.id, "2");
 
@@ -111,10 +111,10 @@ fn ext_resource_uids_register_in_uid_registry() {
     assert_eq!(registry.lookup_uid(res.uid), Some("res://test.tscn"));
 
     // ext_resource UIDs resolve to their paths
-    let icon_uid = parse_uid_string("uid://icon_texture");
+    let icon_uid = parse_uid_string("uid://icontexture");
     assert_eq!(registry.lookup_uid(icon_uid), Some("res://icon.png"));
 
-    let script_uid = parse_uid_string("uid://player_script");
+    let script_uid = parse_uid_string("uid://playerscript");
     assert_eq!(
         registry.lookup_uid(script_uid),
         Some("res://scripts/player.gd")
@@ -151,7 +151,7 @@ fn ext_resource_uid_round_trips_through_unified_loader() {
     }
 
     // Load by uid:// should resolve to the ext_resource path
-    let by_uid = unified.load("uid://icon_texture").unwrap();
+    let by_uid = unified.load("uid://icontexture").unwrap();
     assert_eq!(by_uid.path, "res://icon.png");
 
     // Load by res:// path should return the same Arc
@@ -162,7 +162,7 @@ fn ext_resource_uid_round_trips_through_unified_loader() {
     );
 
     // uid:// for the script ext_resource
-    let script = unified.load("uid://player_script").unwrap();
+    let script = unified.load("uid://playerscript").unwrap();
     assert_eq!(script.path, "res://scripts/player.gd");
 }
 
@@ -219,7 +219,7 @@ fn gd_resource_uid_extracted() {
         .unwrap();
 
     assert!(res.uid.is_valid(), "gd_resource uid should be extracted");
-    assert_eq!(res.uid, parse_uid_string("uid://scene_with_refs"));
+    assert_eq!(res.uid, parse_uid_string("uid://scenewithrefs"));
 }
 
 #[test]

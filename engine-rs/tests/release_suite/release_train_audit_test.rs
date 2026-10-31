@@ -126,8 +126,8 @@ fn release_doc_documents_oracle_parity_gate() {
 
 #[test]
 fn release_train_workflow_test_exists() {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/release_train_workflow_test.rs");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/release_suite/release_train_workflow_test.rs");
     assert!(path.exists(), "release_train_workflow_test.rs must exist");
 }
 

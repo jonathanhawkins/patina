@@ -17,6 +17,8 @@
 //! producer/consumer contract is testable natively. The browser half is the JS
 //! string [`audio_worklet_glue`] emits, which the wasm host evaluates.
 
+use std::sync::{Arc, Mutex};
+
 use crate::sample::{AudioOutputStream, AudioSampleBuffer};
 
 /// A single-producer/single-consumer ring of interleaved `f32` samples.
@@ -236,6 +238,122 @@ impl AudioOutputStream for WebAudioOutput {
     }
 }
 
+/// A clonable handle to ONE [`WebAudioOutput`], so the mixer side and the
+/// worklet side hold the *same* ring (pat-mgixk.4).
+///
+/// An [`AudioOutputStream`] is handed to the engine by value —
+/// `AudioServerBridge::attach_output` takes a `Box<dyn AudioOutputStream>` and
+/// owns it — so a bare [`WebAudioOutput`] given to a `MainLoop` is unreachable
+/// from the page's `pullBlock`. That is exactly how web audio came to be
+/// silent: the scene's bridge had no output attached at all, and the only
+/// `WebAudioOutput` in the process belonged to a second, demo-only
+/// `AudioServer` that no `AudioStreamPlayer` ever reached. With this handle one
+/// clone goes into the bridge as the producer and the other stays with the
+/// runtime as the consumer the `AudioWorkletProcessor` drains.
+///
+/// `Arc<Mutex<_>>` rather than `Rc<RefCell<_>>`, for the same reason
+/// [`crate::output::PlatformAudioOutput`] uses it: the boxed trait object can
+/// be stored anywhere in the engine, and a `!Send` handle inside it would make
+/// every `MainLoop` that attaches one un-sendable on native. On the browser
+/// main thread there is only one thread, so the lock is never contended.
+#[derive(Debug, Clone)]
+pub struct SharedWebAudioOutput {
+    inner: Arc<Mutex<WebAudioOutput>>,
+    /// Cached so a consumer's block geometry never depends on taking the lock.
+    /// De-interleaving the ring at a different width than it was written with
+    /// is heard as a garbled stereo image rather than as a failure, so the
+    /// channel count must not be able to change under a failed lock.
+    context_rate: u32,
+    channels: u16,
+}
+
+impl SharedWebAudioOutput {
+    /// A shared ring feeding a context at `context_rate`, written by a mixer
+    /// running at `mix_rate`.
+    pub fn new(context_rate: u32, mix_rate: u32, channels: u16) -> Self {
+        Self::from_output(WebAudioOutput::new(context_rate, mix_rate, channels))
+    }
+
+    /// Shares an output that has already been built.
+    pub fn from_output(output: WebAudioOutput) -> Self {
+        let context_rate = output.context_rate();
+        // Spelled as a trait call rather than `output.channels()` so it cannot
+        // silently start resolving to a future inherent method of another
+        // meaning.
+        let channels = AudioOutputStream::channels(&output).max(1);
+        Self {
+            inner: Arc::new(Mutex::new(output)),
+            context_rate,
+            channels,
+        }
+    }
+
+    /// The `AudioContext` rate the ring holds samples at.
+    pub fn context_rate(&self) -> u32 {
+        self.context_rate
+    }
+
+    /// Interleaved channel count of everything in the ring.
+    pub fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    /// Samples (not frames) queued for the worklet.
+    pub fn queued(&self) -> usize {
+        self.with(|o| o.queued())
+    }
+
+    /// Frames queued for the worklet.
+    pub fn queued_frames(&self) -> usize {
+        self.queued() / self.channels.max(1) as usize
+    }
+
+    /// Drains up to `out.len()` samples, zero-padding an underrun.
+    pub fn drain(&self, out: &mut [f32]) -> usize {
+        self.with(|o| o.drain(out))
+    }
+
+    /// Whether a user gesture has resumed the context yet.
+    pub fn is_unlocked(&self) -> bool {
+        self.with(|o| o.is_unlocked())
+    }
+
+    /// Records that a gesture resumed the context.
+    ///
+    /// Takes `&self`: the unlock is reported by the page through whichever
+    /// clone it happens to hold, and both refer to the same flag.
+    pub fn mark_unlocked(&self) {
+        self.with(|o| o.mark_unlocked());
+    }
+
+    /// Runs `f` against the shared output.
+    ///
+    /// ⚠️ Poison-tolerant on purpose. A panic on one side of this ring must not
+    /// silence the page for the rest of its life, and what the lock guards is a
+    /// plain sample buffer with no invariant an unwind could leave broken —
+    /// the worst case is one glitched block.
+    fn with<T>(&self, f: impl FnOnce(&mut WebAudioOutput) -> T) -> T {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        // `&mut *guard` rather than `&mut guard`: an explicit reborrow through
+        // `DerefMut` instead of relying on a coercion at a generic call site.
+        f(&mut *guard)
+    }
+}
+
+impl AudioOutputStream for SharedWebAudioOutput {
+    fn write_samples(&mut self, buffer: &AudioSampleBuffer) -> usize {
+        self.with(|o| o.write_samples(buffer))
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.context_rate
+    }
+
+    fn channels(&self) -> u16 {
+        self.channels
+    }
+}
+
 /// Blocks the processor keeps requested-but-not-yet-delivered.
 ///
 /// ⚠️ Must be > 1. The host that answers a `need-block` request lives on the
@@ -433,6 +551,74 @@ mod tests {
     fn glue_pads_a_short_block_with_silence() {
         let glue = audio_worklet_glue("patina-out", 2);
         assert!(glue.contains("idx < block.length"));
+    }
+
+    /// ⚠️ The whole point of the shared handle: what the producer writes, the
+    /// consumer reads. `AudioServerBridge::attach_output` takes the stream by
+    /// value, so before this existed the ring the engine wrote into could not
+    /// be drained by anyone — which is how web audio came to be silent
+    /// (pat-mgixk.4).
+    #[test]
+    fn a_shared_output_reads_back_what_the_other_clone_wrote() {
+        let consumer = SharedWebAudioOutput::new(48_000, 48_000, 2);
+        let mut producer = consumer.clone();
+
+        let mut buffer = AudioSampleBuffer::new(48_000, 2);
+        buffer.samples = vec![0.25, -0.25, 0.5, -0.5];
+        assert_eq!(producer.write_samples(&buffer), 2, "two stereo frames");
+
+        assert_eq!(consumer.queued(), 4, "the clone must see the same ring");
+        assert_eq!(consumer.queued_frames(), 2);
+        let mut out = [9.0f32; 4];
+        assert_eq!(consumer.drain(&mut out), 4);
+        assert_eq!(out, [0.25, -0.25, 0.5, -0.5]);
+        assert!(consumer.queued() == 0, "the ring is one ring, not two");
+    }
+
+    /// The geometry a consumer computes blocks from must not be able to drift
+    /// from what the producer interleaved at.
+    #[test]
+    fn a_shared_output_reports_the_context_rate_and_the_mixers_channels() {
+        let shared = SharedWebAudioOutput::new(48_000, 44_100, 2);
+        assert_eq!(shared.context_rate(), 48_000, "the browser's rate wins");
+        assert_eq!(shared.channels(), 2);
+        assert_eq!(
+            AudioOutputStream::sample_rate(&shared),
+            48_000,
+            "the engine must be told the rate it has to resample TO"
+        );
+        assert_eq!(AudioOutputStream::channels(&shared), 2);
+    }
+
+    /// Resampling has to happen on the way INTO the shared ring, exactly as it
+    /// does for a bare [`WebAudioOutput`] — a 44.1 kHz mix queued untouched for
+    /// a 48 kHz context plays ~8.8% slow and flat.
+    #[test]
+    fn a_shared_output_resamples_into_the_ring() {
+        let consumer = SharedWebAudioOutput::new(48_000, 44_100, 2);
+        let mut producer = consumer.clone();
+
+        let mut buffer = AudioSampleBuffer::new(44_100, 2);
+        // 441 stereo frames at 44.1 kHz is 10 ms, which is 480 frames at 48 kHz.
+        buffer.samples = vec![0.5; 441 * 2];
+        let frames = producer.write_samples(&buffer);
+
+        assert_eq!(frames, 480, "441 frames at 44.1 kHz is 480 at 48 kHz");
+        assert_eq!(consumer.queued_frames(), 480);
+    }
+
+    /// A gesture unlock reported through one clone must be visible from the
+    /// other — the page holds one and the engine the other.
+    #[test]
+    fn a_shared_output_shares_the_gesture_unlock() {
+        let consumer = SharedWebAudioOutput::new(48_000, 48_000, 2);
+        let producer = consumer.clone();
+        assert!(
+            !consumer.is_unlocked(),
+            "audio starts locked until a gesture"
+        );
+        producer.mark_unlocked();
+        assert!(consumer.is_unlocked());
     }
 
     /// ⚠️ The worklet body is carried inside a JS **template literal**, so a

@@ -15,45 +15,60 @@
 //! character index alone, which is what makes it assertable in a test. The
 //! amplitude/frequency semantics and the tag names/params match Godot.
 //!
-//! Script-defined custom effects are NOT dispatched here. The ClassDB surface
-//! for `RichTextEffect`/`CharFXTransform` is registered
-//! (`gdobject::register_2d_classes`) and this module is shaped to accept that
-//! call, but things are missing before `_process_custom_fx` can run. Two of the
-//! four originally listed below have since been struck off — 1 was never a
-//! blocker and 4 was cleared by pat-fk17e.1 — so **2 and 3 are the real
-//! remaining work** (pat-fk17e.2). The struck entries are kept rather than
-//! deleted because each was believed to be a blocker and the reason it is not
-//! is the useful part; a bare count here would go stale again.
+//! Script-defined custom effects **are** dispatched, as of pat-fk17e.2. The
+//! engine side runs as a PRE-PASS in
+//! [`control_render`](crate::control_render): it seeds a phantom node with
+//! [`CharFXTransform::to_properties`], calls the effect's
+//! `_process_custom_fx` through `SceneTree::call_script_method`, then collects
+//! the mutation with [`CharFXTransform::read_back`]. A handler that returns
+//! `false` hides the glyph, which Godot treats as separate from clearing
+//! `char_fx.visible`. [`match_custom_effect`] maps a BBCode tag to an entry of
+//! `RichTextLabel.custom_effects`, first match wins.
 //!
-//! 1. ~~`draw_control` takes `&SceneTree` — calling a script needs `&mut`.~~
-//!    **NOT a blocker (pat-fk17e.2).** This reads as though the feature needs
-//!    `&mut` threaded through `draw_control`, which would reach every caller of
-//!    `control_draw_items` including the editor viewport. It does not: the
-//!    sanctioned shape is a PRE-PASS that runs the scripts with `&mut self`,
-//!    caches what they produced, and lets the immutable draw path read the
-//!    cache. There are already two of them —
+//! ⚠️ This paragraph previously said the opposite — that effects were "NOT
+//! dispatched here" and that two of four blockers were "the real remaining
+//! work". All four are resolved, and the note outlived them. It is recorded
+//! here because a stale "remaining work" note in a module doc is worse than no
+//! note: it reads as current, and it cost a worker most of a slice picking up
+//! blocker 3 before discovering `to_properties`/`read_back` already existed.
+//! The four, and what settled each:
+//!
+//! 1. `draw_control` takes `&SceneTree` — calling a script needs `&mut`.
+//!    **Never a blocker**, and the reason is the design the implementation
+//!    used. It reads as though the feature needs `&mut` threaded through
+//!    `draw_control`, which would reach every caller of `control_draw_items`
+//!    including the editor viewport. It does not: the sanctioned shape is a
+//!    PRE-PASS that runs the scripts with `&mut self`, caches what they
+//!    produced, and lets the immutable draw path read the cache. There were
+//!    already two of them —
 //!    [`SceneTree::flush_pending_redraws`](crate::scene_tree::SceneTree::flush_pending_redraws)
 //!    for a node's own `_draw`, and
 //!    [`SceneTree::flush_scripted_resources`](crate::scene_tree::SceneTree::flush_scripted_resources)
-//!    for scripted `StyleBox`/`Texture2D` (pat-s3rrv.160), whose doc-comment
-//!    spells out this exact argument. Custom effects want a third of the same
-//!    shape, not a signature change.
-//! 2. `RichTextLabel` has no `custom_effects` property to hold effect
-//!    instances, and nothing maps a BBCode tag to an effect's `bbcode`.
-//! 3. `CharFXTransform` has no `Variant` encoding, so it cannot cross
+//!    for scripted `StyleBox`/`Texture2D` (pat-s3rrv.160). Custom effects took
+//!    a third of the same shape, not a signature change.
+//! 2. `RichTextLabel` had no `custom_effects` property and nothing mapped a
+//!    BBCode tag to an effect's `bbcode`. **Resolved**: the property is
+//!    registered in `class_db.rs` and [`match_custom_effect`] does the mapping.
+//! 3. `CharFXTransform` had no `Variant` encoding, so it could not cross
 //!    `ScriptInstance::call_method(&[Variant])` and come back mutated.
-//! 4. ~~There is no script-backed Resource to hang an effect on.~~ **CLEARED by
-//!    pat-fk17e.1.** A GDScript that `extends Resource` now instantiates as an
+//!    **Resolved**: it rides as the property bag of a phantom node —
+//!    [`CharFXTransform::to_properties`] out, [`CharFXTransform::read_back`]
+//!    in — so no new `Variant` type was needed.
+//! 4. There was no script-backed Resource to hang an effect on. **Resolved by
+//!    pat-fk17e.1.** A GDScript that `extends Resource` instantiates as an
 //!    object carrying a `ScriptInstance`, via the scene accessor's
 //!    `instantiate_script_resource`, and `load("res://effect.tres")` on a
 //!    `.tres` with `script = ExtResource(..)` yields that object. See
 //!    `crate::scripting`'s module doc for why the instance id — not a `script`
 //!    field on `ResourceRef` — is the representation. The object is still a
-//!    phantom `Node` under the scene root, which is a carrier limitation rather
-//!    than an absence of the thing.
+//!    phantom `Node` under the scene root, a carrier limitation rather than an
+//!    absence of the thing.
 //!
-//! Any of 1–3 alone would block it; together they are a separate bead
-//! (pat-fk17e.2).
+//! Remaining parity gap, small and real: `to_properties` seeds `glyph_flags`
+//! and `glyph_index` at `0` because this struct models neither. Godot supplies
+//! both per glyph, so a script reading `char_fx.glyph_index` sees `0` for every
+//! glyph rather than its real index. They are seeded rather than omitted so
+//! arithmetic on them does not fault on `Nil`.
 
 use std::collections::HashMap;
 

@@ -124,6 +124,32 @@ def main() -> int:
         else:
             print(f"ok   {full}  (binary {os.path.basename(binary)}, {mtime})")
 
+    # Freshness audit. NOT a hard failure: the assertions above are about rows
+    # passing in binaries dated today, which stays true. This surfaces the
+    # separate question the report's expiry section raises — whether a binary
+    # predates HEAD and so cannot speak for current code.
+    head_ts = subprocess.run(
+        ["git", "log", "-1", "--format=%ct"],
+        cwd=REPO, capture_output=True, text=True,
+    ).stdout.strip()
+    if head_ts.isdigit():
+        head_ts = int(head_ts)
+        stale = []
+        for target in {t for t, _ in rows}:
+            b = newest_binary(target)
+            if b is not None and os.path.getmtime(b) < head_ts:
+                stale.append((target, time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(b)))))
+        print()
+        if stale:
+            print(f"FRESHNESS: {len(stale)} target(s) have a binary OLDER than HEAD "
+                  f"({time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(head_ts))}) "
+                  f"— their rows cannot speak for current code:")
+            for t, m in sorted(stale):
+                print(f"  - {t} (binary {m})")
+        else:
+            print("FRESHNESS: every binary used postdates HEAD.")
+
     print()
     if failures:
         print(f"FAILED: {len(failures)} of {len(rows)} claimed-stale rows do not hold")

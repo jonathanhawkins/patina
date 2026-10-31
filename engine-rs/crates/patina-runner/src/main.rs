@@ -8,7 +8,11 @@
 //!
 //! ```text
 //! patina-runner <scene.tscn> [--frames N] [--delta D]
+//! patina-runner <project.godot> --trace-out <file> [--frames N]
 //! ```
+//!
+//! `--trace-out` writes the conformance trace envelope the conformance gate
+//! diffs against headless Godot, instead of the tree dump (pat-mgixk.403).
 
 #![warn(clippy::all)]
 
@@ -40,12 +44,20 @@ struct Args {
     scene_path: String,
     /// Number of frames to run (default 10).
     frames: u64,
+    /// Whether `--frames` was given explicitly. `--trace-out` falls back to
+    /// [`conformance::DEFAULT_FRAMES`] rather than the tree-dump default of 10,
+    /// so an envelope written without `--frames` is comparable with the
+    /// checked-in goldens instead of being silently two frames short.
+    frames_explicit: bool,
     /// Delta time per frame in seconds (default 1/60).
     delta: f64,
     /// Whether to emit a per-frame trace of tree state.
     trace_frames: bool,
     /// Whether to emit the lifecycle event trace (notifications, script calls, signals).
     event_trace: bool,
+    /// Where to write the conformance trace envelope, when asked for
+    /// (pat-mgixk.403). Only meaningful for a `project.godot` target.
+    trace_out: Option<PathBuf>,
     /// The `--debug-*` overlays the editor's Debug menu launched us with.
     debug: patina_runner::debug_flags::DebugFlags,
 }
@@ -57,7 +69,7 @@ fn parse_args() -> Result<Args, String> {
     if args.len() < 2 {
         return Err(format!(
             "Usage: {} <scene.tscn|project.godot|game.pck> [--main-pack PACK] \
-             [--frames N] [--delta D]",
+             [--frames N] [--delta D] [--trace-out FILE]",
             args[0]
         ));
     }
@@ -73,9 +85,11 @@ fn parse_args() -> Result<Args, String> {
         args[1].clone()
     };
     let mut frames: u64 = 10;
+    let mut frames_explicit = false;
     let mut delta: f64 = 1.0 / 60.0;
     let mut trace_frames = false;
     let mut event_trace = false;
+    let mut trace_out: Option<PathBuf> = None;
     let mut debug = patina_runner::debug_flags::DebugFlags::default();
 
     let mut i = if starts_with_flag { 1 } else { 2 };
@@ -88,6 +102,7 @@ fn parse_args() -> Result<Args, String> {
                     .ok_or("--frames requires a value")?
                     .parse()
                     .map_err(|e| format!("invalid --frames value: {e}"))?;
+                frames_explicit = true;
             }
             "--delta" => {
                 i += 1;
@@ -102,6 +117,12 @@ fn parse_args() -> Result<Args, String> {
             }
             "--event-trace" => {
                 event_trace = true;
+            }
+            "--trace-out" => {
+                i += 1;
+                trace_out = Some(PathBuf::from(
+                    args.get(i).ok_or("--trace-out requires a path")?,
+                ));
             }
             "--main-pack" => {
                 i += 1;
@@ -132,9 +153,11 @@ fn parse_args() -> Result<Args, String> {
     Ok(Args {
         scene_path,
         frames,
+        frames_explicit,
         delta,
         trace_frames,
         event_trace,
+        trace_out,
         debug,
     })
 }
@@ -359,6 +382,34 @@ fn run_project_from_godot(arg_path: &Path, args: &Args) {
         arg_path.parent().unwrap_or(Path::new(".")).to_path_buf()
     };
 
+    // pat-mgixk.403: `--trace-out` records the conformance trace envelope from
+    // this very boot and writes that instead of the tree dump. It calls the
+    // same `conformance::capture_project` the conformance suite runs, so the
+    // gate and the shipping runner can never drift apart.
+    if let Some(out) = &args.trace_out {
+        let frames = if args.frames_explicit {
+            args.frames
+        } else {
+            patina_runner::conformance::DEFAULT_FRAMES
+        };
+        match patina_runner::conformance::capture_project(&project_dir, frames, args.delta) {
+            Ok(envelope) => {
+                let text = serde_json::to_string_pretty(&envelope.to_json())
+                    .expect("JSON serialization failed");
+                if let Err(e) = fs::write(out, format!("{text}\n")) {
+                    eprintln!("Error writing '{}': {e}", out.display());
+                    process::exit(1);
+                }
+                eprintln!("wrote conformance envelope to {}", out.display());
+            }
+            Err(e) => {
+                eprintln!("Error capturing '{}': {e}", project_dir.display());
+                process::exit(1);
+            }
+        }
+        return;
+    }
+
     let booted = match project_boot::boot_project(&project_dir) {
         Ok(b) => b,
         Err(e) => {
@@ -514,6 +565,14 @@ fn main() {
     if arg_path.is_dir() || arg_path.file_name().is_some_and(|n| n == "project.godot") {
         run_project_from_godot(arg_path, &args);
         return;
+    }
+
+    // The conformance envelope is defined over a whole project (autoloads,
+    // input map, declared main scene), so refuse rather than silently write an
+    // envelope that no golden can be compared against.
+    if args.trace_out.is_some() {
+        eprintln!("Error: --trace-out needs a project.godot target, not a loose scene or pack");
+        process::exit(1);
     }
 
     // pat-s3rrv.34: a `.pck` argument boots the exported game inside it.

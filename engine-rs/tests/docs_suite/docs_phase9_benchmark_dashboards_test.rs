@@ -44,9 +44,9 @@ fn committed_benchmark_baseline_data_exists() {
 #[test]
 fn validation_suite_keeps_dashboard_and_schema_in_sync() {
     for f in [
-        "engine-rs/tests/benchmark_dashboard_test.rs",
-        "engine-rs/tests/benchmark_dashboard_audit_test.rs",
-        "engine-rs/tests/perf_benchmark_ci_gate_test.rs",
+        "engine-rs/tests/misc_suite_a/benchmark_dashboard_test.rs",
+        "engine-rs/tests/misc_suite_a/benchmark_dashboard_audit_test.rs",
+        "engine-rs/tests/misc_suite_e/perf_benchmark_ci_gate_test.rs",
     ] {
         let p = repo_root().join(f);
         assert!(

@@ -104,11 +104,11 @@ fn uid_registry_mut_add_mapping_after_construction() {
     assert!(ul.uid_registry().is_empty());
 
     // Add mapping via mutable reference.
-    let uid = parse_uid_string("uid://added_later");
+    let uid = parse_uid_string("uid://addedlater");
     ul.uid_registry_mut().register(uid, "res://late.tres");
 
     // Should now resolve.
-    let res = ul.load("uid://added_later").unwrap();
+    let res = ul.load("uid://addedlater").unwrap();
     assert_eq!(res.path, "res://late.tres");
 }
 
@@ -141,7 +141,7 @@ fn bulk_register_load_invalidate_reload_cycle() {
     let mut ul = UnifiedLoader::new(InstrumentedLoader::new());
 
     let paths: Vec<String> = (0..10).map(|i| format!("res://bulk_{i}.tres")).collect();
-    let uid_strs: Vec<String> = (0..10).map(|i| format!("uid://bulk_{i}")).collect();
+    let uid_strs: Vec<String> = (0..10).map(|i| format!("uid://bulk{i}")).collect();
 
     // Register all.
     for (uid_str, path) in uid_strs.iter().zip(paths.iter()) {
@@ -187,7 +187,7 @@ fn bulk_register_load_invalidate_reload_cycle() {
 
 #[test]
 fn tres_subresource_parsed_uid_registers_and_resolves() {
-    let source = r#"[gd_resource type="Theme" format=3 uid="uid://sub_theme"]
+    let source = r#"[gd_resource type="Theme" format=3 uid="uid://subtheme"]
 
 [sub_resource type="StyleBoxFlat" id="box_a"]
 bg_color = Color(1, 0, 0, 1)
@@ -210,7 +210,7 @@ name = "SubTheme"
     let mut ul = UnifiedLoader::new(InstrumentedLoader::new());
     ul.register_uid(parsed.uid, "res://themes/sub.tres");
 
-    let uid_str = "uid://sub_theme";
+    let uid_str = "uid://subtheme";
     let by_uid = ul.load(uid_str).unwrap();
     let by_path = ul.load("res://themes/sub.tres").unwrap();
     assert!(Arc::ptr_eq(&by_uid, &by_path));
@@ -222,10 +222,10 @@ name = "SubTheme"
 
 #[test]
 fn tres_ext_resources_all_uids_register_and_resolve() {
-    let source = r#"[gd_resource type="PackedScene" format=3 uid="uid://scene_with_ext"]
+    let source = r#"[gd_resource type="PackedScene" format=3 uid="uid://scenewithext"]
 
-[ext_resource type="Script" uid="uid://player_gd" path="res://scripts/player.gd" id="1"]
-[ext_resource type="Texture2D" uid="uid://player_png" path="res://textures/player.png" id="2"]
+[ext_resource type="Script" uid="uid://playergd" path="res://scripts/player.gd" id="1"]
+[ext_resource type="Texture2D" uid="uid://playerpng" path="res://textures/player.png" id="2"]
 
 [resource]
 name = "SceneWithExt"
@@ -248,14 +248,14 @@ name = "SceneWithExt"
     }
 
     // Load main scene by uid://.
-    let scene = ul.load("uid://scene_with_ext").unwrap();
+    let scene = ul.load("uid://scenewithext").unwrap();
     assert_eq!(scene.path, "res://scenes/with_ext.tres");
 
     // Load ext_resources by uid://.
-    let script = ul.load("uid://player_gd").unwrap();
+    let script = ul.load("uid://playergd").unwrap();
     assert_eq!(script.path, "res://scripts/player.gd");
 
-    let texture = ul.load("uid://player_png").unwrap();
+    let texture = ul.load("uid://playerpng").unwrap();
     assert_eq!(texture.path, "res://textures/player.png");
 
     // All cached.
@@ -431,21 +431,21 @@ fn with_registry_large_batch_all_resolve() {
 fn batch_tres_parse_register_cross_reference() {
     let sources = [
         (
-            r#"[gd_resource type="Resource" format=3 uid="uid://item_a"]
+            r#"[gd_resource type="Resource" format=3 uid="uid://itema"]
 [resource]
 name = "ItemA"
 "#,
             "res://items/a.tres",
         ),
         (
-            r#"[gd_resource type="Resource" format=3 uid="uid://item_b"]
+            r#"[gd_resource type="Resource" format=3 uid="uid://itemb"]
 [resource]
 name = "ItemB"
 "#,
             "res://items/b.tres",
         ),
         (
-            r#"[gd_resource type="Resource" format=3 uid="uid://item_c"]
+            r#"[gd_resource type="Resource" format=3 uid="uid://itemc"]
 [resource]
 name = "ItemC"
 "#,
@@ -466,7 +466,7 @@ name = "ItemC"
     }
 
     // Load by UID string, verify each resolves to correct path.
-    let uid_strs = ["uid://item_a", "uid://item_b", "uid://item_c"];
+    let uid_strs = ["uid://itema", "uid://itemb", "uid://itemc"];
     for (i, uid_str) in uid_strs.iter().enumerate() {
         let res = ul.load(uid_str).unwrap();
         assert_eq!(res.path, sources[i].1);
@@ -594,13 +594,39 @@ fn similar_uid_strings_produce_distinct_uids() {
         ("uid://abc", "uid://abd"),
         ("uid://test1", "uid://test2"),
         ("uid://A", "uid://a"),
-        ("uid://x_y", "uid://xy_"),
+        // Same characters, different order. This pair used to be
+        // ("uid://x_y", "uid://xy_"), which could NEVER pass: `_` is outside
+        // the codec's `[a-z0-9]` alphabet, so BOTH sides decoded to the single
+        // `ResourceUid::INVALID` sentinel and `assert_ne!` compared -1 with
+        // itself. Position-sensitivity is what the pair was reaching for, and
+        // base-34 gives it with valid characters (pat-21oab).
+        ("uid://xyz", "uid://xzy"),
     ];
 
     for (a, b) in &pairs {
         let uid_a = parse_uid_string(a);
         let uid_b = parse_uid_string(b);
         assert_ne!(uid_a, uid_b, "{a} and {b} should produce different UIDs");
+    }
+
+    // ⚠️ The flip side, and the reason the old pair was impossible rather than
+    // merely wrong: every malformed string collapses onto ONE sentinel, so two
+    // different invalid UIDs are equal by design. Asserted here so nobody
+    // "fixes" a future failure by reaching for two invalid strings again.
+    for (a, b) in [
+        ("uid://x_y", "uid://xy_"),
+        ("uid://A", "uid://."),
+        ("uid://has space", "uid://UPPER"),
+    ] {
+        assert_eq!(
+            parse_uid_string(a),
+            parse_uid_string(b),
+            "{a} and {b} are both malformed, so both must be the INVALID sentinel"
+        );
+        assert!(
+            !parse_uid_string(a).is_valid(),
+            "{a} must not be a valid UID"
+        );
     }
 }
 
@@ -673,10 +699,10 @@ name = "NoUidInHeader"
 #[test]
 fn resource_uid_field_independent_of_registry_uid() {
     let mut ul = UnifiedLoader::new(InstrumentedLoader::new());
-    let registry_uid = parse_uid_string("uid://field_test");
-    ul.register_uid_str("uid://field_test", "res://field_test.tres");
+    let registry_uid = parse_uid_string("uid://fieldtest");
+    ul.register_uid_str("uid://fieldtest", "res://field_test.tres");
 
-    let res = ul.load("uid://field_test").unwrap();
+    let res = ul.load("uid://fieldtest").unwrap();
     // The InstrumentedLoader sets uid = call_count * 1000, not the registry UID.
     // This verifies that the resource's uid field and the registry UID are independent.
     assert_ne!(
@@ -693,16 +719,16 @@ fn resource_uid_field_independent_of_registry_uid() {
 #[test]
 fn two_loaders_independent_caches_same_registry_data() {
     let mut reg1 = UidRegistry::new();
-    reg1.register(parse_uid_string("uid://shared_data"), "res://shared.tres");
+    reg1.register(parse_uid_string("uid://shareddata"), "res://shared.tres");
 
     let mut reg2 = UidRegistry::new();
-    reg2.register(parse_uid_string("uid://shared_data"), "res://shared.tres");
+    reg2.register(parse_uid_string("uid://shareddata"), "res://shared.tres");
 
     let mut ul1 = UnifiedLoader::with_registry(InstrumentedLoader::new(), reg1);
     let mut ul2 = UnifiedLoader::with_registry(InstrumentedLoader::new(), reg2);
 
-    let res1 = ul1.load("uid://shared_data").unwrap();
-    let res2 = ul2.load("uid://shared_data").unwrap();
+    let res1 = ul1.load("uid://shareddata").unwrap();
+    let res2 = ul2.load("uid://shareddata").unwrap();
 
     // Same path, but different Arc (separate caches).
     assert_eq!(res1.path, res2.path);
@@ -716,19 +742,19 @@ fn two_loaders_independent_caches_same_registry_data() {
 #[test]
 fn invalidation_preserves_registry_mapping() {
     let mut ul = UnifiedLoader::new(InstrumentedLoader::new());
-    ul.register_uid_str("uid://stable_reg", "res://stable.tres");
+    ul.register_uid_str("uid://stablereg", "res://stable.tres");
 
-    ul.load("uid://stable_reg").unwrap();
+    ul.load("uid://stablereg").unwrap();
     ul.invalidate("res://stable.tres");
 
     // Registry is untouched by cache invalidation.
     assert_eq!(
         ul.uid_registry().lookup_path("res://stable.tres"),
-        Some(parse_uid_string("uid://stable_reg"))
+        Some(parse_uid_string("uid://stablereg"))
     );
 
     // Can still load by uid:// after invalidation.
-    let reloaded = ul.load("uid://stable_reg").unwrap();
+    let reloaded = ul.load("uid://stablereg").unwrap();
     assert_eq!(reloaded.path, "res://stable.tres");
 }
 
@@ -774,14 +800,14 @@ fn stress_100_uids_full_cycle() {
     // Register 100 UIDs.
     for i in 0..100 {
         ul.register_uid_str(
-            &format!("uid://stress_{i}"),
+            &format!("uid://stress{i}"),
             &format!("res://stress/{i}.tres"),
         );
     }
 
     // Load all by UID.
     let first_pass: Vec<Arc<Resource>> = (0..100)
-        .map(|i| ul.load(&format!("uid://stress_{i}")).unwrap())
+        .map(|i| ul.load(&format!("uid://stress{i}")).unwrap())
         .collect();
     assert_eq!(ul.cache_len(), 100);
 

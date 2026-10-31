@@ -266,9 +266,34 @@ pub fn reset() {
 mod tests {
     use super::*;
 
+    /// Resets the process-global canvas store AND serializes this test against
+    /// every other test in this module. Bind it for the whole test body:
+    /// `let _guard = fresh();`.
+    ///
+    /// ⚠️ Each test used to open with a bare `reset()`, which is only safe
+    /// when every test owns its own process — true under `cargo nextest run`,
+    /// FALSE under `cargo test` and when this lib test binary is run directly,
+    /// where libtest runs these tests as THREADS IN ONE PROCESS. One test's
+    /// `reset()` then deleted another's canvas items mid-assertion, so
+    /// `create_parent_add_and_clear` failed only sometimes: six identical runs
+    /// of the lib binary scored 751 to 754 passing, with the failing set
+    /// moving between this module and `editor_commands` (pat-21oab).
+    #[must_use = "bind the guard for the whole test (`let _guard = fresh();`); \
+                  dropping it immediately serializes nothing"]
+    fn fresh() -> std::sync::MutexGuard<'static, ()> {
+        static TEST_LOCK: Mutex<()> = Mutex::new(());
+        // Poison-tolerant: one panicking test must not cascade into every
+        // other test in the module failing with `PoisonError`.
+        let guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        reset();
+        guard
+    }
+
     #[test]
     fn create_parent_add_and_clear() {
-        reset();
+        let _guard = fresh();
         let node_rid = node_canvas_item(42);
         assert_eq!(
             node_canvas_item(42),
@@ -308,7 +333,7 @@ mod tests {
 
     #[test]
     fn unknown_rid_is_rejected_rather_than_created() {
-        reset();
+        let _guard = fresh();
         assert!(!canvas_item_set_parent(9_999, 1));
         assert!(!canvas_item_clear(9_999));
         assert!(!canvas_item_exists(9_999));
@@ -316,7 +341,7 @@ mod tests {
 
     #[test]
     fn unparented_item_reaches_no_node() {
-        reset();
+        let _guard = fresh();
         let ci = canvas_item_create();
         canvas_item_add(
             ci,
@@ -333,5 +358,57 @@ mod tests {
         );
         canvas_item_set_parent(ci, node_rid);
         assert_eq!(items_for_node(7).len(), 1);
+    }
+
+    /// ⚠️ Concurrency cover for the process-global canvas store, required by
+    /// `CLAUDE.md` for server-side state. `NEXT_RID` is a single `AtomicU64`
+    /// handing ids to whichever thread asks, so the invariant worth pinning is
+    /// that two threads creating items at the same moment never receive the
+    /// same RID and never leak an item onto each other's node — a non-atomic
+    /// fetch-then-store would collide here and nowhere else in this module.
+    #[test]
+    fn concurrent_item_creation_hands_out_distinct_rids_per_node() {
+        let _guard = fresh();
+        const THREADS: u64 = 8;
+        let handles: Vec<_> = (0..THREADS)
+            .map(|n| {
+                std::thread::spawn(move || {
+                    let node = node_canvas_item(1_000 + n);
+                    let ci = canvas_item_create();
+                    assert!(canvas_item_set_parent(ci, node));
+                    assert!(canvas_item_add(
+                        ci,
+                        CanvasCommand::Rect {
+                            rect: Rect2 {
+                                position: Vector2::ZERO,
+                                size: Vector2::new(20.0, 20.0),
+                            },
+                            color: Color::new(1.0, 0.0, 0.0, 1.0),
+                        }
+                    ));
+                    ci
+                })
+            })
+            .collect();
+        let rids: Vec<u64> = handles
+            .into_iter()
+            .map(|h| h.join().expect("canvas worker thread panicked"))
+            .collect();
+
+        let mut unique = rids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            rids.len(),
+            "two threads were handed the same canvas RID: {rids:?}"
+        );
+        for n in 0..THREADS {
+            assert_eq!(
+                items_for_node(1_000 + n).len(),
+                1,
+                "node {n} must see exactly its own item"
+            );
+        }
     }
 }

@@ -172,14 +172,18 @@ fn a_pose_retargets_onto_the_mapped_source_bone() {
         "the mapped bone must actually move — an unmapped no-op would leave it \
          at rest and every assertion below would be vacuous"
     );
-    // ⚠️ `get_bone_global_pose` composes `rest * pose` at every level
-    // (skeleton3d.rs:397) — the pose does NOT replace the rest. So the chain is
-    // hips(0,1,0) * shoulder(0,1,0) * [arm rest(0,1,0) * pose(0.5,0,0)],
-    // putting the arm at y = 3, not 2. Getting this wrong would have failed on
-    // correct code.
+    // ⚠️ y was 3.0 before pat-mgixk.3, and this comment used to say "y = 3,
+    // not 2". Godot 4 composes `parent_global * pose`
+    // (`skeleton_3d.cpp:1108-1116`): the pose IS the bone's local transform and
+    // REPLACES its rest. So the chain is hips(0,1,0) * shoulder(0,1,0) *
+    // arm_pose(0.5,0,0) — the arm's own (0,1,0) rest is overridden by the
+    // retargeted pose — putting the arm at y = 2. Hips and shoulder still
+    // contribute their rests because an unposed bone's pose DEFAULTS to its
+    // rest, which is what keeps the chain from collapsing.
     assert!(
-        (after.x - 0.5).abs() < 1e-4 && (after.y - 3.0).abs() < 1e-4,
-        "the pose must land in the source bone's own chain, got {after:?}"
+        (after.x - 0.5).abs() < 1e-4 && (after.y - 2.0).abs() < 1e-4,
+        "the pose must land in the source bone's own chain and replace that \
+         bone's rest, got {after:?}"
     );
 }
 

@@ -12,8 +12,12 @@
 //!    `OrderedDict`), not the random order of a `HashMap`. Re-assigning an
 //!    existing key keeps its original position, matching Godot.
 //!
-//! Numeric keys follow Godot's rule that `1` and `1.0` are the *same* key: an
-//! integral float hashes and compares equal to the corresponding int.
+//! Keys follow Godot's `StringLikeVariantComparator` ([`crate::string_like`]),
+//! which is *not* the `==` operator: an `int` key and a `float` key are
+//! **distinct** (`Variant::hash_compare` bails on `type != p_variant.type`,
+//! `variant.cpp:3172`), while a `String` and a `StringName` of the same text are
+//! the **same** key (`variant.cpp:3396`). The second rule is what lets a script
+//! look up a `.tscn`-authored `&"walk"` with `d["walk"]` (pat-mgixk.12).
 //!
 //! Storage is a `Vec` of entries (for order) plus a `HashMap` from key to
 //! position (for O(1) lookup). Game-script dictionaries are typically small, so
@@ -43,27 +47,19 @@ impl Hash for DictKey {
     }
 }
 
-/// Godot-style key equality. Numeric keys unify (`1 == 1.0`); everything else
-/// falls back to `Variant`'s structural equality.
+/// Godot's dictionary key equality: `StringLikeVariantComparator`
+/// (`core/variant/dictionary.cpp:50`).
+///
+/// This used to promote `Int`/`Float` into each other and keep
+/// `String`/`StringName` apart — the inverse of Godot on both counts
+/// (pat-mgixk.12). See [`crate::string_like`] for the ground truth.
 fn key_eq(a: &Variant, b: &Variant) -> bool {
-    match (a, b) {
-        (Variant::Int(x), Variant::Int(y)) => x == y,
-        (Variant::Float(x), Variant::Float(y)) => x == y,
-        (Variant::Int(x), Variant::Float(y)) | (Variant::Float(y), Variant::Int(x)) => {
-            (*x as f64) == *y
-        }
-        _ => a == b,
-    }
+    crate::string_like::string_like_eq(a, b)
 }
 
-/// Returns `true` if `f` represents an exact `i64`; such floats hash into the
-/// integer bucket so that `1.0` and `1` share a slot.
-fn float_is_integral(f: f64) -> bool {
-    f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64
-}
-
-/// Key hashing consistent with [`key_eq`]. Integral numbers share a bucket;
-/// strings and bools get their own; every other Variant kind is bucketed by its
+/// Key hashing consistent with [`key_eq`]. A `StringName` hashes exactly like
+/// the `String` of the same text, because the two are the *same* key; bools and
+/// strings get their own tag; every other Variant kind is bucketed by its
 /// discriminant (equality still disambiguates within the bucket).
 fn key_hash<H: Hasher>(v: &Variant, state: &mut H) {
     match v {
@@ -71,17 +67,35 @@ fn key_hash<H: Hasher>(v: &Variant, state: &mut H) {
             0u8.hash(state);
             i.hash(state);
         }
-        Variant::Float(f) if float_is_integral(*f) => {
-            0u8.hash(state);
-            (*f as i64).hash(state);
-        }
+        // A float key no longer borrows the int bucket: `1` and `1.0` are
+        // distinct keys (`key_eq`), so sharing a slot bought nothing.
+        //
+        // `+0.0`/`-0.0` and every NaN encoding are normalized first, exactly as
+        // Godot's `hash_murmur3_one_double` does
+        // (`core/templates/hashfuncs.cpp:57-64`: "Normalize +/- 0.0 and NaN
+        // values so they hash the same"). Without it the bits of `-0.0` and
+        // `0.0` differ while `key_eq` calls them equal, which would put two
+        // equal keys in two buckets — and a NaN key could never be found again.
         Variant::Float(f) => {
             1u8.hash(state);
-            f.to_bits().hash(state);
+            let normalized = if *f == 0.0 {
+                0.0f64
+            } else if f.is_nan() {
+                f64::NAN
+            } else {
+                *f
+            };
+            normalized.to_bits().hash(state);
         }
         Variant::String(s) => {
             2u8.hash(state);
-            s.hash(state);
+            s.as_str().hash(state);
+        }
+        // Same tag and same bytes as `String`: `key_eq` treats `"a"` and `&"a"`
+        // as one key, so they must land in one bucket (pat-mgixk.12).
+        Variant::StringName(sn) => {
+            2u8.hash(state);
+            sn.as_str().hash(state);
         }
         Variant::Bool(b) => {
             3u8.hash(state);
@@ -416,21 +430,92 @@ mod tests {
         );
     }
 
+    /// Godot's dictionary comparator is `StringLikeVariantComparator`, whose
+    /// first step is `Variant::hash_compare` — and that bails on
+    /// `type != p_variant.type` (`core/variant/variant.cpp:3172`). So an `int`
+    /// key and a `float` key are DISTINCT, even though the `==` operator
+    /// promotes and says `2 == 2.0`.
+    ///
+    /// This test asserted the opposite until pat-mgixk.12.
     #[test]
-    fn int_and_integral_float_are_same_key() {
+    fn int_and_integral_float_are_distinct_keys() {
         let mut d = Dictionary::new();
         d.insert(Variant::Int(2), Variant::String("two".into()));
-        // 2.0 addresses the same slot as 2.
+        assert_eq!(d.get(Variant::Float(2.0)), None);
+
+        // Inserting 2.0 adds a second entry rather than replacing 2.
+        let old = d.insert(Variant::Float(2.0), Variant::String("TWO".into()));
+        assert_eq!(old, None);
+        assert_eq!(d.len(), 2);
+        assert_eq!(d.get(Variant::Int(2)), Some(&Variant::String("two".into())));
         assert_eq!(
             d.get(Variant::Float(2.0)),
-            Some(&Variant::String("two".into()))
+            Some(&Variant::String("TWO".into()))
         );
-        let old = d.insert(Variant::Float(2.0), Variant::String("TWO".into()));
-        assert_eq!(old, Some(Variant::String("two".into())));
-        assert_eq!(d.len(), 1);
-        // A non-integral float is a distinct key.
+
+        // A non-integral float is its own key too.
         d.insert(Variant::Float(2.5), Variant::Int(0));
+        assert_eq!(d.len(), 3);
+    }
+
+    /// `StringLikeVariantComparator::compare` (`variant.cpp:3396-3405`) compares
+    /// a `String` against a `StringName` by text, so a `.tscn`-authored
+    /// `&"walk"` and the literal `"walk"` address one slot (pat-mgixk.12).
+    #[test]
+    fn string_and_string_name_are_the_same_key() {
+        use gdcore::string_name::StringName;
+
+        let mut d = Dictionary::new();
+        d.insert(Variant::String("walk".into()), Variant::Int(1));
+        assert!(d.has(Variant::StringName(StringName::new("walk"))));
+        assert_eq!(
+            d.get(Variant::StringName(StringName::new("walk"))),
+            Some(&Variant::Int(1))
+        );
+
+        // Re-inserting through the other kind overwrites in place; it does not
+        // add a second entry, and it keeps the original key's position.
+        let old = d.insert(
+            Variant::StringName(StringName::new("walk")),
+            Variant::Int(2),
+        );
+        assert_eq!(old, Some(Variant::Int(1)));
+        assert_eq!(d.len(), 1);
+
+        // And the reverse direction: a StringName-keyed entry found by String.
+        let mut e = Dictionary::new();
+        e.insert(
+            Variant::StringName(StringName::new("idle")),
+            Variant::Int(7),
+        );
+        assert!(e.has(Variant::String("idle".into())));
+        assert_eq!(
+            e.remove(Variant::String("idle".into())),
+            Some(Variant::Int(7))
+        );
+        assert!(e.is_empty());
+    }
+
+    /// Godot normalizes `+0.0`/`-0.0` and NaN before hashing
+    /// (`core/templates/hashfuncs.cpp:57-64`), so these stay findable now that
+    /// float keys hash by bits rather than through the int bucket.
+    #[test]
+    fn signed_zero_and_nan_float_keys_are_findable() {
+        let mut d = Dictionary::new();
+        d.insert(Variant::Float(0.0), Variant::String("zero".into()));
+        // -0.0 == 0.0, so it must hit the same slot.
+        assert_eq!(
+            d.get(Variant::Float(-0.0)),
+            Some(&Variant::String("zero".into()))
+        );
+        assert_eq!(d.len(), 1);
+
+        d.insert(Variant::Float(f64::NAN), Variant::String("nan".into()));
         assert_eq!(d.len(), 2);
+        assert_eq!(
+            d.get(Variant::Float(f64::NAN)),
+            Some(&Variant::String("nan".into()))
+        );
     }
 
     #[test]

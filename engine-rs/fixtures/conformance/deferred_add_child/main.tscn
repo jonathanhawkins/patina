@@ -1,0 +1,11 @@
+[gd_scene load_steps=3 format=3 uid="uid://cdeferaddchild1"]
+
+[ext_resource type="Script" path="res://main.gd" id="1_main"]
+[ext_resource type="Script" path="res://spawner.gd" id="2_spawner"]
+
+[node name="Main" type="Node2D"]
+script = ExtResource("1_main")
+
+[node name="Spawner" type="Node2D" parent="."]
+position = Vector2(10, 20)
+script = ExtResource("2_spawner")

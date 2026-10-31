@@ -187,8 +187,16 @@ fn tres_saver_roundtrip_with_uid() {
 
     let saved = saver.save_to_string(&resource).unwrap();
 
-    // Must include the UID
-    assert!(saved.contains("uid=\"uid://12345\""));
+    // ⚠️ The header carries the uid's base-34 TEXT, not its decimal id. This
+    // used to assert `uid="uid://12345"` for a numeric uid of 12345, which
+    // conflates the two: 12345 encodes to `uid://kxd` (the same value
+    // `gdresource::unified`'s own test fixture documents). Derived from the
+    // encoder so the literal cannot drift from it (pat-21oab).
+    let expected_uid_text = gdresource::id_to_text(resource.uid.raw());
+    assert!(
+        saved.contains(&format!("uid=\"{expected_uid_text}\"")),
+        "saved header must carry the uid text {expected_uid_text}, got:\n{saved}"
+    );
 }
 
 #[test]
@@ -220,7 +228,7 @@ fn tres_saver_roundtrip_with_ext_resources() {
         "1".into(),
         ExtResource {
             resource_type: "Texture2D".into(),
-            uid: "uid://tex_abc".into(),
+            uid: "uid://texabc".into(),
             path: "res://icon.png".into(),
             id: "1".into(),
         },
@@ -310,10 +318,10 @@ fn unified_loader_manual_uid_registration() {
     let mut loader = UnifiedLoader::new(TresLoader);
     let path = fixture_path("resources/simple.tres");
 
-    loader.register_uid_str("uid://manual_test_123", &path);
+    loader.register_uid_str("uid://manualtest123", &path);
 
     // Should resolve the UID to the path
-    let resolved = loader.resolve_to_path("uid://manual_test_123").unwrap();
+    let resolved = loader.resolve_to_path("uid://manualtest123").unwrap();
     assert_eq!(resolved, path);
 }
 
@@ -1456,10 +1464,10 @@ fn remove_from_group_updates_group_membership() {
 #[test]
 fn uid_registry_bidirectional() {
     let mut loader = UnifiedLoader::new(TresLoader);
-    loader.register_uid_str("uid://bidir_test_999", "res://test_bidir.tres");
+    loader.register_uid_str("uid://bidirtest999", "res://test_bidir.tres");
 
     // Forward lookup
-    let resolved = loader.resolve_to_path("uid://bidir_test_999").unwrap();
+    let resolved = loader.resolve_to_path("uid://bidirtest999").unwrap();
     assert_eq!(resolved, "res://test_bidir.tres");
 
     // Non-UID path resolves to itself

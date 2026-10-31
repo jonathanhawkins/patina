@@ -999,6 +999,81 @@ fn multiply_projection_transform(proj: &Projection, t: &Transform3D) -> Projecti
 // Tests
 // ===========================================================================
 
+/// Camera3D's script-callable method surface.
+///
+/// Returns `None` for every non-Camera3D receiver and for every name it does
+/// not serve, so `call_node_method`'s table stays reachable unchanged.
+///
+/// ⚠️ Before this existed, all 19 methods Camera3D registers in ClassDB had no
+/// dispatch arm anywhere. `node_has_method` answers from the registration table
+/// alone (`scene_tree.rs` -> `class_db::class_has_method`), so the interpreter
+/// took its "the method exists" branch and returned `Variant::Nil` — a falsy
+/// value, silently — for every one of them. `camera.make_current()` did nothing
+/// and reported nothing, and a script could not even detect it, because the
+/// thing it would ask (`has_method`) was the thing that was wrong (pat-nzgdu).
+///
+/// ⚠️ Only the four methods that need NO viewport are served here. The
+/// projection family (`get_camera_projection`, `get_camera_frustum`,
+/// `is_position_in_frustum`, `project_position`, `unproject_position`,
+/// `project_ray_origin`, `project_ray_normal`) all take explicit
+/// `viewport_width`/`viewport_height`, which Godot's script API does not pass.
+/// That size lives on [`crate::main_loop`]'s `viewport_size()`, and `SceneTree`
+/// exposes none, so wiring them from here would mean inventing a default and
+/// returning confidently wrong projections. They stay unwired until a viewport
+/// size reaches this layer.
+pub fn call_camera3d_method(
+    tree: &mut SceneTree,
+    node_id: NodeId,
+    method: &str,
+    args: &[Variant],
+) -> Option<Variant> {
+    if !matches!(
+        method,
+        "make_current" | "clear_current" | "get_cull_mask_value" | "set_cull_mask_value"
+    ) {
+        return None;
+    }
+    if tree.get_node(node_id)?.class_name() != "Camera3D" {
+        return None;
+    }
+
+    // Godot's `layer_number` is 1-based and valid in 1..=20.
+    // `get_cull_mask_value`/`set_cull_mask_value` already reject 0 and >20, so
+    // mapping anything non-positive to 0 reads back `false` instead of
+    // panicking on a negative-to-u32 cast.
+    let layer = |v: Option<&Variant>| -> u32 {
+        match v {
+            Some(Variant::Int(i)) if *i > 0 => *i as u32,
+            Some(Variant::Float(f)) if *f > 0.0 => *f as u32,
+            _ => 0,
+        }
+    };
+
+    match method {
+        // Not the same as `current = true`: Godot also clears `current` on every
+        // other Camera3D, which is what this helper does by walking the tree.
+        "make_current" => {
+            make_current(tree, node_id);
+            Some(Variant::Nil)
+        }
+        "clear_current" => {
+            clear_current(tree, node_id);
+            Some(Variant::Nil)
+        }
+        "get_cull_mask_value" => Some(Variant::Bool(get_cull_mask_value(
+            tree,
+            node_id,
+            layer(args.first()),
+        ))),
+        "set_cull_mask_value" => {
+            let value = matches!(args.get(1), Some(Variant::Bool(true)));
+            set_cull_mask_value(tree, node_id, layer(args.first()), value);
+            Some(Variant::Nil)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1061,6 +1136,134 @@ mod tests {
         let root = tree.root_id();
         let node = Node::new(name, "Camera3D");
         tree.add_child(root, node).unwrap()
+    }
+
+    // -- script dispatch (pat-nzgdu) -----------------------------------------
+
+    /// `make_current()` must reach the helper that clears the OTHER cameras.
+    ///
+    /// This is the assertion that would have caught the original bug: before a
+    /// dispatch arm existed the call returned `Nil` and changed nothing, so
+    /// `b` would still have been current.
+    #[test]
+    fn script_make_current_switches_the_active_camera() {
+        let mut tree = make_tree();
+        let a = add_camera(&mut tree, "A");
+        let b = add_camera(&mut tree, "B");
+        make_current(&mut tree, b);
+        assert!(is_current(&tree, b), "precondition: B is current");
+
+        let out = call_camera3d_method(&mut tree, a, "make_current", &[]);
+        assert_eq!(out, Some(Variant::Nil), "make_current must be dispatched");
+        assert!(is_current(&tree, a), "A must become current");
+        assert!(!is_current(&tree, b), "B must stop being current");
+    }
+
+    #[test]
+    fn script_clear_current_clears_it() {
+        let mut tree = make_tree();
+        let a = add_camera(&mut tree, "A");
+        make_current(&mut tree, a);
+        let out = call_camera3d_method(&mut tree, a, "clear_current", &[]);
+        assert_eq!(out, Some(Variant::Nil), "clear_current must be dispatched");
+        assert!(!is_current(&tree, a));
+    }
+
+    /// 🔑 The default cull mask is `0xFFFFF` — ALL twenty layers on, as in Godot
+    /// (`get_cull_mask`, this file). An earlier version of this test asserted an
+    /// untouched layer reads `false`, which assumed a zero default and failed
+    /// against the correct engine behaviour. Pinning the real default is the
+    /// more useful assertion: a regression to `0` would make every camera cull
+    /// everything, and nothing else here would catch it.
+    #[test]
+    fn script_cull_mask_value_round_trips() {
+        let mut tree = make_tree();
+        let a = add_camera(&mut tree, "A");
+
+        assert_eq!(
+            call_camera3d_method(&mut tree, a, "get_cull_mask_value", &[Variant::Int(4)]),
+            Some(Variant::Bool(true)),
+            "every layer starts enabled (Godot's 0xFFFFF default)"
+        );
+
+        // Clearing is what exercises the write path against an all-on default;
+        // setting a layer that is already on could not fail.
+        assert_eq!(
+            call_camera3d_method(
+                &mut tree,
+                a,
+                "set_cull_mask_value",
+                &[Variant::Int(3), Variant::Bool(false)]
+            ),
+            Some(Variant::Nil)
+        );
+        assert_eq!(
+            call_camera3d_method(&mut tree, a, "get_cull_mask_value", &[Variant::Int(3)]),
+            Some(Variant::Bool(false)),
+            "layer 3 must read back cleared"
+        );
+        assert_eq!(
+            call_camera3d_method(&mut tree, a, "get_cull_mask_value", &[Variant::Int(4)]),
+            Some(Variant::Bool(true)),
+            "clearing layer 3 must not disturb layer 4"
+        );
+
+        // …and back on again, so the round trip is both directions.
+        assert_eq!(
+            call_camera3d_method(
+                &mut tree,
+                a,
+                "set_cull_mask_value",
+                &[Variant::Int(3), Variant::Bool(true)]
+            ),
+            Some(Variant::Nil)
+        );
+        assert_eq!(
+            call_camera3d_method(&mut tree, a, "get_cull_mask_value", &[Variant::Int(3)]),
+            Some(Variant::Bool(true)),
+            "layer 3 must read back re-enabled"
+        );
+    }
+
+    /// Godot's `layer_number` is 1..=20; out-of-range must read `false`, not panic.
+    ///
+    /// ⚠️ The negative case is the point: `layer_number` becomes a `u32`, so a
+    /// raw `as` cast on -1 would wrap to 4294967295 rather than being rejected.
+    #[test]
+    fn script_cull_mask_value_rejects_out_of_range_layers() {
+        let mut tree = make_tree();
+        let a = add_camera(&mut tree, "A");
+        for bad in [Variant::Int(0), Variant::Int(-1), Variant::Int(21)] {
+            assert_eq!(
+                call_camera3d_method(&mut tree, a, "get_cull_mask_value", &[bad.clone()]),
+                Some(Variant::Bool(false)),
+                "out-of-range layer {bad:?} must read false"
+            );
+        }
+    }
+
+    /// The handler must DECLINE anything it does not serve, or it would shadow
+    /// the generic node table for every other method and node class.
+    #[test]
+    fn script_dispatch_declines_other_nodes_and_methods() {
+        let mut tree = make_tree();
+        let cam = add_camera(&mut tree, "Cam");
+        let root = tree.root_id();
+        let other = tree
+            .add_child(root, Node::new("Mesh", "MeshInstance3D"))
+            .unwrap();
+
+        assert_eq!(
+            call_camera3d_method(&mut tree, other, "make_current", &[]),
+            None,
+            "a non-Camera3D receiver must be declined"
+        );
+        assert_eq!(
+            call_camera3d_method(&mut tree, cam, "get_frustum", &[]),
+            None,
+            "a name this handler does not serve must be declined so the \
+             generic table stays reachable"
+        );
     }
 
     // -- ProjectionType enum ------------------------------------------------

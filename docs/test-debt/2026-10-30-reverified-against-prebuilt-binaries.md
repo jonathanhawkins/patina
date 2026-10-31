@@ -5,6 +5,31 @@ RosePeak, 2026-10-30 10:57 PDT. Produced by running the prebuilt
 No cargo and no build slot — these binaries already existed, so any worker
 can repeat this. **This file does not replace the 08:11 snapshot; it dates it.**
 
+## ⚠️ EXPIRY — this file was measured at 10:56 and HEAD has moved
+
+Measured against the binaries named per row below. **Those datestamps are the
+report, not decoration.** HEAD is now `68475e3 2026-10-30 11:14:30`, and at least one commit since
+has invalidated part of this file:
+
+* Checkpoint **`68475e3` (11:14:30)** landed **197 lines in
+  `engine-rs/crates/gdphysics2d/src/world.rs`** and 93 in `world3d.rs`. The
+  newest `gdphysics2d` binary is **09:42:05** — ninety minutes OLDER. So every
+  `gdphysics2d` row below, and the three `physics_suite` collision rows that
+  share their mechanism, are **UNVERIFIED as of now**: the fix that may have
+  repaired them landed after the binary that reported them failing.
+* That cluster is the largest single-cause group in this epic (4 + 3 rows,
+  "bodies should be separated"). **Someone with a build slot should rebuild
+  `gdphysics2d` before anyone claims those rows** — they may already be green.
+
+Confirmed in the other direction by the same method: the five
+`render_suite::render_2d_parity_test::hidden_*` rows this file listed as
+still-failing were fixed, and a `render_suite` binary built at **11:22:15**
+(after the fix) runs that module **9 passed / 0 failed**.
+
+🔑 **Re-run `verify_reverified_report.py` before trusting any row.** It asserts
+the stale-row claims and now also prints a freshness audit of every binary it
+touched against HEAD's commit time.
+
 ## The one thing to take away
 
 **Binary age gates every number below.** Only **36 of 110** measured targets

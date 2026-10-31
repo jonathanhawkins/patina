@@ -1,0 +1,16 @@
+; Conformance fixture (pat-mgixk.403). A complete, runnable Godot project.
+;
+; Seam under test: `[connection]` lines in a `.tscn` whose `method` is a NATIVE
+; node method (`queue_free`, `hide`) on a node with NO script attached.
+
+config_version=5
+
+[application]
+
+config/name="timer_queue_free"
+run/main_scene="res://main.tscn"
+
+[display]
+
+window/size/viewport_width=320
+window/size/viewport_height=240

@@ -54,8 +54,8 @@ fn migration_guide_lists_target_matrix() {
 #[test]
 fn validation_test_anchors_present() {
     for f in [
-        "engine-rs/tests/platform_targets_validation_test.rs",
-        "engine-rs/tests/phase7_desktop_targets_doc_validation_test.rs",
+        "engine-rs/tests/platform_suite/platform_targets_validation_test.rs",
+        "engine-rs/tests/phase_suite/phase7_desktop_targets_doc_validation_test.rs",
     ] {
         let p = repo_root().join(f);
         assert!(

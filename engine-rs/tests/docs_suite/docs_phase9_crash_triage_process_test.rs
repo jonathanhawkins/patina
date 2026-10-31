@@ -42,10 +42,10 @@ fn crash_triage_module_source_exists() {
 #[test]
 fn validation_suite_anchors_present() {
     for f in [
-        "engine-rs/tests/crash_triage_process_test.rs",
-        "engine-rs/tests/crash_triage_audit_test.rs",
-        "engine-rs/tests/crash_triage_auto_issue_test.rs",
-        "engine-rs/tests/community_issue_template_triage_test.rs",
+        "engine-rs/tests/crash_suite/crash_triage_process_test.rs",
+        "engine-rs/tests/crash_suite/crash_triage_audit_test.rs",
+        "engine-rs/tests/crash_suite/crash_triage_auto_issue_test.rs",
+        "engine-rs/tests/misc_suite_a/community_issue_template_triage_test.rs",
     ] {
         let p = repo_root().join(f);
         assert!(

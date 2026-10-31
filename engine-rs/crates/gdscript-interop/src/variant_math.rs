@@ -1424,13 +1424,326 @@ fn plane_method(p: Plane, method: &str, args: &[Variant]) -> Result<Variant, Run
 // The `*` operator
 // ---------------------------------------------------------------------------
 
-/// Applies `*` where at least one side is a math builtin: transform × point,
-/// transform × transform, and quaternion × scalar.
+// ---------------------------------------------------------------------------
+// The Variant operator matrix (pat-mgixk.11)
+// ---------------------------------------------------------------------------
+//
+// Godot registers +, -, *, /, % and unary - for every builtin pair in
+// `core/variant/variant_op.cpp` `_register_variant_operators`. The interpreter
+// only ever grew the handful of arms a given bead needed, so 186 of the 271
+// non-equality rows raised `cannot multiply X and Y` at runtime — everyday
+// idioms like `velocity * Vector2(1, 0)`, `cell * 16` and `modulate * 0.5`
+// aborted the script.
+//
+// The table lives here rather than in `interpreter.rs` for two reasons: the
+// arithmetic belongs next to the math types, and `interpreter.rs` is the single
+// most contended file in the workspace — it gets only the fallback call sites.
+//
+// ⚠️ Every row below was transcribed from the upstream registration table, not
+// inferred, because the result *type* is not guessable from the operands:
+//
+// * `Vector2i * int` -> **Vector2i** (stays a grid coordinate), but
+//   `Vector2i * float` -> **Vector2**. Same for Vector3i/Vector4i. Getting this
+//   backwards silently turns integer cell maths into floats, or truncates a
+//   scaled position.
+// * `Vector2 * Transform2D` is the INVERSE transform (`XFormInv`), while
+//   `Transform2D * Vector2` is the forward one. The operand order is the whole
+//   difference.
+// * int-vector `/` and `%` are `DivNZ`/`ModNZ`: a zero divisor is a script
+//   error, unlike float division which yields inf.
+//
+// Rows deliberately NOT implemented here, because Patina's math types have no
+// helper with the verified convention yet: `Rect2 * Transform2D`,
+// `Aabb * Transform3D`, `Plane * Transform3D`, `Transform3D * Plane`,
+// `Vector4 * Projection`, `Projection * Vector4`. They keep the old TypeError.
+
+/// Int-vector components are `i32` and Godot's are plain C `int32_t`, which
+/// wraps rather than trapping. A debug Rust build would PANIC on the same
+/// input, turning a wrapped coordinate into a crash, so the integer rows below
+/// are all `wrapping_*`.
+fn as_i32(scalar: i64) -> i32 {
+    scalar as i32
+}
+
+/// `Color` has no arithmetic impls in `gdcore`, so every colour row is spelled
+/// out componentwise here. (The bead claimed the type "already has the
+/// arithmetic"; it does not — `grep "impl .* for Color"` finds no `Add`/`Mul`.)
+fn color_zip(a: Color, b: Color, f: impl Fn(f32, f32) -> f32) -> Color {
+    Color::new(f(a.r, b.r), f(a.g, b.g), f(a.b, b.b), f(a.a, b.a))
+}
+
+fn color_map(c: Color, f: impl Fn(f32) -> f32) -> Color {
+    Color::new(f(c.r), f(c.g), f(c.b), f(c.a))
+}
+
+fn quat_zip(a: Quaternion, b: Quaternion, f: impl Fn(f32, f32) -> f32) -> Quaternion {
+    Quaternion::new(f(a.x, b.x), f(a.y, b.y), f(a.z, b.z), f(a.w, b.w))
+}
+
+/// `Basis * float` scales all three columns (`basis.h operator*(real_t)`).
+fn scale_basis(b: Basis, s: f32) -> Basis {
+    Basis {
+        x: b.x * s,
+        y: b.y * s,
+        z: b.z * s,
+    }
+}
+
+/// `Transform2D * float` scales the basis columns AND the origin
+/// (`transform_2d.h operator*(real_t)`).
+fn scale_transform2d(t: Transform2D, s: f32) -> Transform2D {
+    Transform2D {
+        x: t.x * s,
+        y: t.y * s,
+        origin: t.origin * s,
+    }
+}
+
+/// `Transform3D * float`, likewise.
+fn scale_transform3d(t: Transform3D, s: f32) -> Transform3D {
+    Transform3D {
+        basis: scale_basis(t.basis, s),
+        origin: t.origin * s,
+    }
+}
+
+/// Godot's `Transform2D::xform_inv`: `basis_xform_inv(v - origin)`, where
+/// `basis_xform_inv` dots the *columns* with the vector
+/// (`transform_2d.h:208`). Patina's `Transform2D` stores `x`/`y` as those same
+/// columns, so this is a direct transcription rather than a transpose-by-index.
+fn transform2d_xform_inv(t: Transform2D, v: Vector2) -> Vector2 {
+    let d = v - t.origin;
+    Vector2::new(t.x.dot(d), t.y.dot(d))
+}
+
+/// Godot's `Transform3D::xform_inv`: the basis' inverse applied to the
+/// translated point. `Basis::xform_inv` is already the transpose-apply and
+/// matches upstream for Patina's column storage, so it is reused rather than
+/// re-derived.
+fn transform3d_xform_inv(t: Transform3D, v: Vector3) -> Vector3 {
+    t.basis.xform_inv(v - t.origin)
+}
+
+/// Applies `+` for the math builtins and the container concatenations.
+///
+/// `None` means the pair has no `+` row, so the interpreter keeps its own
+/// "cannot add" error.
+pub(crate) fn add(lhs: &Variant, rhs: &Variant) -> Option<Variant> {
+    match (lhs, rhs) {
+        (Variant::Vector4(a), Variant::Vector4(b)) => Some(Variant::Vector4(*a + *b)),
+        (Variant::Vector4i(a), Variant::Vector4i(b)) => Some(Variant::Vector4i(*a + *b)),
+        (Variant::Color(a), Variant::Color(b)) => {
+            Some(Variant::Color(color_zip(*a, *b, |x, y| x + y)))
+        }
+        (Variant::Quaternion(a), Variant::Quaternion(b)) => {
+            Some(Variant::Quaternion(quat_zip(*a, *b, |x, y| x + y)))
+        }
+        // `Array + Array` concatenates into a NEW, UNTYPED array
+        // (`OperatorEvaluatorAddArray`): it must not alias either operand, or
+        // `var c = a + b` would mutate `a` when `c` is appended to.
+        (Variant::Array(a), Variant::Array(b)) => {
+            let mut out = a.to_vec();
+            out.extend(b.to_vec());
+            Some(Variant::Array(gdvariant::SharedArray::from_vec(out)))
+        }
+        _ => packed_concat(lhs, rhs),
+    }
+}
+
+/// `Packed*Array + Packed*Array` concatenation (`OperatorEvaluatorAppendArray`),
+/// which is registered for all ten packed types and only between two arrays of
+/// the SAME type.
+fn packed_concat(lhs: &Variant, rhs: &Variant) -> Option<Variant> {
+    macro_rules! cat {
+        ($variant:ident, $a:expr, $b:expr) => {{
+            let mut out = $a.clone();
+            out.extend_from_slice($b);
+            Some(Variant::$variant(out))
+        }};
+    }
+    match (lhs, rhs) {
+        (Variant::PackedByteArray(a), Variant::PackedByteArray(b)) => cat!(PackedByteArray, a, b),
+        (Variant::PackedInt32Array(a), Variant::PackedInt32Array(b)) => {
+            cat!(PackedInt32Array, a, b)
+        }
+        (Variant::PackedInt64Array(a), Variant::PackedInt64Array(b)) => {
+            cat!(PackedInt64Array, a, b)
+        }
+        (Variant::PackedFloat32Array(a), Variant::PackedFloat32Array(b)) => {
+            cat!(PackedFloat32Array, a, b)
+        }
+        (Variant::PackedFloat64Array(a), Variant::PackedFloat64Array(b)) => {
+            cat!(PackedFloat64Array, a, b)
+        }
+        (Variant::PackedStringArray(a), Variant::PackedStringArray(b)) => {
+            cat!(PackedStringArray, a, b)
+        }
+        (Variant::PackedVector2Array(a), Variant::PackedVector2Array(b)) => {
+            cat!(PackedVector2Array, a, b)
+        }
+        (Variant::PackedVector3Array(a), Variant::PackedVector3Array(b)) => {
+            cat!(PackedVector3Array, a, b)
+        }
+        (Variant::PackedVector4Array(a), Variant::PackedVector4Array(b)) => {
+            cat!(PackedVector4Array, a, b)
+        }
+        (Variant::PackedColorArray(a), Variant::PackedColorArray(b)) => {
+            cat!(PackedColorArray, a, b)
+        }
+        _ => None,
+    }
+}
+
+/// Applies `-` for the math builtins. There is no `-` row for any container.
+pub(crate) fn sub(lhs: &Variant, rhs: &Variant) -> Option<Variant> {
+    match (lhs, rhs) {
+        (Variant::Vector4(a), Variant::Vector4(b)) => Some(Variant::Vector4(*a - *b)),
+        (Variant::Vector4i(a), Variant::Vector4i(b)) => Some(Variant::Vector4i(*a - *b)),
+        (Variant::Color(a), Variant::Color(b)) => {
+            Some(Variant::Color(color_zip(*a, *b, |x, y| x - y)))
+        }
+        (Variant::Quaternion(a), Variant::Quaternion(b)) => {
+            Some(Variant::Quaternion(quat_zip(*a, *b, |x, y| x - y)))
+        }
+        _ => None,
+    }
+}
+
+/// Applies `*` where at least one side is a math builtin: componentwise
+/// products, scalar scaling, transform × point, transform × transform, and the
+/// inverse-transform rows where the vector is on the LEFT.
 ///
 /// `None` means this pair is not a math-builtin product, so the interpreter
 /// keeps its own "cannot multiply" error.
 pub(crate) fn mul(lhs: &Variant, rhs: &Variant) -> Option<Variant> {
     match (lhs, rhs) {
+        // -- componentwise vector products --------------------------------
+        (Variant::Vector2(a), Variant::Vector2(b)) => {
+            Some(Variant::Vector2(Vector2::new(a.x * b.x, a.y * b.y)))
+        }
+        (Variant::Vector3(a), Variant::Vector3(b)) => Some(Variant::Vector3(Vector3::new(
+            a.x * b.x,
+            a.y * b.y,
+            a.z * b.z,
+        ))),
+        (Variant::Vector4(a), Variant::Vector4(b)) => Some(Variant::Vector4(Vector4::new(
+            a.x * b.x,
+            a.y * b.y,
+            a.z * b.z,
+            a.w * b.w,
+        ))),
+        (Variant::Vector2i(a), Variant::Vector2i(b)) => Some(Variant::Vector2i(Vector2i::new(
+            a.x.wrapping_mul(b.x),
+            a.y.wrapping_mul(b.y),
+        ))),
+        (Variant::Vector3i(a), Variant::Vector3i(b)) => Some(Variant::Vector3i(Vector3i::new(
+            a.x.wrapping_mul(b.x),
+            a.y.wrapping_mul(b.y),
+            a.z.wrapping_mul(b.z),
+        ))),
+        (Variant::Vector4i(a), Variant::Vector4i(b)) => Some(Variant::Vector4i(Vector4i::new(
+            a.x.wrapping_mul(b.x),
+            a.y.wrapping_mul(b.y),
+            a.z.wrapping_mul(b.z),
+            a.w.wrapping_mul(b.w),
+        ))),
+
+        // -- Vector4 × scalar (both orders) -------------------------------
+        (Variant::Vector4(v), Variant::Float(s)) => Some(Variant::Vector4(*v * *s as f32)),
+        (Variant::Vector4(v), Variant::Int(s)) => Some(Variant::Vector4(*v * *s as f32)),
+        (Variant::Float(s), Variant::Vector4(v)) => Some(Variant::Vector4(*v * *s as f32)),
+        (Variant::Int(s), Variant::Vector4(v)) => Some(Variant::Vector4(*v * *s as f32)),
+
+        // -- int-vector × int stays INTEGRAL; × float widens to float -----
+        //
+        // ⚠️ These two result types differ, straight from the upstream table:
+        // `VECTOR2I INT -> Vector2i` but `VECTOR2I FLOAT -> Vector2`.
+        (Variant::Vector2i(v), Variant::Int(s)) => {
+            let s = as_i32(*s);
+            Some(Variant::Vector2i(Vector2i::new(
+                v.x.wrapping_mul(s),
+                v.y.wrapping_mul(s),
+            )))
+        }
+        (Variant::Int(s), Variant::Vector2i(v)) => {
+            let s = as_i32(*s);
+            Some(Variant::Vector2i(Vector2i::new(
+                v.x.wrapping_mul(s),
+                v.y.wrapping_mul(s),
+            )))
+        }
+        (Variant::Vector2i(v), Variant::Float(s)) | (Variant::Float(s), Variant::Vector2i(v)) => {
+            let s = *s as f32;
+            Some(Variant::Vector2(Vector2::new(
+                v.x as f32 * s,
+                v.y as f32 * s,
+            )))
+        }
+        (Variant::Vector3i(v), Variant::Int(s)) | (Variant::Int(s), Variant::Vector3i(v)) => {
+            let s = as_i32(*s);
+            Some(Variant::Vector3i(Vector3i::new(
+                v.x.wrapping_mul(s),
+                v.y.wrapping_mul(s),
+                v.z.wrapping_mul(s),
+            )))
+        }
+        (Variant::Vector3i(v), Variant::Float(s)) | (Variant::Float(s), Variant::Vector3i(v)) => {
+            let s = *s as f32;
+            Some(Variant::Vector3(Vector3::new(
+                v.x as f32 * s,
+                v.y as f32 * s,
+                v.z as f32 * s,
+            )))
+        }
+        (Variant::Vector4i(v), Variant::Int(s)) | (Variant::Int(s), Variant::Vector4i(v)) => {
+            let s = as_i32(*s);
+            Some(Variant::Vector4i(Vector4i::new(
+                v.x.wrapping_mul(s),
+                v.y.wrapping_mul(s),
+                v.z.wrapping_mul(s),
+                v.w.wrapping_mul(s),
+            )))
+        }
+        (Variant::Vector4i(v), Variant::Float(s)) | (Variant::Float(s), Variant::Vector4i(v)) => {
+            let s = *s as f32;
+            Some(Variant::Vector4(Vector4::new(
+                v.x as f32 * s,
+                v.y as f32 * s,
+                v.z as f32 * s,
+                v.w as f32 * s,
+            )))
+        }
+
+        // -- Color ---------------------------------------------------------
+        (Variant::Color(a), Variant::Color(b)) => {
+            Some(Variant::Color(color_zip(*a, *b, |x, y| x * y)))
+        }
+        (Variant::Color(c), Variant::Float(s)) | (Variant::Float(s), Variant::Color(c)) => {
+            let s = *s as f32;
+            Some(Variant::Color(color_map(*c, |x| x * s)))
+        }
+        (Variant::Color(c), Variant::Int(s)) | (Variant::Int(s), Variant::Color(c)) => {
+            let s = *s as f32;
+            Some(Variant::Color(color_map(*c, |x| x * s)))
+        }
+
+        // -- transforms × scalar -------------------------------------------
+        (Variant::Basis(b), Variant::Float(s)) => Some(Variant::Basis(scale_basis(*b, *s as f32))),
+        (Variant::Basis(b), Variant::Int(s)) => Some(Variant::Basis(scale_basis(*b, *s as f32))),
+        (Variant::Transform2D(t), Variant::Float(s)) => {
+            Some(Variant::Transform2D(scale_transform2d(*t, *s as f32)))
+        }
+        (Variant::Transform2D(t), Variant::Int(s)) => {
+            Some(Variant::Transform2D(scale_transform2d(*t, *s as f32)))
+        }
+        (Variant::Transform3D(t), Variant::Float(s)) => {
+            Some(Variant::Transform3D(scale_transform3d(*t, *s as f32)))
+        }
+        (Variant::Transform3D(t), Variant::Int(s)) => {
+            Some(Variant::Transform3D(scale_transform3d(*t, *s as f32)))
+        }
+
+        // -- forward transforms (unchanged: pat-0q2kx.50) ------------------
         (Variant::Transform2D(t), Variant::Vector2(v)) => Some(Variant::Vector2(t.xform(*v))),
         (Variant::Transform2D(a), Variant::Transform2D(b)) => Some(Variant::Transform2D(*a * *b)),
         (Variant::Transform2D(t), Variant::Rect2(r)) => Some(Variant::Rect2(xform_rect2(*t, *r))),
@@ -1447,7 +1760,407 @@ pub(crate) fn mul(lhs: &Variant, rhs: &Variant) -> Option<Variant> {
         (Variant::Quaternion(q), Variant::Int(s)) => {
             Some(Variant::Quaternion(scale_quat(*q, *s as f32)))
         }
+        (Variant::Float(s), Variant::Quaternion(q)) => {
+            Some(Variant::Quaternion(scale_quat(*q, *s as f32)))
+        }
+        (Variant::Int(s), Variant::Quaternion(q)) => {
+            Some(Variant::Quaternion(scale_quat(*q, *s as f32)))
+        }
+
+        // -- INVERSE transforms: the vector is on the LEFT (XFormInv) ------
+        //
+        // ⚠️ Operand order is the entire difference from the forward rows
+        // above. `t * v` transforms into the transform's space; `v * t`
+        // transforms out of it.
+        (Variant::Vector2(v), Variant::Transform2D(t)) => {
+            Some(Variant::Vector2(transform2d_xform_inv(*t, *v)))
+        }
+        (Variant::Vector3(v), Variant::Basis(b)) => Some(Variant::Vector3(b.xform_inv(*v))),
+        (Variant::Vector3(v), Variant::Transform3D(t)) => {
+            Some(Variant::Vector3(transform3d_xform_inv(*t, *v)))
+        }
+        (Variant::Vector3(v), Variant::Quaternion(q)) => {
+            Some(Variant::Vector3(q.inverse().xform(*v)))
+        }
+
         _ => None,
+    }
+}
+
+/// Applies `/` for the math builtins.
+///
+/// Three outcomes, which the nesting makes explicit: `None` = no such row (the
+/// interpreter keeps its "cannot divide" error); `Some(Err)` = a zero divisor on
+/// a `DivNZ`/`ModNZ` row, which Godot reports as a script error; `Some(Ok)` = a
+/// value. Float rows are plain `Div` and yield inf rather than erroring, exactly
+/// as upstream.
+pub(crate) fn div(lhs: &Variant, rhs: &Variant) -> Option<Result<Variant, RuntimeError>> {
+    match (lhs, rhs) {
+        // -- float vectors: componentwise and by scalar, inf on zero -------
+        (Variant::Vector2(a), Variant::Vector2(b)) => {
+            Some(Ok(Variant::Vector2(Vector2::new(a.x / b.x, a.y / b.y))))
+        }
+        (Variant::Vector3(a), Variant::Vector3(b)) => Some(Ok(Variant::Vector3(Vector3::new(
+            a.x / b.x,
+            a.y / b.y,
+            a.z / b.z,
+        )))),
+        (Variant::Vector4(a), Variant::Vector4(b)) => Some(Ok(Variant::Vector4(Vector4::new(
+            a.x / b.x,
+            a.y / b.y,
+            a.z / b.z,
+            a.w / b.w,
+        )))),
+        (Variant::Vector4(v), Variant::Float(s)) => Some(Ok(Variant::Vector4(*v / *s as f32))),
+        (Variant::Vector4(v), Variant::Int(s)) => Some(Ok(Variant::Vector4(*v / *s as f32))),
+
+        // -- int vectors: DivNZ, so a zero divisor is an error -------------
+        (Variant::Vector2i(a), Variant::Vector2i(b)) => {
+            Some(int_vec2(a.x.checked_div(b.x), a.y.checked_div(b.y)))
+        }
+        (Variant::Vector3i(a), Variant::Vector3i(b)) => Some(int_vec3(
+            a.x.checked_div(b.x),
+            a.y.checked_div(b.y),
+            a.z.checked_div(b.z),
+        )),
+        (Variant::Vector4i(a), Variant::Vector4i(b)) => Some(int_vec4(
+            a.x.checked_div(b.x),
+            a.y.checked_div(b.y),
+            a.z.checked_div(b.z),
+            a.w.checked_div(b.w),
+        )),
+        (Variant::Vector2i(v), Variant::Int(s)) => {
+            let s = as_i32(*s);
+            Some(int_vec2(v.x.checked_div(s), v.y.checked_div(s)))
+        }
+        (Variant::Vector3i(v), Variant::Int(s)) => {
+            let s = as_i32(*s);
+            Some(int_vec3(
+                v.x.checked_div(s),
+                v.y.checked_div(s),
+                v.z.checked_div(s),
+            ))
+        }
+        (Variant::Vector4i(v), Variant::Int(s)) => {
+            let s = as_i32(*s);
+            Some(int_vec4(
+                v.x.checked_div(s),
+                v.y.checked_div(s),
+                v.z.checked_div(s),
+                v.w.checked_div(s),
+            ))
+        }
+        // ⚠️ An int vector divided by a FLOAT widens to the float vector, and
+        // is still a `DivNZ` row upstream — so zero errors here too, unlike
+        // `Vector2 / 0.0`.
+        (Variant::Vector2i(v), Variant::Float(s)) => {
+            if *s == 0.0 {
+                return Some(Err(div_by_zero()));
+            }
+            let s = *s as f32;
+            Some(Ok(Variant::Vector2(Vector2::new(
+                v.x as f32 / s,
+                v.y as f32 / s,
+            ))))
+        }
+        (Variant::Vector3i(v), Variant::Float(s)) => {
+            if *s == 0.0 {
+                return Some(Err(div_by_zero()));
+            }
+            let s = *s as f32;
+            Some(Ok(Variant::Vector3(Vector3::new(
+                v.x as f32 / s,
+                v.y as f32 / s,
+                v.z as f32 / s,
+            ))))
+        }
+        (Variant::Vector4i(v), Variant::Float(s)) => {
+            if *s == 0.0 {
+                return Some(Err(div_by_zero()));
+            }
+            let s = *s as f32;
+            Some(Ok(Variant::Vector4(Vector4::new(
+                v.x as f32 / s,
+                v.y as f32 / s,
+                v.z as f32 / s,
+                v.w as f32 / s,
+            ))))
+        }
+
+        // -- Color ---------------------------------------------------------
+        (Variant::Color(a), Variant::Color(b)) => {
+            Some(Ok(Variant::Color(color_zip(*a, *b, |x, y| x / y))))
+        }
+        (Variant::Color(c), Variant::Float(s)) => {
+            let s = *s as f32;
+            Some(Ok(Variant::Color(color_map(*c, |x| x / s))))
+        }
+        (Variant::Color(c), Variant::Int(s)) => {
+            let s = *s as f32;
+            Some(Ok(Variant::Color(color_map(*c, |x| x / s))))
+        }
+
+        // -- transforms / scalar -------------------------------------------
+        (Variant::Basis(b), Variant::Float(s)) => {
+            Some(Ok(Variant::Basis(scale_basis(*b, 1.0 / *s as f32))))
+        }
+        (Variant::Basis(b), Variant::Int(s)) => {
+            Some(Ok(Variant::Basis(scale_basis(*b, 1.0 / *s as f32))))
+        }
+        (Variant::Transform2D(t), Variant::Float(s)) => Some(Ok(Variant::Transform2D(
+            scale_transform2d(*t, 1.0 / *s as f32),
+        ))),
+        (Variant::Transform2D(t), Variant::Int(s)) => Some(Ok(Variant::Transform2D(
+            scale_transform2d(*t, 1.0 / *s as f32),
+        ))),
+        (Variant::Transform3D(t), Variant::Float(s)) => Some(Ok(Variant::Transform3D(
+            scale_transform3d(*t, 1.0 / *s as f32),
+        ))),
+        (Variant::Transform3D(t), Variant::Int(s)) => Some(Ok(Variant::Transform3D(
+            scale_transform3d(*t, 1.0 / *s as f32),
+        ))),
+        (Variant::Quaternion(q), Variant::Float(s)) => {
+            Some(Ok(Variant::Quaternion(scale_quat(*q, 1.0 / *s as f32))))
+        }
+        (Variant::Quaternion(q), Variant::Int(s)) => {
+            Some(Ok(Variant::Quaternion(scale_quat(*q, 1.0 / *s as f32))))
+        }
+        _ => None,
+    }
+}
+
+/// Applies `%` for the int vectors (`ModNZ`); no float type has a `%` row.
+pub(crate) fn rem(lhs: &Variant, rhs: &Variant) -> Option<Result<Variant, RuntimeError>> {
+    match (lhs, rhs) {
+        (Variant::Vector2i(a), Variant::Vector2i(b)) => {
+            Some(int_vec2(a.x.checked_rem(b.x), a.y.checked_rem(b.y)))
+        }
+        (Variant::Vector3i(a), Variant::Vector3i(b)) => Some(int_vec3(
+            a.x.checked_rem(b.x),
+            a.y.checked_rem(b.y),
+            a.z.checked_rem(b.z),
+        )),
+        (Variant::Vector4i(a), Variant::Vector4i(b)) => Some(int_vec4(
+            a.x.checked_rem(b.x),
+            a.y.checked_rem(b.y),
+            a.z.checked_rem(b.z),
+            a.w.checked_rem(b.w),
+        )),
+        (Variant::Vector2i(v), Variant::Int(s)) => {
+            let s = as_i32(*s);
+            Some(int_vec2(v.x.checked_rem(s), v.y.checked_rem(s)))
+        }
+        (Variant::Vector3i(v), Variant::Int(s)) => {
+            let s = as_i32(*s);
+            Some(int_vec3(
+                v.x.checked_rem(s),
+                v.y.checked_rem(s),
+                v.z.checked_rem(s),
+            ))
+        }
+        (Variant::Vector4i(v), Variant::Int(s)) => {
+            let s = as_i32(*s);
+            Some(int_vec4(
+                v.x.checked_rem(s),
+                v.y.checked_rem(s),
+                v.z.checked_rem(s),
+                v.w.checked_rem(s),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Applies unary `-` for the math builtins.
+pub(crate) fn neg(value: &Variant) -> Option<Variant> {
+    match value {
+        Variant::Vector4(v) => Some(Variant::Vector4(-*v)),
+        Variant::Vector4i(v) => Some(Variant::Vector4i(-*v)),
+        Variant::Color(c) => Some(Variant::Color(color_map(*c, |x| -x))),
+        Variant::Quaternion(q) => {
+            Some(Variant::Quaternion(Quaternion::new(-q.x, -q.y, -q.z, -q.w)))
+        }
+        // Godot negates both the normal AND the distance (`plane.h operator-`),
+        // which is the same plane facing the other way.
+        Variant::Plane(p) => Some(Variant::Plane(Plane {
+            normal: -p.normal,
+            d: -p.d,
+        })),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ordering and membership (pat-mgixk.11 part 2)
+// ---------------------------------------------------------------------------
+
+/// How deep `cmp` will recurse into nested arrays.
+///
+/// ⚠️ A GDScript array can contain itself (`var a = []; a.append(a)`), and
+/// Godot guards its recursive array walks with exactly this kind of cap
+/// (`array.cpp` `MAX_RECURSION`). Without one, comparing two such arrays
+/// recurses until the stack dies.
+const MAX_CMP_DEPTH: u32 = 64;
+
+/// Total order for the `<`, `<=`, `>`, `>=` rows Godot registers beyond the
+/// numeric and string ones (`variant_op.cpp` OP_LESS: Vector2/2i/3/3i/4/4i,
+/// ARRAY, RID, BOOL).
+///
+/// `None` means the pair has no ordering row, so the interpreter keeps its own
+/// "cannot compare" error.
+///
+/// Returning an `Ordering` rather than four separate predicates is sound here
+/// and worth checking, because Godot spells each operator out by hand: its
+/// `Vector2::operator<=` is `x == p.x ? (y <= p.y) : (x < p.x)` while
+/// `operator<` is `x == p.x ? (y < p.y) : (x < p.x)` (vector2.h:164-167). Those
+/// differ only in the tie case, which is precisely `a < b || a == b` — i.e.
+/// both are the lexicographic order, so one `Ordering` reproduces all four.
+/// The same holds for `Array`, whose `<=` is defined as `!(>)`.
+pub(crate) fn cmp(lhs: &Variant, rhs: &Variant) -> Option<std::cmp::Ordering> {
+    cmp_depth(lhs, rhs, 0)
+}
+
+fn cmp_depth(lhs: &Variant, rhs: &Variant, depth: u32) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    match (lhs, rhs) {
+        // Lexicographic, component by component (vector2.h:164, vector3.h:484).
+        (Variant::Vector2(a), Variant::Vector2(b)) => lex(&[(a.x, b.x), (a.y, b.y)]),
+        (Variant::Vector3(a), Variant::Vector3(b)) => lex(&[(a.x, b.x), (a.y, b.y), (a.z, b.z)]),
+        (Variant::Vector4(a), Variant::Vector4(b)) => {
+            lex(&[(a.x, b.x), (a.y, b.y), (a.z, b.z), (a.w, b.w)])
+        }
+        (Variant::Vector2i(a), Variant::Vector2i(b)) => Some((a.x, a.y).cmp(&(b.x, b.y))),
+        (Variant::Vector3i(a), Variant::Vector3i(b)) => Some((a.x, a.y, a.z).cmp(&(b.x, b.y, b.z))),
+        (Variant::Vector4i(a), Variant::Vector4i(b)) => {
+            Some((a.x, a.y, a.z, a.w).cmp(&(b.x, b.y, b.z, b.w)))
+        }
+        // `false < true` (`OperatorEvaluatorLess<bool, bool>`).
+        (Variant::Bool(a), Variant::Bool(b)) => Some(a.cmp(b)),
+        // RIDs order by their handle (`rid.h operator<`).
+        (Variant::Rid(a), Variant::Rid(b)) => Some(a.id().cmp(&b.id())),
+        // Element-wise, with the SHORTER array sorting first on a shared
+        // prefix (`array.cpp:164-179` — the `return a_len < b_len` tail). A
+        // size-first comparison would be a different order and would make
+        // `[1, 2] < [1, 3]` depend on length instead of content.
+        (Variant::Array(a), Variant::Array(b)) => {
+            if depth >= MAX_CMP_DEPTH {
+                return None;
+            }
+            let (a, b) = (a.to_vec(), b.to_vec());
+            for (x, y) in a.iter().zip(b.iter()) {
+                match cmp_depth(x, y, depth + 1) {
+                    Some(Ordering::Equal) => continue,
+                    // An element pair with no ordering row makes the whole
+                    // comparison an error, rather than silently treating the
+                    // elements as equal and moving on.
+                    None => return None,
+                    other => return other,
+                }
+            }
+            Some(a.len().cmp(&b.len()))
+        }
+        _ => None,
+    }
+}
+
+/// Lexicographic order over float component pairs.
+///
+/// A NaN component has no ordering; it is treated as equal to its counterpart
+/// so the walk moves to the next component, which is the same thing Godot's
+/// `==`-then-`<` chain does with a NaN (both tests are false).
+fn lex(pairs: &[(f32, f32)]) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    for (a, b) in pairs {
+        match a.partial_cmp(b) {
+            Some(Ordering::Equal) | None => continue,
+            other => return other,
+        }
+    }
+    Some(Ordering::Equal)
+}
+
+/// `value in <Packed*Array>` (`variant_op.cpp` OP_IN rows for the ten packed
+/// types).
+///
+/// `None` means `container` is not a packed array, so the interpreter falls
+/// through to its other `in` cases. A packed array of the wrong element type
+/// for `needle` answers `Some(false)` rather than `None`: Godot registers
+/// `INT in PACKED_FLOAT32_ARRAY` and friends, so a numeric needle is compared
+/// numerically across the integer and float arrays.
+pub(crate) fn packed_contains(container: &Variant, needle: &Variant) -> Option<bool> {
+    let number = match needle {
+        Variant::Int(i) => Some(*i as f64),
+        Variant::Float(f) => Some(*f),
+        _ => None,
+    };
+    match container {
+        Variant::PackedByteArray(items) => {
+            Some(number.is_some_and(|n| items.iter().any(|v| f64::from(*v) == n)))
+        }
+        Variant::PackedInt32Array(items) => {
+            Some(number.is_some_and(|n| items.iter().any(|v| f64::from(*v) == n)))
+        }
+        Variant::PackedInt64Array(items) => {
+            Some(number.is_some_and(|n| items.iter().any(|v| *v as f64 == n)))
+        }
+        Variant::PackedFloat32Array(items) => {
+            Some(number.is_some_and(|n| items.iter().any(|v| f64::from(*v) == n)))
+        }
+        Variant::PackedFloat64Array(items) => {
+            Some(number.is_some_and(|n| items.iter().any(|v| *v == n)))
+        }
+        // String and StringName are both registered against
+        // PackedStringArray, and compare by text.
+        Variant::PackedStringArray(items) => {
+            let text = match needle {
+                Variant::String(s) => Some(s.clone()),
+                Variant::StringName(s) => Some(s.to_string()),
+                _ => None,
+            };
+            Some(text.is_some_and(|t| items.iter().any(|v| *v == t)))
+        }
+        Variant::PackedVector2Array(items) => Some(matches!(needle, Variant::Vector2(n)
+            if items.iter().any(|v| v.x == n.x && v.y == n.y))),
+        Variant::PackedVector3Array(items) => Some(matches!(needle, Variant::Vector3(n)
+            if items.iter().any(|v| v.x == n.x && v.y == n.y && v.z == n.z))),
+        Variant::PackedVector4Array(items) => Some(matches!(needle, Variant::Vector4(n)
+            if items.iter().any(|v| v.x == n.x && v.y == n.y && v.z == n.z && v.w == n.w))),
+        Variant::PackedColorArray(items) => Some(matches!(needle, Variant::Color(n)
+            if items.iter().any(|v| v.r == n.r && v.g == n.g && v.b == n.b && v.a == n.a))),
+        _ => None,
+    }
+}
+
+/// `DivNZ`/`ModNZ` reports a zero divisor as a script error rather than
+/// returning a sentinel, so `checked_div`/`checked_rem` returning `None` for any
+/// component fails the whole operation.
+fn div_by_zero() -> RuntimeError {
+    RuntimeError::new(RuntimeErrorKind::DivisionByZero)
+}
+
+fn int_vec2(x: Option<i32>, y: Option<i32>) -> Result<Variant, RuntimeError> {
+    match (x, y) {
+        (Some(x), Some(y)) => Ok(Variant::Vector2i(Vector2i::new(x, y))),
+        _ => Err(div_by_zero()),
+    }
+}
+
+fn int_vec3(x: Option<i32>, y: Option<i32>, z: Option<i32>) -> Result<Variant, RuntimeError> {
+    match (x, y, z) {
+        (Some(x), Some(y), Some(z)) => Ok(Variant::Vector3i(Vector3i::new(x, y, z))),
+        _ => Err(div_by_zero()),
+    }
+}
+
+fn int_vec4(
+    x: Option<i32>,
+    y: Option<i32>,
+    z: Option<i32>,
+    w: Option<i32>,
+) -> Result<Variant, RuntimeError> {
+    match (x, y, z, w) {
+        (Some(x), Some(y), Some(z), Some(w)) => Ok(Variant::Vector4i(Vector4i::new(x, y, z, w))),
+        _ => Err(div_by_zero()),
     }
 }
 

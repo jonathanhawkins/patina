@@ -24,6 +24,12 @@ pub mod shared;
 // script surface) must share it, and gdvariant is their only common dependency
 // that has Variant.
 pub mod shader_globals;
+// pat-mgixk.12: Godot's `StringLikeVariantComparator` — the equality rule
+// Dictionary keys and `Array.find`/`has`/`count` use, which is deliberately
+// *not* the `==` operator (no int/float promotion; String and StringName
+// compare equal by text). Lives here because `Dictionary` and the GDScript
+// interpreter must agree on it.
+pub mod string_like;
 pub mod variant;
 
 // Re-export the most-used types at the crate root.
@@ -31,4 +37,5 @@ pub use binary::{decode_variant, encode_variant, VariantDecodeError, VariantEnco
 pub use conversion::ConversionError;
 pub use dictionary::Dictionary;
 pub use shared::{ContainerError, ContainerType, SharedArray, SharedDictionary};
+pub use string_like::{hash_compare, string_like_eq};
 pub use variant::{CallableRef, ResourceRef, Variant, VariantType};

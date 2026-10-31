@@ -41,6 +41,39 @@ fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// Every file name under `tests/`, including one directory down.
+///
+/// `engine-rs/tests` was reorganised into suite directories — a standalone file
+/// per test meant ~550 full engine links — so a plain `read_dir("tests")` sees
+/// only the 10 files still at the top level and misses the other 404. That is
+/// why the editor-coverage check below reported "got 0" with many editor tests
+/// present (pat-21oab).
+///
+/// One level is the whole layout, measured: of the `*_test.rs` files, 10 sit at
+/// the top level and 404 one directory down, and none nests deeper. Returns bare
+/// file names, which is what every caller here matches on.
+fn test_file_names() -> Vec<String> {
+    let tests_dir = workspace_root().join("tests");
+    let mut names = Vec::new();
+    if let Ok(entries) = fs::read_dir(&tests_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Ok(inner) = fs::read_dir(&path) {
+                    names.extend(
+                        inner
+                            .filter_map(|e| e.ok())
+                            .map(|e| e.file_name().to_string_lossy().to_string()),
+                    );
+                }
+            } else {
+                names.push(entry.file_name().to_string_lossy().to_string());
+            }
+        }
+    }
+    names
+}
+
 // ===========================================================================
 // Milestone 1: Editor crate structure — all key modules present
 // ===========================================================================
@@ -447,14 +480,9 @@ fn milestone15_editor_has_at_least_30_modules() {
 
 #[test]
 fn milestone16_editor_integration_tests_exist() {
-    let tests_dir = workspace_root().join("tests");
-    let editor_tests: Vec<_> = fs::read_dir(&tests_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            let name = e.file_name().to_string_lossy().to_string();
-            name.contains("editor") && name.ends_with("_test.rs")
-        })
+    let editor_tests: Vec<_> = test_file_names()
+        .into_iter()
+        .filter(|name| name.contains("editor") && name.ends_with("_test.rs"))
         .collect();
     assert!(
         editor_tests.len() >= 5,
@@ -519,12 +547,7 @@ fn audit_sync_documents_all_tooling_families() {
 /// in the tests directory backing its "Measured" classification.
 #[test]
 fn audit_sync_measured_families_have_test_evidence() {
-    let tests_dir = workspace_root().join("tests");
-    let test_files: Vec<String> = fs::read_dir(&tests_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .collect();
+    let test_files: Vec<String> = test_file_names();
 
     // Each measured family must have at least one matching test file.
     let measured_families = [
@@ -556,9 +579,10 @@ fn audit_sync_milestone_count_matches_audit_claim() {
     // This file defines 16 milestones (1-16). The audit describes these as
     // "selected tooling parity milestones" covering the editor tooling slice.
     // If you add a milestone, update the audit. If you remove one, update both.
-    let source =
-        fs::read_to_string(workspace_root().join("tests/tooling_parity_milestone_test.rs"))
-            .unwrap();
+    let source = fs::read_to_string(
+        workspace_root().join("tests/misc_suite_g/tooling_parity_milestone_test.rs"),
+    )
+    .unwrap();
 
     // Count unique milestone test functions (pattern: fn milestoneN_)
     let milestone_count = source

@@ -46,11 +46,11 @@ fn validation_suite_files_are_present() {
     // The minimum measured-evidence anchors. We don't care about pass/fail here
     // (the verifier lane runs them); only that they have not been deleted.
     let test_files = [
-        "engine-rs/tests/phase8_editor_compat_layer_validation_test.rs",
-        "engine-rs/tests/editor_compat_layer_test.rs",
-        "engine-rs/tests/editor_interface_compat_test.rs",
-        "engine-rs/tests/editor_compat_layer_surface_test.rs",
-        "engine-rs/tests/phase8_editor_compatibility_layer_scope_test.rs",
+        "engine-rs/tests/phase_suite/phase8_editor_compat_layer_validation_test.rs",
+        "engine-rs/tests/editor_suite/editor_compat_layer_test.rs",
+        "engine-rs/tests/editor_suite/editor_interface_compat_test.rs",
+        "engine-rs/tests/editor_suite/editor_compat_layer_surface_test.rs",
+        "engine-rs/tests/phase_suite/phase8_editor_compatibility_layer_scope_test.rs",
     ];
     for f in &test_files {
         let p = repo_root().join(f);

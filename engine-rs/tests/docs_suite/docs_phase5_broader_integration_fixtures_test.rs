@@ -52,7 +52,7 @@ fn broader_integration_fixture_goldens_exist() {
 
 #[test]
 fn broader_integration_test_anchor_exists() {
-    let p = repo_root().join("engine-rs/tests/broader_integration_fixtures_test.rs");
+    let p = repo_root().join("engine-rs/tests/broader_suite/broader_integration_fixtures_test.rs");
     assert!(
         p.exists(),
         "broader integration test must exist at {}",

@@ -25,7 +25,7 @@ const FUZZ_MODULES: &[(&str, &str)] = &[
     ),
     (
         "gdobject+gdplatform property tests",
-        "tests/fuzz_input_weakref_classdb_property_test.rs",
+        "tests/fuzz_suite/fuzz_input_weakref_classdb_property_test.rs",
     ),
 ];
 

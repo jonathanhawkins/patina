@@ -15,7 +15,7 @@ fn repo_root() -> PathBuf {
 
 #[test]
 fn audio_harness_test_anchor_exists() {
-    let p = repo_root().join("engine-rs/tests/audio_deterministic_harness_test.rs");
+    let p = repo_root().join("engine-rs/tests/audio_suite/audio_deterministic_harness_test.rs");
     assert!(
         p.exists(),
         "audio test harness must exist at {}",
@@ -48,9 +48,9 @@ fn gdaudio_crate_publishes_core_modules() {
 #[test]
 fn audio_evidence_test_set_is_present() {
     for f in [
-        "engine-rs/tests/audio_smoke_test.rs",
-        "engine-rs/tests/audio_runtime_broad_test.rs",
-        "engine-rs/tests/audio_import_pipeline_test.rs",
+        "engine-rs/tests/audio_suite/audio_smoke_test.rs",
+        "engine-rs/tests/audio_suite/audio_runtime_broad_test.rs",
+        "engine-rs/tests/audio_suite/audio_import_pipeline_test.rs",
     ] {
         let p = repo_root().join(f);
         assert!(

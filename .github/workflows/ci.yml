@@ -163,6 +163,20 @@ jobs:
           PATINA_CI: "1"
         run: make test-render-ci
 
+      # A golden mismatch is undiagnosable from a log line — the whole point of
+      # the failure is the pixels. Uploaded only on failure so a green run costs
+      # nothing, and keyed by matrix OS because the three legs would otherwise
+      # collide on a single artifact name (pat-21oab).
+      - name: Upload golden render output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-render-${{ matrix.os }}
+          path: |
+            engine-rs/output/
+          if-no-files-found: ignore
+          retention-days: 14
+
   # ── Rust: Headless runtime compat slice ──────────────────────────────────
   rust-compat-headless:
     name: Headless runtime compat

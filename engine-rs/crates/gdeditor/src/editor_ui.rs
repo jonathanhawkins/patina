@@ -13940,7 +13940,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
                 showSimpleContextMenu(ev.clientX, ev.clientY, [
                   { label: 'Edit...', act: function() { openConnectDialog(sgName); } },
                   { label: 'Go to Method', act: function() { logMessage('info', 'Go to Method: ' + (conn.method || '')); showFsToast('Go to Method: ' + (conn.method || '')); } },
-                  { label: 'Disconnect', act: function() { api('POST', '/api/signal/disconnect', { node_id: selectedNodeId, signal: sgName }).then(function() { fetchNodeDock(); }); } }
+                  { label: 'Disconnect', act: function() { api('POST', '/api/signal/disconnect', { node_id: selectedNodeId, signal: sgName, method: conn.method, target_id: conn.target_id }).then(function() { fetchNodeDock(); }); } }
                 ]);
               });
               sigBody.appendChild(crow);

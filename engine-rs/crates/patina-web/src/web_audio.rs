@@ -27,7 +27,9 @@
 
 use wasm_bindgen::prelude::*;
 
-use crate::audio::{WebAudioEngine, PROCESSOR_NAME, RENDER_QUANTUM_FRAMES};
+use crate::audio::{SceneAudioRing, WebAudioEngine, PROCESSOR_NAME, RENDER_QUANTUM_FRAMES};
+use crate::browser_runtime::WebEngineHandle;
+use crate::mp3_bridge::BrowserMp3Decoder;
 
 /// A live audio backend: the browser's `AudioContext` plus the engine mixer
 /// feeding it.
@@ -38,6 +40,15 @@ use crate::audio::{WebAudioEngine, PROCESSOR_NAME, RENDER_QUANTUM_FRAMES};
 pub struct WebAudio {
     context: web_sys::AudioContext,
     engine: WebAudioEngine,
+    /// The running scene's audio, once [`WebAudio::attach_scene_audio`] has
+    /// routed the `MainLoop`'s `AudioServerBridge` into this same worklet
+    /// (pat-mgixk.4). `None` until then, which is the state in which every
+    /// `AudioStreamPlayer` in a web game was silent.
+    scene: Option<SceneAudioRing>,
+    /// PCM the browser decoded for MP3 streams the wasm build has no codec for
+    /// (pat-mgixk.4). Shares its store with the clone installed as `gdaudio`'s
+    /// host decoder, so anything registered here is visible to the scene loader.
+    mp3: BrowserMp3Decoder,
 }
 
 #[wasm_bindgen]
@@ -114,9 +125,17 @@ impl WebAudio {
     }
 
     /// Records that the gesture-unlock listener resumed the context.
+    ///
+    /// Marks the scene's ring too when one is attached: the gesture is a
+    /// property of the ONE `AudioContext` both producers feed, so leaving the
+    /// scene ring's flag false would make it report a suspended context
+    /// forever.
     #[wasm_bindgen(js_name = markUnlocked)]
     pub fn mark_unlocked(&mut self) {
         self.engine.mark_unlocked();
+        if let Some(scene) = self.scene.as_mut() {
+            scene.mark_unlocked();
+        }
     }
 
     /// Mixes and returns `frames` frames of interleaved audio for the worklet.
@@ -125,7 +144,117 @@ impl WebAudio {
     /// whole output buffer, so an underrun comes back zero-padded.
     #[wasm_bindgen(js_name = pullBlock)]
     pub fn pull_block(&mut self, frames: usize) -> Vec<f32> {
-        self.engine.pull_block(frames)
+        let mut block = self.engine.pull_block(frames);
+        // One device output, two producers: the scene's `AudioServer` (driven
+        // by `MainLoop::step`) and this module's demo server (`playTone` /
+        // `playEncoded`). Summing them is what a single output does with two
+        // buses; the alternative — a second `AudioContext` for the scene —
+        // would build the page a whole second audio graph to say the same
+        // thing. `zip` rather than indexing so a channel-count skew between
+        // the two truncates instead of panicking inside a worklet pull.
+        if let Some(scene) = self.scene.as_mut() {
+            for (out, s) in block.iter_mut().zip(scene.pull_block(frames)) {
+                *out += s;
+            }
+        }
+        block
+    }
+
+    /// Routes a running engine's scene audio into this backend's worklet pulls
+    /// (pat-mgixk.4).
+    ///
+    /// Until this is called the page hears only `playTone`/`playEncoded`: the
+    /// `MainLoop`'s `AudioServerBridge` has no output attached, so it mixes
+    /// every `AudioStreamPlayer` in the loaded scene and throws the frames
+    /// away. Attaching through *this* object rather than through the engine
+    /// handle is deliberate — the ring has to be built for the rate the
+    /// browser actually chose for the `AudioContext`, and that is owned here.
+    ///
+    /// ⚠️ Attach before the engine's first frame: honouring a mix rate the
+    /// bridge was not built with replaces its `AudioServer`, which would cut
+    /// off anything already playing.
+    #[wasm_bindgen(js_name = attachSceneAudio)]
+    pub fn attach_scene_audio(&mut self, engine: &WebEngineHandle) {
+        let ring = engine.attach_audio_output(self.engine.context_rate(), self.engine.mix_rate());
+        self.scene = Some(ring);
+    }
+
+    /// Whether the scene's audio has been routed into this output.
+    ///
+    /// A page that reports `false` here is a page whose `AudioStreamPlayer`
+    /// nodes cannot be heard, which is otherwise indistinguishable from a
+    /// scene that simply has no sound in it.
+    #[wasm_bindgen(getter, js_name = sceneAttached)]
+    pub fn scene_attached(&self) -> bool {
+        self.scene.is_some()
+    }
+
+    /// Frames of scene audio the frame loop has mixed but the worklet has not
+    /// taken, or 0 when no scene is attached.
+    #[wasm_bindgen(getter, js_name = sceneQueuedFrames)]
+    pub fn scene_queued_frames(&self) -> usize {
+        self.scene.as_ref().map_or(0, SceneAudioRing::queued_frames)
+    }
+
+    /// Lets the engine decode MP3 streams out of browser-decoded PCM
+    /// (pat-mgixk.4).
+    ///
+    /// Call once, before loading a scene that names an `.mp3`. Until it is
+    /// called `gdaudio` has no MP3 codec on wasm32 at all — `minimp3` builds C
+    /// sources and is gated to native targets — so every `AudioStreamMP3`
+    /// decodes to `UnsupportedFormat` and plays silence.
+    ///
+    /// Registering is a second step ([`Self::register_decoded_mp3`]): the
+    /// browser's `decodeAudioData` is async and the engine loads a stream
+    /// synchronously inside a frame, so the PCM has to be in hand before the
+    /// scene asks for it.
+    #[wasm_bindgen(js_name = enableBrowserMp3Decoding)]
+    pub fn enable_browser_mp3_decoding(&self) {
+        self.mp3.install();
+    }
+
+    /// Registers PCM the browser decoded for one MP3 asset.
+    ///
+    /// `planar` is channel-major — all of channel 0, then all of channel 1 —
+    /// which is `decodeAudioData`'s own shape: the page concatenates the
+    /// `getChannelData(c)` arrays and hands them over without interleaving.
+    /// `mp3` must be the exact bytes the scene will load, because that is the
+    /// key the engine looks the PCM up by (the decode hook is handed bytes, not
+    /// a path).
+    ///
+    /// Returns how many streams are now registered. Rejects PCM that cannot be
+    /// played — a zero rate or channel count, or a length that is not a whole
+    /// number of frames — rather than storing something that would play silence
+    /// while reporting success.
+    #[wasm_bindgen(js_name = registerDecodedMp3)]
+    pub fn register_decoded_mp3(
+        &self,
+        mp3: &[u8],
+        planar: &[f32],
+        sample_rate: u32,
+        channels: u16,
+    ) -> Result<usize, JsValue> {
+        self.mp3
+            .register_planar(mp3, planar, sample_rate, channels)
+            .map_err(JsValue::from)
+    }
+
+    /// How many browser-decoded MP3 streams are held.
+    ///
+    /// A page reporting 0 while its scene names an `.mp3` is a page whose music
+    /// cannot play, which is otherwise indistinguishable from a scene that has
+    /// no music in it.
+    #[wasm_bindgen(getter, js_name = decodedMp3Count)]
+    pub fn decoded_mp3_count(&self) -> usize {
+        self.mp3.registered()
+    }
+
+    /// Drops the PCM for one asset, returning whether it was held. The decoded
+    /// form is an order of magnitude larger than the file, so a game that is
+    /// done with a track should give it back.
+    #[wasm_bindgen(js_name = forgetDecodedMp3)]
+    pub fn forget_decoded_mp3(&self, mp3: &[u8]) -> bool {
+        self.mp3.forget(mp3)
     }
 
     /// Plays a sine tone through the mixer. The demo's audibility check.
@@ -163,5 +292,15 @@ pub fn start_web_audio(mix_rate: u32) -> Result<WebAudio, JsValue> {
     // becomes 47999.
     let context_rate = context.sample_rate().round().max(0.0) as u32;
     let engine = WebAudioEngine::new(context_rate, mix_rate);
-    Ok(WebAudio { context, engine })
+    Ok(WebAudio {
+        context,
+        engine,
+        // The scene is routed in separately: the engine handle does not exist
+        // yet at the point a page creates its audio context.
+        scene: None,
+        // Created empty and NOT installed: installing is the page's explicit
+        // `enableBrowserMp3Decoding` call, so merely starting audio never
+        // changes how MP3 decoding behaves.
+        mp3: BrowserMp3Decoder::new(),
+    })
 }

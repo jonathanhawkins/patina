@@ -607,9 +607,20 @@ fn stable_layer_doc_windowing_input_timing_have_audit_status() {
         doc.contains("Native OS windowing"),
         "windowing table must list native OS windowing row"
     );
+    // ⚠️ This asserted the phrase "Implemented, partly measured", which
+    // `phase_suite::phase7_platform_claims_reconciliation_test::\
+    // stable_layer_does_not_use_partly_measured` asserts must NOT appear in this
+    // same doc. The two were in direct contradiction and the doc could not
+    // satisfy both.
+    //
+    // Resolved toward the approved four-label vocabulary (Measured /
+    // Implemented, not yet measured / Deferred / Missing), which three phase7
+    // tests enforce and which THIS FILE already uses for the Phase 7 audit at
+    // the next assertion below — so line 611 was the stale holdout in a
+    // migration this file had already started (pat-21oab).
     assert!(
-        doc.contains("Implemented, partly measured"),
-        "doc must classify native windowing as partly measured"
+        doc.contains("Implemented, not yet measured"),
+        "doc must classify native windowing with an approved status label"
     );
 
     // Input section must note headless scope

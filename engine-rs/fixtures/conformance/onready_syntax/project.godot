@@ -1,0 +1,17 @@
+; Conformance fixture (pat-mgixk.403).
+;
+; Seam under test: `@onready var x = $Child` resolved before `_ready`, plus the
+; GDScript token forms a hand-written parser is most likely to miss: `!`, `&&`,
+; `||` and the inferred-type declaration `:=`.
+
+config_version=5
+
+[application]
+
+config/name="onready_syntax"
+run/main_scene="res://main.tscn"
+
+[display]
+
+window/size/viewport_width=320
+window/size/viewport_height=240

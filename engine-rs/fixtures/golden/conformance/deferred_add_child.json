@@ -1,0 +1,60 @@
+{
+  "frames": 12,
+  "prints": [
+    "deferred_queued",
+    "main_ready children=1",
+    "spawned_present children=2"
+  ],
+  "project": "deferred_add_child",
+  "signals": [],
+  "tree": [
+    {
+      "class": "Node2D",
+      "path": "Main",
+      "properties": {
+        "position": [
+          0.0,
+          0.0
+        ],
+        "rotation": 0.0,
+        "scale": [
+          1.0,
+          1.0
+        ],
+        "visible": true
+      }
+    },
+    {
+      "class": "Node2D",
+      "path": "Main/Spawned",
+      "properties": {
+        "position": [
+          5.0,
+          7.0
+        ],
+        "rotation": 0.0,
+        "scale": [
+          1.0,
+          1.0
+        ],
+        "visible": true
+      }
+    },
+    {
+      "class": "Node2D",
+      "path": "Main/Spawner",
+      "properties": {
+        "position": [
+          10.0,
+          20.0
+        ],
+        "rotation": 0.0,
+        "scale": [
+          1.0,
+          1.0
+        ],
+        "visible": true
+      }
+    }
+  ]
+}

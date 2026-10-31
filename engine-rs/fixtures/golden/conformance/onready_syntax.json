@@ -1,0 +1,64 @@
+{
+  "frames": 12,
+  "prints": [
+    "child_name=Child",
+    "child_x=12.0",
+    "bang_and_ok",
+    "or_ok",
+    "inferred=3,0.5",
+    "label_text=tick2"
+  ],
+  "project": "onready_syntax",
+  "signals": [],
+  "tree": [
+    {
+      "class": "Node2D",
+      "path": "Main",
+      "properties": {
+        "position": [
+          0.0,
+          0.0
+        ],
+        "rotation": 0.0,
+        "scale": [
+          1.0,
+          1.0
+        ],
+        "visible": true
+      }
+    },
+    {
+      "class": "Node2D",
+      "path": "Main/Child",
+      "properties": {
+        "position": [
+          12.0,
+          34.0
+        ],
+        "rotation": 0.0,
+        "scale": [
+          1.0,
+          1.0
+        ],
+        "visible": true
+      }
+    },
+    {
+      "class": "Label",
+      "path": "Main/Label",
+      "properties": {
+        "position": [
+          0.0,
+          0.0
+        ],
+        "rotation": 0.0,
+        "scale": [
+          1.0,
+          1.0
+        ],
+        "text": "tick2",
+        "visible": true
+      }
+    }
+  ]
+}

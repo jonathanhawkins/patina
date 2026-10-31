@@ -47,6 +47,16 @@ impl TresLoader {
         let mut current_section = Section::None;
         let mut current_sub_id = String::new();
         let mut current_sub = Option::<Resource>::None;
+        // A property whose value opens more brackets than it closes continues
+        // onto the following lines. Godot's text writer puts every Dictionary
+        // and Array on several lines (`variant_parser.cpp` `write`), so an
+        // `AnimationLibrary`'s `_data` or an `Animation`'s `tracks/N/keys`
+        // arrives split. Without buffering, the first line's value is the bare
+        // `{`, `parse_variant_value` rejects it, and the `?` below failed the
+        // WHOLE file — so no `.tres` the editor actually wrote could be loaded
+        // at all (pat-mgixk.1). `packed_scene.rs` has buffered `.tscn` values
+        // this way since pat-nzgdu.78; this is the same rule for `.tres`.
+        let mut pending_prop = Option::<(String, String)>::None;
 
         for (line_num, line) in source.lines().enumerate() {
             let line_num = line_num + 1; // 1-based
@@ -54,6 +64,33 @@ impl TresLoader {
 
             // Skip empty lines and comments.
             if line.is_empty() || line.starts_with(';') {
+                continue;
+            }
+
+            // Continuation of a multi-line value opened above.
+            //
+            // Checked BEFORE the section-header branch so a `}` or `]` sitting
+            // alone on its own line is not mistaken for a `[...]` header — a
+            // closing `]` is exactly that shape.
+            if let Some((key, mut acc)) = pending_prop.take() {
+                acc.push('\n');
+                acc.push_str(line);
+                if bracket_depth(&acc) > 0 {
+                    pending_prop = Some((key, acc));
+                    continue;
+                }
+                let value = parse_variant_value(acc.trim()).map_err(|e| {
+                    EngineError::Parse(format!("{} (at line {} in {})", e, line_num, path))
+                })?;
+                store_property(
+                    &mut resource,
+                    &mut current_sub,
+                    current_section,
+                    &key,
+                    value,
+                    line_num,
+                    path,
+                )?;
                 continue;
             }
 
@@ -89,30 +126,24 @@ impl TresLoader {
 
             // Property lines: key = value
             if let Some((key, value_str)) = line.split_once('=') {
-                let key = key.trim();
+                let key = key.trim().to_string();
                 let value_str = value_str.trim();
+                if bracket_depth(value_str) > 0 {
+                    pending_prop = Some((key, value_str.to_string()));
+                    continue;
+                }
                 let value = parse_variant_value(value_str).map_err(|e| {
                     EngineError::Parse(format!("{} (at line {} in {})", e, line_num, path))
                 })?;
-
-                match current_section {
-                    Section::Resource => {
-                        resource.set_property(key, value);
-                    }
-                    Section::SubResource => {
-                        if let Some(ref mut sub) = current_sub {
-                            sub.set_property(key, value);
-                        }
-                    }
-                    // A property before any section means the file has no
-                    // `[gd_resource]`/`[resource]` header — not a valid .tres.
-                    Section::None => {
-                        return Err(EngineError::Parse(format!(
-                            "property '{key}' outside any section (missing [gd_resource]/[resource] header) at line {line_num} in {path}"
-                        )));
-                    }
-                    _ => {}
-                }
+                store_property(
+                    &mut resource,
+                    &mut current_sub,
+                    current_section,
+                    &key,
+                    value,
+                    line_num,
+                    path,
+                )?;
             }
         }
 
@@ -135,6 +166,71 @@ impl ResourceLoader for TresLoader {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// Stores one parsed property into whichever section is currently open.
+///
+/// Shared by the single-line and the buffered multi-line path so the two
+/// cannot drift — before this existed only the single-line path stored
+/// anything, which is why a multi-line value was a hard parse error.
+fn store_property(
+    resource: &mut Resource,
+    current_sub: &mut Option<Resource>,
+    section: Section,
+    key: &str,
+    value: Variant,
+    line_num: usize,
+    path: &str,
+) -> EngineResult<()> {
+    match section {
+        Section::Resource => resource.set_property(key, value),
+        Section::SubResource => {
+            if let Some(sub) = current_sub.as_mut() {
+                sub.set_property(key, value);
+            }
+        }
+        // A property before any section means the file has no
+        // `[gd_resource]`/`[resource]` header — not a valid .tres.
+        Section::None => {
+            return Err(EngineError::Parse(format!(
+                "property '{key}' outside any section (missing [gd_resource]/[resource] header) at line {line_num} in {path}"
+            )));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Net bracket/paren/brace depth of `s`, ignoring anything inside a string.
+///
+/// ⚠️ The string tracking is not optional. A `"{"` or a Windows path inside a
+/// quoted value would otherwise skew the depth and swallow the rest of the
+/// file. Mirrors `packed_scene.rs`'s scanner of the same name.
+fn bracket_depth(s: &str) -> i32 {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    for c in s.chars() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if in_string {
+            match c {
+                '\\' => escape = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Section {
@@ -660,7 +756,15 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
 
     // StringName("name") — the call-style form.
     if let Some(inner) = try_strip_call(s, "StringName") {
-        let inner = inner.trim();
+        // ⚠️ The ampersand is OPTIONAL inside the call form. Godot writes both
+        // `StringName("name")` and `StringName(&"name")`, and this arm used to
+        // require a quote directly after the paren, so it rejected the second
+        // with "invalid StringName" (pat-21oab).
+        let inner = inner
+            .trim()
+            .strip_prefix('&')
+            .unwrap_or(inner.trim())
+            .trim();
         if inner.starts_with('"') && inner.ends_with('"') && inner.len() >= 2 {
             let name = unescape_string(&inner[1..inner.len() - 1]);
             return Ok(Variant::StringName(StringName::new(&name)));
@@ -985,6 +1089,21 @@ fn parse_dictionary(s: &str) -> EngineResult<Variant> {
     let mut map = Dictionary::new();
     for pair in &pairs {
         let pair = pair.trim();
+        // ⚠️ A `StringName` key is written `&"name"`. Godot keys an
+        // `AnimationLibrary`'s animations by StringName, so `_get_data` saves
+        // `_data = {&"clip": SubResource(..)}` (upstream
+        // animation_library.cpp `_get_data`, variant_parser.cpp STRING_NAME).
+        // Rejecting the ampersand threw out the whole dictionary, so a library
+        // written by Godot 4.6 yielded no clips at all (pat-mgixk.1).
+        //
+        // The ampersand is dropped rather than preserved as a
+        // `Variant::StringName`: in Godot a String and a StringName of the same
+        // text are the same Dictionary key (they compare and hash equal), and
+        // every consumer in this workspace matches on `Variant::String`.
+        let pair = match pair.strip_prefix('&') {
+            Some(rest) => rest.trim_start(),
+            None => pair,
+        };
         // Find the colon separating key from value, but only outside of the key string.
         if !pair.starts_with('"') {
             return Err(EngineError::Parse(format!(
@@ -1585,6 +1704,118 @@ mod tests {
             }
             other => panic!("expected Dictionary, got {other:?}"),
         }
+    }
+
+    /// ⚠️ Godot keys an `AnimationLibrary`'s animations by `StringName`, so its
+    /// saved `_data` uses the `&"name"` spelling (animation_library.cpp
+    /// `_get_data` + variant_parser.cpp STRING_NAME). Rejecting the ampersand
+    /// threw the whole dictionary away, so a 4.6 library yielded no clips
+    /// (pat-mgixk.1).
+    #[test]
+    fn parse_dictionary_with_stringname_keys() {
+        let v = parse_variant_value(r#"{&"slide": SubResource("Animation_x"), &"idle": 2}"#)
+            .expect("a StringName-keyed dictionary must parse");
+        match v {
+            Variant::Dictionary(ref map) => {
+                let d = map.to_dict();
+                assert_eq!(d.len(), 2);
+                // Stored as a plain String key: in Godot a String and a
+                // StringName of the same text ARE the same dictionary key, and
+                // every consumer here matches on `Variant::String`.
+                assert_eq!(
+                    d["slide"],
+                    Variant::String("SubResource:Animation_x".into())
+                );
+                assert_eq!(d["idle"], Variant::Int(2));
+            }
+            other => panic!("expected Dictionary, got {other:?}"),
+        }
+    }
+
+    /// A key that is neither quoted nor a StringName is still refused — the
+    /// ampersand must not have turned the check off.
+    #[test]
+    fn parse_dictionary_still_rejects_an_unquoted_key() {
+        assert!(parse_variant_value(r#"{slide: 1}"#).is_err());
+        assert!(parse_variant_value(r#"{&slide: 1}"#).is_err());
+    }
+
+    /// ⚠️ **The bug this half fixes.** Godot's text writer puts every Dictionary
+    /// and Array on several lines, so an `AnimationLibrary`'s `_data` and an
+    /// `Animation`'s `tracks/N/keys` arrive split across lines. Before
+    /// pat-mgixk.1 the first line's value was the bare `{`,
+    /// `parse_variant_value` rejected it, and the error failed the WHOLE
+    /// file — no `.tres` the editor actually wrote could be loaded.
+    #[test]
+    fn parse_tres_with_multiline_dictionary_and_array_values() {
+        let source = r#"
+[gd_resource type="AnimationLibrary" load_steps=2 format=3]
+
+[sub_resource type="Animation" id="Animation_slide"]
+resource_name = "slide"
+length = 1.0
+tracks/0/keys = {
+"times": PackedFloat32Array(0, 1),
+"transitions": PackedFloat32Array(1, 1),
+"update": 0,
+"values": [Vector2(0, 0), Vector2(100, 0)]
+}
+
+[resource]
+_data = {
+&"slide": SubResource("Animation_slide")
+}
+"#;
+        let res = TresLoader::new()
+            .parse_str(source, "res://lib.tres")
+            .expect("a .tres with multi-line values must load");
+        assert_eq!(res.class_name, "AnimationLibrary");
+
+        // The library's `_data` survived as a dictionary, not as an error.
+        match res.get_property("_data") {
+            Some(Variant::Dictionary(map)) => {
+                assert_eq!(
+                    map.to_dict()["slide"],
+                    Variant::String("SubResource:Animation_slide".into())
+                );
+            }
+            other => panic!("_data should be a Dictionary, got {other:?}"),
+        }
+
+        // And the sub-resource's own multi-line value did too, with the
+        // following `[resource]` header NOT swallowed by the continuation.
+        let anim = res
+            .subresources
+            .get("Animation_slide")
+            .expect("the Animation sub-resource must still be registered");
+        assert_eq!(anim.class_name, "Animation");
+        assert_eq!(
+            anim.get_property("resource_name"),
+            Some(&Variant::String("slide".into()))
+        );
+        match anim.get_property("tracks/0/keys") {
+            Some(Variant::Dictionary(map)) => {
+                let d = map.to_dict();
+                assert_eq!(d["update"], Variant::Int(0));
+                match &d["values"] {
+                    Variant::Array(items) => assert_eq!(items.len(), 2),
+                    other => panic!("values should be an Array, got {other:?}"),
+                }
+            }
+            other => panic!("tracks/0/keys should be a Dictionary, got {other:?}"),
+        }
+    }
+
+    /// A quoted `{` must not open a bracket level — otherwise one string value
+    /// swallows the rest of the file.
+    #[test]
+    fn bracket_depth_ignores_brackets_inside_strings() {
+        assert_eq!(bracket_depth(r#""{""#), 0);
+        assert_eq!(bracket_depth(r#"{"a": "]["#), 1);
+        assert_eq!(bracket_depth(r#"{"a": 1}"#), 0);
+        assert_eq!(bracket_depth(r#"}"#), -1);
+        // An escaped quote does not end the string.
+        assert_eq!(bracket_depth(r#""a\"{""#), 0);
     }
 
     #[test]

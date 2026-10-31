@@ -84,6 +84,47 @@ impl ImportResourceType {
         }
     }
 
+    /// Godot's importer NAME for a source extension.
+    ///
+    /// This is `ResourceImporter::get_importer_name()` — the string Godot writes
+    /// into a `.import` file's `importer="..."` line
+    /// (`editor/file_system/editor_file_system.cpp:2659`) and shows as the
+    /// dock's "Import As:" value. It is NOT `get_resource_type()`: the texture
+    /// importer is named `texture` and *produces* a `Texture2D`.
+    ///
+    /// Transcribed from upstream, one importer at a time, never derived from the
+    /// type name — the two differ unpredictably (`.ogg` is `oggvorbisstr`, not
+    /// `ogg_vorbis`; `.obj` is `wavefront_obj`, not `scene`; `.fnt` is
+    /// `font_data_bmfont`, not `font_data_dynamic`).
+    ///
+    /// Returns `"unknown"` for extensions Godot does not import at all, which
+    /// includes native formats like `.tscn` and `.gd` — they are loaded, not
+    /// imported, so they have no importer.
+    pub fn godot_importer_name(ext: &str) -> &'static str {
+        match ext.to_lowercase().as_str() {
+            // editor/import/resource_importer_texture.cpp
+            "png" | "jpg" | "jpeg" | "bmp" | "tga" | "webp" | "exr" | "hdr" => "texture",
+            // editor/import/resource_importer_svg.h — SVG has its own importer.
+            "svg" => "svg",
+            // editor/import/resource_importer_wav.cpp
+            "wav" => "wav",
+            // modules/vorbis/resource_importer_ogg_vorbis.cpp:44
+            "ogg" => "oggvorbisstr",
+            // modules/minimp3
+            "mp3" => "mp3",
+            // editor/import/3d/resource_importer_scene.cpp:251
+            "glb" | "gltf" | "dae" | "fbx" => "scene",
+            // editor/import — the Wavefront importer is separate from `scene`.
+            "obj" => "wavefront_obj",
+            // editor/import/resource_importer_dynamic_font.cpp
+            "ttf" | "otf" | "woff" | "woff2" => "font_data_dynamic",
+            // Bitmap fonts take the BMFont importer, not the dynamic one.
+            "fnt" => "font_data_bmfont",
+            "glsl" => "glsl",
+            _ => "unknown",
+        }
+    }
+
     /// File extension patterns for this resource type.
     pub fn extensions(&self) -> &'static [&'static str] {
         match self {
@@ -536,6 +577,42 @@ impl Default for ImportSettingsPanel {
 
 #[cfg(test)]
 mod tests {
+    /// The importer name is NOT the resource type name, which is the bug this
+    /// guards: the handler used to answer `Texture2D`/`Audio Stream`/`Font`.
+    ///
+    /// Each expectation is a `get_importer_name()` body in upstream, cited on
+    /// the function itself. The three that differ most from their type name are
+    /// the point of the test.
+    #[test]
+    fn godot_importer_names_match_upstream() {
+        use super::ImportResourceType as T;
+        assert_eq!(T::godot_importer_name("png"), "texture");
+        assert_eq!(T::godot_importer_name("wav"), "wav");
+        assert_eq!(T::godot_importer_name("ttf"), "font_data_dynamic");
+        assert_eq!(T::godot_importer_name("glb"), "scene");
+        // ⚠️ Not "ogg_vorbis" — upstream is `oggvorbisstr`.
+        assert_eq!(T::godot_importer_name("ogg"), "oggvorbisstr");
+        // ⚠️ Not "scene" — Wavefront has its own importer.
+        assert_eq!(T::godot_importer_name("obj"), "wavefront_obj");
+        // ⚠️ Not "font_data_dynamic" — bitmap fonts take the BMFont importer.
+        assert_eq!(T::godot_importer_name("fnt"), "font_data_bmfont");
+        // Case-insensitive, like `from_extension`.
+        assert_eq!(T::godot_importer_name("PNG"), "texture");
+    }
+
+    /// Formats Godot loads rather than imports have no importer.
+    #[test]
+    fn native_formats_have_no_importer() {
+        use super::ImportResourceType as T;
+        for ext in ["tscn", "scn", "gd", "cs", "res", "bin", ""] {
+            assert_eq!(
+                T::godot_importer_name(ext),
+                "unknown",
+                "{ext} is loaded, not imported, so it has no importer name"
+            );
+        }
+    }
+
     use super::*;
 
     // ---- ImportResourceType ----

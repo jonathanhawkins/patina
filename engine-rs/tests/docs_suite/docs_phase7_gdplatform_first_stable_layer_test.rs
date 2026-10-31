@@ -48,10 +48,10 @@ fn gdplatform_publishes_first_stable_layer_modules() {
 #[test]
 fn integration_test_anchors_present() {
     for f in [
-        "engine-rs/tests/platform_first_stable_layer_test.rs",
-        "engine-rs/tests/window_lifecycle_test.rs",
-        "engine-rs/tests/input_action_coverage_test.rs",
-        "engine-rs/tests/time_singleton_parity_test.rs",
+        "engine-rs/tests/platform_suite/platform_first_stable_layer_test.rs",
+        "engine-rs/tests/window_suite/window_lifecycle_test.rs",
+        "engine-rs/tests/input_suite/input_action_coverage_test.rs",
+        "engine-rs/tests/misc_suite_g/time_singleton_parity_test.rs",
     ] {
         let p = repo_root().join(f);
         assert!(

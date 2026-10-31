@@ -47,7 +47,7 @@ fn representative_3d_fixture_and_oracle_present() {
 
 #[test]
 fn sibling_test_cites_command_path() {
-    let p = repo_root().join("engine-rs/tests/audited_3d_comparison_tooling_test.rs");
+    let p = repo_root().join("engine-rs/tests/misc_suite_a/audited_3d_comparison_tooling_test.rs");
     let body = std::fs::read_to_string(&p).unwrap_or_else(|e| {
         panic!(
             "audited 3D comparison tooling test must exist at {}: {e}",
@@ -63,10 +63,10 @@ fn sibling_test_cites_command_path() {
 #[test]
 fn comparison_evidence_test_set_is_present() {
     for f in [
-        "engine-rs/tests/comparison_tooling_3d_test.rs",
-        "engine-rs/tests/render_physics_comparison_tooling_test.rs",
-        "engine-rs/tests/audited_3d_comparison_tooling_test.rs",
-        "engine-rs/tests/render_3d_parity_test.rs",
+        "engine-rs/tests/misc_suite_a/comparison_tooling_3d_test.rs",
+        "engine-rs/tests/render_suite/render_physics_comparison_tooling_test.rs",
+        "engine-rs/tests/misc_suite_a/audited_3d_comparison_tooling_test.rs",
+        "engine-rs/tests/render_suite/render_3d_parity_test.rs",
     ] {
         let p = repo_root().join(f);
         assert!(

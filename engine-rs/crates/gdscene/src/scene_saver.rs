@@ -1608,7 +1608,21 @@ fn tileset_custom_data_layer_types(node: &crate::node::Node) -> Vec<i32> {
 /// Property keys that are internal companions, never emitted as scene
 /// properties (they are re-encoded as resource references / header attributes).
 fn is_internal_prop(key: &str) -> bool {
-    key.starts_with("__resref__")
+    key == "signal_connections"
+        // The editor used to record signal connections as a `,`-joined string
+        // in this property instead of in the tree's signal store
+        // (pat-mgixk.13). Nothing at runtime ever read it, so a connection made
+        // in the editor never fired — and because `is_internal_prop` did not
+        // know the key, the saver wrote it into the `.tscn` as a stray
+        // `signal_connections = "pressed:_on_pressed"` property that Godot has
+        // never heard of.
+        //
+        // Connections now go through `SceneTree::connect_signal` and are
+        // emitted as real `[connection]` sections below. Filtering the key here
+        // is what stops an ALREADY-SAVED scene from carrying it forward: the
+        // loader still reads the property into the node, so without this a
+        // round trip would preserve it forever.
+        || key.starts_with("__resref__")
         // `__resscript__<prop>` caches the script path of a SCRIPTED resource
         // held in `<prop>`, so render code can reach it with only the tree in
         // hand (pat-s3rrv.160). Derived from the sub-resource on load, so

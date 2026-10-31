@@ -107,14 +107,14 @@ fn fuzz_modules_contain_test_logic() {
 // ── Integration test files for fuzz coverage ────────────────────────
 
 const FUZZ_INTEGRATION_TESTS: &[&str] = &[
-    "tests/fuzz_property_coverage_test.rs",
-    "tests/fuzz_variant_serialization_roundtrip_test.rs",
-    "tests/fuzz_resource_loader_roundtrip_test.rs",
-    "tests/fuzz_scene_tree_property_test.rs",
-    "tests/fuzz_signal_property_test.rs",
-    "tests/fuzz_collision_property_test.rs",
-    "tests/fuzz_variant_coercion_test.rs",
-    "tests/fuzz_input_weakref_classdb_property_test.rs",
+    "tests/fuzz_suite/fuzz_property_coverage_test.rs",
+    "tests/fuzz_suite/fuzz_variant_serialization_roundtrip_test.rs",
+    "tests/fuzz_suite/fuzz_resource_loader_roundtrip_test.rs",
+    "tests/fuzz_suite/fuzz_scene_tree_property_test.rs",
+    "tests/fuzz_suite/fuzz_signal_property_test.rs",
+    "tests/fuzz_suite/fuzz_collision_property_test.rs",
+    "tests/fuzz_suite/fuzz_variant_coercion_test.rs",
+    "tests/fuzz_suite/fuzz_input_weakref_classdb_property_test.rs",
 ];
 
 #[test]
@@ -189,7 +189,7 @@ fn ci_fuzz_command_is_documented() {
 
 #[test]
 fn fuzz_coverage_gate_test_exists() {
-    let path = workspace_root().join("tests/fuzz_property_coverage_test.rs");
+    let path = workspace_root().join("tests/fuzz_suite/fuzz_property_coverage_test.rs");
     assert!(path.exists(), "the fuzz coverage gate test must exist");
     let content = std::fs::read_to_string(&path).unwrap();
     assert!(

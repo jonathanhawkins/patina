@@ -9,7 +9,8 @@
 //! - [`set_bone_parent`] / [`get_bone_parent`]
 //! - [`set_bone_rest`] / [`get_bone_rest`]
 //! - [`set_bone_pose`] / [`get_bone_pose`]
-//! - [`get_bone_global_pose`] — recursively composes rest * pose up the chain
+//! - [`get_bone_global_pose`] — recursively composes `parent_global * pose`
+//!   up the chain (Godot 4; the rest is the pose's default, not a factor)
 
 use gdcore::math::Vector3;
 use gdcore::math3d::{Basis, Quaternion, Transform3D};
@@ -72,10 +73,14 @@ pub fn add_bone(tree: &mut SceneTree, node_id: NodeId, name: &str) -> usize {
             &bone_rest_key(count),
             Variant::Transform3D(Transform3D::IDENTITY),
         );
-        node.set_property(
-            &bone_pose_key(count),
-            Variant::Transform3D(Transform3D::IDENTITY),
-        );
+        // ⚠️ The pose is deliberately left UNSET (pat-mgixk.3). It used to be
+        // seeded with `Transform3D::IDENTITY`, which under Godot 4 semantics is
+        // not the neutral value — the pose is the bone's whole local transform,
+        // so a pinned identity means "sit exactly on my parent" and the rest is
+        // ignored forever. Writing nothing lets [`get_bone_pose`] fall back to
+        // the rest, so a later `set_bone_rest` moves the bone as Godot's
+        // `reset_bone_pose` does (`skeleton_3d.cpp:908`), and a built-up rig
+        // composes its rests the way an imported one does.
         node.set_property(&bone_enabled_key(count), Variant::Bool(true));
         node.set_property(BONE_COUNT_KEY, Variant::Int((count + 1) as i64));
     }
@@ -231,14 +236,51 @@ pub fn set_bone_pose(tree: &mut SceneTree, node_id: NodeId, idx: usize, pose: Tr
     }
 }
 
-/// Returns the current pose for bone `idx`.
+/// Returns the current pose for bone `idx` — its **full local transform**.
+///
+/// Godot 4 semantics (`skeleton_3d.cpp:1108-1116`): the pose is not an offset
+/// applied on top of the rest, it replaces it, and it defaults to the rest.
+/// Three sources are tried in order:
+///
+/// 1. the materialized `bones/N/pose` Transform3D, written by
+///    [`set_bone_pose`] and by `recompose_bone_pose`;
+/// 2. the per-component keys, when a `.tscn` supplied some of them but nothing
+///    has recomposed yet — a scene is loaded by `set_property`, which never
+///    runs `recompose_bone_pose`;
+/// 3. the rest transform.
+///
+/// ⚠️ Step 3 returns `rest` **whole** rather than recomposing it from its own
+/// decomposed components. Decompose-then-recompose is not the identity on a
+/// basis carrying shear or a mirrored axis, so recomposing would perturb the
+/// bind pose of a rig that merely sat unposed — the most common case there is.
 pub fn get_bone_pose(tree: &SceneTree, node_id: NodeId, idx: usize) -> Transform3D {
-    tree.get_node(node_id)
-        .map(|n| match n.get_property(&bone_pose_key(idx)) {
-            Variant::Transform3D(t) => t,
-            _ => Transform3D::IDENTITY,
-        })
-        .unwrap_or(Transform3D::IDENTITY)
+    let Some(node) = tree.get_node(node_id) else {
+        return Transform3D::IDENTITY;
+    };
+    if let Variant::Transform3D(t) = node.get_property(&bone_pose_key(idx)) {
+        return t;
+    }
+    // `.iter().copied()`, not `.iter()`: the latter yields `&&str` and the
+    // parameter takes `&str`.
+    let has_component = ["position", "rotation", "scale"]
+        .iter()
+        .copied()
+        .any(|c| stored_pose_component(tree, node_id, idx, c).is_some());
+    if !has_component {
+        return get_bone_rest(tree, node_id, idx);
+    }
+    let position = get_bone_pose_position(tree, node_id, idx);
+    let rotation = get_bone_pose_rotation(tree, node_id, idx);
+    let scale = get_bone_pose_scale(tree, node_id, idx);
+    let rotation_basis = Basis::from_quaternion(rotation);
+    Transform3D {
+        basis: Basis {
+            x: rotation_basis.x * scale.x,
+            y: rotation_basis.y * scale.y,
+            z: rotation_basis.z * scale.z,
+        },
+        origin: position,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -251,34 +293,74 @@ pub fn get_bone_pose(tree: &SceneTree, node_id: NodeId, idx: usize) -> Transform
 // `get_bone_pose` / `get_bone_global_pose` path keeps working.
 // ---------------------------------------------------------------------------
 
-/// Returns the position component of bone `idx`'s pose (default `ZERO`).
+/// Reads one stored pose component of bone `idx`, under either spelling.
+///
+/// ⚠️ **Two key spellings are both live, and they are not interchangeable.**
+/// [`set_bone_pose_position`] and the animation bone tracks write Patina's
+/// `bones/N/pose_position`. A scene saved by Godot 4 stores the very same value
+/// as `bones/N/position` (upstream `skeleton_3d.cpp:98-102`, `:199-201`), and
+/// `packed_scene` lands every scene key verbatim as a node property, so that is
+/// the name a `.tscn` arrives under. Reading only Patina's spelling is why a
+/// Godot-authored bone pose was silently dropped on load.
+///
+/// Patina's own key wins when both exist: a script or an animation track that
+/// has since posed the bone is newer than whatever the scene file shipped.
+///
+/// Returns `None` when the bone has no stored component at all, which is the
+/// signal the caller needs to fall back to the rest value rather than to a
+/// zero/identity default.
+fn stored_pose_component(
+    tree: &SceneTree,
+    node_id: NodeId,
+    idx: usize,
+    component: &str,
+) -> Option<Variant> {
+    let node = tree.get_node(node_id)?;
+    for key in [
+        format!("bones/{idx}/pose_{component}"),
+        format!("bones/{idx}/{component}"),
+    ] {
+        match node.get_property(&key) {
+            Variant::Nil => continue,
+            value => return Some(value),
+        }
+    }
+    None
+}
+
+/// Returns the position component of bone `idx`'s pose.
+///
+/// Defaults to the **rest** origin, not `ZERO`: in Godot 4 a bone's pose *is*
+/// its full local transform and starts out equal to its rest
+/// (`reset_bone_pose` copies rest into pose, `skeleton_3d.cpp:908`). Answering
+/// `ZERO` collapsed every unposed bone of an imported rig onto its parent.
 pub fn get_bone_pose_position(tree: &SceneTree, node_id: NodeId, idx: usize) -> Vector3 {
-    tree.get_node(node_id)
-        .map(|n| match n.get_property(&bone_pose_position_key(idx)) {
-            Variant::Vector3(v) => v,
-            _ => Vector3::ZERO,
-        })
-        .unwrap_or(Vector3::ZERO)
+    match stored_pose_component(tree, node_id, idx, "position") {
+        Some(Variant::Vector3(v)) => v,
+        _ => get_bone_rest(tree, node_id, idx).origin,
+    }
 }
 
-/// Returns the rotation component of bone `idx`'s pose (default identity).
+/// Returns the rotation component of bone `idx`'s pose.
+///
+/// Defaults to the **rest** rotation — see [`get_bone_pose_position`].
 pub fn get_bone_pose_rotation(tree: &SceneTree, node_id: NodeId, idx: usize) -> Quaternion {
-    tree.get_node(node_id)
-        .map(|n| match n.get_property(&bone_pose_rotation_key(idx)) {
-            Variant::Quaternion(q) => q,
-            _ => Quaternion::IDENTITY,
-        })
-        .unwrap_or(Quaternion::IDENTITY)
+    match stored_pose_component(tree, node_id, idx, "rotation") {
+        Some(Variant::Quaternion(q)) => q,
+        _ => get_bone_rest(tree, node_id, idx)
+            .basis
+            .get_rotation_quaternion(),
+    }
 }
 
-/// Returns the scale component of bone `idx`'s pose (default `ONE`).
+/// Returns the scale component of bone `idx`'s pose.
+///
+/// Defaults to the **rest** scale — see [`get_bone_pose_position`].
 pub fn get_bone_pose_scale(tree: &SceneTree, node_id: NodeId, idx: usize) -> Vector3 {
-    tree.get_node(node_id)
-        .map(|n| match n.get_property(&bone_pose_scale_key(idx)) {
-            Variant::Vector3(v) => v,
-            _ => Vector3::ONE,
-        })
-        .unwrap_or(Vector3::ONE)
+    match stored_pose_component(tree, node_id, idx, "scale") {
+        Some(Variant::Vector3(v)) => v,
+        _ => get_bone_rest(tree, node_id, idx).basis.get_scale(),
+    }
 }
 
 /// Recomposes bone `idx`'s full pose Transform3D from its stored
@@ -373,8 +455,22 @@ pub fn is_bone_enabled(tree: &SceneTree, node_id: NodeId, idx: usize) -> bool {
 
 /// Computes the global pose of bone `idx` within the skeleton.
 ///
-/// This walks the bone parent chain, composing `rest * pose` at each level,
-/// matching Godot's `Skeleton3D.get_bone_global_pose()`.
+/// Walks the bone parent chain composing `parent_global * pose`, matching
+/// Godot 4's `Skeleton3D.get_bone_global_pose()`
+/// (`skeleton_3d.cpp:1108-1116`).
+///
+/// ⚠️ **This used to compose `parent_global * rest * pose`** — Godot *3*
+/// semantics, where the pose was an offset layered on the rest. In Godot 4 the
+/// pose is the bone's whole local transform and the rest is only its default,
+/// so multiplying by both applied the rest **twice**. Animation bone tracks
+/// sample ABSOLUTE local values and write them straight through
+/// `set_bone_pose_*` (see `apply_animation_bone_tracks`), so every imported rig
+/// with non-identity rests came out distorted. The bind pose still composes to
+/// the same matrix it always did, because [`get_bone_pose`] now defaults to the
+/// rest instead of to the identity.
+///
+/// The rest is consulted here for exactly one reason, the one Godot gives it:
+/// a **disabled** bone ignores its pose and holds its rest.
 pub fn get_bone_global_pose(tree: &SceneTree, node_id: NodeId, idx: usize) -> Transform3D {
     let count = get_bone_count(tree, node_id);
     if idx >= count {
@@ -392,9 +488,12 @@ pub fn get_bone_global_pose(tree: &SceneTree, node_id: NodeId, idx: usize) -> Tr
 
     let mut global = Transform3D::IDENTITY;
     for bone_idx in chain {
-        let rest = get_bone_rest(tree, node_id, bone_idx);
-        let pose = get_bone_pose(tree, node_id, bone_idx);
-        global = global * rest * pose;
+        let local = if is_bone_enabled(tree, node_id, bone_idx) {
+            get_bone_pose(tree, node_id, bone_idx)
+        } else {
+            get_bone_rest(tree, node_id, bone_idx)
+        };
+        global = global * local;
     }
     global
 }
@@ -402,11 +501,18 @@ pub fn get_bone_global_pose(tree: &SceneTree, node_id: NodeId, idx: usize) -> Tr
 /// Sets bone `idx`'s **global** pose, by solving for the local pose that
 /// produces it (pat-0q2kx.203).
 ///
-/// [`get_bone_global_pose`] accumulates `parent_global * rest * pose` down the
-/// chain, so the local pose that lands a bone at `global` is
-/// `(parent_global * rest)⁻¹ * global`. This is the writeback direction a
-/// ragdoll needs: the simulation produces world-space bone transforms, while
-/// the skeleton only stores local poses.
+/// [`get_bone_global_pose`] accumulates `parent_global * pose` down the chain,
+/// so the local pose that lands a bone at `global` is
+/// `parent_global⁻¹ * global`. This is the writeback direction a ragdoll
+/// needs: the simulation produces world-space bone transforms, while the
+/// skeleton only stores local poses.
+///
+/// ⚠️ The rest is **not** part of this solve. It used to be
+/// `(parent_global * rest)⁻¹ * global`, the exact inverse of the old Godot 3
+/// composition; leaving it in while [`get_bone_global_pose`] dropped it would
+/// make the round trip `set_bone_global_pose(i, g)` →
+/// `get_bone_global_pose(i)` return `g` pre-multiplied by `rest`, which is a
+/// silently drifting ragdoll rather than a visible failure.
 pub fn set_bone_global_pose(
     tree: &mut SceneTree,
     node_id: NodeId,
@@ -422,9 +528,8 @@ pub fn set_bone_global_pose(
     } else {
         Transform3D::IDENTITY
     };
-    let rest = get_bone_rest(tree, node_id, idx);
 
-    let pose = (parent_global * rest).inverse() * global;
+    let pose = parent_global.inverse() * global;
     set_bone_pose(tree, node_id, idx, pose);
 }
 
@@ -482,10 +587,18 @@ pub fn bone_rest_array(tree: &SceneTree, node_id: NodeId) -> Vec<Transform3D> {
 }
 
 /// Resets all bone poses to identity (clears animation overrides).
+/// Resets every bone's pose to its **rest**, as Godot's `reset_bone_poses`
+/// does (`skeleton_3d.cpp:908`).
+///
+/// ⚠️ This wrote `Transform3D::IDENTITY` before pat-mgixk.3. That was the
+/// neutral element only while the global pose composed `rest * pose`; now that
+/// the pose IS the local transform, an identity pose collapses every bone onto
+/// its parent, so "clear the pose" would have flattened the whole rig.
 pub fn clear_bones_pose(tree: &mut SceneTree, node_id: NodeId) {
     let count = get_bone_count(tree, node_id);
     for i in 0..count {
-        set_bone_pose(tree, node_id, i, Transform3D::IDENTITY);
+        let rest = get_bone_rest(tree, node_id, i);
+        set_bone_pose(tree, node_id, i, rest);
     }
 }
 
@@ -1327,9 +1440,14 @@ fn apply_look_at_modifier(tree: &mut SceneTree, skeleton_id: NodeId, modifier_id
     } else {
         Basis::IDENTITY
     };
-    let rest = get_bone_rest(tree, skeleton_id, bone);
     let pose = get_bone_pose(tree, skeleton_id, bone);
-    let frame = parent_basis * rest.basis;
+    // ⚠️ the pose IS the bone's local transform in Godot 4, so the frame a
+    // pose lives in is the parent's global basis ALONE (pat-mgixk.3).
+    // It used to be `parent_basis * rest.basis`, the Godot 3 frame.
+    // Leaving the rest in here while `get_bone_global_pose` dropped it
+    // would have every modifier rotate in a frame the skinning path no
+    // longer uses — the bone would visibly miss its target.
+    let frame = parent_basis;
     let mut new_pose = pose;
     new_pose.basis = frame.inverse() * delta * frame * pose.basis;
     set_bone_pose(tree, skeleton_id, bone, new_pose);
@@ -1440,9 +1558,14 @@ fn apply_aim_modifier(tree: &mut SceneTree, skeleton_id: NodeId, modifier_id: No
         } else {
             Basis::IDENTITY
         };
-        let rest = get_bone_rest(tree, skeleton_id, apply_bone);
         let pose = get_bone_pose(tree, skeleton_id, apply_bone);
-        let frame = parent_basis * rest.basis;
+        // ⚠️ the pose IS the bone's local transform in Godot 4, so the frame a
+        // pose lives in is the parent's global basis ALONE (pat-mgixk.3).
+        // It used to be `parent_basis * rest.basis`, the Godot 3 frame.
+        // Leaving the rest in here while `get_bone_global_pose` dropped it
+        // would have every modifier rotate in a frame the skinning path no
+        // longer uses — the bone would visibly miss its target.
+        let frame = parent_basis;
         let mut new_pose = pose;
         new_pose.basis = frame.inverse() * delta * frame * pose.basis;
         set_bone_pose(tree, skeleton_id, apply_bone, new_pose);
@@ -1580,10 +1703,15 @@ fn solve_fabrik_chain(
         } else {
             Basis::IDENTITY
         };
-        let rest = get_bone_rest(tree, skeleton_id, joint);
         let pose = get_bone_pose(tree, skeleton_id, joint);
 
-        let frame = parent_basis * rest.basis;
+        // ⚠️ the pose IS the bone's local transform in Godot 4, so the frame a
+        // pose lives in is the parent's global basis ALONE (pat-mgixk.3).
+        // It used to be `parent_basis * rest.basis`, the Godot 3 frame.
+        // Leaving the rest in here while `get_bone_global_pose` dropped it
+        // would have every modifier rotate in a frame the skinning path no
+        // longer uses — the bone would visibly miss its target.
+        let frame = parent_basis;
         let mut new_pose = pose;
         new_pose.basis = frame.inverse() * delta * frame * pose.basis;
         set_bone_pose(tree, skeleton_id, joint, new_pose);
@@ -1642,20 +1770,25 @@ fn solve_ccd(
                 Basis::from_quaternion(Quaternion::from_axis_angle(axis.normalized(), angle));
 
             // `delta` is a rotation in skeleton space, but poses are stored in
-            // the bone's parent frame. global(j) = parent_global * rest * pose,
-            // so to get global' = delta * global we need
-            //   pose' = (parent_global.basis * rest.basis)^-1
-            //           * delta * (parent_global.basis * rest.basis) * pose
+            // the bone's parent frame. global(j) = parent_global * pose
+            // (Godot 4), so to get global' = delta * global we need
+            //   pose' = parent_global.basis^-1 * delta
+            //           * parent_global.basis * pose
             let parent = get_bone_parent(tree, skeleton_id, joint);
             let parent_basis = if parent >= 0 {
                 get_bone_global_pose(tree, skeleton_id, parent as usize).basis
             } else {
                 Basis::IDENTITY
             };
-            let rest = get_bone_rest(tree, skeleton_id, joint);
             let pose = get_bone_pose(tree, skeleton_id, joint);
 
-            let frame = parent_basis * rest.basis;
+            // ⚠️ the pose IS the bone's local transform in Godot 4, so the frame a
+            // pose lives in is the parent's global basis ALONE (pat-mgixk.3).
+            // It used to be `parent_basis * rest.basis`, the Godot 3 frame.
+            // Leaving the rest in here while `get_bone_global_pose` dropped it
+            // would have every modifier rotate in a frame the skinning path no
+            // longer uses — the bone would visibly miss its target.
+            let frame = parent_basis;
             let mut new_pose = pose;
             new_pose.basis = frame.inverse() * delta * frame * pose.basis;
             set_bone_pose(tree, skeleton_id, joint, new_pose);
@@ -2340,9 +2473,20 @@ mod tests {
         );
 
         let spine_global = get_bone_global_pose(&tree, skel_id, spine);
-        // Hip rest origin (0,1,0) + spine rest origin (0,0.5,0) + spine pose (1,0,0)
+        // ⚠️ y was 1.5 before pat-mgixk.3, when this composed
+        // hip_rest (0,1,0) * spine_rest (0,0.5,0) * spine_pose (1,0,0).
+        // In Godot 4 the pose REPLACES the bone's local transform instead of
+        // offsetting its rest, so spine's own 0.5 rest offset is gone and only
+        // the parent chain contributes y: hip's pose (which defaults to hip's
+        // rest, 0,1,0) composed with spine's pose (1,0,0) → (1, 1, 0).
+        // That is the whole point of the change: an animation track writes
+        // absolute local values, and the rest must not be applied on top.
         assert!((spine_global.origin.x - 1.0).abs() < 1e-5);
-        assert!((spine_global.origin.y - 1.5).abs() < 1e-5);
+        assert!(
+            (spine_global.origin.y - 1.0).abs() < 1e-5,
+            "pose must replace spine's rest, not stack on it: {:?}",
+            spine_global.origin
+        );
     }
 
     #[test]
@@ -2794,8 +2938,15 @@ mod tests {
         player.play("pose");
         tree.attach_animation_player(player_node, player).unwrap();
 
-        // Before: the bone sits at its rest pose.
-        assert_eq!(get_bone_pose_position(&tree, skel, 1), Vector3::ZERO);
+        // Before: the bone sits at its rest pose — and now says so. This
+        // asserted `ZERO` while the comment claimed "rest pose"; the two only
+        // agreed because the getter defaulted to zero regardless of the rest
+        // (pat-mgixk.3). `Tip`'s rest origin is (0, 2, 0).
+        assert_eq!(
+            get_bone_pose_position(&tree, skel, 1),
+            Vector3::new(0.0, 2.0, 0.0),
+            "an unposed bone's pose defaults to its REST, as in Godot 4"
+        );
 
         apply_animation_bone_tracks(&mut tree);
 
@@ -2804,10 +2955,18 @@ mod tests {
             Vector3::new(3.0, 0.0, 0.0),
             "a position_3d track targeting Skeleton3D:Tip must write the bone pose"
         );
+        // ⚠️ This assertion used to read (3, 2, 0) — it ENCODED the bug
+        // pat-mgixk.3 fixes. `Tip`'s rest origin is (0, 2, 0) and the track
+        // writes the ABSOLUTE local value (3, 0, 0) through
+        // `set_bone_pose_position`, exactly as Godot 4 / glTF clips do. The old
+        // `parent_global * rest * pose` composition then added the rest a
+        // SECOND time and landed the bone at (3, 2, 0). Godot 4 composes
+        // `parent_global * pose` (`skeleton_3d.cpp:1108-1116`), so the bone
+        // belongs at the keyed value itself.
         assert_eq!(
             get_bone_global_pose(&tree, skel, 1).origin,
-            Vector3::new(3.0, 2.0, 0.0),
-            "the animated pose must compose with the bone's rest"
+            Vector3::new(3.0, 0.0, 0.0),
+            "an absolute bone track must not have the rest applied twice"
         );
     }
 }

@@ -385,11 +385,15 @@ fn guide_has_porting_walkthrough() {
         "guide must have a step-by-step porting walkthrough"
     );
 
+    // ⚠️ Step 4 is "GDScript and/or Rust game logic", NOT "Rewrite GDScript in
+    // Rust". Patina executes GDScript through `gdscript-interop`, and the guide
+    // offers "Option A — keep GDScript" first, so a step name that mandates a
+    // rewrite is the pre-interop stance and would be wrong advice (pat-21oab).
     let steps = [
         "Assess Compatibility",
         "Create a Rust Project",
         "Copy Scene Files",
-        "Rewrite GDScript in Rust",
+        "GDScript and/or Rust game logic",
         "Run and Iterate",
     ];
     for step in &steps {
@@ -412,8 +416,13 @@ fn porting_walkthrough_has_compatibility_checklist() {
         guide.contains("Partially supported"),
         "porting section must have partially supported features"
     );
+    // ⚠️ The walkthrough HAS this checklist: Step 1 carries
+    // `##### Not Yet Supported`, listing the unimplemented node types. Only the
+    // capitalisation differed, and this file's own sibling assertion already
+    // accepts either case for the same heading (see
+    // `limitations_section_exists`). Made consistent with it (pat-21oab).
     assert!(
-        guide.contains("Not yet supported"),
+        guide.contains("Not Yet Supported") || guide.contains("Not yet supported"),
         "porting section must have unsupported features"
     );
 }
@@ -703,10 +712,19 @@ fn each_limitation_has_workaround() {
 fn limitations_mention_key_missing_features() {
     let guide = read_guide();
 
+    // ⚠️ "No GDScript" and "No blend trees" were both FALSE and were replaced
+    // with the guide's real limitation rows for those subsystems (pat-21oab):
+    //   * GDScript runs — `crates/gdscript-interop` is a parser, type checker
+    //     and interpreter. The true limitation is that coverage is PARTIAL.
+    //   * Blend trees exist — `crates/gdscene/src/animation_tree.rs` (+
+    //     `animation_tree_tscn.rs`, editor `anim_tree_graph.rs`). The true
+    //     limitation is blend DEPTH on exotic graphs.
+    // Asserting the absent features would make the guide tell users to rewrite
+    // working GDScript and abandon working blend trees.
     let key_limitations = [
         "Software rendering",
-        "No GDScript",
-        "No blend trees",
+        "Partial GDScript interpreter",
+        "`AnimationTree` blend depth",
         "No mobile platforms",
         "No GDExtension",
     ];

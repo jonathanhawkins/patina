@@ -5,6 +5,8 @@
 //! 1. NOTIFICATION_PARENTED / CHILD_ORDER_CHANGED — fires on add_child
 //! 2. NOTIFICATION_UNPARENTED — fires on remove_node
 //! 3. NOTIFICATION_MOVED_IN_PARENT — fires on reparent and move_child
+//!    (⚠️ deprecated upstream: Godot 4.6.1 never sends it — see
+//!    doc/classes/Node.xml:1172. Patina still does; not changed here.)
 //! 4. NOTIFICATION_CHILD_ORDER_CHANGED — fires on parent when child order changes
 //! 5. move_child / raise / lower — reorder operations
 //! 6. NOTIFICATION_PAUSED / NOTIFICATION_UNPAUSED — fires on set_paused
@@ -212,9 +214,13 @@ fn unparented_fires_for_subtree_root_only() {
 // 3. NOTIFICATION_MOVED_IN_PARENT — fires on reparent and move_child
 // ===========================================================================
 
-/// Reparenting fires UNPARENTED, then PARENTED, then MOVED_IN_PARENT on the child.
+/// Reparenting takes the moved node out of the tree and back in, so it sees the
+/// full lifecycle: EXIT_TREE, the structural notifications, then ENTER_TREE and
+/// READY. Godot gets this by delegating to `remove_child` + `add_child`
+/// (node.cpp:2077-2078); `reparent_notification_order_parity_test` is the
+/// dedicated parity suite for the ordering.
 #[test]
-fn reparent_fires_unparented_then_parented_then_moved() {
+fn reparent_fires_the_full_exit_and_reenter_lifecycle() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
@@ -234,8 +240,16 @@ fn reparent_fires_unparented_then_parented_then_moved() {
 
     assert_eq!(
         child_events,
-        vec!["UNPARENTED", "PARENTED", "MOVED_IN_PARENT"],
-        "reparent sequence on child should be UNPARENTED -> PARENTED -> MOVED_IN_PARENT"
+        vec![
+            "EXIT_TREE",
+            "UNPARENTED",
+            "PARENTED",
+            "MOVED_IN_PARENT",
+            "ENTER_TREE",
+            "READY"
+        ],
+        "reparent must take the child out of the tree and back in, not just \
+         re-link it structurally"
     );
 }
 
@@ -822,8 +836,9 @@ fn full_removal_sequence() {
     );
 }
 
-/// Verify reparent sequence: UNPARENTED -> PARENTED -> MOVED_IN_PARENT on child,
-/// CHILD_ORDER_CHANGED on new parent.
+/// Verify the whole reparent sequence on the child -- EXIT_TREE, UNPARENTED,
+/// PARENTED, MOVED_IN_PARENT, ENTER_TREE, READY -- plus CHILD_ORDER_CHANGED on
+/// the new parent.
 #[test]
 fn full_reparent_sequence() {
     let mut tree = SceneTree::new();
@@ -842,8 +857,16 @@ fn full_reparent_sequence() {
     let child_details = node_notification_details(&tree, "Child");
     assert_eq!(
         child_details,
-        vec!["UNPARENTED", "PARENTED", "MOVED_IN_PARENT"],
-        "reparent sequence should be UNPARENTED -> PARENTED -> MOVED_IN_PARENT"
+        vec![
+            "EXIT_TREE",
+            "UNPARENTED",
+            "PARENTED",
+            "MOVED_IN_PARENT",
+            "ENTER_TREE",
+            "READY"
+        ],
+        "reparent sequence should be EXIT_TREE -> UNPARENTED -> PARENTED -> \
+         MOVED_IN_PARENT -> ENTER_TREE -> READY"
     );
 
     let b_details = exact_node_notifications(&tree, "/root/B");

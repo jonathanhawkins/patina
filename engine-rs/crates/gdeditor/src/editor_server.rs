@@ -30,7 +30,7 @@ use gdvariant::Variant;
 use crate::create_dialog::CreateNodeDialog;
 use crate::filesystem::{EditorFileSystem, FileSystemDock};
 use crate::texture_cache::TextureCache;
-use crate::EditorCommand;
+use crate::{ConnectOptions, EditorCommand};
 
 use gdcore::math::{Rect2, Vector2, Vector2i};
 use gdscene::scripting::{GDScriptNodeInstance, InputSnapshot};
@@ -3579,11 +3579,19 @@ fn node_to_json_tree_with_warnings(
         _ => String::new(),
     };
 
-    // Detect signal connections.
-    let has_signals = match node.get_property("signal_connections") {
-        Variant::String(ref s) if !s.is_empty() => true,
-        _ => false,
-    };
+    // Detect signal connections from the tree's signal store (pat-mgixk.13).
+    //
+    // ⚠️ This used to read the `signal_connections` string property, which made
+    // the scene-tree badge lie in BOTH directions: a connection loaded from a
+    // `.tscn` set no property, so it showed nothing, and the property survived
+    // a disconnect, so it kept showing one. `dock.rs` already counts the real
+    // store (`signal_count > 0`), so the two sources now agree.
+    let has_signals = tree.signal_store(node_id).is_some_and(|store| {
+        store
+            .signal_names()
+            .iter()
+            .any(|name| store.get_signal(name).is_some_and(|s| s.is_connected()))
+    });
 
     // Collect groups from the node's real membership (single source of truth,
     // shared with the Groups dock, `get_nodes_in_group`, and `.tscn` save).
@@ -13396,61 +13404,93 @@ fn api_get_node_signals(state: &Arc<Mutex<EditorState>>, query: &str, stream: &m
         let node = state.scene_tree.get_node(node_id).unwrap();
         let class_name = node.class_name().to_string();
 
-        // Get signals available for this class.
-        let available = signals_for_class(&class_name);
-
-        // Check for connections (stored as property signal_connections).
-        let connections_variant = node.get_property("signal_connections");
-        let connections_str = match &connections_variant {
-            Variant::String(s) => s.clone(),
-            _ => String::new(),
-        };
+        // Signals come from ClassDB's inheritance chain plus the attached
+        // script's own `signal` declarations — what Godot's ConnectionsDock
+        // shows (pat-mgixk.13).
+        //
+        // This replaces `signals_for_class`, a hard-coded match that knew about
+        // four classes: a Node2D offered three signals, a Sprite2D none of its
+        // own, and a script's `signal died` was invisible. `register_all_classes`
+        // runs in `EditorState::new`, so the table is populated by the time any
+        // request lands.
+        let mut signal_names: Vec<String> = gdobject::class_db::get_signal_list(&class_name)
+            .into_iter()
+            .map(|info| info.name)
+            .collect();
+        if let Some(script) = state.scene_tree.get_script(node_id) {
+            signal_names.extend(script.list_signals());
+        }
+        signal_names.sort();
+        signal_names.dedup();
+        // An unregistered custom class would otherwise render an EMPTY dock,
+        // which is strictly worse than the old table. Fall back only then.
+        if signal_names.is_empty() {
+            signal_names = signals_for_class(&class_name)
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
+        }
 
         // Get groups from the node's real membership so the Groups dock shows
         // groups added here, loaded from a `.tscn`, or copied on duplicate.
         let mut groups: Vec<String> = node.groups().iter().cloned().collect();
         groups.sort();
 
-        let signals_json: Vec<String> = available
+        // Connections come from the tree's signal store — the same place
+        // `TscnSaver` reads and the running scene emits through. The old code
+        // read a `signal_connections` string property that nothing but the
+        // editor ever looked at, so a connection loaded from a `.tscn` did not
+        // appear here at all.
+        let store = state.scene_tree.signal_store(node_id);
+        let signals_json: Vec<serde_json::Value> = signal_names
             .iter()
             .map(|sig| {
-                // Parse connections to get details for this signal
-                let connections: Vec<String> = connections_str
-                    .split(',')
-                    .filter(|c| !c.is_empty() && c.starts_with(&format!("{}:", sig)))
-                    .map(|c| {
-                        let method = c.splitn(2, ':').nth(1).unwrap_or("");
-                        format!(r#"{{"method":"{}"}}"#, method.replace('"', "\\\""))
+                let connections: Vec<serde_json::Value> = store
+                    .and_then(|s| s.get_signal(sig))
+                    .map(|signal| {
+                        signal
+                            .connections()
+                            .iter()
+                            .map(|conn| {
+                                // `NodeId` is a newtype over `ObjectId`, so the
+                                // target resolves straight back to a node — and
+                                // to `None` when it is some other object.
+                                let target = gdscene::node::NodeId::from_object_id(conn.target_id);
+                                let options = ConnectOptions::from_connection(conn);
+                                serde_json::json!({
+                                    "method": conn.method,
+                                    "target_id": conn.target_id.raw(),
+                                    "target_path": state.scene_tree.node_path(target),
+                                    "flags": options.godot_flags(),
+                                    "deferred": conn.deferred,
+                                    "one_shot": conn.one_shot,
+                                    "bind_count": conn.binds.len(),
+                                })
+                            })
+                            .collect()
                     })
-                    .collect();
-                let connected = !connections.is_empty();
-                format!(
-                    r#"{{"name":"{}","connected":{},"connection_count":{},"connections":[{}]}}"#,
-                    sig,
-                    connected,
-                    connections.len(),
-                    connections.join(",")
-                )
+                    .unwrap_or_default();
+                serde_json::json!({
+                    "name": sig,
+                    "connected": !connections.is_empty(),
+                    "connection_count": connections.len(),
+                    "connections": connections,
+                })
             })
-            .collect();
-
-        let groups_json: Vec<String> = groups
-            .iter()
-            .map(|g| format!(r#""{}""#, g.replace('\\', "\\\\").replace('"', "\\\"")))
             .collect();
 
         let total_connected = signals_json
             .iter()
-            .filter(|s| s.contains(r#""connected":true"#))
+            .filter(|s| s["connected"] == serde_json::Value::Bool(true))
             .count();
-        format!(
-            r#"{{"node_id":{},"class":"{}","signals":[{}],"groups":[{}],"connected_count":{}}}"#,
-            node_raw,
-            class_name.replace('"', "\\\""),
-            signals_json.join(","),
-            groups_json.join(","),
-            total_connected,
-        )
+        serde_json::json!({
+            "node_id": node_raw,
+            "class": class_name,
+            "signals": signals_json,
+            "groups": groups,
+            "connected_count": total_connected,
+        })
+        .to_string()
     };
     send_json(stream, &json);
 }
@@ -13479,13 +13519,32 @@ fn api_connect_signal(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
             return;
         }
     };
-    let _target_raw = parsed.get("target_id").and_then(|v| v.as_u64());
+    let target_raw = parsed.get("target_id").and_then(|v| v.as_u64());
     let method = match parsed.get("method").and_then(|v| v.as_str()) {
         Some(v) => v.to_string(),
         None => {
             send_error(stream, 400, "missing method");
             return;
         }
+    };
+    // The Connect dialog has sent these since pat-jwuv1.3 and this handler threw
+    // all three away, along with `target_id` — so every connection made in the
+    // editor was an inline call to a method on the node itself, whatever the
+    // user ticked (pat-mgixk.13).
+    let options = ConnectOptions {
+        deferred: parsed
+            .get("deferred")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        one_shot: parsed
+            .get("one_shot")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        binds: parsed
+            .get("binds")
+            .and_then(|v| v.as_array())
+            .map(|items| items.iter().map(json_to_variant).collect())
+            .unwrap_or_default(),
     };
 
     let mut state = state.lock().unwrap();
@@ -13496,35 +13555,31 @@ fn api_connect_signal(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
             return;
         }
     };
+    // Godot's ConnectDialog defaults the receiver to the scene root — the node
+    // that owns the script — which is what `to="."` means in a `.tscn`.
+    let target_id = match target_raw {
+        Some(raw) => match find_node_by_raw_id(&state.scene_tree, raw) {
+            Some(id) => id,
+            None => {
+                send_error(stream, 404, "target node not found");
+                return;
+            }
+        },
+        None => state.scene_tree.root_id(),
+    };
 
-    // Store connection info as a property string (signal_connections), as an
-    // undoable step (pat-0q2kx.12).
+    // A REAL connection in the tree's signal store, not a string in a property.
     //
-    // Note this handler keeps connections in a node property rather than via
-    // `SceneTree::connect_signal`, so the existing `ConnectSignal` command —
-    // which drives the tree's own signal table — would undo the wrong thing.
-    // `SetProperty` restores exactly the string this route writes. Letting
-    // `execute` capture `old_value` is safe here (unlike the viewport drag):
-    // nothing else has written the property during this request.
-    let existing = match state
-        .scene_tree
-        .get_node(node_id)
-        .map(|n| n.get_property("signal_connections"))
-    {
-        Some(Variant::String(s)) => s,
-        _ => String::new(),
-    };
-    let new_entry = format!("{}:{}", signal_name, method);
-    let updated = if existing.is_empty() {
-        new_entry
-    } else {
-        format!("{},{}", existing, new_entry)
-    };
-    let mut cmd = EditorCommand::SetProperty {
-        node_id,
-        property: "signal_connections".to_string(),
-        new_value: Variant::String(updated),
-        old_value: Variant::Nil,
+    // The store is what `TscnSaver` reads to emit `[connection]` lines and what
+    // the running scene emits through, so this is the single change that makes
+    // an editor-made connection both persist and fire. `ConnectSignal` already
+    // existed with full undo support and simply had no caller on this route.
+    let mut cmd = EditorCommand::ConnectSignal {
+        source_id: node_id,
+        signal_name: signal_name.clone(),
+        target_object_id: target_id.object_id().raw(),
+        method: method.clone(),
+        options,
     };
     if let Err(e) = cmd.execute(&mut state.scene_tree) {
         send_error(stream, 500, &e.to_string());
@@ -13539,6 +13594,26 @@ fn api_connect_signal(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
     );
 
     send_json(stream, r#"{"ok":true}"#);
+}
+
+/// Converts one JSON value from a request body into a [`Variant`].
+///
+/// Used for a connection's bound arguments. The Connect dialog collects them as
+/// comma-separated text, so they arrive as strings; numbers and booleans are
+/// handled too so a client that sends typed JSON is not silently stringified.
+/// Anything structured becomes its JSON text rather than `Nil`, which keeps the
+/// bind visible in the saved scene instead of quietly vanishing.
+fn json_to_variant(value: &serde_json::Value) -> Variant {
+    match value {
+        serde_json::Value::Null => Variant::Nil,
+        serde_json::Value::Bool(b) => Variant::Bool(*b),
+        serde_json::Value::Number(n) => match n.as_i64() {
+            Some(i) => Variant::Int(i),
+            None => Variant::Float(n.as_f64().unwrap_or(0.0)),
+        },
+        serde_json::Value::String(s) => Variant::String(s.clone()),
+        other => Variant::String(other.to_string()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -22148,6 +22223,12 @@ fn api_disconnect_signal(state: &Arc<Mutex<EditorState>>, body: &str, stream: &m
             return;
         }
     };
+    // Optional, and what makes a disconnect EXACT. Godot identifies a
+    // connection by (signal, target, method); without these the old handler
+    // could only guess.
+    let method = parsed_method(&p);
+    let target_raw = p.get("target_id").and_then(|v| v.as_u64());
+
     let mut s = state.lock().unwrap();
     let nid = match find_node_by_raw_id(&s.scene_tree, node_raw) {
         Some(n) => n,
@@ -22156,21 +22237,93 @@ fn api_disconnect_signal(state: &Arc<Mutex<EditorState>>, body: &str, stream: &m
             return;
         }
     };
-    let node = s.scene_tree.get_node_mut(nid).unwrap();
-    let connections = match node.get_property("signal_connections") {
-        Variant::String(c) => c,
-        _ => String::new(),
+
+    // Read the real connections out of the signal store and narrow them by
+    // whatever the caller specified.
+    //
+    // ⚠️ This replaces string surgery on a `signal_connections` property that
+    // was broken three ways at once (pat-mgixk.13): connect joined entries with
+    // `,` while this split on `;`, so the whole value was always one entry; the
+    // filter was `!entry.contains(&signal)`, a SUBSTRING test, so disconnecting
+    // `pressed` also matched `button_pressed`; and between the two, removing
+    // any one connection dropped every connection on the node. None of it was
+    // undoable, and none of it affected what the scene actually emitted.
+    let doomed: Vec<(u64, String)> = s
+        .scene_tree
+        .signal_store(nid)
+        .and_then(|store| store.get_signal(&signal))
+        .map(|sig| {
+            sig.connections()
+                .iter()
+                .filter(|conn| method.as_deref().map_or(true, |m| conn.method == m))
+                .filter(|conn| target_raw.map_or(true, |t| conn.target_id.raw() == t))
+                .map(|conn| (conn.target_id.raw(), conn.method.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if doomed.is_empty() {
+        send_error(stream, 404, "no such connection");
+        return;
+    }
+
+    let removed_count = doomed.len();
+    let mut cmd = if removed_count == 1 {
+        let (target_object_id, method) = doomed.into_iter().next().expect("one element");
+        EditorCommand::DisconnectSignal {
+            source_id: nid,
+            signal_name: signal.clone(),
+            target_object_id,
+            method,
+            removed: None,
+        }
+    } else {
+        // One undo step, not N. A dock row's "Disconnect" means the whole
+        // signal, and the user expects one Ctrl-Z to put it all back.
+        EditorCommand::Group {
+            label: format!("Disconnect {signal} ({removed_count} connections)"),
+            commands: doomed
+                .into_iter()
+                .map(
+                    |(target_object_id, method)| EditorCommand::DisconnectSignal {
+                        source_id: nid,
+                        signal_name: signal.clone(),
+                        target_object_id,
+                        method,
+                        removed: None,
+                    },
+                )
+                .collect(),
+        }
     };
-    let updated: Vec<&str> = connections
-        .split(';')
-        .filter(|entry| !entry.is_empty() && !entry.contains(&signal))
-        .collect();
-    node.set_property("signal_connections", Variant::String(updated.join(";")));
+    if let Err(e) = cmd.execute(&mut s.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+    s.undo_stack.push(cmd);
+    s.redo_stack.clear();
+    s.scene_modified = true;
     s.add_log(
         "info",
-        format!("Signal disconnected: {} on node {}", signal, node_raw),
+        format!("Signal disconnected: {signal} on node {node_raw} ({removed_count})"),
     );
-    send_json(stream, r#"{"ok":true}"#);
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"removed":{removed_count}}}"#),
+    );
+}
+
+/// Reads an optional non-empty `method` out of a request body.
+///
+/// Empty-string and absent mean the same thing to the signal routes — "not
+/// specified" — so a client that sends `method: ""` must not be read as asking
+/// for a connection whose method is the empty string.
+fn parsed_method(body: &serde_json::Value) -> Option<String> {
+    body.get("method")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
 }
 
 /// Resolves a script `path` (either a `res://` virtual path or a filesystem
@@ -23338,17 +23491,16 @@ fn api_get_import_settings(state: &Arc<Mutex<EditorState>>, query: &str, stream:
             return;
         }
     };
-    // Godot names the texture importer "Texture2D" and the scene importer
-    // "Scene"; map our resource types to those user-facing importer names.
-    let importer = match rty {
-        ImportResourceType::Texture => "Texture2D",
-        ImportResourceType::Audio => "Audio Stream",
-        ImportResourceType::Scene => "Scene",
-        ImportResourceType::Mesh => "Mesh",
-        ImportResourceType::Font => "Font",
-        ImportResourceType::Shader => "Shader",
-        ImportResourceType::Script => "Script",
-    };
+    // ⚠️ This used to answer "Texture2D"/"Audio Stream"/"Scene"/"Font" under a
+    // comment claiming those were Godot's importer names. They are not: those
+    // are `get_resource_type()` values. The dock's "Import As:" field is
+    // `get_importer_name()` — the string Godot writes into a `.import` file's
+    // `importer="..."` line — and the two differ unpredictably, so it cannot be
+    // derived from the resource type: `.ogg` is `oggvorbisstr`, `.obj` is
+    // `wavefront_obj` rather than `scene`, and `.fnt` is `font_data_bmfont`
+    // rather than `font_data_dynamic`. It is therefore keyed on the EXTENSION,
+    // not on `rty` (pat-21oab).
+    let importer = ImportResourceType::godot_importer_name(&ext);
     // What the asset is ACTUALLY set to wins over the importer default: Godot's
     // `ImportDock::_update_options` shows the values stored in the asset's
     // `.import` `[params]`, so a dock that always rendered defaults could never

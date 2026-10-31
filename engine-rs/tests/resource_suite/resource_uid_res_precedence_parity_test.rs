@@ -62,7 +62,7 @@ impl ResourceLoader for HeaderUidLoader {
         let mut r = Resource::new("WithHeaderUid");
         r.path = path.to_string();
         // Simulate a .tres file having uid=... in its [gd_resource] header.
-        r.uid = parse_uid_string(&format!("uid://file_header_{path}"));
+        r.uid = parse_uid_string(&format!("uid://fileheader{path}"));
         Ok(Arc::new(r))
     }
 }
@@ -140,8 +140,8 @@ fn manual_uid_persists_after_load() {
     let mut ul = UnifiedLoader::new(HeaderUidLoader);
 
     // Manually register a specific UID for the path.
-    let manual_uid = parse_uid_string("uid://my_manual_id");
-    ul.register_uid_str("uid://my_manual_id", "res://hero.tres");
+    let manual_uid = parse_uid_string("uid://mymanualid");
+    ul.register_uid_str("uid://mymanualid", "res://hero.tres");
 
     // Load the resource — manual registration must survive.
     ul.load("res://hero.tres").unwrap();
@@ -198,17 +198,17 @@ fn uid_reregistration_evicts_old_path() {
 fn path_reregistration_evicts_old_uid() {
     let mut ul = UnifiedLoader::new(CountingLoader::new());
 
-    let uid_a = parse_uid_string("uid://uid_alpha");
-    let uid_b = parse_uid_string("uid://uid_beta");
+    let uid_a = parse_uid_string("uid://uidalpha");
+    let uid_b = parse_uid_string("uid://uidbeta");
 
-    ul.register_uid_str("uid://uid_alpha", "res://shared.tres");
+    ul.register_uid_str("uid://uidalpha", "res://shared.tres");
     assert_eq!(
         ul.uid_registry().lookup_path("res://shared.tres"),
         Some(uid_a)
     );
 
     // Register a different UID for the same path.
-    ul.register_uid_str("uid://uid_beta", "res://shared.tres");
+    ul.register_uid_str("uid://uidbeta", "res://shared.tres");
 
     // Old UID is evicted.
     assert!(
@@ -328,11 +328,11 @@ fn path_first_then_uid_same_arc() {
 fn registry_is_strict_bijection_no_multi_uid_alias() {
     let mut ul = UnifiedLoader::new(CountingLoader::new());
 
-    let uid_a = parse_uid_string("uid://alias_a");
-    let uid_b = parse_uid_string("uid://alias_b");
+    let uid_a = parse_uid_string("uid://aliasa");
+    let uid_b = parse_uid_string("uid://aliasb");
 
-    ul.register_uid_str("uid://alias_a", "res://shared.tres");
-    ul.register_uid_str("uid://alias_b", "res://shared.tres");
+    ul.register_uid_str("uid://aliasa", "res://shared.tres");
+    ul.register_uid_str("uid://aliasb", "res://shared.tres");
 
     // Only the last registration survives (strict bijection).
     assert!(
@@ -399,11 +399,11 @@ fn explicit_registration_governs_uid_resolution() {
     let mut ul = UnifiedLoader::new(CountingLoader::new());
 
     // Register two UIDs for two different resources.
-    ul.register_uid_str("uid://scene_a", "res://scenes/a.tscn");
-    ul.register_uid_str("uid://scene_b", "res://scenes/b.tscn");
+    ul.register_uid_str("uid://scenea", "res://scenes/a.tscn");
+    ul.register_uid_str("uid://sceneb", "res://scenes/b.tscn");
 
-    let a = ul.load("uid://scene_a").unwrap();
-    let b = ul.load("uid://scene_b").unwrap();
+    let a = ul.load("uid://scenea").unwrap();
+    let b = ul.load("uid://sceneb").unwrap();
 
     assert_eq!(a.path, "res://scenes/a.tscn");
     assert_eq!(b.path, "res://scenes/b.tscn");
@@ -412,14 +412,14 @@ fn explicit_registration_governs_uid_resolution() {
         "different UIDs must load different resources"
     );
 
-    // Re-register uid://scene_a to point to B's path.
-    ul.register_uid_str("uid://scene_a", "res://scenes/b.tscn");
+    // Re-register uid://scenea to point to B's path.
+    ul.register_uid_str("uid://scenea", "res://scenes/b.tscn");
 
     // Now both UIDs resolve to the same path and same cached Arc.
-    let a2 = ul.load("uid://scene_a").unwrap();
+    let a2 = ul.load("uid://scenea").unwrap();
     assert!(
         Arc::ptr_eq(&a2, &b),
-        "after re-registration, uid://scene_a must resolve to same Arc as uid://scene_b"
+        "after re-registration, uid://scenea must resolve to same Arc as uid://sceneb"
     );
 }
 
@@ -430,10 +430,10 @@ fn explicit_registration_governs_uid_resolution() {
 #[test]
 fn clear_cache_preserves_uid_registry() {
     let mut ul = UnifiedLoader::new(CountingLoader::new());
-    let uid = parse_uid_string("uid://survives_clear");
-    ul.register_uid_str("uid://survives_clear", "res://data.tres");
+    let uid = parse_uid_string("uid://survivesclear");
+    ul.register_uid_str("uid://survivesclear", "res://data.tres");
 
-    ul.load("uid://survives_clear").unwrap();
+    ul.load("uid://survivesclear").unwrap();
     assert_eq!(ul.cache_len(), 1);
 
     ul.clear_cache();
@@ -447,7 +447,7 @@ fn clear_cache_preserves_uid_registry() {
     );
 
     // Can reload by UID after cache clear.
-    let reloaded = ul.load("uid://survives_clear").unwrap();
+    let reloaded = ul.load("uid://survivesclear").unwrap();
     assert_eq!(reloaded.path, "res://data.tres");
 }
 
@@ -458,10 +458,10 @@ fn clear_cache_preserves_uid_registry() {
 #[test]
 fn get_cached_resolves_uid_to_same_arc() {
     let mut ul = UnifiedLoader::new(CountingLoader::new());
-    ul.register_uid_str("uid://cached_ref", "res://cached.tres");
+    ul.register_uid_str("uid://cachedref", "res://cached.tres");
 
     let loaded = ul.load("res://cached.tres").unwrap();
-    let by_uid = ul.get_cached("uid://cached_ref").unwrap();
+    let by_uid = ul.get_cached("uid://cachedref").unwrap();
     let by_path = ul.get_cached("res://cached.tres").unwrap();
 
     assert!(Arc::ptr_eq(&loaded, &by_uid));

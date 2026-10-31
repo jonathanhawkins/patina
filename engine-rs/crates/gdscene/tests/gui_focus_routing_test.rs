@@ -106,22 +106,47 @@ fn clicking_a_control_grabs_focus_through_push_input() {
     );
 }
 
-/// Clicking a `FOCUS_NONE` Control drops focus rather than keeping the old
-/// owner, matching Godot.
+/// 🔑 Clicking a Label **keeps** the previous focus owner. Godot does not
+/// release focus for a click that lands on no control.
+///
+/// ⚠️ This test previously asserted the opposite — `focus_owner() == None`,
+/// "matching Godot" — and failed against correct engine behaviour (pat-21oab).
+/// Two things it had wrong:
+///
+/// 1. A Label is `MOUSE_FILTER_IGNORE` by default
+///    (`scene/gui/label.cpp:1477`), so the click never resolves to the Label.
+///    Its `FOCUS_NONE` mode never enters the picture, which is why the old name
+///    described a mechanism that does not run.
+/// 2. With no control under the cursor, `Viewport::_gui_input_event`
+///    (`scene/main/viewport.cpp:1918-1926`) sets `gui.hide_focus = true`,
+///    queues a redraw, and **returns** — `gui.key_focus` is untouched. Its
+///    comment says so: "Focus should be hidden on click even if the focus
+///    holder didn't change."
+///
+/// So the observable is: the Button stays the focus owner, and the Label never
+/// becomes it. Godot additionally hides the focus *ring* via `hide_focus`;
+/// Patina has no such flag yet, which is a real gap but a visual one and not
+/// what this test measures.
 #[test]
-fn clicking_a_non_focusable_control_releases_focus() {
+fn clicking_a_label_keeps_the_previous_focus_owner() {
     let (mut tree, btn, _edit, label) = focus_scene();
 
     tree.push_input(&press(40.0, 15.0));
     assert!(tree.has_focus(btn));
 
+    // A Label is MOUSE_FILTER_IGNORE, so this press finds no control.
     tree.push_input(&press(240.0, 15.0));
     assert_eq!(
         tree.focus_owner(),
-        None,
-        "clicking a Label (FOCUS_NONE) must clear focus, not retain the Button"
+        Some(btn),
+        "a click that lands on no control must leave the focus owner alone \
+         (viewport.cpp:1918-1926 hides the ring and returns)"
     );
-    assert!(!tree.has_focus(label));
+    assert!(
+        !tree.has_focus(label),
+        "the Label must never take focus — it is both FOCUS_NONE and \
+         MOUSE_FILTER_IGNORE"
+    );
 }
 
 // ===========================================================================

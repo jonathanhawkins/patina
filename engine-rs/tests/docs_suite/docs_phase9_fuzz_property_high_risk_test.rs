@@ -58,7 +58,7 @@ fn fuzz_property_coverage_gate_anchor_exists() {
     // The sibling gate that this bead depends on for a "suite" (it iterates
     // every high-risk surface). Guard its presence so a regression that
     // strips the gate file fails under pat-2y541's marker.
-    let p = repo_root().join("engine-rs/tests/fuzz_property_coverage_test.rs");
+    let p = repo_root().join("engine-rs/tests/fuzz_suite/fuzz_property_coverage_test.rs");
     assert!(
         p.exists(),
         "fuzz/property coverage gate must exist at {}",

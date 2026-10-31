@@ -89,21 +89,34 @@ fn audit_distinguishes_measured_from_broader_parity() {
 // 2. Evidence test files cited in the audit matrix exist
 // ===========================================================================
 
-/// All test files cited as evidence in the Phase 8 audit matrix.
+/// All test files cited as evidence in the Phase 8 audit matrix, as paths
+/// relative to `engine-rs/`.
+///
+/// ⚠️ These were `tests/<name>.rs` and every one of the 13 reported as missing.
+/// None had been deleted: `engine-rs/tests` was reorganised into suite
+/// directories — a standalone file per test meant ~550 full engine links — so
+/// each former standalone file is now a module inside `tests/<suite>/main.rs`.
+/// One of them does not live under `engine-rs/tests` at all; `editor_smoke_test`
+/// is a `gdeditor` crate test, which is why a resolver scoped to `tests/` would
+/// still not find it and the paths are spelled out instead (pat-21oab).
+///
+/// Kept as explicit paths, not basenames: this is an evidence list for an audit,
+/// so it should break loudly when a cited file moves rather than quietly
+/// re-resolve. `audit_evidence_file_count_guard` pins the count at 13.
 const AUDIT_EVIDENCE_TEST_FILES: &[&str] = &[
-    "tests/editor_smoke_test.rs",
-    "tests/editor_461_revalidation_test.rs",
-    "tests/editor_interface_compat_test.rs",
-    "tests/editor_menu_parity_test.rs",
-    "tests/editor_systems_parity_test.rs",
-    "tests/editor_compat_layer_test.rs",
-    "tests/script_editor_core_parity_test.rs",
-    "tests/property_inspector_typed_editors_test.rs",
-    "tests/property_inspector_resource_sub_editor_test.rs",
-    "tests/animation_editor_parity_test.rs",
-    "tests/tilemap_editor_painting_test.rs",
-    "tests/theme_editor_live_preview_test.rs",
-    "tests/tooling_parity_milestone_test.rs",
+    "crates/gdeditor/tests/editor_suite_d/editor_smoke_test.rs",
+    "tests/editor_suite/editor_461_revalidation_test.rs",
+    "tests/editor_suite/editor_interface_compat_test.rs",
+    "tests/editor_suite/editor_menu_parity_test.rs",
+    "tests/editor_suite/editor_systems_parity_test.rs",
+    "tests/editor_suite/editor_compat_layer_test.rs",
+    "tests/script_suite/script_editor_core_parity_test.rs",
+    "tests/property_suite/property_inspector_typed_editors_test.rs",
+    "tests/property_suite/property_inspector_resource_sub_editor_test.rs",
+    "tests/animation_suite/animation_editor_parity_test.rs",
+    "tests/misc_suite_f/tilemap_editor_painting_test.rs",
+    "tests/theme_suite/theme_editor_live_preview_test.rs",
+    "tests/misc_suite_g/tooling_parity_milestone_test.rs",
 ];
 
 #[test]

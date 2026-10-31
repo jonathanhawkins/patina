@@ -20,6 +20,10 @@ pub mod fuzz_gdscript;
 pub mod global_constants;
 pub mod interpreter;
 pub mod midi_ports;
+// pat-mgixk.7: the three tables that say which ClassDB registrations the
+// interpreter can actually call, and which ones `has_method()` was lying
+// about. Read by `interpreter::call_object_method`'s miss path.
+pub mod native_method_gaps;
 pub mod parser;
 pub mod script_backtrace;
 pub mod tokenizer;

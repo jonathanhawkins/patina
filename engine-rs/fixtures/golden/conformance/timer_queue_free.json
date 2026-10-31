@@ -1,0 +1,99 @@
+{
+  "frames": 12,
+  "prints": [
+    "ready target=true",
+    "label_visible_after_press=false",
+    "target_freed"
+  ],
+  "project": "timer_queue_free",
+  "signals": [
+    {
+      "frame": 0,
+      "signal": "hidden",
+      "source": "Main/UI/Label"
+    },
+    {
+      "frame": 0,
+      "signal": "pressed",
+      "source": "Main/UI/Button"
+    },
+    {
+      "frame": 6,
+      "signal": "timeout",
+      "source": "Main/Timer"
+    }
+  ],
+  "tree": [
+    {
+      "class": "Node2D",
+      "path": "Main",
+      "properties": {
+        "position": [
+          0.0,
+          0.0
+        ],
+        "rotation": 0.0,
+        "scale": [
+          1.0,
+          1.0
+        ],
+        "visible": true
+      }
+    },
+    {
+      "class": "Timer",
+      "path": "Main/Timer",
+      "properties": {
+        "autostart": false,
+        "one_shot": true,
+        "wait_time": 0.1
+      }
+    },
+    {
+      "class": "CanvasLayer",
+      "path": "Main/UI",
+      "properties": {
+        "rotation": 0.0,
+        "scale": [
+          1.0,
+          1.0
+        ],
+        "visible": true
+      }
+    },
+    {
+      "class": "Button",
+      "path": "Main/UI/Button",
+      "properties": {
+        "position": [
+          0.0,
+          0.0
+        ],
+        "rotation": 0.0,
+        "scale": [
+          1.0,
+          1.0
+        ],
+        "text": "Press",
+        "visible": true
+      }
+    },
+    {
+      "class": "Label",
+      "path": "Main/UI/Label",
+      "properties": {
+        "position": [
+          0.0,
+          0.0
+        ],
+        "rotation": 0.0,
+        "scale": [
+          1.0,
+          1.0
+        ],
+        "text": "hello",
+        "visible": false
+      }
+    }
+  ]
+}

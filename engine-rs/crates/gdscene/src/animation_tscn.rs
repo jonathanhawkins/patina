@@ -22,9 +22,12 @@
 //! `gdresource` is a dependency of `gdscene`, not the other way round.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use gdcore::math::{Vector2, Vector3};
 use gdcore::math3d::Quaternion;
+use gdresource::loader::TresLoader;
+use gdresource::resource::Resource;
 use gdvariant::Variant;
 
 use crate::animation::{
@@ -408,33 +411,125 @@ fn fill_transform_track(
 // AnimationPlayer (one `[node type="AnimationPlayer"]`)
 // ---------------------------------------------------------------------------
 
-/// Collects every animation reachable from an `[sub_resource
-/// type="AnimationLibrary"]`, as `(clip_name, animation)`.
+/// Where the `Animation`s a library's `_data` dictionary names are looked up.
+///
+/// A library reaches the player one of two ways, and the Animations inside it
+/// are addressed relative to whichever file the library itself came from.
+enum AnimSource<'a> {
+    /// An `[sub_resource type="AnimationLibrary"]` of the `.tscn` being
+    /// instanced: `_data` entries name that scene's own `[sub_resource]`
+    /// blocks, or its `[ext_resource]` headers.
+    Scene(&'a PackedScene),
+    /// An `AnimationLibrary` loaded from its own `.tres`/`.res`: `_data`
+    /// entries name THAT file's sub-resources or ITS `[ext_resource]` headers,
+    /// which have nothing to do with the scene's ids.
+    External(Arc<Resource>),
+}
+
+impl AnimSource<'_> {
+    /// Properties of the `Animation` one `_data` value references.
+    ///
+    /// ⚠️ The two parsers spell a resource reference differently, and both
+    /// spellings arrive here. `packed_scene`'s `.tscn` scanner keeps a *node*
+    /// property's `ExtResource("id")` verbatim, while
+    /// `gdresource::loader::parse_variant_value` — which parses every
+    /// `[sub_resource]` block and every `.tres` — normalises to
+    /// `ExtResource:<id>` / `SubResource:<id>`. `_data` values always come from
+    /// the latter, but `PackedScene::resolve_ext_resource_path` accepts either,
+    /// so the ExtResource arm is spelling-agnostic on purpose.
+    fn animation_props(&self, anim_ref: &Variant) -> Option<HashMap<String, Variant>> {
+        let Variant::String(reference) = anim_ref else {
+            return None;
+        };
+        match self {
+            AnimSource::Scene(scene) => {
+                if let Some(id) = reference.strip_prefix("SubResource:") {
+                    return scene.sub_resource_props(id).cloned();
+                }
+                let path = scene.resolve_ext_resource_path(reference)?.to_string();
+                load_external_resource(&path).map(|res| resource_props(&res))
+            }
+            AnimSource::External(library) => {
+                if let Some(id) = reference.strip_prefix("SubResource:") {
+                    return library.subresources.get(id).map(|res| resource_props(res));
+                }
+                let id = reference.strip_prefix("ExtResource:")?;
+                let path = library.ext_resources.get(id)?.path.clone();
+                load_external_resource(&path).map(|res| resource_props(&res))
+            }
+        }
+    }
+}
+
+/// Loads a `.tres`/`.res` resource named by a `res://` path.
+///
+/// Read through `FileAccess`, which resolves `res://` against the configured
+/// project root and serves a mounted `.pck` before disk — the same reason
+/// `scripting.rs`'s `instantiate_packed_scene` reads that way. A raw
+/// `std::fs::read_to_string` would make an exported game, where the file exists
+/// only inside the pack, silently animate nothing.
+///
+/// A failure is reported rather than swallowed: a library that did not load is
+/// indistinguishable from a player with no clips, which is the failure mode
+/// this whole bead is about.
+fn load_external_resource(res_path: &str) -> Option<Arc<Resource>> {
+    let source = match gdcore::file_access::FileAccess::read_file_string(res_path) {
+        Ok(source) => source,
+        Err(err) => {
+            tracing::error!(
+                path = %res_path,
+                error = %err,
+                "AnimationPlayer resource failed to load; the player will have no clips"
+            );
+            return None;
+        }
+    };
+    match TresLoader::new().parse_str(&source, res_path) {
+        Ok(res) => Some(res),
+        Err(err) => {
+            tracing::error!(
+                path = %res_path,
+                error = %err,
+                "AnimationPlayer resource failed to parse; the player will have no clips"
+            );
+            None
+        }
+    }
+}
+
+/// A loaded resource's `[resource]` properties, in the shape the animation
+/// builders take.
+fn resource_props(res: &Resource) -> HashMap<String, Variant> {
+    res.properties()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// Collects every animation of one `AnimationLibrary`, as
+/// `(clip_name, animation)`.
 ///
 /// `library_name` is the key the player filed the library under; Godot
 /// addresses clips of a non-default library as `"<library>/<clip>"` and clips of
 /// the default (empty-named) library as just `"<clip>"`.
-fn animations_from_library(
-    scene: &PackedScene,
+fn animations_from_library_props(
     library_name: &str,
-    library_id: &str,
+    library_props: &HashMap<String, Variant>,
+    source: &AnimSource<'_>,
 ) -> Vec<(String, Animation)> {
-    let Some(props) = scene.sub_resource_props(library_id) else {
-        return Vec::new();
-    };
-    let Some(Variant::Dictionary(data)) = props.get("_data") else {
+    let Some(Variant::Dictionary(data)) = library_props.get("_data") else {
         return Vec::new();
     };
 
     let mut out = Vec::new();
     for (clip, anim_ref) in data.to_dict().iter() {
+        // Godot writes these keys as StringNames (`&"clip"`), which
+        // `gdresource`'s dictionary parser stores as a plain `Variant::String`
+        // because a String and a StringName of the same text are the same
+        // Godot dictionary key.
         let Variant::String(clip) = clip else {
             continue;
         };
-        let Some(anim_id) = sub_resource_id(anim_ref) else {
-            continue;
-        };
-        let Some(anim_props) = scene.sub_resource_props(&anim_id) else {
+        let Some(anim_props) = source.animation_props(anim_ref) else {
             continue;
         };
         let full_name = if library_name.is_empty() {
@@ -444,8 +539,75 @@ fn animations_from_library(
         };
         out.push((
             full_name.clone(),
-            animation_from_tscn_props(&full_name, anim_props),
+            animation_from_tscn_props(&full_name, &anim_props),
         ));
+    }
+    out
+}
+
+/// Resolves one library reference to the clips it holds.
+///
+/// Accepts every spelling a library arrives in: a `SubResource` of the scene,
+/// and an `ExtResource` naming an `AnimationLibrary` `.tres`/`.res` on disk.
+/// Only the SubResource form was handled before, so a scene whose library lives
+/// in its own file produced no player at all (pat-mgixk.1).
+fn animations_from_library_ref(
+    scene: &PackedScene,
+    library_name: &str,
+    library_ref: &Variant,
+) -> Vec<(String, Animation)> {
+    let Variant::String(reference) = library_ref else {
+        return Vec::new();
+    };
+    if let Some(id) = reference.strip_prefix("SubResource:") {
+        let Some(props) = scene.sub_resource_props(id) else {
+            return Vec::new();
+        };
+        return animations_from_library_props(library_name, props, &AnimSource::Scene(scene));
+    }
+    let Some(path) = scene
+        .resolve_ext_resource_path(reference)
+        .map(str::to_string)
+    else {
+        return Vec::new();
+    };
+    let Some(library) = load_external_resource(&path) else {
+        return Vec::new();
+    };
+    // Owned before the move, so the lookup side can take the `Arc`.
+    let props = resource_props(&library);
+    animations_from_library_props(library_name, &props, &AnimSource::External(library))
+}
+
+/// Every `(library_name, reference)` pair an `AnimationPlayer` node declares.
+///
+/// ⚠️ Godot 4.6 saves one storage property *per library*, `libraries/<name>`
+/// (upstream animation_mixer.cpp `_get_property_list`, which publishes
+/// `libraries/%s` with `PROPERTY_USAGE_STORAGE`), and the default library's
+/// name is empty — so the key is literally `libraries/`. The
+/// `libraries = {..}` dictionary is only the deprecated compat branch of
+/// `AnimationMixer::_set`, kept under `!DISABLE_DEPRECATED`. Patina read ONLY
+/// that dictionary, so an `AnimationPlayer` in any scene saved by 4.6 resolved
+/// no library, `build_animation_player` returned `None`, and nothing was ever
+/// attached (pat-mgixk.1). Both forms are read here: every scene written before
+/// this change uses the dictionary.
+///
+/// The `libraries/` keys are sorted so a player with several libraries builds
+/// its clips in a stable order rather than `HashMap` order.
+fn library_refs(props: &HashMap<String, Variant>) -> Vec<(String, Variant)> {
+    let mut out: Vec<(String, Variant)> = props
+        .iter()
+        .filter_map(|(key, value)| {
+            Some((key.strip_prefix("libraries/")?.to_string(), value.clone()))
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    if let Some(Variant::Dictionary(libraries)) = props.get("libraries") {
+        for (name, value) in libraries.to_dict().iter() {
+            if let Variant::String(name) = name {
+                out.push((name.clone(), value.clone()));
+            }
+        }
     }
     out
 }
@@ -490,19 +652,10 @@ pub fn build_animation_player(
     }
 
     let mut any = false;
-    if let Some(Variant::Dictionary(libraries)) = props.get("libraries") {
-        for (lib_name, lib_ref) in libraries.to_dict().iter() {
-            let lib_name = match lib_name {
-                Variant::String(s) => s.as_str(),
-                _ => continue,
-            };
-            let Some(lib_id) = sub_resource_id(lib_ref) else {
-                continue;
-            };
-            for (_, anim) in animations_from_library(scene, lib_name, &lib_id) {
-                player.add_animation(anim);
-                any = true;
-            }
+    for (library_name, library_ref) in library_refs(props) {
+        for (_, anim) in animations_from_library_ref(scene, &library_name, &library_ref) {
+            player.add_animation(anim);
+            any = true;
         }
     }
     if !any {
@@ -567,15 +720,6 @@ pub fn attach_scene_animation_players(
 // ---------------------------------------------------------------------------
 // Variant helpers
 // ---------------------------------------------------------------------------
-
-/// Extracts the sub-resource id from a parsed `SubResource("id")` reference,
-/// which the `.tscn` value parser stores as `Variant::String("SubResource:id")`.
-fn sub_resource_id(value: &Variant) -> Option<String> {
-    match value {
-        Variant::String(s) => s.strip_prefix("SubResource:").map(String::from),
-        _ => None,
-    }
-}
 
 fn variant_to_f64(v: &Variant) -> Option<f64> {
     match v {
@@ -841,9 +985,68 @@ _data = {
 [node name="Main" type="Node2D"]
 "#,
         );
-        let anims = animations_from_library(&s, "hero", "Lib_a");
+        let anims =
+            animations_from_library_ref(&s, "hero", &Variant::String("SubResource:Lib_a".into()));
         assert_eq!(anims.len(), 1);
         assert_eq!(anims[0].0, "hero/walk");
+    }
+
+    /// ⚠️ The Godot 4.6 storage form. `AnimationMixer::_get_property_list`
+    /// publishes `libraries/%s`, so a 4.6 scene writes `libraries/ = ...` for
+    /// the default library and never a `libraries = {..}` dictionary. Reading
+    /// only the dictionary made `build_animation_player` return `None`, so no
+    /// player was attached and `play()` fell back to setting a bare `playing`
+    /// property (pat-mgixk.1).
+    #[test]
+    fn libraries_slash_property_is_read_like_the_legacy_dictionary() {
+        let s = scene(
+            r#"[gd_scene format=3]
+
+[sub_resource type="Animation" id="Animation_a"]
+length = 1.0
+tracks/0/type = "value"
+tracks/0/path = NodePath("Sprite2D:position")
+tracks/0/keys = {
+"times": PackedFloat32Array(0),
+"values": [Vector2(0, 0)]
+}
+
+[sub_resource type="AnimationLibrary" id="Lib_a"]
+_data = {
+&"walk": SubResource("Animation_a")
+}
+
+[node name="Main" type="Node2D"]
+"#,
+        );
+
+        // The default (empty-named) library: the key is literally `libraries/`.
+        let mut props = HashMap::new();
+        props.insert(
+            "libraries/".to_string(),
+            Variant::String("SubResource:Lib_a".into()),
+        );
+        props.insert("autoplay".to_string(), Variant::String("walk".into()));
+        let player = build_animation_player(&s, &props).expect("4.6 form must build a player");
+        assert!(
+            player.animations.contains_key("walk"),
+            "clips of the default library are addressed unprefixed, got {:?}",
+            player.animations.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(player.autoplay.as_deref(), Some("walk"));
+
+        // A named library still prefixes its clips.
+        let mut props = HashMap::new();
+        props.insert(
+            "libraries/hero".to_string(),
+            Variant::String("SubResource:Lib_a".into()),
+        );
+        let player = build_animation_player(&s, &props).expect("named 4.6 library must build");
+        assert!(
+            player.animations.contains_key("hero/walk"),
+            "got {:?}",
+            player.animations.keys().collect::<Vec<_>>()
+        );
     }
 
     /// A player with no resolvable library is not attached at all.

@@ -110,7 +110,12 @@ fn gdserver3d_has_implemented_not_yet_measured_modules() {
         ("gi.rs", "GI systems"),
         ("navigation.rs", "NavigationRegion3D"),
         ("occluder.rs", "Occluder3D"),
-        ("particles3d.rs", "GPUParticles3D"),
+        // ⚠️ `particles3d.rs` is deliberately absent from this list. The Phase 6
+        // audit classifies it as `Deferred` in gdserver3d's own module table,
+        // the module does not exist, and `GPUParticles3D` is implemented at the
+        // scene level in `gdscene::particle` instead. Asserting it here claimed a
+        // crate surface the audit never claimed. See the dedicated test below,
+        // which pins the Deferred classification in both directions.
     ];
     for (module, family) in &implemented_modules {
         assert!(
@@ -118,6 +123,30 @@ fn gdserver3d_has_implemented_not_yet_measured_modules() {
             "gdserver3d must have {module} for {family} (implemented per Phase 6 audit)"
         );
     }
+}
+
+/// `gdserver3d::particles3d` stays Deferred until the audit says otherwise.
+///
+/// Pinned in BOTH directions on purpose. If the module appears, this fails and
+/// whoever added it must move the audit row off `Deferred` and add it to
+/// `gdserver3d_has_implemented_not_yet_measured_modules`. If the audit row stops
+/// saying `Deferred`, this fails too. The original bug was exactly these two
+/// disagreeing with nothing to notice it (pat-21oab).
+#[test]
+fn gdserver3d_particles_stays_deferred_until_the_audit_says_otherwise() {
+    assert!(
+        !module_exists("gdserver3d", "particles3d.rs"),
+        "gdserver3d/src/particles3d.rs now exists, but the Phase 6 audit still \
+         classifies it as Deferred — update the audit and the implemented-module \
+         list together"
+    );
+
+    let audit = std::fs::read_to_string(repo_root().join("prd/PHASE6_3D_PARITY_AUDIT.md"))
+        .expect("prd/PHASE6_3D_PARITY_AUDIT.md must exist");
+    assert!(
+        audit.contains("| `particles3d.rs` | Particle systems | Deferred |"),
+        "Phase 6 audit must still classify gdserver3d particles3d.rs as Deferred"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -233,13 +262,18 @@ fn deferred_families_do_not_have_standalone_crates() {
 
 #[test]
 fn audit_evidence_test_files_exist() {
+    // Paths are relative to `engine-rs/`. ⚠️ These were `tests/<name>.rs` and all
+    // six reported missing; none had been deleted. `engine-rs/tests` was
+    // reorganised into suite directories — a standalone file per test meant ~550
+    // full engine links — so each former standalone file is now a module inside
+    // `tests/<suite>/main.rs` (pat-21oab).
     let evidence_tests = [
-        "tests/real_3d_demo_unified_parity_test.rs",
-        "tests/render_3d_parity_test.rs",
-        "tests/characterbody3d_move_and_slide_test.rs",
-        "tests/physics_ray_shape_query3d_test.rs",
-        "tests/rigidbody3d_forces_torques_contacts_test.rs",
-        "tests/real_3d_demo_parity_report_artifact_test.rs",
+        "tests/real_suite/real_3d_demo_unified_parity_test.rs",
+        "tests/render_suite/render_3d_parity_test.rs",
+        "tests/misc_suite_a/characterbody3d_move_and_slide_test.rs",
+        "tests/physics_suite/physics_ray_shape_query3d_test.rs",
+        "tests/misc_suite_f/rigidbody3d_forces_torques_contacts_test.rs",
+        "tests/real_suite/real_3d_demo_parity_report_artifact_test.rs",
     ];
 
     let engine_dir = repo_root().join("engine-rs");

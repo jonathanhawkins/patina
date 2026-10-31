@@ -63,7 +63,7 @@ impl ResourceLoader for FailingLoader {
 
 #[test]
 fn parse_extract_register_load_by_uid_full_pipeline() {
-    let source = r#"[gd_resource type="Theme" format=3 uid="uid://my_sword"]
+    let source = r#"[gd_resource type="Theme" format=3 uid="uid://mysword"]
 
 [resource]
 name = "Sword"
@@ -78,12 +78,12 @@ damage = 25
 
     // Register extracted UID in a UnifiedLoader.
     let mut ul = UnifiedLoader::new(TrackingLoader::new());
-    ul.register_uid_str("uid://my_sword", "res://weapons/sword.tres");
+    ul.register_uid_str("uid://mysword", "res://weapons/sword.tres");
 
     // Load by res:// path.
     let by_path = ul.load("res://weapons/sword.tres").unwrap();
     // Load by uid:// reference.
-    let by_uid = ul.load("uid://my_sword").unwrap();
+    let by_uid = ul.load("uid://mysword").unwrap();
 
     // Both must resolve to the same cached Arc.
     assert!(
@@ -99,7 +99,7 @@ damage = 25
 
 #[test]
 fn parsed_uid_matches_string_derived_uid() {
-    let source = r#"[gd_resource type="Resource" format=3 uid="uid://player_stats"]
+    let source = r#"[gd_resource type="Resource" format=3 uid="uid://playerstats"]
 
 [resource]
 hp = 100
@@ -107,7 +107,7 @@ hp = 100
     let tres = TresLoader::new();
     let parsed = tres.parse_str(source, "res://stats/player.tres").unwrap();
 
-    let from_string = parse_uid_string("uid://player_stats");
+    let from_string = parse_uid_string("uid://playerstats");
 
     assert_eq!(
         parsed.uid, from_string,
@@ -122,14 +122,14 @@ hp = 100
 #[test]
 fn multiple_uids_cache_efficiency() {
     let mut ul = UnifiedLoader::new(TrackingLoader::new());
-    ul.register_uid_str("uid://res_a", "res://a.tres");
-    ul.register_uid_str("uid://res_b", "res://b.tres");
-    ul.register_uid_str("uid://res_c", "res://c.tres");
+    ul.register_uid_str("uid://resa", "res://a.tres");
+    ul.register_uid_str("uid://resb", "res://b.tres");
+    ul.register_uid_str("uid://resc", "res://c.tres");
 
     // First load each by UID.
-    let a1 = ul.load("uid://res_a").unwrap();
-    let b1 = ul.load("uid://res_b").unwrap();
-    let c1 = ul.load("uid://res_c").unwrap();
+    let a1 = ul.load("uid://resa").unwrap();
+    let b1 = ul.load("uid://resb").unwrap();
+    let c1 = ul.load("uid://resc").unwrap();
 
     // Second load each by res:// path — should all hit cache.
     let a2 = ul.load("res://a.tres").unwrap();
@@ -197,7 +197,7 @@ fn uid_to_failing_path_propagates_error() {
 #[test]
 fn unregistered_uid_returns_not_found() {
     let mut ul = UnifiedLoader::new(TrackingLoader::new());
-    let result = ul.load("uid://never_registered");
+    let result = ul.load("uid://neverregistered");
     assert!(result.is_err());
 }
 
@@ -250,11 +250,11 @@ fn two_uids_same_path_same_arc() {
 
     // UidRegistry enforces one-to-one (second register overwrites first),
     // so we test that loading by the surviving UID and by path both hit cache.
-    ul.register_uid_str("uid://alias_a", "res://shared.tres");
-    ul.register_uid_str("uid://alias_b", "res://shared.tres");
+    ul.register_uid_str("uid://aliasa", "res://shared.tres");
+    ul.register_uid_str("uid://aliasb", "res://shared.tres");
     // alias_a is now evicted; alias_b owns the path.
 
-    let by_uid = ul.load("uid://alias_b").unwrap();
+    let by_uid = ul.load("uid://aliasb").unwrap();
     let by_path = ul.load("res://shared.tres").unwrap();
 
     assert!(
@@ -329,9 +329,9 @@ fn invalid_uid_string_not_registered() {
     ul.register_uid_str("not_a_uid", "res://orphan.tres");
 
     // UID should not have been registered.
-    let result = ul.load("uid://not_a_uid");
+    let result = ul.load("uid://notauid");
     // This tests the load path — it should either fail or load via the
-    // string hash, depending on whether parse_uid_string("uid://not_a_uid")
+    // string hash, depending on whether parse_uid_string("uid://notauid")
     // is valid. The key thing is no panic.
     let _ = result;
 
@@ -409,13 +409,13 @@ fn is_cached_after_uid_load() {
 #[test]
 fn with_registry_constructor_resolves_preloaded_uids() {
     let mut reg = UidRegistry::new();
-    reg.register(parse_uid_string("uid://pre_a"), "res://a.tres");
-    reg.register(parse_uid_string("uid://pre_b"), "res://b.tres");
+    reg.register(parse_uid_string("uid://prea"), "res://a.tres");
+    reg.register(parse_uid_string("uid://preb"), "res://b.tres");
 
     let mut ul = UnifiedLoader::with_registry(TrackingLoader::new(), reg);
 
-    let a = ul.load("uid://pre_a").unwrap();
-    let b = ul.load("uid://pre_b").unwrap();
+    let a = ul.load("uid://prea").unwrap();
+    let b = ul.load("uid://preb").unwrap();
     assert_eq!(a.path, "res://a.tres");
     assert_eq!(b.path, "res://b.tres");
     assert!(!Arc::ptr_eq(&a, &b));
@@ -429,24 +429,24 @@ fn with_registry_constructor_resolves_preloaded_uids() {
 fn batch_register_from_parsed_tres_then_load_by_uid() {
     let sources = [
         (
-            "uid://weapon_1",
-            r#"[gd_resource type="Resource" format=3 uid="uid://weapon_1"]
+            "uid://weapon1",
+            r#"[gd_resource type="Resource" format=3 uid="uid://weapon1"]
 [resource]
 name = "Sword"
 "#,
             "res://weapons/sword.tres",
         ),
         (
-            "uid://weapon_2",
-            r#"[gd_resource type="Resource" format=3 uid="uid://weapon_2"]
+            "uid://weapon2",
+            r#"[gd_resource type="Resource" format=3 uid="uid://weapon2"]
 [resource]
 name = "Axe"
 "#,
             "res://weapons/axe.tres",
         ),
         (
-            "uid://armor_1",
-            r#"[gd_resource type="Resource" format=3 uid="uid://armor_1"]
+            "uid://armor1",
+            r#"[gd_resource type="Resource" format=3 uid="uid://armor1"]
 [resource]
 name = "Shield"
 "#,
@@ -466,9 +466,9 @@ name = "Shield"
     }
 
     // Load all by uid:// — each should resolve correctly.
-    let sword = ul.load("uid://weapon_1").unwrap();
-    let axe = ul.load("uid://weapon_2").unwrap();
-    let shield = ul.load("uid://armor_1").unwrap();
+    let sword = ul.load("uid://weapon1").unwrap();
+    let axe = ul.load("uid://weapon2").unwrap();
+    let shield = ul.load("uid://armor1").unwrap();
 
     assert_eq!(sword.path, "res://weapons/sword.tres");
     assert_eq!(axe.path, "res://weapons/axe.tres");
@@ -492,10 +492,10 @@ name = "Shield"
 #[test]
 fn uid_hashing_deterministic_across_calls() {
     let uid_strs = [
-        "uid://test_123",
+        "uid://test123",
         "uid://player",
         "uid://a",
-        "uid://very_long_identifier_that_should_still_hash_deterministically",
+        "uid://verylongidentifierthatshouldstillhashdeterministically",
     ];
 
     for uid_str in &uid_strs {
@@ -528,14 +528,14 @@ fn different_uid_strings_produce_different_resource_uids() {
 #[test]
 fn registry_reverse_lookup_after_unified_registration() {
     let mut ul = UnifiedLoader::new(TrackingLoader::new());
-    ul.register_uid_str("uid://reverse_test", "res://reverse.tres");
+    ul.register_uid_str("uid://reversetest", "res://reverse.tres");
 
     let uid = ul
         .uid_registry()
         .lookup_path("res://reverse.tres")
         .expect("path should have a registered UID");
 
-    assert_eq!(uid, parse_uid_string("uid://reverse_test"));
+    assert_eq!(uid, parse_uid_string("uid://reversetest"));
 }
 
 // ===========================================================================
@@ -642,14 +642,14 @@ fn ext_resource_uid_resolves_through_unified_loader() {
     let mut ul = UnifiedLoader::new(TrackingLoader::new());
 
     // Register ext_resource UIDs (as a scene parser would do).
-    ul.register_uid_str("uid://player_script", "res://scripts/player.gd");
-    ul.register_uid_str("uid://player_texture", "res://textures/player.png");
-    ul.register_uid_str("uid://enemy_script", "res://scripts/enemy.gd");
+    ul.register_uid_str("uid://playerscript", "res://scripts/player.gd");
+    ul.register_uid_str("uid://playertexture", "res://textures/player.png");
+    ul.register_uid_str("uid://enemyscript", "res://scripts/enemy.gd");
 
     // Load all by UID (as ext_resource resolution would).
-    let player_script = ul.load("uid://player_script").unwrap();
-    let player_texture = ul.load("uid://player_texture").unwrap();
-    let enemy_script = ul.load("uid://enemy_script").unwrap();
+    let player_script = ul.load("uid://playerscript").unwrap();
+    let player_texture = ul.load("uid://playertexture").unwrap();
+    let enemy_script = ul.load("uid://enemyscript").unwrap();
 
     assert_eq!(player_script.path, "res://scripts/player.gd");
     assert_eq!(player_texture.path, "res://textures/player.png");
@@ -715,7 +715,7 @@ fn strong_count_verifies_cache_ownership() {
 
 #[test]
 fn full_round_trip_with_subresources() {
-    let source = r#"[gd_resource type="Theme" format=3 uid="uid://full_theme"]
+    let source = r#"[gd_resource type="Theme" format=3 uid="uid://fulltheme"]
 
 [sub_resource type="StyleBoxFlat" id="panel"]
 bg_color = Color(0.1, 0.2, 0.3, 1.0)
@@ -729,7 +729,7 @@ style = SubResource("panel")
 
     // Verify parse results.
     assert!(parsed.uid.is_valid());
-    assert_eq!(parsed.uid, parse_uid_string("uid://full_theme"));
+    assert_eq!(parsed.uid, parse_uid_string("uid://fulltheme"));
     assert_eq!(parsed.class_name, "Theme");
     assert!(!parsed.subresources.is_empty());
     assert!(parsed.subresources.contains_key("panel"));

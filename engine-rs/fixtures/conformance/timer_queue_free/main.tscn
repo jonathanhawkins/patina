@@ -1,0 +1,25 @@
+[gd_scene load_steps=2 format=3 uid="uid://ctimerqfree01"]
+
+[ext_resource type="Script" path="res://main.gd" id="1_main"]
+
+[node name="Main" type="Node2D"]
+script = ExtResource("1_main")
+
+[node name="Timer" type="Timer" parent="."]
+wait_time = 0.1
+one_shot = true
+autostart = true
+
+[node name="Target" type="Node2D" parent="."]
+position = Vector2(32, 48)
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="Label" type="Label" parent="UI"]
+text = "hello"
+
+[node name="Button" type="Button" parent="UI"]
+text = "Press"
+
+[connection signal="timeout" from="Timer" to="Target" method="queue_free"]
+[connection signal="pressed" from="UI/Button" to="UI/Label" method="hide"]

@@ -40,6 +40,18 @@ const GENERATOR_RESREF_PREFIX: &str = "AudioStreamGenerator::";
 /// property is the only direction the dependency graph allows.
 const GENERATOR_PUSH_PROP: &str = "__generator_push__";
 
+/// The one-shot channel for `AudioStreamPlayer.play(from)`, drained every
+/// frame (pat-mgixk.5).
+///
+/// 🔑 Distinct from `seek_request` on purpose. A seek moves the playhead of the
+/// voice that is *already* live and does nothing when there is none, so it
+/// could not express Godot's `play()`, which stops whatever is playing and
+/// starts again from `from` (`audio_stream_player_internal.cpp:137-145`,
+/// `play_basic`). Writing `playing = true` could not express it either: on an
+/// already-playing player that is a no-op edge, which is exactly why the
+/// standard SFX retrigger was silent.
+pub(crate) const PLAY_REQUEST_PROP: &str = "__play_request__";
+
 /// Godot's `AudioStreamGenerator.buffer_length` default, in seconds
 /// (`doc/classes/AudioStreamGenerator.xml`).
 const GENERATOR_BUFFER_SECS: f32 = 0.5;
@@ -132,6 +144,16 @@ pub struct AudioServerBridge {
     /// Rebuilt every `sync_player_node` rather than remembered, so a player
     /// that stops simply stops appearing — there is no "stopped" edge to miss.
     generators_active: HashSet<NodeId>,
+    /// Which stream each node was last loaded FROM, as a
+    /// [`StreamSpec::identity`] key (pat-mgixk.5).
+    ///
+    /// Loading used to happen only on first sight, so `player.stream =
+    /// preload(...)` and an animation audio key switching clips both kept the
+    /// buffer the node was born with. Comparing identities rather than the raw
+    /// property matters because one stream has three spellings — a path, an
+    /// `ExtResource` companion, a `Resource` variant — and a change of spelling
+    /// is not a change of stream.
+    stream_keys: HashMap<NodeId, String>,
 }
 
 impl AudioServerBridge {
@@ -153,6 +175,7 @@ impl AudioServerBridge {
             stream_errors: Vec::new(),
             generators: HashMap::new(),
             generators_active: HashSet::new(),
+            stream_keys: HashMap::new(),
         }
     }
 
@@ -375,6 +398,16 @@ impl AudioServerBridge {
             // held forever, and replayed if a later node reused the id.
             self.generators.remove(&id);
             self.generators_active.remove(&id);
+            // 🔑 The remembered stream identity MUST go with the player
+            // (pat-mgixk.5). `players.remove` above leaves a node that re-enters
+            // the tree — or any later node reusing the id — with a fresh,
+            // empty `AudioStreamPlayer`; a surviving identity would then match
+            // the stream it names, `needs_load` would be false, and the player
+            // would be silent forever with nothing in the log.
+            self.stream_keys.remove(&id);
+            // Same reasoning for the loop the departed stream declared: a new
+            // one-shot clip on a reused id would inherit it.
+            self.stream_loops.remove(&id);
         }
 
         // Mix this frame's worth of output.
@@ -794,7 +827,17 @@ impl AudioServerBridge {
     }
 
     fn sync_player_node(&mut self, tree: &mut SceneTree, id: NodeId) {
-        let (stream_path, volume_db, autoplay, playing_prop, bus, seek_request, paused_prop, pitch) = {
+        let (
+            stream_spec,
+            volume_db,
+            autoplay,
+            playing_prop,
+            bus,
+            seek_request,
+            play_request,
+            paused_prop,
+            pitch,
+        ) = {
             let Some(node) = tree.get_node(id) else {
                 return;
             };
@@ -804,38 +847,49 @@ impl AudioServerBridge {
                 Variant::Int(i) => Some(i as f32),
                 _ => None,
             };
-            // Godot's `stream` is a `Ref<AudioStream>`; in a `.tscn` it is
-            // `ExtResource("id")` pointing at an `[ext_resource]` header, not a
-            // path. `PackedScene` resolves that reference to the referenced file
-            // under an `__extres__stream` companion, so prefer it and fall back
-            // to a plain path string (the programmatic form) (pat-0q2kx.6).
-            let stream_path = match node.get_property("__extres__stream") {
-                Variant::String(s) if !s.is_empty() => s,
-                _ => match node.get_property("stream") {
-                    Variant::String(s) => s,
-                    _ => String::new(),
-                },
-            };
             let volume_db = as_f32("volume_db").unwrap_or(0.0);
             let bus = match node.get_property("bus") {
                 Variant::String(s) => s,
                 _ => "Master".to_owned(),
             };
             (
-                stream_path,
+                resolve_stream_spec(node),
                 volume_db,
                 as_bool("autoplay"),
                 as_bool("playing"),
                 bus,
                 // `seek_request` is the interpreter's one-shot channel for
-                // `AudioStreamPlayer.seek(pos)` / `play(from)`; absent (Nil)
-                // means "no seek this frame". Drained below.
+                // `AudioStreamPlayer.seek(pos)`; absent (Nil) means "no seek
+                // this frame". Drained below.
                 as_f32("seek_request"),
+                // `__play_request__` is the separate channel for `play(from)`,
+                // which RESTARTS rather than seeks. Drained immediately below.
+                as_f32(PLAY_REQUEST_PROP),
                 as_bool("stream_paused"),
                 // Godot's default pitch_scale is 1.0, not 0.
                 as_f32("pitch_scale").unwrap_or(1.0),
             )
         };
+
+        // Drained HERE, before any of the early returns below. A request left
+        // on the node is re-read every frame, so a player whose stream failed
+        // to load — which returns early — would restart forever.
+        //
+        // ⚠️ `remove_property`, not `set_property(.., Nil)`. The scene saver's
+        // internal-key list is an allowlist, and it formats a stored `Nil` as
+        // `null`, so overwriting with Nil would put `__play_request__ = null`
+        // into every saved scene holding an audio player. Removing the key
+        // reads back as Nil either way.
+        if play_request.is_some() {
+            if let Some(node) = tree.get_node_mut(id) {
+                node.remove_property(PLAY_REQUEST_PROP);
+            }
+        }
+
+        // Reassigned when a stream swap stops the player below, so the branch
+        // table sees the state Godot would leave behind rather than the value
+        // the node carried into the frame.
+        let mut playing_prop = playing_prop;
 
         // Godot pauses a player's stream when the tree pauses and the node's
         // effective process mode cannot run (audio_stream_player_internal.cpp:97-131
@@ -863,27 +917,32 @@ impl AudioServerBridge {
             self.sync_generator(tree, id, playing_prop || (first_sight && autoplay));
         }
 
-        let resolved = if stream_path.is_empty() {
-            None
-        } else if is_unresolved_resource_ref(&stream_path) {
-            // The scene named a resource but nothing resolved it to a file. Say
-            // so — this is precisely the failure that used to present as a
-            // player that simply never made a sound (pat-0q2kx.6).
+        if let StreamSpec::Unresolved(raw) = &stream_spec {
+            // The scene named a resource but nothing resolved it to a file or
+            // to inline data. Say so — this is precisely the failure that used
+            // to present as a player that simply never made a sound
+            // (pat-0q2kx.6).
             // ⚠️ Not for a generator: it is fileless BY DESIGN, so this
             // warning would fire every run on a correct scene and train the
             // reader to ignore the one case it exists to catch.
             if first_sight && !is_generator {
                 tracing::warn!(
                     node = %tree.get_node(id).map(|n| n.name().to_owned()).unwrap_or_default(),
-                    stream = %stream_path,
+                    stream = %raw,
                     "AudioStreamPlayer stream is an unresolved resource reference; \
                      the player will be silent"
                 );
             }
-            None
-        } else {
-            Some(self.resolve_stream_path(&stream_path))
+        }
+
+        // Both computed BEFORE the `&mut self.players` borrow below:
+        // `resolve_stream_path` takes `&self`, which cannot coexist with it.
+        let stream_key = stream_spec.identity();
+        let resolved_path = match &stream_spec {
+            StreamSpec::Path(raw) => Some(self.resolve_stream_path(raw)),
+            _ => None,
         };
+        let prev_stream_key = self.stream_keys.get(&id).cloned();
 
         let player = self
             .players
@@ -892,34 +951,92 @@ impl AudioServerBridge {
         player.set_bus(bus);
         player.set_volume_db(volume_db);
 
-        // Load the stream from disk on first sight if the node names one and
-        // no buffer was injected directly.
-        if first_sight && !player.has_stream() {
-            if let Some(path) = resolved {
-                // A failed import used to be discarded here, so a missing or
-                // undecodable file was indistinguishable from success: the
-                // player just stayed silent. Report it (pat-0q2kx.6).
-                match load_stream_buffer(&mut self.importer, &path) {
-                    Ok((buffer, loop_points)) => {
-                        if let Some(points) = loop_points {
-                            self.stream_loops.insert(id, points);
-                        }
-                        player.set_stream(buffer);
+        // Load the stream whenever the node names a DIFFERENT one than the
+        // buffer the player holds — not merely on first sight.
+        //
+        // 🔑 `player.stream = preload(...)` and an animation audio key
+        // switching clips both arrive on a node the bridge has already seen, so
+        // a first-sight-only load left the original buffer playing for the rest
+        // of the run (pat-mgixk.5).
+        let needs_load = !stream_key.is_empty()
+            && match &prev_stream_key {
+                // Never loaded for this node. A buffer injected straight onto
+                // the player (`set_stream_buffer`) still wins over the path the
+                // scene names, exactly as before.
+                None => !player.has_stream(),
+                // Loaded before: only a genuinely different stream reloads.
+                Some(prev) => prev != &stream_key,
+            };
+        // Remembered even when the load is skipped or fails: otherwise an
+        // injected buffer (or a bad path) would leave the node with no
+        // identity, and the NEXT assignment would look like the first one.
+        if !stream_key.is_empty() {
+            self.stream_keys.insert(id, stream_key);
+        }
+
+        if needs_load {
+            // Godot's `set_stream` stops the player before swapping
+            // (`audio_stream_player_internal.cpp:254-265`, `stop_callable`), so
+            // the old clip never outlives the assignment and the new one does
+            // not start by itself. A `play()` in the same frame — including the
+            // one an animation audio key writes — restarts it through the
+            // play-request arm below.
+            //
+            // ⚠️ Only on a RELOAD, never on the first load: the first load is
+            // what `autoplay` and a scene-authored `playing = true` start from,
+            // and stopping there would mute every autoplaying scene.
+            if prev_stream_key.is_some() {
+                player.stop(&mut self.server);
+                if play_request.is_none() {
+                    playing_prop = false;
+                    if let Some(node) = tree.get_node_mut(id) {
+                        node.set_property("playing", Variant::Bool(false));
                     }
-                    Err(err) => {
-                        // `warn!` alone is invisible in a default runner log, so
-                        // a missing asset presented as plain silence. Raise it
-                        // to `error!` and retain it (pat-s3rrv.5).
-                        tracing::error!(
-                            path = %path.display(),
-                            error = %err,
-                            "AudioStreamPlayer stream failed to load; the player will be silent"
-                        );
-                        self.stream_errors.push(format!(
+                }
+            }
+            // A failed import used to be discarded here, so a missing or
+            // undecodable file was indistinguishable from success: the
+            // player just stayed silent. Report it (pat-0q2kx.6).
+            let loaded = match (&stream_spec, &resolved_path) {
+                (StreamSpec::Path(_), Some(path)) => load_stream_buffer(&mut self.importer, path)
+                    .map_err(|err| {
+                        format!(
                             "AudioStreamPlayer stream failed to load: {} ({err})",
                             path.display()
-                        ));
+                        )
+                    }),
+                (StreamSpec::Inline(wav), _) => decode_inline_wav(wav).map_err(|err| {
+                    format!("AudioStreamPlayer inline stream failed to decode: {err}")
+                }),
+                // `stream_key` is empty for both other variants, so `needs_load`
+                // is false and this is unreachable; reported rather than
+                // panicked because an audio frame is the wrong place to abort.
+                _ => Err("AudioStreamPlayer stream resolved to nothing".to_owned()),
+            };
+            match loaded {
+                Ok((buffer, loop_points)) => {
+                    // ⚠️ `remove` on the `None` arm, not "leave it alone": the
+                    // loop belongs to the STREAM, so a stale entry would make a
+                    // one-shot clip inherit the previous clip's loop region.
+                    match loop_points {
+                        Some(points) => {
+                            self.stream_loops.insert(id, points);
+                        }
+                        None => {
+                            self.stream_loops.remove(&id);
+                        }
                     }
+                    player.set_stream(buffer);
+                }
+                Err(message) => {
+                    // `warn!` alone is invisible in a default runner log, so
+                    // a missing asset presented as plain silence. Raise it
+                    // to `error!` and retain it (pat-s3rrv.5).
+                    tracing::error!(
+                        error = %message,
+                        "AudioStreamPlayer stream failed to load; the player will be silent"
+                    );
+                    self.stream_errors.push(message);
                 }
             }
         }
@@ -934,7 +1051,35 @@ impl AudioServerBridge {
             .and_then(|pid| self.server.stream_state(pid));
         let voice_alive = voice_state.is_some();
 
-        if first_sight && (autoplay || playing_prop) {
+        // Godot's `play(from = 0)` ALWAYS (re)starts: on a player that is
+        // already running it stops the live voice and begins again from `from`
+        // (`play_basic`, monophonic branch). That is the ordinary SFX
+        // retrigger, and the table below had no arm for it — `playing` was
+        // already true, so no edge fired and the call did nothing at all
+        // (pat-mgixk.5).
+        if let Some(from) = play_request {
+            if let Some(pid) = player.play(&mut self.server) {
+                if let Some(points) = self.stream_loops.get(&id) {
+                    apply_stream_loop(&mut self.server, pid, points);
+                }
+                // `play()` and `play(0)` restart from the top, which
+                // `player.play` already did; only a positive `from` needs the
+                // playhead moved.
+                if from > 0.0 {
+                    if let Some(stream) = self.server.stream_mut(pid) {
+                        stream.seek(from);
+                    }
+                }
+            }
+            // ⚠️ `playing` is deliberately NOT written here. Both writers of
+            // the request — the interpreter's `play()` arm and the animation
+            // audio key — already set `playing = true`, and mirroring
+            // `player.playing_flag()` back onto the node instead would write
+            // FALSE for a generator-backed player, whose audio never goes
+            // through `player.play()` at all (`mix_generator_block`). That
+            // would have silenced `AudioStreamGenerator` the frame a script
+            // called `play()` on it.
+        } else if first_sight && (autoplay || playing_prop) {
             if let Some(pid) = player.play(&mut self.server) {
                 if let Some(points) = self.stream_loops.get(&id) {
                     apply_stream_loop(&mut self.server, pid, points);
@@ -1003,6 +1148,225 @@ impl Default for AudioServerBridge {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// What a player's `stream` property points at, once the companions a scene
+/// load leaves beside it are taken into account (pat-mgixk.5).
+#[derive(Debug, Clone, PartialEq)]
+enum StreamSpec {
+    /// No stream named at all.
+    None,
+    /// A file to decode, in `res://` or filesystem form.
+    Path(String),
+    /// PCM the resource carries itself: an inline `AudioStreamWAV`
+    /// sub-resource, or a `load()`ed resource with no path of its own.
+    Inline(InlineWav),
+    /// The scene named a resource and nothing resolved it to either a file or
+    /// inline data. Kept distinct from [`None`](Self::None) so the player can
+    /// say so rather than being quietly mute.
+    Unresolved(String),
+}
+
+impl StreamSpec {
+    /// A value that changes exactly when the stream the node names changes.
+    ///
+    /// Reload is driven off this rather than off the raw property because one
+    /// stream has several spellings, and a change of spelling is not a change
+    /// of stream. Empty means "nothing loadable here", which is also what makes
+    /// a reload impossible for the two no-stream variants.
+    fn identity(&self) -> String {
+        match self {
+            Self::None | Self::Unresolved(_) => String::new(),
+            Self::Path(p) => format!("path:{p}"),
+            Self::Inline(wav) => format!("inline:{:016x}", wav.identity()),
+        }
+    }
+}
+
+/// The PCM payload of an `AudioStreamWAV`, in Godot's own property shape
+/// (`doc/classes/AudioStreamWAV.xml`).
+///
+/// This is the shape `scripting.rs` already builds for
+/// `AudioEffectRecord.get_recording()` and the shape `packed_scene.rs` copies
+/// onto a node as `__subres__stream__<key>` companions, so one decoder serves
+/// an inline sub-resource and a script-assigned resource alike.
+#[derive(Debug, Clone, PartialEq)]
+struct InlineWav {
+    data: Vec<u8>,
+    format: i64,
+    mix_rate: u32,
+    stereo: bool,
+    loop_mode: i64,
+    loop_begin: i64,
+    loop_end: i64,
+}
+
+impl InlineWav {
+    /// Hash of everything that decides what this stream sounds like.
+    ///
+    /// Inline PCM has no path to compare, so identity has to come from the
+    /// bytes. Hashed rather than cloned because the comparison runs once per
+    /// player per frame and the payload is the whole clip.
+    fn identity(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.data.hash(&mut hasher);
+        self.format.hash(&mut hasher);
+        self.mix_rate.hash(&mut hasher);
+        self.stereo.hash(&mut hasher);
+        self.loop_mode.hash(&mut hasher);
+        self.loop_begin.hash(&mut hasher);
+        self.loop_end.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+/// Reads a player node's `stream` property, plus the companions a scene load
+/// writes beside it, into a single [`StreamSpec`].
+///
+/// ⚠️ `stream` is consulted FIRST, and `__extres__stream` only while `stream`
+/// still holds an unresolved reference. The companion is the *resolution of
+/// that reference*, so once a script or an animation key has replaced `stream`
+/// with a real path or a `Resource` the companion is stale — preferring it
+/// unconditionally is what made `player.stream = load(...)` keep playing the
+/// clip the scene was authored with (pat-mgixk.5).
+fn resolve_stream_spec(node: &crate::node::Node) -> StreamSpec {
+    let companion_path = match node.get_property("__extres__stream") {
+        Variant::String(s) if !s.is_empty() => Some(s),
+        _ => None,
+    };
+    match node.get_property("stream") {
+        // `load()` / `preload()` hand a script a `Resource`, never a string, so
+        // this is the shape EVERY script-assigned stream arrives in. Matching
+        // only `Variant::String` here is why such an assignment was ignored
+        // outright.
+        Variant::Resource(res) => {
+            if !res.path.is_empty() {
+                StreamSpec::Path(res.path.clone())
+            } else if let Some(wav) = inline_wav_from_props(|key: &str| {
+                res.properties.get(key).cloned().unwrap_or(Variant::Nil)
+            }) {
+                StreamSpec::Inline(wav)
+            } else {
+                StreamSpec::Unresolved(format!("{} with neither path nor data", res.class_name))
+            }
+        }
+        // Godot's `stream` in a `.tscn` is `ExtResource("id")` (a file) or
+        // `SubResource("id")` (inline data), never a path.
+        Variant::String(s) if is_unresolved_resource_ref(&s) => {
+            if let Some(path) = companion_path {
+                StreamSpec::Path(path)
+            } else if let Some(wav) = inline_wav_from_props(|key: &str| {
+                node.get_property(&format!("__subres__stream__{key}"))
+            }) {
+                StreamSpec::Inline(wav)
+            } else {
+                StreamSpec::Unresolved(s)
+            }
+        }
+        Variant::String(s) if !s.is_empty() => StreamSpec::Path(s),
+        // No usable `stream` of its own: a companion is all there is.
+        _ => match companion_path {
+            Some(path) => StreamSpec::Path(path),
+            None => StreamSpec::None,
+        },
+    }
+}
+
+/// Builds an [`InlineWav`] from a property bag in `AudioStreamWAV` shape.
+/// `get` answers `Variant::Nil` for a property the bag does not hold.
+///
+/// `data` is the only required field — without PCM there is nothing to play —
+/// and every other default is Godot's own
+/// (`doc/classes/AudioStreamWAV.xml`: `format` 0 = 8-bit, `mix_rate` 44100,
+/// `stereo` false, the loop fields 0).
+///
+/// ⚠️ `format` defaults to 0, not 1. `AudioEffectRecord.format` defaults to
+/// 16-bit and `AudioStreamWAV.format` to 8-bit, and reading 16-bit data as
+/// 8-bit halves the clip's length and turns it into noise.
+fn inline_wav_from_props(get: impl Fn(&str) -> Variant) -> Option<InlineWav> {
+    let data = match get("data") {
+        Variant::PackedByteArray(bytes) if !bytes.is_empty() => bytes,
+        _ => return None,
+    };
+    let as_int = |value: Variant, default: i64| match value {
+        Variant::Int(i) => i,
+        Variant::Float(f) => f as i64,
+        _ => default,
+    };
+    Some(InlineWav {
+        data,
+        format: as_int(get("format"), 0),
+        mix_rate: as_int(get("mix_rate"), 44_100).clamp(1, i64::from(u32::MAX)) as u32,
+        stereo: matches!(get("stereo"), Variant::Bool(true)),
+        loop_mode: as_int(get("loop_mode"), 0),
+        loop_begin: as_int(get("loop_begin"), 0),
+        loop_end: as_int(get("loop_end"), 0),
+    })
+}
+
+/// Decodes an inline `AudioStreamWAV`'s PCM into a playable buffer.
+///
+/// 🔑 8-bit `AudioStreamWAV` is **signed** — the raw two's-complement byte, not
+/// the unsigned 0..255 a RIFF/WAV file stores. This is the exact inverse of
+/// `AudioEffectRecord`'s encoder (`gdaudio::effects::AudioEffectRecord::get_recording`),
+/// and reading it as unsigned offsets the whole clip by a half-scale DC step.
+fn decode_inline_wav(wav: &InlineWav) -> Result<LoadedStream, String> {
+    let samples: Vec<f32> = match wav.format {
+        // FORMAT_8_BITS
+        0 => wav
+            .data
+            .iter()
+            .map(|b| f32::from(*b as i8) / 128.0)
+            .collect(),
+        // FORMAT_16_BITS, little-endian
+        1 => wav
+            .data
+            .chunks_exact(2)
+            .map(|c| f32::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0)
+            .collect(),
+        // FORMAT_IMA_ADPCM / FORMAT_QOA. Reported rather than decoded as PCM:
+        // a lossily compressed payload read as raw samples is loud noise, which
+        // is worse than silence with a line in the log.
+        other => {
+            return Err(format!(
+                "format {other} is not decodable yet (only 8-bit and 16-bit PCM are)"
+            ))
+        }
+    };
+    if samples.is_empty() {
+        return Err("the resource carries no samples".to_owned());
+    }
+    let buffer = AudioBuffer {
+        samples,
+        sample_rate: wav.mix_rate,
+        channels: if wav.stereo { 2 } else { 1 },
+    };
+    // ⚠️ `loop_begin`/`loop_end` are FRAMES on the resource and SECONDS on the
+    // playback API — the same conversion `gdaudio::import` does for a file's
+    // `smpl` chunk. Handing frames straight through would put the loop region
+    // tens of thousands of seconds out.
+    let loop_points = match wav.loop_mode {
+        1 => Some(gdaudio::stream::LoopMode::Forward),
+        2 => Some(gdaudio::stream::LoopMode::PingPong),
+        3 => Some(gdaudio::stream::LoopMode::Backward),
+        _ => None,
+    }
+    .map(|mode| {
+        let rate = wav.mix_rate.max(1) as f32;
+        gdaudio::import::StreamLoop {
+            mode,
+            begin_secs: wav.loop_begin as f32 / rate,
+            // Godot treats an unset `loop_end` (0, or anything at or before
+            // `loop_begin`) as "to the end of the sample".
+            end_secs: if wav.loop_end > wav.loop_begin {
+                wav.loop_end as f32 / rate
+            } else {
+                buffer.duration_secs()
+            },
+        }
+    });
+    Ok((buffer, loop_points))
 }
 
 /// Whether `raw` is still a `.tscn` resource *reference* rather than a usable

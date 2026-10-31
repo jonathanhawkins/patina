@@ -1,0 +1,17 @@
+; Conformance fixture (pat-mgixk.403).
+;
+; Seam under test: `get_parent().call_deferred("add_child", n)` — a deferred
+; call to a NATIVE method, with a runtime-constructed node as its argument.
+; The child must appear in the tree on the frame AFTER the call.
+
+config_version=5
+
+[application]
+
+config/name="deferred_add_child"
+run/main_scene="res://main.tscn"
+
+[display]
+
+window/size/viewport_width=320
+window/size/viewport_height=240

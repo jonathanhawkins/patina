@@ -69,6 +69,17 @@ fn the_demo_shell_drives_the_audio_backend() {
             "renderQuantum",
             "the block size must come from the backend rather than a hardcoded 128",
         ),
+        (
+            "enableBrowserMp3Decoding",
+            "gdaudio's ISO MP3 decoder is target-gated off wasm32, so without this \
+             every AudioStreamMP3 in a web scene decodes to UnsupportedFormat \
+             (pat-mgixk.4)",
+        ),
+        (
+            "registerDecodedMp3",
+            "enabling browser MP3 decoding only installs the lookup — the page still \
+             has to hand over what decodeAudioData produced, or every MP3 is a miss",
+        ),
     ] {
         assert!(
             html.contains(needle),
@@ -108,6 +119,12 @@ fn the_shell_only_calls_names_the_rust_side_exports() {
         ("markUnlocked", "js_name = markUnlocked"),
         ("pullBlock", "js_name = pullBlock"),
         ("renderQuantum", "js_name = renderQuantum"),
+        (
+            "enableBrowserMp3Decoding",
+            "js_name = enableBrowserMp3Decoding",
+        ),
+        ("registerDecodedMp3", "js_name = registerDecodedMp3"),
+        ("decodedMp3Count", "js_name = decodedMp3Count"),
     ] {
         assert!(
             bindings.contains(declaration),

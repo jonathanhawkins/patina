@@ -25,6 +25,30 @@ fn read_audit_doc() -> String {
     std::fs::read_to_string(&path).expect("prd/PHASE7_PLATFORM_PARITY_AUDIT.md must exist")
 }
 
+/// Whether `name` exists under `engine-rs/tests`, at the top level or one
+/// directory down.
+///
+/// `engine-rs/tests` was reorganised into suite directories — a standalone file
+/// per test meant ~550 full engine links — so the former `tests/<name>.rs`
+/// files are now modules inside `tests/<suite>/main.rs`. Checking only the top
+/// level answers "missing" for a file that is merely one directory away, which
+/// is what failed all four existence tests below (pat-21oab).
+///
+/// One level is the whole layout, measured: of the 414 `*_test.rs` files, 10 sit
+/// at the top level and 404 one directory down, and none nests deeper.
+fn test_file_exists(name: &str) -> bool {
+    let tests_dir = repo_root().join("engine-rs/tests");
+    if tests_dir.join(name).exists() {
+        return true;
+    }
+    match std::fs::read_dir(&tests_dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .any(|e| e.path().is_dir() && e.path().join(name).exists()),
+        Err(_) => false,
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // 1. Stable layer doc exists and cites the audit
 // ─────────────────────────────────────────────────────────────────────
@@ -154,57 +178,74 @@ fn audit_references_stable_layer_evidence() {
 
 #[test]
 fn stable_layer_integration_test_exists() {
-    let path = repo_root().join("engine-rs/tests/platform_first_stable_layer_test.rs");
     assert!(
-        path.exists(),
+        test_file_exists("platform_first_stable_layer_test.rs"),
         "platform_first_stable_layer_test.rs must exist"
     );
 }
 
 #[test]
 fn windowing_tests_exist() {
-    let tests_dir = repo_root().join("engine-rs/tests");
     let window_tests = [
         "window_lifecycle_test.rs",
         "window_lifecycle_parity_test.rs",
         "window_creation_abstraction_test.rs",
     ];
     for test in &window_tests {
-        assert!(
-            tests_dir.join(test).exists(),
-            "windowing test must exist: {test}"
-        );
+        assert!(test_file_exists(test), "windowing test must exist: {test}");
     }
 }
 
 #[test]
 fn platform_target_tests_exist() {
-    let tests_dir = repo_root().join("engine-rs/tests");
     assert!(
-        tests_dir
-            .join("platform_targets_validation_test.rs")
-            .exists(),
+        test_file_exists("platform_targets_validation_test.rs"),
         "platform targets validation test must exist"
     );
     assert!(
-        tests_dir.join("ci_build_matrix_platform_test.rs").exists(),
+        test_file_exists("ci_build_matrix_platform_test.rs"),
         "CI build matrix test must exist"
     );
 }
 
 #[test]
 fn per_os_platform_tests_exist() {
-    let tests_dir = repo_root().join("engine-rs/tests");
     let os_tests = [
         "linux_x11_wayland_platform_test.rs",
         "windows_platform_win32_backend_test.rs",
     ];
     for test in &os_tests {
         assert!(
-            tests_dir.join(test).exists(),
+            test_file_exists(test),
             "per-OS platform test must exist: {test}"
         );
     }
+}
+
+/// Guard for the resolver the four existence tests above depend on.
+///
+/// The bug those tests hit was not a missing file — it was a resolver that only
+/// looked at `engine-rs/tests` itself. This pins BOTH halves, so reverting
+/// `test_file_exists` to a top-level check fails the nested case, and dropping
+/// its top-level branch fails the other (pat-21oab).
+#[test]
+fn test_file_resolver_finds_both_top_level_and_suite_directory_files() {
+    // Still at the top level of engine-rs/tests.
+    assert!(
+        test_file_exists("signal_dispatch_parity_test.rs"),
+        "resolver must find a top-level test file"
+    );
+    // One directory down, which is where 404 of the 414 test files live.
+    assert!(
+        test_file_exists("window_lifecycle_test.rs"),
+        "resolver must find a test file inside a suite directory — \
+         a top-level-only check reports it missing"
+    );
+    // And it must not invent files.
+    assert!(
+        !test_file_exists("a_test_file_that_does_not_exist_test.rs"),
+        "resolver must not report a nonexistent file as present"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────

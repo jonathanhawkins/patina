@@ -130,6 +130,7 @@ pub mod script_find_replace;
 pub mod script_gutter;
 pub mod script_main_view;
 pub mod script_outline;
+pub mod script_post_import;
 pub mod script_templates;
 pub mod settings;
 pub mod shader_editor;
@@ -484,6 +485,85 @@ impl RunControls {
     }
 }
 
+/// The `CONNECT_*` flags and bound arguments a signal connection was made with
+/// (pat-mgixk.13).
+///
+/// Godot's `ConnectDialog` lets the user tick **Deferred** and **One Shot** and
+/// add bound arguments, and `Object::connect` carries them as `CONNECT_DEFERRED`
+/// / `CONNECT_ONE_SHOT` plus `binds`. `PackedScene` then persists them as the
+/// `flags=` field of a `[connection]` line, so they are part of what the editor
+/// has to round-trip — not a runtime-only detail.
+///
+/// Carried as one struct rather than three fields on the command so adding a
+/// future flag does not touch every construction site again.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConnectOptions {
+    /// Godot `CONNECT_DEFERRED`: fire from the deferred queue, not inline.
+    pub deferred: bool,
+    /// Godot `CONNECT_ONE_SHOT`: auto-disconnect after the first emission.
+    pub one_shot: bool,
+    /// Extra arguments appended after the signal's own (Godot `binds`).
+    pub binds: Vec<Variant>,
+}
+
+impl ConnectOptions {
+    /// Reads the options back off a live connection.
+    ///
+    /// Needed so undoing a *disconnect* restores the connection it removed with
+    /// the flags it actually had. Reconnecting with defaults would silently
+    /// drop a user's Deferred tick, which looks like the undo worked.
+    pub fn from_connection(conn: &gdobject::signal::Connection) -> Self {
+        Self {
+            deferred: conn.deferred,
+            one_shot: conn.one_shot,
+            binds: conn.binds.clone(),
+        }
+    }
+
+    /// Builds the `Connection` these options describe.
+    pub fn to_connection(&self, target_id: u64, method: &str) -> gdobject::signal::Connection {
+        let mut conn =
+            gdobject::signal::Connection::new(gdcore::id::ObjectId::from_raw(target_id), method);
+        conn.deferred = self.deferred;
+        conn.one_shot = self.one_shot;
+        conn.binds = self.binds.clone();
+        conn
+    }
+
+    /// The `flags=` value Godot writes into a `[connection]` line.
+    ///
+    /// ⚠️ Takes the values from `gdscene::packed_scene` rather than spelling
+    /// them here. Godot's `ConnectFlags` are NOT consecutive —
+    /// `CONNECT_DEFERRED = 1`, `CONNECT_PERSIST = 2`, `CONNECT_ONE_SHOT = 4`
+    /// (`core/object/object.h`) — so deriving "the second flag is 2" writes
+    /// `flags=2` for a one-shot, which is CONNECT_PERSIST. That reloads as a
+    /// different connection with no error anywhere. The loader and the saver
+    /// already read these constants; this is the third reader, not a second
+    /// definition.
+    ///
+    /// Godot omits the field entirely when the value is 0, which is why this
+    /// returns the number and leaves the decision to the saver.
+    pub fn godot_flags(&self) -> u32 {
+        let mut flags = 0;
+        if self.deferred {
+            flags |= gdscene::packed_scene::CONNECT_DEFERRED;
+        }
+        if self.one_shot {
+            flags |= gdscene::packed_scene::CONNECT_ONE_SHOT;
+        }
+        flags
+    }
+
+    /// Rebuilds the options a `flags=` value encodes, for scene loading.
+    pub fn from_godot_flags(flags: u32) -> Self {
+        Self {
+            deferred: flags & gdscene::packed_scene::CONNECT_DEFERRED != 0,
+            one_shot: flags & gdscene::packed_scene::CONNECT_ONE_SHOT != 0,
+            binds: Vec::new(),
+        }
+    }
+}
+
 /// An undoable editor command.
 ///
 /// Each variant stores enough data to both execute and reverse the
@@ -657,6 +737,8 @@ pub enum EditorCommand {
         target_object_id: u64,
         /// Method name on the target.
         method: String,
+        /// The `CONNECT_*` flags and binds the connection was made with.
+        options: ConnectOptions,
     },
     /// Disconnect a signal on a source node.
     DisconnectSignal {
@@ -668,6 +750,12 @@ pub enum EditorCommand {
         target_object_id: u64,
         /// Method name on the target.
         method: String,
+        /// The options the removed connection carried (populated on execute).
+        ///
+        /// ⚠️ Load-bearing for undo: reconnecting with `ConnectOptions::default()`
+        /// would drop whatever Deferred/One Shot/binds the user had chosen, and
+        /// the undo would *look* like it worked.
+        removed: Option<ConnectOptions>,
     },
     /// Add a node to a named group.
     AddToGroup {
@@ -1058,18 +1146,17 @@ impl EditorCommand {
                 signal_name,
                 target_object_id,
                 method,
+                options,
             } => {
-                let conn = gdobject::signal::Connection::new(
-                    gdcore::id::ObjectId::from_raw(*target_object_id),
-                    method.as_str(),
-                );
+                let conn = options.to_connection(*target_object_id, method);
                 tree.connect_signal(*source_id, signal_name, conn);
                 tracing::debug!(
-                    "ConnectSignal {:?}.{} -> {}::{}",
+                    "ConnectSignal {:?}.{} -> {}::{} flags={}",
                     source_id,
                     signal_name,
                     target_object_id,
-                    method
+                    method,
+                    options.godot_flags()
                 );
                 Ok(())
             }
@@ -1078,7 +1165,20 @@ impl EditorCommand {
                 signal_name,
                 target_object_id,
                 method,
+                removed,
             } => {
+                // Capture the flags BEFORE removing the connection — once it is
+                // gone there is nothing left to read them off, and undo would
+                // have to guess.
+                *removed = tree
+                    .signal_store(*source_id)
+                    .and_then(|store| store.get_signal(signal_name))
+                    .and_then(|signal| {
+                        signal.connections().iter().find(|conn| {
+                            conn.target_id.raw() == *target_object_id && conn.method == *method
+                        })
+                    })
+                    .map(ConnectOptions::from_connection);
                 let store = tree.signal_store_mut(*source_id);
                 store.disconnect(
                     signal_name,
@@ -1390,6 +1490,9 @@ impl EditorCommand {
                 signal_name,
                 target_object_id,
                 method,
+                // A connection is identified by (signal, target, method); the
+                // flags play no part in finding it again.
+                options: _,
             } => {
                 // Undo connect = disconnect.
                 let store = tree.signal_store_mut(*source_id);
@@ -1405,12 +1508,15 @@ impl EditorCommand {
                 signal_name,
                 target_object_id,
                 method,
+                removed,
             } => {
-                // Undo disconnect = reconnect.
-                let conn = gdobject::signal::Connection::new(
-                    gdcore::id::ObjectId::from_raw(*target_object_id),
-                    method.as_str(),
-                );
+                // Undo disconnect = reconnect, WITH the flags it had. `execute`
+                // recorded them; `None` means the connection was not there to
+                // begin with, so defaults are the honest answer.
+                let conn = removed
+                    .clone()
+                    .unwrap_or_default()
+                    .to_connection(*target_object_id, method);
                 tree.connect_signal(*source_id, signal_name, conn);
                 Ok(())
             }
@@ -2912,6 +3018,7 @@ position = Vector2(10, 20)
                 signal_name: "pressed".into(),
                 target_object_id: target_oid,
                 method: "on_pressed".into(),
+                options: ConnectOptions::default(),
             })
             .unwrap();
 
@@ -2951,6 +3058,7 @@ position = Vector2(10, 20)
                 signal_name: "clicked".into(),
                 target_object_id: target_oid.raw(),
                 method: "on_click".into(),
+                removed: None,
             })
             .unwrap();
 
@@ -3061,9 +3169,128 @@ position = Vector2(10, 20)
             signal_name: "clicked".into(),
             target_object_id: 0,
             method: "handler".into(),
+            options: ConnectOptions::default(),
         }
         .label()
         .contains("clicked"));
+    }
+
+    /// Godot's `ConnectFlags` are NOT consecutive bits, and getting that wrong
+    /// is silent: `CONNECT_DEFERRED = 1`, `CONNECT_PERSIST = 2`,
+    /// `CONNECT_ONE_SHOT = 4` (`core/object/object.h`). Writing `flags=2` for a
+    /// one-shot saves CONNECT_PERSIST instead, and the scene reloads as a
+    /// different connection with no error from anything.
+    ///
+    /// The literals here are deliberate. Asserting only against the
+    /// `gdscene::packed_scene` constants would pass even if BOTH sides drifted
+    /// together, which is exactly the failure that matters when the number is
+    /// also written into a `.tscn` on disk that older scenes already contain.
+    #[test]
+    fn connect_option_flags_match_godots_non_consecutive_values() {
+        assert_eq!(ConnectOptions::default().godot_flags(), 0, "no flags = 0");
+        assert_eq!(
+            ConnectOptions {
+                deferred: true,
+                ..Default::default()
+            }
+            .godot_flags(),
+            1,
+            "CONNECT_DEFERRED is 1"
+        );
+        assert_eq!(
+            ConnectOptions {
+                one_shot: true,
+                ..Default::default()
+            }
+            .godot_flags(),
+            4,
+            "CONNECT_ONE_SHOT is 4, NOT 2 - 2 is CONNECT_PERSIST"
+        );
+        assert_eq!(
+            ConnectOptions {
+                deferred: true,
+                one_shot: true,
+                ..Default::default()
+            }
+            .godot_flags(),
+            5,
+            "both flags OR together to 5, never 3"
+        );
+    }
+
+    /// The `flags=` field has to survive a save/load round trip, since that is
+    /// the whole reason the editor records it.
+    #[test]
+    fn connect_option_flags_round_trip_through_the_godot_encoding() {
+        for (deferred, one_shot) in [(false, false), (true, false), (false, true), (true, true)] {
+            let original = ConnectOptions {
+                deferred,
+                one_shot,
+                binds: Vec::new(),
+            };
+            let decoded = ConnectOptions::from_godot_flags(original.godot_flags());
+            assert_eq!(
+                decoded,
+                original,
+                "flags {} did not round trip",
+                original.godot_flags()
+            );
+        }
+    }
+
+    /// Undoing a disconnect must restore the flags the connection had, not
+    /// defaults. Reconnecting with `Connection::new` silently drops a user's
+    /// Deferred tick while making the undo look like it worked.
+    #[test]
+    fn undoing_a_disconnect_restores_the_connections_flags() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let source = tree.add_child(root, Node::new("Button", "Button")).unwrap();
+
+        let options = ConnectOptions {
+            deferred: true,
+            one_shot: true,
+            binds: vec![Variant::Int(7)],
+        };
+        let target = root.object_id().raw();
+        let mut connect = EditorCommand::ConnectSignal {
+            source_id: source,
+            signal_name: "pressed".into(),
+            target_object_id: target,
+            method: "_on_pressed".into(),
+            options: options.clone(),
+        };
+        connect.execute(&mut tree).unwrap();
+
+        let mut disconnect = EditorCommand::DisconnectSignal {
+            source_id: source,
+            signal_name: "pressed".into(),
+            target_object_id: target,
+            method: "_on_pressed".into(),
+            removed: None,
+        };
+        disconnect.execute(&mut tree).unwrap();
+        assert_eq!(
+            tree.signal_store(source)
+                .and_then(|s| s.get_signal("pressed"))
+                .map_or(0, |s| s.connection_count()),
+            0,
+            "the disconnect must actually remove it"
+        );
+
+        disconnect.undo(&mut tree).unwrap();
+        let restored = tree
+            .signal_store(source)
+            .and_then(|s| s.get_signal("pressed"))
+            .and_then(|s| s.connections().first())
+            .expect("the connection comes back");
+        assert!(restored.deferred, "Deferred was dropped by the undo");
+        assert!(restored.one_shot, "One Shot was dropped by the undo");
+        assert_eq!(
+            restored.binds,
+            vec![Variant::Int(7)],
+            "bound arguments were dropped by the undo"
+        );
     }
 
     // -- EditorMode ---------------------------------------------------------

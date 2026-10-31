@@ -17,9 +17,12 @@ fn read_audit_doc() -> String {
 
 /// Read the startup/packaging flow test.
 fn read_flow_test() -> String {
+    // ⚠️ Was "/tests/startup_runtime_packaging_flow_test.rs", which no longer
+    // resolves: engine-rs/tests was reorganised into suite directories, so this
+    // file is now a module inside tests/misc_suite_f/main.rs (pat-21oab).
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/startup_runtime_packaging_flow_test.rs"
+        "/tests/misc_suite_f/startup_runtime_packaging_flow_test.rs"
     );
     std::fs::read_to_string(path).expect("should read startup_runtime_packaging_flow_test.rs")
 }

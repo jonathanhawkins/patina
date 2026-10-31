@@ -393,13 +393,23 @@ name = "Config"
 
 #[test]
 fn classdb_pck_packer_exists() {
-    gdobject::class_db::register_3d_classes();
+    // PCKPacker and ProjectSettings are registered by
+    // `register_root_window_chain()` (class_db.rs), not by
+    // `register_3d_classes()` — PCKPacker is a RefCounted utility with
+    // nothing to do with 3D. This is the bootstrap `SceneTree::new()`
+    // itself calls, so it is the one a ClassDB assertion must use.
+    gdobject::class_db::register_root_window_chain();
     assert!(gdobject::class_db::class_exists("PCKPacker"));
 }
 
 #[test]
 fn classdb_pck_packer_has_methods() {
-    gdobject::class_db::register_3d_classes();
+    // PCKPacker and ProjectSettings are registered by
+    // `register_root_window_chain()` (class_db.rs), not by
+    // `register_3d_classes()` — PCKPacker is a RefCounted utility with
+    // nothing to do with 3D. This is the bootstrap `SceneTree::new()`
+    // itself calls, so it is the one a ClassDB assertion must use.
+    gdobject::class_db::register_root_window_chain();
     assert!(gdobject::class_db::class_has_method(
         "PCKPacker",
         "pck_start"
@@ -413,7 +423,12 @@ fn classdb_pck_packer_has_methods() {
 
 #[test]
 fn classdb_project_settings_has_load_resource_pack() {
-    gdobject::class_db::register_3d_classes();
+    // PCKPacker and ProjectSettings are registered by
+    // `register_root_window_chain()` (class_db.rs), not by
+    // `register_3d_classes()` — PCKPacker is a RefCounted utility with
+    // nothing to do with 3D. This is the bootstrap `SceneTree::new()`
+    // itself calls, so it is the one a ClassDB assertion must use.
+    gdobject::class_db::register_root_window_chain();
     assert!(gdobject::class_db::class_has_method(
         "ProjectSettings",
         "load_resource_pack"

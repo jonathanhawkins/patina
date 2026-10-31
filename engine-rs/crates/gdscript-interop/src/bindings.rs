@@ -145,6 +145,20 @@ pub trait ScriptInstance {
     /// Returns metadata for all methods exposed by this script.
     fn list_methods(&self) -> Vec<MethodInfo>;
 
+    /// Drains the lines this script has printed since the last call.
+    ///
+    /// Defaulted to an empty list, so only the GDScript instance has to answer
+    /// and every other implementor is untouched. This is the seam the
+    /// conformance gate reads a *running project's* `print()` output through
+    /// (pat-mgixk.403): the buffer itself lives on the interpreter, and
+    /// `GDScriptNodeInstance::take_output` is an INHERENT method, so a host
+    /// holding `&mut dyn ScriptInstance` out of the scene tree had no way to
+    /// reach it — the editor's own output panel only works because it owns the
+    /// concrete type.
+    fn drain_print_output(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Returns metadata for all properties exposed by this script.
     fn list_properties(&self) -> Vec<ScriptPropertyInfo>;
 
@@ -1063,6 +1077,18 @@ pub trait SceneAccess {
     /// `SceneTree.get_node_count`.
     fn tree_node_count(&self) -> i64 {
         0
+    }
+
+    /// `SceneTree.get_current_scene` — the root of the scene the tree is
+    /// currently running, as an object handle (pat-mgixk.8).
+    ///
+    /// ⚠️ NOT the same node as [`tree_root`](Self::tree_root). `/root` is the
+    /// Window that owns every scene; the current scene is the child under it
+    /// that `change_scene_to_*` swapped in, which is what a script asking
+    /// "which scene am I in?" means. Returning the root instead would answer
+    /// the same handle before and after a scene change.
+    fn current_scene(&self) -> Option<u64> {
+        None
     }
 
     /// `SceneTree.get_nodes_in_group`, in tree order.

@@ -11,7 +11,7 @@ The `gdplatform` crate provides the foundational windowing, input, timing, and O
 
 The stable layer is validated in **headless mode** — all contracts below are
 exercised without OS windows or GPU. Native per-OS platform parity (live X11,
-Cocoa, Win32 windowing) is classified as "Implemented, partly measured" in the
+Cocoa, Win32 windowing) is classified as "Implemented, not yet measured" in the
 Phase 7 audit and is **not** claimed as full parity by this specification.
 
 ## Subsystem Responsibilities
@@ -23,7 +23,7 @@ Phase 7 audit and is **not** claimed as full parity by this specification.
 | Window lifecycle (create, resize, close) | `window` | `WindowConfig`, `WindowManager`, `WindowId`, `HeadlessWindow` | Measured (headless) |
 | Multi-window management and event routing | `display` | `DisplayServer`, `VsyncMode` | Measured (headless) |
 | Platform backend abstraction | `backend` | `PlatformBackend` (trait), `HeadlessPlatform` | Measured |
-| Native OS windowing (X11, Cocoa, Win32) | per-OS modules | `winit_backend` | Implemented, partly measured |
+| Native OS windowing (X11, Cocoa, Win32) | per-OS modules | `winit_backend` | Implemented, not yet measured |
 
 **Contracts:**
 - `PlatformBackend` and `WindowManager` are object-safe traits, allowing runtime backend swapping.
@@ -118,6 +118,32 @@ Phase 7 audit and is **not** claimed as full parity by this specification.
 3. **Deterministic construction**: All public configuration types produce identical results from identical inputs.
 4. **Event pipeline integrity**: `WindowEvent -> InputEvent -> InputState -> ActionMap` pipeline is fully tested end-to-end.
 5. **Packaging determinism**: `PackageExecutor` produces identical manifest and resource listing from identical inputs.
+
+## Per-OS Native Platform Classification
+
+Each OS is classified separately, and only against what a test actually drives.
+Everything below is **headless/model behavior only**: the backends are exercised
+through Patina's headless composition or an OS-API model, so they prove the model
+is self-consistent, not that a real OS shell matches Godot.
+
+| OS | Native windowing surface | Classification | Scope |
+|----|--------------------------|----------------|-------|
+| Linux | X11 / Wayland | Implemented, not yet measured | headless/model protocol coverage; no display server is contacted |
+| macOS | Cocoa / AppKit | Implemented, not yet measured | headless/model API coverage; no NSApplication is started |
+| Windows | Win32 | Implemented, not yet measured | headless/model API coverage; no HWND is created |
+
+### Test Evidence Per OS
+
+| OS | Test file | What it covers |
+|----|-----------|----------------|
+| Linux | `engine-rs/tests/misc_suite_d/linux_x11_wayland_platform_test.rs` | X11/Wayland platform model; ⚠️ 6 rows red at HEAD |
+| macOS | `engine-rs/tests/misc_suite_d/macos_platform_layer_test.rs` | Cocoa platform layer model; green at HEAD |
+| Windows | `engine-rs/tests/misc_suite_g/windows_platform_layer_test.rs` | Win32 platform layer model; green at HEAD |
+
+Cross-OS evidence that is genuinely green, and genuinely headless:
+`engine-rs/tests/platform_suite/platform_first_stable_layer_test.rs`,
+`engine-rs/tests/platform_suite/platform_backend_test.rs` and
+`engine-rs/tests/platform_suite/platform_targets_validation_test.rs`.
 
 ## Test Coverage
 

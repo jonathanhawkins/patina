@@ -157,6 +157,31 @@ impl WebEngineHandle {
     }
 }
 
+/// Not exported to JS, so it lives outside the `#[wasm_bindgen]` block above.
+impl WebEngineHandle {
+    /// Routes this engine's scene audio into a ring an `AudioWorkletProcessor`
+    /// can drain (pat-mgixk.4).
+    ///
+    /// The page reaches this through
+    /// [`WebAudio::attach_scene_audio`](crate::web_audio::WebAudio::attach_scene_audio)
+    /// rather than directly: the ring has to be built for the rate the browser
+    /// chose for the `AudioContext`, and the `AudioContext` is owned there.
+    /// Every decision lives in
+    /// [`WebEngine::attach_audio_output`](crate::engine::WebEngine::attach_audio_output),
+    /// which is target-independent and covered by native tests — this is only
+    /// the borrow.
+    pub(crate) fn attach_audio_output(
+        &self,
+        context_rate: u32,
+        mix_rate: u32,
+    ) -> crate::audio::SceneAudioRing {
+        self.runtime
+            .borrow_mut()
+            .engine
+            .attach_audio_output(context_rate, mix_rate)
+    }
+}
+
 /// The browser `Window`, or a message naming why there is none.
 fn window() -> Result<web_sys::Window, JsValue> {
     web_sys::window().ok_or_else(|| JsValue::from_str("no `window`: not on a browser main thread"))

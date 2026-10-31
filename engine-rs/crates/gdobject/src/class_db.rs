@@ -1071,6 +1071,29 @@ fn object_class() -> ClassRegistration {
         .method(MethodInfo::new("set", 2))
         .method(MethodInfo::new("get", 1).const_method())
         .method(MethodInfo::new("notification", 1))
+        // Object's four SCRIPT VIRTUALS, which ClassDB did not declare at all
+        // although the engine dispatches every one of them (pat-nzgdu).
+        //
+        // ⚠️ `gdscene/src/scripting.rs`'s "Object virtual chain" section calls
+        // `_to_string` (`:2520`), `_get` (`:2532`), `_set` (`:2551`) and
+        // `_get_property_list` (`:2560`) through `call_script_method`. With no
+        // declaration, `class_has_method(.., "_get")` answered FALSE for a
+        // virtual the engine runs on EVERY object, so a script could implement
+        // `_get`, have it work, and still be told by `has_method` that it does
+        // not exist. `has_method` is what a defensive script asks, which is why
+        // the gap was invisible.
+        //
+        // ⚠️ Plain `.virtual_method()` with NO `.const_method()`: `Object.xml`
+        // gives all four `qualifiers="virtual"`, not `virtual const`. Marking
+        // `_set` const would contradict its purpose — it exists to consume a
+        // write and returns whether it did.
+        //
+        // These coexist with the non-underscore `set`/`get` above: those are
+        // the engine-side accessors, these are the script's override points.
+        .method(MethodInfo::new("_get", 1).virtual_method())
+        .method(MethodInfo::new("_set", 2).virtual_method())
+        .method(MethodInfo::new("_get_property_list", 0).virtual_method())
+        .method(MethodInfo::new("_to_string", 0).virtual_method())
         .signal(SignalInfo::new("script_changed"))
         .signal(SignalInfo::new("property_list_changed"))
         .constant(
@@ -22018,7 +22041,27 @@ pub fn register_root_window_chain() {
         register_class(ClassRegistration::new("Performance").parent("Object"));
     }
     if !class_exists("ProjectSettings") {
-        register_class(ClassRegistration::new("ProjectSettings").parent("Object"));
+        // pat-21oab — ProjectSettings was registered BARE: parent set, zero
+        // methods. That is the same shape this file records for `Time` above,
+        // so `class_exists("ProjectSettings")` answered true while
+        // `class_has_method("ProjectSettings", "load_resource_pack")` answered
+        // false for a method the engine fully runs.
+        //
+        // ⚠️ Description only, and it is allowed to be here because the method
+        // IS dispatched: `interpreter.rs` (the `"load_resource_pack"` arm)
+        // reads the path, `replace_files` and `offset`, then calls
+        // `gdresource::pck::load_resource_pack`. Registering an undispatched
+        // name would make `class_has_method` answer true while the call
+        // returns Nil, which is the failure mode this file exists to avoid.
+        //
+        // Arity 3 counts Godot's OPTIONAL arguments, as every entry here does:
+        // `load_resource_pack(pack, replace_files = true, offset = 0)`, from
+        // `upstream/godot/doc/classes/ProjectSettings.xml:169-173`.
+        register_class(
+            ClassRegistration::new("ProjectSettings")
+                .parent("Object")
+                .method(MethodInfo::new("load_resource_pack", 3)),
+        );
     }
     if !class_exists("ClassDB") {
         register_class(
@@ -22578,7 +22621,45 @@ pub fn register_viewport_classes() {
                 .parent("Texture")
                 .method(MethodInfo::new("get_width", 0).const_method())
                 .method(MethodInfo::new("get_height", 0).const_method())
-                .method(MethodInfo::new("get_size", 0).const_method()),
+                .method(MethodInfo::new("get_size", 0).const_method())
+                // The three virtuals the engine ACTUALLY INVOKES on a scripted
+                // Texture2D, which ClassDB did not declare at all (pat-nzgdu).
+                //
+                // ⚠️ This gap points the opposite way from the usual one. The
+                // scripted-resource draw path calls `_get_width`
+                // (`gdscene/src/scene_tree.rs:5226`), `_get_height` (`:5228`)
+                // and `_draw_rect` (`:5235`) on a procedural texture. With no
+                // declaration, `class_has_method("Texture2D", "_get_width")`
+                // answered FALSE for an override the engine runs — so a script
+                // guarding with `has_method` skips a working override and the
+                // texture silently falls back to the control's rect.
+                //
+                // ⚠️ Godot's other four Texture2D virtuals (`_draw`,
+                // `_draw_rect_region`, `_has_alpha`, `_is_pixel_opaque`) are
+                // deliberately NOT declared: nothing in the engine calls them,
+                // and declaring an uninvoked virtual is the Nil-placeholder bug
+                // this audit exists to find. `_draw` in particular only LOOKS
+                // wired — `scene_tree.rs:5205` passes `(Nil, Rect2)`, which is
+                // `StyleBox._draw`, and `:5598` passes none, which is
+                // `CanvasItem._draw`; Godot's `Texture2D._draw` takes four.
+                //
+                // Arities and the `virtual const` qualifiers are transcribed
+                // from `upstream/godot/doc/classes/Texture2D.xml`.
+                .method(
+                    MethodInfo::new("_get_width", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_get_height", 0)
+                        .virtual_method()
+                        .const_method(),
+                )
+                .method(
+                    MethodInfo::new("_draw_rect", 5)
+                        .virtual_method()
+                        .const_method(),
+                ),
         );
     }
 

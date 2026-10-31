@@ -29,7 +29,7 @@
 use gdaudio::decode::AudioBuffer;
 use gdaudio::output::mix_and_write;
 use gdaudio::server::{AudioServer, PlaybackId};
-use gdaudio::web_output::WebAudioOutput;
+use gdaudio::web_output::{SharedWebAudioOutput, WebAudioOutput};
 
 /// Frames an `AudioWorkletProcessor` renders per `process()` call.
 ///
@@ -250,6 +250,107 @@ impl WebAudioEngine {
     /// interleaving [`Self::pull_block`] produces.
     pub fn worklet_glue(&self) -> String {
         gdaudio::audio_worklet_glue(PROCESSOR_NAME, self.channels)
+    }
+}
+
+/// The scene path: the ring the `MainLoop`'s `AudioServerBridge` fills and the
+/// `AudioWorkletProcessor` drains (pat-mgixk.4).
+///
+/// Which mixer feeds it is the entire difference from [`WebAudioEngine`], and
+/// that difference was the bug. `WebAudioEngine` owns a *second*
+/// `AudioServer` that only [`WebAudioEngine::play_tone`] and
+/// [`WebAudioEngine::play_encoded`] ever reach, while the loaded scene's audio
+/// is mixed by the `MainLoop`'s `AudioServerBridge`. With nothing attached to
+/// that bridge it mixed every `AudioStreamPlayer` into `last_mix` and dropped
+/// it, so a web game was silent however correct its scene was. Godot's web
+/// export has exactly one `AudioServer` and the worklet pulls from it
+/// (`platform/web/audio_driver_web.cpp`); this is the consumer end of that
+/// arrangement.
+///
+/// ⚠️ A pull here **never mixes**. That is the point, not an omission: the
+/// frames come from `MainLoop::step`, so if the frame loop stops, audio stops,
+/// exactly as on native. Topping the ring up inside `pull_block` would
+/// re-introduce a mixer the scene does not drive — which is what made the old
+/// demo path look like it worked.
+pub struct SceneAudioRing {
+    ring: SharedWebAudioOutput,
+    /// Frames handed to the worklet so far — the observable "scene audio is
+    /// flowing" counter, distinct from the demo path's.
+    frames_pulled: u64,
+}
+
+impl SceneAudioRing {
+    /// Wraps the consumer end of a ring already attached to a `MainLoop`.
+    ///
+    /// Built by [`crate::engine::WebEngine::attach_audio_output`], which is
+    /// what attaches the producer end — constructing one by hand gives a ring
+    /// nothing writes to.
+    pub fn new(ring: SharedWebAudioOutput) -> Self {
+        Self {
+            ring,
+            frames_pulled: 0,
+        }
+    }
+
+    /// The `AudioContext` rate blocks come out at.
+    pub fn context_rate(&self) -> u32 {
+        self.ring.context_rate()
+    }
+
+    /// Interleaved channel count of every block [`Self::pull_block`] returns.
+    pub fn channels(&self) -> u16 {
+        self.ring.channels()
+    }
+
+    /// Frames handed to the worklet since start.
+    pub fn frames_pulled(&self) -> u64 {
+        self.frames_pulled
+    }
+
+    /// Frames the frame loop has mixed that the worklet has not taken yet.
+    pub fn queued_frames(&self) -> usize {
+        self.ring.queued_frames()
+    }
+
+    /// Whether a user gesture has resumed the `AudioContext`.
+    pub fn is_unlocked(&self) -> bool {
+        self.ring.is_unlocked()
+    }
+
+    /// Records that the gesture-unlock listener resumed the context.
+    pub fn mark_unlocked(&mut self) {
+        self.ring.mark_unlocked();
+    }
+
+    /// The shared ring, for inspecting it or attaching another producer.
+    pub fn ring(&self) -> &SharedWebAudioOutput {
+        &self.ring
+    }
+
+    /// Returns exactly `frames` frames of interleaved audio for the worklet.
+    ///
+    /// Always `frames * channels` samples: `process()` has to fill its whole
+    /// output buffer every call, and silence is the correct filler for an
+    /// underrun.
+    pub fn pull_block(&mut self, frames: usize) -> Vec<f32> {
+        let channels = self.ring.channels().max(1) as usize;
+        let mut block = vec![0.0f32; frames * channels];
+        self.ring.drain(&mut block);
+        self.frames_pulled += frames as u64;
+        block
+    }
+
+    /// Pulls one browser render quantum.
+    pub fn pull_quantum(&mut self) -> Vec<f32> {
+        self.pull_block(RENDER_QUANTUM_FRAMES)
+    }
+
+    /// The `AudioWorkletProcessor` module source the page registers.
+    ///
+    /// Carries this ring's channel count so `outputChannelCount` matches the
+    /// interleaving [`Self::pull_block`] produces.
+    pub fn worklet_glue(&self) -> String {
+        gdaudio::audio_worklet_glue(PROCESSOR_NAME, self.ring.channels())
     }
 }
 

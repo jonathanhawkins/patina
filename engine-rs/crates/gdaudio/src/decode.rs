@@ -3,6 +3,7 @@
 //! Decodes audio files into a unified [`AudioBuffer`] of interleaved f32 samples.
 
 use std::io::{Cursor, Read, Seek};
+use std::sync::{Arc, Mutex};
 
 /// A decoded audio buffer holding interleaved f32 samples.
 #[derive(Debug, Clone)]
@@ -276,6 +277,68 @@ pub fn is_mp3(data: &[u8]) -> bool {
     data.len() >= 2 && data[0] == 0xFF && (data[1] & 0xE0) == 0xE0
 }
 
+/// A host-supplied MP3 decoder, consulted by [`decode_mp3`] before the
+/// built-in codec (pat-mgixk.4).
+///
+/// This exists for the **browser**, where there is no MP3 codec at all:
+/// `minimp3` wraps C sources through `cc` and is target-gated off wasm32, so
+/// before this hook every `AudioStreamMP3` in a web game decoded to
+/// `UnsupportedFormat` and played silence. A browser, meanwhile, has a decoder
+/// built in — `AudioContext.decodeAudioData` — which Godot's own web export
+/// relies on for the same reason.
+///
+/// # Why a decoder and not an async call
+///
+/// `decodeAudioData` is asynchronous, and the engine loads a stream
+/// *synchronously* from inside `AudioServerBridge::process`. A hook cannot
+/// bridge that on its own, so the shape is a **lookup**: the page decodes its
+/// MP3 assets up front and registers the PCM, and this hook answers out of what
+/// has been registered. [`crate`]'s consumer for that is
+/// `patina_web::mp3_bridge::BrowserMp3Decoder`.
+///
+/// Returning `None` means "not mine" and lets the built-in codec have the
+/// bytes, so installing a decoder never takes MP3 support *away* from a native
+/// build. A decode the host attempted and failed simply never registers, which
+/// reads as `None` too.
+pub trait Mp3Decoder: Send + Sync {
+    /// Decodes `data`, or returns `None` if this decoder has nothing for it.
+    fn decode(&self, data: &[u8]) -> Option<AudioBuffer>;
+}
+
+/// The installed decoder, if a host has supplied one.
+///
+/// Process-global for the same reason `gdcore::display_backend` is: the load
+/// path that needs it (`AudioStreamLoader` inside the bridge's `process`) is
+/// reached through several layers of engine that have no business carrying a
+/// decoder parameter down to it.
+static MP3_DECODER: Mutex<Option<Arc<dyn Mp3Decoder>>> = Mutex::new(None);
+
+/// Installs `decoder` as the host MP3 decoder, returning whatever it replaced.
+///
+/// The previous value is handed back rather than dropped so a caller that is
+/// only borrowing the slot — a test, or a page swapping backends — can put it
+/// back.
+pub fn install_mp3_decoder(decoder: Arc<dyn Mp3Decoder>) -> Option<Arc<dyn Mp3Decoder>> {
+    let mut slot = MP3_DECODER.lock().unwrap_or_else(|e| e.into_inner());
+    slot.replace(decoder)
+}
+
+/// Removes the host MP3 decoder, returning it.
+pub fn clear_mp3_decoder() -> Option<Arc<dyn Mp3Decoder>> {
+    let mut slot = MP3_DECODER.lock().unwrap_or_else(|e| e.into_inner());
+    slot.take()
+}
+
+/// The installed host MP3 decoder, if any.
+///
+/// Hands back a clone of the `Arc` rather than holding the lock across the
+/// decode: a decoder is free to do slow work, and blocking every other thread's
+/// audio load while it does would be a worse bug than the one this fixes.
+pub fn installed_mp3_decoder() -> Option<Arc<dyn Mp3Decoder>> {
+    let slot = MP3_DECODER.lock().unwrap_or_else(|e| e.into_inner());
+    slot.clone()
+}
+
 /// MP3 decode (pat-p0s82.13). Real ISO MP3 streams are decoded frame-by-frame
 /// with `minimp3` (the same decoder Godot ships) into interleaved f32 PCM.
 /// A Patina test fixture starting with `PATMP3` carries raw f32 samples
@@ -303,6 +366,20 @@ pub fn decode_mp3(data: &[u8]) -> Result<AudioBuffer, DecodeError> {
     }
     if !is_mp3(data) {
         return Err(DecodeError::UnsupportedFormat("not mp3".into()));
+    }
+    // A host decoder gets the bytes first. On wasm32 this is the ONLY branch
+    // that can succeed — `decode_mp3_frames` below is the stub that reports
+    // `UnsupportedFormat` — so it is what makes an `AudioStreamMP3` in a web
+    // game audible at all (pat-mgixk.4).
+    //
+    // Checked BEFORE the built-in codec on every target on purpose, not just
+    // under `cfg(wasm32)`: it means a native test exercises the same line the
+    // browser depends on. `None` falls through, so a native build that installs
+    // a decoder and misses keeps full `minimp3` behaviour.
+    if let Some(decoder) = installed_mp3_decoder() {
+        if let Some(buffer) = decoder.decode(data) {
+            return Ok(buffer);
+        }
     }
     decode_mp3_frames(data)
 }
@@ -351,6 +428,12 @@ fn decode_mp3_frames(data: &[u8]) -> Result<AudioBuffer, DecodeError> {
 }
 
 /// wasm32 has no MP3 codec linked in — see the module gate above.
+///
+/// Reached only after [`decode_mp3`] has already offered the bytes to a
+/// host-installed [`Mp3Decoder`], so on the web this is the "the page never
+/// preloaded this asset" answer rather than "the browser cannot decode MP3"
+/// (pat-mgixk.4). `patina_web::mp3_bridge::BrowserMp3Decoder` is what fills
+/// that hook from `AudioContext.decodeAudioData`.
 ///
 /// Reported as an ordinary [`DecodeError`] rather than a panic so a project
 /// carrying an `.mp3` still boots in the browser with that one stream silent,
@@ -570,6 +653,136 @@ mod mp3_gen_tests {
         let buf = decode_mp3(&data).unwrap();
         assert_eq!(buf.sample_rate, 44100);
         assert_eq!(buf.samples.len(), 2);
+    }
+
+    // -- pat-mgixk.4: the host MP3 decoder hook ------------------------------
+
+    /// Serializes every test that touches the process-global decoder slot, and
+    /// clears the slot on the way out.
+    ///
+    /// Bound ONCE per test rather than reset at the top of each: a per-test
+    /// `clear_mp3_decoder()` would be a re-arm, and under a thread-per-test
+    /// runner two tests would still interleave between the clear and the
+    /// install. Poison-tolerant, so one failing test does not cascade into
+    /// "Mutex poisoned" for the rest of the binary.
+    static DECODER_SLOT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[must_use]
+    struct DecoderSlot(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+    impl DecoderSlot {
+        fn acquire() -> Self {
+            Self(DECODER_SLOT.lock().unwrap_or_else(|e| e.into_inner()))
+        }
+    }
+
+    impl Drop for DecoderSlot {
+        fn drop(&mut self) {
+            clear_mp3_decoder();
+        }
+    }
+
+    /// Bytes that pass [`is_mp3`] (the `ID3` tag prefix) but contain no
+    /// decodable frame, so NO built-in codec can turn them into audio on any
+    /// target. Audio coming out of these can only have come from the hook.
+    fn undecodable_mp3() -> Vec<u8> {
+        let mut data = b"ID3\x04\x00\x00\x00\x00\x00\x0a".to_vec();
+        data.extend_from_slice(&[0u8; 10]);
+        data
+    }
+
+    fn tone_buffer(rate: u32, channels: u16, frames: usize) -> AudioBuffer {
+        AudioBuffer {
+            samples: (0..frames * channels as usize)
+                .map(|i| ((i as f32) * 0.1).sin() * 0.5)
+                .collect(),
+            sample_rate: rate,
+            channels,
+        }
+    }
+
+    struct Fixed(AudioBuffer);
+    impl Mp3Decoder for Fixed {
+        fn decode(&self, _data: &[u8]) -> Option<AudioBuffer> {
+            Some(self.0.clone())
+        }
+    }
+
+    struct Never;
+    impl Mp3Decoder for Never {
+        fn decode(&self, _data: &[u8]) -> Option<AudioBuffer> {
+            None
+        }
+    }
+
+    /// The whole point of the hook: bytes the linked codec cannot decode —
+    /// which on wasm32 is EVERY ISO MP3 — become real PCM.
+    #[test]
+    fn an_installed_decoder_decodes_what_the_built_in_codec_cannot() {
+        let _slot = DecoderSlot::acquire();
+        let data = undecodable_mp3();
+        assert!(
+            decode_mp3(&data).is_err(),
+            "the control is wrong: these bytes must be undecodable without a host \
+             decoder, or this test proves nothing"
+        );
+
+        install_mp3_decoder(std::sync::Arc::new(Fixed(tone_buffer(32_000, 2, 64))));
+        let buffer = decode_mp3(&data).expect("the host decoder must answer");
+        assert_eq!(buffer.sample_rate, 32_000);
+        assert_eq!(buffer.channels, 2);
+        assert_eq!(buffer.frame_count(), 64);
+    }
+
+    /// `None` means "not mine", so installing a decoder must never take MP3
+    /// support away from a build that has a real codec linked.
+    #[test]
+    fn a_decoder_returning_none_falls_through_to_the_built_in_codec() {
+        let _slot = DecoderSlot::acquire();
+        install_mp3_decoder(std::sync::Arc::new(Never));
+        // Undecodable either way — what matters is that the error comes from
+        // the codec branch rather than the hook swallowing the bytes.
+        assert!(decode_mp3(&undecodable_mp3()).is_err());
+    }
+
+    /// The `PATMP3` unit fixture is handled before the hook, so the many
+    /// existing tests built on it cannot be captured by an installed decoder.
+    #[test]
+    fn the_patmp3_fixture_outranks_an_installed_decoder() {
+        let _slot = DecoderSlot::acquire();
+        install_mp3_decoder(std::sync::Arc::new(Fixed(tone_buffer(8_000, 1, 4))));
+        let mut data = b"PATMP3".to_vec();
+        data.extend_from_slice(&22_050u32.to_le_bytes());
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&0.25f32.to_le_bytes());
+        let buffer = decode_mp3(&data).expect("the fixture still decodes");
+        assert_eq!(buffer.sample_rate, 22_050, "the hook captured the fixture");
+        assert_eq!(buffer.samples, vec![0.25]);
+    }
+
+    /// Installing hands back what it replaced, so a borrower can put it back.
+    #[test]
+    fn installing_returns_the_previous_decoder() {
+        let _slot = DecoderSlot::acquire();
+        assert!(installed_mp3_decoder().is_none(), "the slot starts empty");
+        assert!(install_mp3_decoder(std::sync::Arc::new(Never)).is_none());
+        assert!(installed_mp3_decoder().is_some());
+        let replaced = install_mp3_decoder(std::sync::Arc::new(Fixed(tone_buffer(8_000, 1, 2))));
+        assert!(replaced.is_some(), "the first decoder must come back out");
+        assert!(clear_mp3_decoder().is_some());
+        assert!(installed_mp3_decoder().is_none());
+    }
+
+    /// A non-MP3 byte string is rejected before the hook ever sees it: the hook
+    /// must not become a way to smuggle arbitrary formats past detection.
+    #[test]
+    fn a_non_mp3_is_rejected_before_the_hook() {
+        let _slot = DecoderSlot::acquire();
+        install_mp3_decoder(std::sync::Arc::new(Fixed(tone_buffer(8_000, 1, 4))));
+        assert!(
+            decode_mp3(b"NOTANMP3....").is_err(),
+            "detection must run first, or `decode_auto`'s ordering means nothing"
+        );
     }
 
     // -- pat-nzgdu.153: generator push_buffer/mix + polyphonic mixing --------

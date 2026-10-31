@@ -30,6 +30,25 @@ const STACK_RED_ZONE: usize = 128 * 1024;
 /// How much native stack to allocate when growing.
 const STACK_GROWTH: usize = 4 * 1024 * 1024;
 
+/// How many script frames may share one native stack segment before the next
+/// script call moves onto a freshly allocated one.
+///
+/// `stacker::maybe_grow` grows only when `stacker::remaining_stack()` reports
+/// less than `STACK_RED_ZONE` left. On this target that check does not fire
+/// before the stack is gone: one script frame costs a measured ~56 KiB of
+/// native stack in a debug build, so `MAX_RECURSION_DEPTH` frames need ~3.6 MiB
+/// and `max_recursion_depth` aborted with "has overflowed its stack" on the
+/// default 2 MiB test thread — while the very same binary passes that test
+/// under `RUST_MIN_STACK=8388608`, i.e. only when the native stack was already
+/// big enough that no growth was needed (pat-21oab.4).
+///
+/// Growing every `STACK_GROW_INTERVAL` frames never consults
+/// `remaining_stack()`, so it holds whether that estimate is wrong or merely
+/// late. Eight frames is ~448 KiB at the measured frame size: small enough that
+/// the frames before the first growth fit the default 2 MiB thread stack, and
+/// roughly nine times under the `STACK_GROWTH` each later segment gets.
+const STACK_GROW_INTERVAL: usize = 8;
+
 /// Accumulates a `Vector2` delta onto a node property used as a script→physics
 /// bridge (pat-nzgdu.14). RigidBody2D force/impulse methods have no direct
 /// handle to the `PhysicsServer`, so they accumulate onto `_pending_*` /
@@ -3622,10 +3641,15 @@ impl Interpreter {
                         Variant::Vector3(v) => Ok(Variant::Vector3(-v)),
                         Variant::Vector2i(v) => Ok(Variant::Vector2i(-v)),
                         Variant::Vector3i(v) => Ok(Variant::Vector3i(-v)),
-                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
-                            "cannot negate {}",
-                            val.variant_type()
-                        )))),
+                        // Vector4/Vector4i, Color, Quaternion, Plane
+                        // (pat-mgixk.11).
+                        _ => match crate::variant_math::neg(&val) {
+                            Some(v) => Ok(v),
+                            None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                                "cannot negate {}",
+                                val.variant_type()
+                            )))),
+                        },
                     },
                     UnaryOp::Not => Ok(Variant::Bool(!val.is_truthy())),
                     UnaryOp::BitNot => match val {
@@ -5257,13 +5281,57 @@ impl Interpreter {
             BinOp::Gt => self.binary_cmp(lhs, rhs, |o| o.is_gt()),
             BinOp::Le => self.binary_cmp(lhs, rhs, |o| o.is_le()),
             BinOp::Ge => self.binary_cmp(lhs, rhs, |o| o.is_ge()),
+            // `in` is `Array::find(a) != -1` / `Dictionary::has(a)`
+            // (`OperatorEvaluatorInArrayFind`, `OperatorEvaluatorInDictionaryHas`
+            // in variant_op.h:1142/1180), so it inherits the StringLike
+            // comparator from both — not `==`.
             BinOp::In => match rhs {
-                Variant::Array(a) => Ok(Variant::Bool(a.to_vec().iter().any(|v| variant_eq(v, lhs)))),
+                Variant::Array(a) => Ok(Variant::Bool(
+                    a.to_vec().iter().any(|v| gdvariant::string_like_eq(v, lhs)),
+                )),
                 Variant::Dictionary(d) => Ok(Variant::Bool(d.contains_key(lhs))),
-                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
-                    "cannot use 'in' with {}",
-                    rhs.variant_type()
-                )))),
+                // `"b" in "abc"` is a substring test, registered for every
+                // String/StringName pairing (`register_string_op(
+                // OperatorEvaluatorInStringFind, OP_IN)`, variant_op.cpp:922).
+                Variant::String(_) | Variant::StringName(_)
+                    if matches!(lhs, Variant::String(_) | Variant::StringName(_)) =>
+                {
+                    Ok(Variant::Bool(arg_str(rhs).contains(&arg_str(lhs))))
+                }
+                // `"position" in node` is a PROPERTY-membership test, not a
+                // value search (`OperatorEvaluatorObjectHasPropertyString`,
+                // variant_op.cpp:1031).
+                //
+                // ⚠️ Narrower than Godot on purpose: this answers from the
+                // class' ClassDB property list only, so a script `var` is not
+                // yet visible to `in`. Godot's `Object::has_property` also
+                // consults the script instance.
+                Variant::ObjectId(oid)
+                    if matches!(lhs, Variant::String(_) | Variant::StringName(_)) =>
+                {
+                    let name = arg_str(lhs);
+                    let class = self
+                        .scene_access
+                        .as_ref()
+                        .and_then(|a| a.get_class(oid.raw()))
+                        .unwrap_or_default();
+                    Ok(Variant::Bool(
+                        gdobject::class_db::get_property_list(&class)
+                            .iter()
+                            .any(|p| p.name == name),
+                    ))
+                }
+                // `value in <Packed*Array>`: Godot registers OP_IN for all ten
+                // packed types (pat-mgixk.11). A numeric needle is compared
+                // numerically across the integer AND float arrays, because
+                // `INT in PACKED_FLOAT32_ARRAY` is itself a registered row.
+                _ => match crate::variant_math::packed_contains(rhs, lhs) {
+                    Some(found) => Ok(Variant::Bool(found)),
+                    None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "cannot use 'in' with {}",
+                        rhs.variant_type()
+                    )))),
+                },
             },
             // And/Or handled via short-circuit in eval_expr
             BinOp::And | BinOp::Or => unreachable!(),
@@ -5279,17 +5347,32 @@ impl Interpreter {
             (Variant::Int(a), Variant::Float(b)) => Ok(Variant::Float(*a as f64 + b)),
             (Variant::Float(a), Variant::Int(b)) => Ok(Variant::Float(a + *b as f64)),
             (Variant::String(a), Variant::String(b)) => Ok(Variant::String(format!("{a}{b}"))),
+            // `+` is registered for all four String/StringName pairings
+            // (`register_string_op(OperatorEvaluatorStringConcat, OP_ADD)`,
+            // variant_op.cpp:222) and always yields a String
+            // (`using ReturnType = String`, variant_op.h:717), so
+            // `&"a" + "b" == "ab"` (pat-mgixk.12).
+            (
+                Variant::String(_) | Variant::StringName(_),
+                Variant::String(_) | Variant::StringName(_),
+            ) => Ok(Variant::String(format!("{}{}", arg_str(lhs), arg_str(rhs)))),
             (Variant::Vector2(a), Variant::Vector2(b)) => Ok(Variant::Vector2(*a + *b)),
             (Variant::Vector3(a), Variant::Vector3(b)) => Ok(Variant::Vector3(*a + *b)),
             // The int vectors stay integral rather than promoting to float —
             // that is the whole point of a grid coordinate (pat-s3rrv.9).
             (Variant::Vector2i(a), Variant::Vector2i(b)) => Ok(Variant::Vector2i(*a + *b)),
             (Variant::Vector3i(a), Variant::Vector3i(b)) => Ok(Variant::Vector3i(*a + *b)),
-            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
-                "cannot add {} and {}",
-                lhs.variant_type(),
-                rhs.variant_type()
-            )))),
+            // Vector4/Vector4i, Color, Quaternion, Array and the ten packed
+            // arrays (pat-mgixk.11). The table lives in `variant_math` so this
+            // file keeps only the call site.
+            _ => match crate::variant_math::add(lhs, rhs) {
+                Some(v) => Ok(v),
+                None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "cannot add {} and {}",
+                    lhs.variant_type(),
+                    rhs.variant_type()
+                )))),
+            },
         }
     }
 
@@ -5303,11 +5386,15 @@ impl Interpreter {
             (Variant::Vector3(a), Variant::Vector3(b)) => Ok(Variant::Vector3(*a - *b)),
             (Variant::Vector2i(a), Variant::Vector2i(b)) => Ok(Variant::Vector2i(*a - *b)),
             (Variant::Vector3i(a), Variant::Vector3i(b)) => Ok(Variant::Vector3i(*a - *b)),
-            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
-                "cannot subtract {} from {}",
-                rhs.variant_type(),
-                lhs.variant_type()
-            )))),
+            // Vector4/Vector4i, Color, Quaternion (pat-mgixk.11).
+            _ => match crate::variant_math::sub(lhs, rhs) {
+                Some(v) => Ok(v),
+                None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "cannot subtract {} from {}",
+                    rhs.variant_type(),
+                    lhs.variant_type()
+                )))),
+            },
         }
     }
 
@@ -5392,21 +5479,33 @@ impl Interpreter {
                 }
                 Ok(Variant::Vector3(*v / *s as f32))
             }
-            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
-                "cannot divide {} by {}",
-                lhs.variant_type(),
-                rhs.variant_type()
-            )))),
+            // Componentwise vector division, the int-vector `DivNZ` rows,
+            // Color and transform-by-scalar (pat-mgixk.11). `Some(Err(..))` is
+            // a zero divisor on a DivNZ row, which Godot reports as a script
+            // error; a float row yields inf instead and never lands here.
+            _ => match crate::variant_math::div(lhs, rhs) {
+                Some(result) => result,
+                None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "cannot divide {} by {}",
+                    lhs.variant_type(),
+                    rhs.variant_type()
+                )))),
+            },
         }
     }
 
     fn binary_mod(&self, lhs: &Variant, rhs: &Variant) -> Result<Variant, RuntimeError> {
-        if let Variant::String(fmt) = lhs {
+        // `%` takes a String *or* a StringName on the left
+        // (`register_string_modulo_op` builds an
+        // `OperatorEvaluatorStringFormat<StringName, _>` row for every right
+        // type, variant_op.cpp:204-208), and both yield a String.
+        if matches!(lhs, Variant::String(_) | Variant::StringName(_)) {
+            let fmt = arg_str(lhs);
             let values: Vec<Variant> = match rhs {
                 Variant::Array(a) => a.clone().to_vec(),
                 other => vec![other.clone()],
             };
-            return Ok(Variant::String(string_format(fmt, &values)));
+            return Ok(Variant::String(string_format(&fmt, &values)));
         }
         match (lhs, rhs) {
             (Variant::Int(a), Variant::Int(b)) => {
@@ -5433,11 +5532,16 @@ impl Interpreter {
                 }
                 Ok(Variant::Float(a % *b as f64))
             }
-            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
-                "cannot modulo {} by {}",
-                lhs.variant_type(),
-                rhs.variant_type()
-            )))),
+            // The int-vector `ModNZ` rows (pat-mgixk.11). No float type has a
+            // `%` row upstream, so nothing else reaches this.
+            _ => match crate::variant_math::rem(lhs, rhs) {
+                Some(result) => result,
+                None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "cannot modulo {} by {}",
+                    lhs.variant_type(),
+                    rhs.variant_type()
+                )))),
+            },
         }
     }
 
@@ -5501,13 +5605,31 @@ impl Interpreter {
                 .partial_cmp(&(*b as f64))
                 .unwrap_or(std::cmp::Ordering::Equal),
             (Variant::String(a), Variant::String(b)) => a.cmp(b),
-            _ => {
-                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
-                    "cannot compare {} and {}",
-                    lhs.variant_type(),
-                    rhs.variant_type()
-                ))));
-            }
+            // `<`/`<=`/`>`/`>=` are registered for StringName x StringName and
+            // for String x String, but NOT across the two
+            // (variant_op.cpp:736-737/751-752/767-768/782-783) — so
+            // `&"a" < "b"` is an error in Godot too, and stays one here.
+            //
+            // ⚠️ Divergence, deliberate: Godot's `StringName::operator<`
+            // compares the *interned pointers* (string_name.h:96-98), so its
+            // result depends on allocation order and is not reproducible.
+            // `gdcore::StringName: Ord` is lexicographic, which is
+            // deterministic and is what a script author means.
+            (Variant::StringName(a), Variant::StringName(b)) => a.cmp(b),
+            // Vector2/2i/3/3i/4/4i (lexicographic), Array (element-wise with a
+            // size tiebreak), Rid and bool (pat-mgixk.11). One `Ordering`
+            // serves all four predicates — see `variant_math::cmp` for why
+            // that is sound against Godot's hand-written `<` / `<=` pair.
+            _ => match crate::variant_math::cmp(lhs, rhs) {
+                Some(ord) => ord,
+                None => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "cannot compare {} and {}",
+                        lhs.variant_type(),
+                        rhs.variant_type()
+                    ))));
+                }
+            },
         };
         Ok(Variant::Bool(pred(ord)))
     }
@@ -5742,6 +5864,68 @@ impl Interpreter {
                 }
                 Variant::Nil
             }
+            // -- pat-mgixk.8: the rest of the SceneTree surface --------------
+            //
+            // `change_scene_to_packed(scene)` — the PackedScene form of a scene
+            // change, and the spelling every Godot tutorial uses because it
+            // avoids re-reading the file. `change_scene_to_file` was wired and
+            // this was not, so the idiomatic call raised `UndefinedFunction`.
+            "change_scene_to_packed" => {
+                Self::require_args("change_scene_to_packed", args, 1)?;
+                // 🔑 `load("res://b.tscn")` hands a script a `Variant::Resource`
+                // carrying the scene's PATH: `load`'s PackedScene branch
+                // deliberately does not instance the file, so at this layer a
+                // PackedScene IS its path. Re-reading it is therefore the whole
+                // of the work, not a shortcut around it — and it is why this
+                // shares `change_scene_to_file`'s accessor rather than needing a
+                // second one. A scene built in memory (no path) has no
+                // representation to hand over yet and is reported, not guessed.
+                let path = match args.first() {
+                    Some(Variant::Resource(res)) if !res.path.is_empty() => res.path.clone(),
+                    // A plain path string, which is what a `preload`ed scene
+                    // reduces to once it has been through a `var`.
+                    Some(Variant::String(s)) if !s.is_empty() => s.clone(),
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "change_scene_to_packed() expects a PackedScene with a path".into(),
+                        )))
+                    }
+                };
+                // The SAME deferred channel `change_scene_to_file` uses: Godot
+                // defers both to the frame boundary so the calling script is not
+                // freed underneath itself mid-callback.
+                let ok = match self.scene_access {
+                    Some(ref mut access) => access.change_scene_to_file(&path),
+                    None => false,
+                };
+                Variant::Int(if ok { OK } else { ERR_CANT_OPEN })
+            }
+            // ⚠️ The current scene is NOT `get_root()`: `/root` is the Window
+            // that owns every scene, so answering it would return the same
+            // handle before and after a scene change.
+            "get_current_scene" => self
+                .scene_access
+                .as_ref()
+                .and_then(|a| a.current_scene())
+                .map(|raw| Variant::ObjectId(gdcore::id::ObjectId::from_raw(raw)))
+                .unwrap_or(Variant::Nil),
+            "get_node_count_in_group" => {
+                Self::require_args("get_node_count_in_group", args, 1)?;
+                let group = Self::scene_tree_arg_string("get_node_count_in_group", args, 0)?;
+                Variant::Int(
+                    self.scene_access
+                        .as_ref()
+                        .map(|a| a.nodes_in_group(&group).len() as i64)
+                        .unwrap_or(0),
+                )
+            }
+            // `SceneTree.get_frame()` is the PROCESS frame count — the same
+            // counter `Engine.get_process_frames()` reports
+            // (`scene/main/scene_tree.cpp`), which the main loop already
+            // publishes to the engine singleton every step. Reading it from
+            // there rather than adding a second counter is what keeps the two
+            // from drifting.
+            "get_frame" => Variant::Int(engine_process_frames() as i64),
             _ => return Ok(None),
         };
         Ok(Some(result))
@@ -8336,10 +8520,20 @@ impl Interpreter {
         Ok(())
     }
 
+    /// Runs `f` on native stack with room for the next `STACK_GROW_INTERVAL`
+    /// script frames, allocating a fresh segment on the interval rather than
+    /// waiting for a red-zone estimate that does not fire — see
+    /// `STACK_GROW_INTERVAL`.
+    fn with_script_call_stack<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        if self.call_depth > 0 && self.call_depth % STACK_GROW_INTERVAL == 0 {
+            stacker::grow(STACK_GROWTH, || f(self))
+        } else {
+            stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || f(self))
+        }
+    }
+
     fn call_user_func(&mut self, name: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
-        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || {
-            self.call_user_func_impl(name, args)
-        })
+        self.with_script_call_stack(|interp| interp.call_user_func_impl(name, args))
     }
 
     fn call_user_func_impl(
@@ -10748,6 +10942,24 @@ impl Interpreter {
         args: &[Variant],
         object_expr: &Expr,
     ) -> Result<Variant, RuntimeError> {
+        // A StringName receiver answers the String method surface (pat-mgixk.12).
+        //
+        // `extension_api`'s StringName builtin mirrors String's 110 methods, and
+        // they return `String`, not `StringName`. There was no
+        // `Variant::StringName(..)` receiver arm in the match below at all, so
+        // every one of them fell through to "cannot call method on StringName"
+        // — including `$Sprite.animation.to_upper()` on a value the .tscn
+        // authored as `&"walk"` (gdresource/src/loader.rs:674).
+        //
+        // Done by re-entering with the text as a `String` rather than by
+        // duplicating the arm: the String arm never reads `object_expr` (no
+        // String method mutates its receiver in place), so the delegation is
+        // behaviourally identical, and recursion terminates because the new
+        // receiver is a `String`.
+        if let Variant::StringName(sn) = obj {
+            let as_string = Variant::String(sn.as_str().to_string());
+            return self.call_method_on(&as_string, method, args, object_expr);
+        }
         // FileAccess / DirAccess / ConfigFile handle methods.
         if let Variant::ObjectId(oid) = obj {
             if gdcore::is_file_access_handle(*oid) {
@@ -11290,11 +11502,17 @@ impl Interpreter {
                     a.reverse();
                     Variant::Nil
                 }),
+                // `find`/`rfind`/`count`/`has` search with
+                // `StringLikeVariantComparator` (array.cpp:383/437/489; `has`
+                // is `find() != -1` at :497), NOT with `==`. Two consequences,
+                // and Patina had both backwards before pat-mgixk.12:
+                // `[1].has(1.0)` is FALSE (no numeric promotion) and
+                // `["a"].has(&"a")` is TRUE (String/StringName unify).
                 "find" => {
                     Self::require_args("find", args, 1)?;
                     Ok(Variant::Int(
                         arr.to_vec().iter()
-                            .position(|v| variant_eq(v, &args[0]))
+                            .position(|v| gdvariant::string_like_eq(v, &args[0]))
                             .map(|idx| idx as i64)
                             .unwrap_or(-1),
                     ))
@@ -11303,7 +11521,7 @@ impl Interpreter {
                     Self::require_args("rfind", args, 1)?;
                     Ok(Variant::Int(
                         arr.to_vec().iter()
-                            .rposition(|v| variant_eq(v, &args[0]))
+                            .rposition(|v| gdvariant::string_like_eq(v, &args[0]))
                             .map(|idx| idx as i64)
                             .unwrap_or(-1),
                     ))
@@ -11311,13 +11529,17 @@ impl Interpreter {
                 "count" => {
                     Self::require_args("count", args, 1)?;
                     Ok(Variant::Int(
-                        arr.to_vec().iter().filter(|v| variant_eq(v, &args[0])).count() as i64,
+                        arr.to_vec().iter().filter(|v| gdvariant::string_like_eq(v, &args[0])).count() as i64,
                     ))
                 }
                 "has" => {
                     Self::require_args("has", args, 1)?;
-                    Ok(Variant::Bool(arr.to_vec().iter().any(|v| variant_eq(v, &args[0]))))
+                    Ok(Variant::Bool(arr.to_vec().iter().any(|v| gdvariant::string_like_eq(v, &args[0]))))
                 }
+                // ⚠️ `erase` is the exception: `Array::erase` (array.cpp:347)
+                // delegates to `Vector::erase`, which compares with
+                // `Variant::operator==`. So it keeps `variant_eq` — numeric
+                // promotion included — and does NOT use the comparator above.
                 "erase" => {
                     Self::require_args("erase", args, 1)?;
                     Self::array_mutate(arr, |a| {
@@ -13154,21 +13376,33 @@ impl Interpreter {
                                     return Ok(Variant::Nil);
                                 }
                             }
-                            // Optional `from` position: request a seek first.
-                            if let Some(from) = args.first() {
-                                let pos = match from {
-                                    Variant::Float(f) => *f,
-                                    Variant::Int(i) => *i as f64,
-                                    _ => 0.0,
-                                };
-                                if pos > 0.0 {
-                                    access.set_node_property(
-                                        id,
-                                        "seek_request",
-                                        Variant::Float(pos),
-                                    );
-                                }
-                            }
+                            // Godot's `play(from = 0.0)` ALWAYS (re)starts from
+                            // `from`, including on a player that is already
+                            // running — the ordinary SFX retrigger
+                            // (`audio_stream_player_internal.cpp` `play_basic`,
+                            // which stops the live voice first when the stream
+                            // is monophonic).
+                            //
+                            // 🔑 `seek_request` could express neither half of
+                            // that. It was written only when `from > 0.0`, so
+                            // `play()` and `play(0)` requested nothing at all,
+                            // and even then it moves the playhead of the voice
+                            // that is ALREADY live rather than starting a new
+                            // one — while `playing` was already true, so the
+                            // bridge saw no edge either and the call was a
+                            // silent no-op. `__play_request__` is the separate
+                            // one-shot restart channel the bridge drains
+                            // (`gdscene::audio_server_bridge`, pat-mgixk.5).
+                            let from = match args.first() {
+                                Some(Variant::Float(f)) => *f,
+                                Some(Variant::Int(i)) => *i as f64,
+                                _ => 0.0,
+                            };
+                            access.set_node_property(
+                                id,
+                                "__play_request__",
+                                Variant::Float(from.max(0.0)),
+                            );
                             access.set_node_property(id, "playing", Variant::Bool(true));
                             Ok(Variant::Nil)
                         } else {
@@ -15450,9 +15684,7 @@ impl Interpreter {
         callable: &CallableRef,
         args: &[Variant],
     ) -> Result<Variant, RuntimeError> {
-        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || {
-            self.invoke_callable_impl(callable, args)
-        })
+        self.with_script_call_stack(|interp| interp.invoke_callable_impl(callable, args))
     }
 
     /// Runs `method` on the object `id` and returns its value — Godot's
@@ -15637,7 +15869,34 @@ impl Interpreter {
             }
         }
         if responds {
-            return Ok(Variant::Nil);
+            // ClassDB knows the name but nothing dispatched it.
+            //
+            // Godot cannot reach this state: `Object::callp`
+            // (core/object/object.cpp) resolves the name to a `MethodBind` and
+            // runs it, so a registered method either does real work or raises.
+            // Returning `Ok(Variant::Nil)` here instead made `has_method()` lie
+            // for 358 registered methods on Node-derived classes, and hid the
+            // gap so well that the same bug was patched one method at a time at
+            // least four times (`is_class` below, camera3d.rs:1006,
+            // scripting.rs's Skeleton3D and LineEdit arms) — each with a
+            // comment confessing it (pat-mgixk.7).
+            //
+            // The one case that stays silent is a method Godot declares
+            // `void`: a missing implementation is unobservable through the
+            // return value, so raising would break callers that correctly
+            // ignore it. That set is enumerated, not guessed — see
+            // `native_method_gaps::VOID_NOOP_METHODS`.
+            if crate::native_method_gaps::is_void_noop(method) {
+                return Ok(Variant::Nil);
+            }
+            let class_name = self
+                .scene_access
+                .as_ref()
+                .and_then(|access| access.get_class(id))
+                .unwrap_or_else(|| "Object".to_string());
+            return Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                crate::native_method_gaps::not_implemented_message(&class_name, method),
+            )));
         }
         Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("ObjectId.{method}"),
@@ -16046,12 +16305,12 @@ impl Interpreter {
         args: &[Variant],
     ) -> Result<Variant, RuntimeError> {
         if let Some(callable) = lambda_connection(method_name) {
-            return stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || {
-                self.resume_with_instance_self(instance, |i| i.invoke_callable(&callable, args))
+            return self.with_script_call_stack(|interp| {
+                interp.resume_with_instance_self(instance, |i| i.invoke_callable(&callable, args))
             });
         }
-        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROWTH, || {
-            self.call_instance_method_impl(instance, method_name, args)
+        self.with_script_call_stack(|interp| {
+            interp.call_instance_method_impl(instance, method_name, args)
         })
     }
 
@@ -17589,6 +17848,12 @@ fn gd_format(template: &str, values: &Variant) -> String {
 fn arg_str(v: &Variant) -> String {
     match v {
         Variant::String(s) => s.clone(),
+        // `Display for Variant` writes a StringName as `&name` (its .tscn
+        // spelling), which is right for `print` of the literal but wrong for a
+        // string *argument*: `"abc".contains(&"b")` would have searched for
+        // `"&b"`. Godot converts with `operator String()`, i.e. the bare name
+        // (variant.cpp:1645-1646). pat-mgixk.12.
+        Variant::StringName(sn) => sn.as_str().to_string(),
         other => format!("{other}"),
     }
 }
@@ -18945,7 +19210,10 @@ fn godot_sprintf(fmt: &str, values: &[Variant]) -> Result<String, String> {
                 };
                 ch.to_string()
             }
-            's' | 'v' => format!("{value}"),
+            // Godot converts the value with `operator String()`, which for a
+            // StringName is the bare name (variant.cpp:1645-1646) — not the
+            // `&name` form `Display for Variant` writes. pat-mgixk.12.
+            's' | 'v' => arg_str(value),
             _ => return Err(SPRINTF_UNSUPPORTED.to_string()),
         };
 
@@ -28063,6 +28331,32 @@ fn call_geometry_3d_static(method: &str, args: &[Variant]) -> Result<Variant, Ru
         }
     }
 
+    // ⚠️ `Variant::Float` is f64 while this geometry is all f32, so the cast is
+    // written out rather than left to inference — that mismatch has taken this
+    // workspace down before. `Int` is accepted because GDScript writes a whole
+    // radius as `2`, not `2.0`, and Godot coerces it.
+    fn scalar(args: &[Variant], i: usize, method: &str) -> Result<f32, RuntimeError> {
+        match args.get(i) {
+            Some(Variant::Float(f)) => Ok(*f as f32),
+            Some(Variant::Int(n)) => Ok(*n as f32),
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "Geometry3D.{method}() expects a number"
+            )))),
+        }
+    }
+
+    // Counts and axis indices arrive as `Int`, but a script writing `8.0` is
+    // coerced by Godot rather than rejected, so `Float` is accepted too.
+    fn integer(args: &[Variant], i: usize, method: &str) -> Result<i64, RuntimeError> {
+        match args.get(i) {
+            Some(Variant::Int(n)) => Ok(*n),
+            Some(Variant::Float(f)) => Ok(*f as i64),
+            _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "Geometry3D.{method}() expects an integer"
+            )))),
+        }
+    }
+
     match method {
         "get_closest_point_to_segment" => Ok(Variant::Vector3(
             gdcore::geometry3d::get_closest_point_to_segment(
@@ -28107,6 +28401,74 @@ fn call_geometry_3d_static(method: &str, args: &[Variant]) -> Result<Variant, Ru
         )
         .map(Variant::Vector3)
         .unwrap_or(Variant::Nil)),
+        // ⚠️ `gdcore::geometry3d::segment_intersects_sphere` has existed and
+        // been unit-tested all along with NO dispatch arm — implemented engine
+        // code unreachable from script, which is this epic's systemic pattern
+        // (pat-nzgdu). Wiring it is the whole fix.
+        //
+        // ⚠️ Godot returns a PackedVector3Array of [point, normal] on a hit and
+        // an EMPTY array on a miss — never null — so a script can always take
+        // `.size()` of the result. gdcore returns only the point, so the
+        // sphere's normal at the hit is derived here.
+        "segment_intersects_sphere" => {
+            let from = vec3(args, 0, method)?;
+            let to = vec3(args, 1, method)?;
+            let center = vec3(args, 2, method)?;
+            let radius = scalar(args, 3, method)?;
+            Ok(
+                match gdcore::geometry3d::segment_intersects_sphere(from, to, center, radius) {
+                    Some(point) => {
+                        Variant::PackedVector3Array(vec![point, (point - center).normalized()])
+                    }
+                    None => Variant::PackedVector3Array(Vec::new()),
+                },
+            )
+        }
+        "get_triangle_barycentric_coords" => Ok(Variant::Vector3(
+            gdcore::geometry3d::get_triangle_barycentric_coords(
+                vec3(args, 0, method)?,
+                vec3(args, 1, method)?,
+                vec3(args, 2, method)?,
+                vec3(args, 3, method)?,
+            ),
+        )),
+        // Godot types this `Plane[]`; we hand back a plain Array of
+        // `Variant::Plane`, which is what the rest of this dispatcher does for
+        // typed arrays.
+        "build_box_planes" => Ok(Variant::Array(
+            gdcore::geometry3d::build_box_planes(vec3(args, 0, method)?)
+                .into_iter()
+                .map(Variant::Plane)
+                .collect::<Vec<_>>()
+                .into(),
+        )),
+        // Godot returns these as `Plane[]`; an out-of-range axis yields an
+        // EMPTY array rather than an error, matching its `ERR_FAIL_INDEX_V`.
+        "build_cylinder_planes" => Ok(Variant::Array(
+            gdcore::geometry3d::build_cylinder_planes(
+                scalar(args, 0, method)?,
+                scalar(args, 1, method)?,
+                integer(args, 2, method)?,
+                integer(args, 3, method)?,
+            )
+            .into_iter()
+            .map(Variant::Plane)
+            .collect::<Vec<_>>()
+            .into(),
+        )),
+        "build_capsule_planes" => Ok(Variant::Array(
+            gdcore::geometry3d::build_capsule_planes(
+                scalar(args, 0, method)?,
+                scalar(args, 1, method)?,
+                integer(args, 2, method)?,
+                integer(args, 3, method)?,
+                integer(args, 4, method)?,
+            )
+            .into_iter()
+            .map(Variant::Plane)
+            .collect::<Vec<_>>()
+            .into(),
+        )),
         _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("Geometry3D.{method}"),
         ))),
@@ -31617,6 +31979,13 @@ fn variant_eq(a: &Variant, b: &Variant) -> bool {
         // (`Variant::evaluate` OP_EQUAL promotes), so `1 == 1.0` is true.
         (Variant::Int(a), Variant::Float(b)) => (*a as f64) == *b,
         (Variant::Float(a), Variant::Int(b)) => *a == (*b as f64),
+        // `==` is registered for String<->StringName in both directions
+        // (`register_string_op(OperatorEvaluatorEqual, OP_EQUAL)`,
+        // variant_op.cpp:493 expanding the macro at :196-201), so `&"a" == "a"`
+        // is true. Without these rows every comparison against a value a .tscn
+        // authored as `&"walk"` (loader.rs:674) answered false (pat-mgixk.12).
+        (Variant::String(a), Variant::StringName(b)) => a.as_str() == b.as_str(),
+        (Variant::StringName(a), Variant::String(b)) => a.as_str() == b.as_str(),
         // Everything else compares structurally.
         //
         // This arm used to be `_ => false`, which enumerated only Nil/Bool/Int/
@@ -32259,6 +32628,29 @@ inf(0)
 ";
         let err = run_err(src);
         assert!(matches!(err.kind, RuntimeErrorKind::MaxRecursionDepth(_)));
+    }
+
+    /// ⚠️ The guard must also be reached when the recursive call sits inside an
+    /// EXPRESSION rather than in tail position. `return 1 + inf(n + 1)` keeps a
+    /// half-evaluated binary operation alive on every native frame, so it costs
+    /// more native stack per script frame than the bare `return inf(n + 1)`
+    /// above and is the shape most likely to exhaust the stack before
+    /// `MAX_RECURSION_DEPTH` is reached. Both must end in `MaxRecursionDepth`
+    /// rather than "fatal runtime error: stack overflow", which is an abort that
+    /// takes every other test in the process with it (pat-21oab.4).
+    #[test]
+    fn max_recursion_depth_through_an_expression_context() {
+        let src = "\
+func inf(n):
+    return 1 + inf(n + 1)
+inf(0)
+";
+        let err = run_err(src);
+        assert!(
+            matches!(err.kind, RuntimeErrorKind::MaxRecursionDepth(_)),
+            "expected MaxRecursionDepth, got {:?}",
+            err.kind
+        );
     }
 
     // -- Arrays -------------------------------------------------------------
@@ -37351,19 +37743,51 @@ match x:
         );
     }
 
+    /// `play(from)` requests a RESTART at `from`, not a seek (pat-mgixk.5).
+    ///
+    /// ⚠️ This asserted `seek_request` until pat-mgixk.5. A seek moves the
+    /// playhead of the voice that is already live and is a no-op when there is
+    /// none, so on a stopped player `play(2.0)` set a request nothing could
+    /// apply, and on a live one it never restarted the clip.
     #[test]
-    fn audio_play_from_position_requests_seek_then_plays() {
+    fn audio_play_from_position_requests_a_restart_at_that_position() {
         let (mut interp, state) = audio_dispatch_interp();
         interp
             .run("var p = get_node(\"Player\")\np.play(2.0)\n")
             .unwrap();
         let st = state.borrow();
         assert_eq!(
-            st.prop(42, "seek_request"),
+            st.prop(42, "__play_request__"),
             Some(Variant::Float(2.0)),
-            "play(from) must request a seek to `from` first",
+            "play(from) must request a restart at `from`",
+        );
+        assert_eq!(
+            st.prop(42, "seek_request"),
+            None,
+            "play(from) must NOT go through the seek channel: a seek cannot \
+             start a stopped voice, and on a live one it moves the old voice's \
+             playhead instead of restarting the clip",
         );
         assert_eq!(st.prop(42, "playing"), Some(Variant::Bool(true)));
+    }
+
+    /// `play()` with no argument requests a restart from the top.
+    ///
+    /// 🔑 The regression this guards: the interpreter wrote a request only when
+    /// `from > 0.0`, so the ordinary `$Sfx.play()` retrigger asked the bridge
+    /// for nothing at all and an already-playing player stayed on its old
+    /// playhead.
+    #[test]
+    fn audio_play_without_argument_requests_a_restart_from_zero() {
+        let (mut interp, state) = audio_dispatch_interp();
+        interp
+            .run("var p = get_node(\"Player\")\np.play()\n")
+            .unwrap();
+        assert_eq!(
+            state.borrow().prop(42, "__play_request__"),
+            Some(Variant::Float(0.0)),
+            "play() must request a restart from 0, not merely set `playing`",
+        );
     }
 
     #[test]
@@ -37670,6 +38094,150 @@ match x:
         );
     }
 
+    /// 🔑 `Geometry3D.segment_intersects_sphere` WAS UNREACHABLE FROM SCRIPT.
+    ///
+    /// `gdcore::geometry3d::segment_intersects_sphere` has existed and been
+    /// unit-tested the whole time with NO arm in `call_geometry_3d_static` —
+    /// working engine code that no script could call, which is the systemic
+    /// pattern this epic names (64 UNWIRED findings).
+    ///
+    /// ⚠️ Asserts the NEAREST hit, not just any hit: a segment crossing a
+    /// sphere has two roots, and returning the far one would still look like a
+    /// success. Entering at x = -1 is what pins the near root.
+    ///
+    /// 🔑 THIS SUPERSEDES A DELIBERATE GAP MARKER, and that marker's reasoning
+    /// is exactly why the arm derives a normal instead of forwarding the
+    /// helper. `geometry_3d_segment_intersects_sphere_stays_undispatched`
+    /// (f8986b8) asserted the method ERRORED, on the grounds that the helper
+    /// returns `Option<Vector3>` and computes no normal — so forwarding it
+    /// could only produce a one-element array, where every script doing
+    /// `result[1]` breaks, or a bare `Vector3`, which is not the documented
+    /// type. It argued `UndefinedFunction` was the honest state, because the
+    /// guard idiom `if Geometry3D.segment_intersects_sphere(...):` would
+    /// otherwise succeed on a wrong-shaped value.
+    ///
+    /// ⚠️ So the dispatch was NOT the only gap — the return shape was half of
+    /// it. That objection is answered rather than bypassed: the arm computes
+    /// the normal as `(point - center).normalized()`, which is what Godot's own
+    /// implementation does, and returns the full `[point, normal]`, empty on a
+    /// miss. This test and
+    /// `geometry_3d_segment_missing_the_sphere_returns_an_empty_array` now pin
+    /// precisely the shape the marker was protecting, so it was removed rather
+    /// than left red in a shared crate (pat-nzgdu).
+    #[test]
+    fn geometry_3d_segment_intersects_sphere_is_callable_from_script() {
+        let hit = run_val(
+            "return Geometry3D.segment_intersects_sphere(Vector3(-2, 0, 0), Vector3(2, 0, 0), Vector3(0, 0, 0), 1.0)\n",
+        );
+        let Variant::PackedVector3Array(v) = hit else {
+            panic!("a hit must be a PackedVector3Array, got {hit:?}");
+        };
+        assert_eq!(v.len(), 2, "Godot returns [point, normal], got {v:?}");
+        assert!(
+            (v[0].x + 1.0).abs() < 1e-4 && v[0].y.abs() < 1e-4 && v[0].z.abs() < 1e-4,
+            "must enter at the NEAR face (-1, 0, 0), got {:?}",
+            v[0]
+        );
+        assert!(
+            (v[1].x + 1.0).abs() < 1e-4,
+            "normal at the hit points back along -X, got {:?}",
+            v[1]
+        );
+    }
+
+    /// ⚠️ The miss case, and it is not a formality: Godot returns an EMPTY
+    /// PackedVector3Array rather than `null`, so a script can always ask for
+    /// `.size()`. Returning Nil here would compile, read as "no hit", and break
+    /// every caller that indexes the result.
+    #[test]
+    fn geometry_3d_segment_missing_the_sphere_returns_an_empty_array() {
+        let miss = run_val(
+            "return Geometry3D.segment_intersects_sphere(Vector3(-2, 5, 0), Vector3(2, 5, 0), Vector3(0, 0, 0), 1.0)\n",
+        );
+        let Variant::PackedVector3Array(v) = miss else {
+            panic!("a miss must still be a PackedVector3Array, got {miss:?}");
+        };
+        assert!(v.is_empty(), "a miss is an empty array, got {v:?}");
+    }
+
+    #[test]
+    fn geometry_3d_barycentric_coords_are_callable_from_script() {
+        // Weights all distinct, so an argument swap in the dispatch arm shows up.
+        let w = run_val(
+            "return Geometry3D.get_triangle_barycentric_coords(Vector3(0.2, 0.5, 0), Vector3(0, 0, 0), Vector3(1, 0, 0), Vector3(0, 1, 0))\n",
+        );
+        let Variant::Vector3(w) = w else {
+            panic!("barycentric coords must be a Vector3, got {w:?}");
+        };
+        assert!(
+            (w.x - 0.3).abs() < 1e-4 && (w.y - 0.2).abs() < 1e-4 && (w.z - 0.5).abs() < 1e-4,
+            "expected (0.3, 0.2, 0.5), got {w:?}"
+        );
+    }
+
+    #[test]
+    fn geometry_3d_build_cylinder_planes_is_callable_from_script() {
+        let planes = run_val("return Geometry3D.build_cylinder_planes(2.0, 6.0, 8, 1)\n");
+        let Variant::Array(arr) = planes else {
+            panic!("build_cylinder_planes must return an Array, got {planes:?}");
+        };
+        assert_eq!(arr.len(), 10, "8 radial planes + 2 caps");
+        let items = arr.to_vec();
+        let Variant::Plane(radial) = &items[0] else {
+            panic!("elements must be Planes, got {items:?}");
+        };
+        // axis = 1 (Y), so a radial normal carries no Y component.
+        assert!(
+            radial.normal.y.abs() < 1e-4 && (radial.d - 2.0).abs() < 1e-4,
+            "radial plane should be perpendicular to Y at d = radius, got {radial:?}"
+        );
+    }
+
+    #[test]
+    fn geometry_3d_build_capsule_planes_is_callable_from_script() {
+        let planes = run_val("return Geometry3D.build_capsule_planes(1.0, 4.0, 8, 2, 1)\n");
+        let Variant::Array(arr) = planes else {
+            panic!("build_capsule_planes must return an Array, got {planes:?}");
+        };
+        assert_eq!(arr.len(), 8 * 5, "sides * (1 + 2 * lats)");
+    }
+
+    /// ⚠️ Godot's `ERR_FAIL_INDEX_V(p_axis, 3, Vector<Plane>())` returns an
+    /// EMPTY array for a bad axis rather than erroring, so a script gets
+    /// something it can take `.size()` of. Raising a RuntimeError here would be
+    /// a divergence a caller would notice only as a crash.
+    #[test]
+    fn geometry_3d_plane_builders_reject_a_bad_axis_with_an_empty_array() {
+        for src in [
+            "return Geometry3D.build_cylinder_planes(1.0, 2.0, 6, 3)\n",
+            "return Geometry3D.build_capsule_planes(1.0, 2.0, 6, 2, 3)\n",
+        ] {
+            let planes = run_val(src);
+            let Variant::Array(arr) = planes else {
+                panic!("a bad axis must still return an Array, got {planes:?}");
+            };
+            assert!(arr.is_empty(), "a bad axis builds no planes, got {arr:?}");
+        }
+    }
+
+    #[test]
+    fn geometry_3d_build_box_planes_is_callable_from_script() {
+        let planes = run_val("return Geometry3D.build_box_planes(Vector3(2, 3, 4))\n");
+        let Variant::Array(arr) = planes else {
+            panic!("build_box_planes must return an Array, got {planes:?}");
+        };
+        assert_eq!(arr.len(), 6, "a box has six sides");
+        let items = arr.to_vec();
+        let Variant::Plane(first) = &items[0] else {
+            panic!("every element must be a Plane, got {items:?}");
+        };
+        // +X first, at the positive extent — the sign convention Godot uses.
+        assert!(
+            (first.normal.x - 1.0).abs() < 1e-4 && (first.d - 2.0).abs() < 1e-4,
+            "first plane is +X at d = extents.x, got {first:?}"
+        );
+    }
+
     /// 🔑 THE POLYGON PREDICATES ANSWER BOTH WAYS.
     ///
     /// ⚠️ A containment test that only ever asserts `true` passes just as well
@@ -37861,45 +38429,6 @@ match x:
             miss,
             Variant::Nil,
             "a segment outside the triangle returns null"
-        );
-    }
-
-    /// 🔑 `segment_intersects_sphere` IS DELIBERATELY NOT DISPATCHED.
-    ///
-    /// Godot returns a `PackedVector3Array` of **[point, normal]** (empty on a
-    /// miss). `gdcore::geometry3d::segment_intersects_sphere` returns
-    /// `Option<Vector3>` and computes no normal, so the only shapes we could
-    /// return are a one-element array — where every script doing `result[1]`
-    /// to read the normal would fail — or a bare `Vector3`, which is not the
-    /// documented type either.
-    ///
-    /// ⚠️ This test exists so the omission is not silently "fixed" by wiring
-    /// the existing helper straight through. Erroring is the honest state until
-    /// the normal is computed; dispatching a wrong-shaped value would be worse
-    /// than the current `UndefinedFunction`, because the guard idiom
-    /// `if Geometry3D.segment_intersects_sphere(...):` would then succeed and
-    /// hand back an array Godot never produces.
-    #[test]
-    fn geometry_3d_segment_intersects_sphere_stays_undispatched() {
-        // Positive control: the singleton itself resolves, so the failure below
-        // is about this ONE method and not about `Geometry3D` being undefined.
-        let control = run_val(
-            "return Geometry3D.get_closest_point_to_segment(\
-             Vector3(0, 1, 0), Vector3(0, 0, 0), Vector3(1, 0, 0))\n",
-        );
-        assert!(
-            matches!(control, Variant::Vector3(_)),
-            "Geometry3D must resolve, got {control:?}"
-        );
-
-        let err = run_err(
-            "return Geometry3D.segment_intersects_sphere(\
-             Vector3(0, 0, -5), Vector3(0, 0, 5), Vector3(0, 0, 0), 1.0)\n",
-        );
-        let text = format!("{err:?}");
-        assert!(
-            text.contains("Geometry3D.segment_intersects_sphere"),
-            "the error must name the undispatched method, got {text}"
         );
     }
 

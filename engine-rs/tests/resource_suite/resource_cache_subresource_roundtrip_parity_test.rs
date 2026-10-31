@@ -61,14 +61,19 @@ fn saver_emits_subresource_sections_with_properties() {
     let saver = TresSaver::new();
     let output = saver.save_to_string(&parent).unwrap();
 
-    // save_to_string renumbers IDs: empty_1 → "1", flat_1 → "2" (alphabetical)
+    // ⚠️ The saver PRESERVES each sub-resource's id; it does not renumber to
+    // "1"/"2". Godot keeps an existing `scene_unique_id` and only invents one
+    // when it is empty, as `<ClassName>_<5 random chars>`
+    // (resource_format_text.cpp:1911-1917, resource.cpp:124-150). Sequential
+    // integer ids were the format=2 style. Sections are emitted in sorted id
+    // order, so empty_1 precedes flat_1 (pat-21oab).
     assert!(
-        output.contains("[sub_resource type=\"StyleBoxEmpty\" id=\"1\"]"),
-        "must emit empty_1 as id=\"1\""
+        output.contains("[sub_resource type=\"StyleBoxEmpty\" id=\"empty_1\"]"),
+        "must emit empty_1 keeping its own id"
     );
     assert!(
-        output.contains("[sub_resource type=\"StyleBoxFlat\" id=\"2\"]"),
-        "must emit flat_1 as id=\"2\""
+        output.contains("[sub_resource type=\"StyleBoxFlat\" id=\"flat_1\"]"),
+        "must emit flat_1 keeping its own id"
     );
 
     // Properties from flat_1.
@@ -98,9 +103,14 @@ fn saver_emits_subresources_in_sorted_id_order() {
     let saver = TresSaver::new();
     let output = saver.save_to_string(&parent).unwrap();
 
-    // After renumbering: empty_1 → "1", flat_1 → "2"
-    let id1_pos = output.find("id=\"1\"").expect("id=\"1\" must appear");
-    let id2_pos = output.find("id=\"2\"").expect("id=\"2\" must appear");
+    // Ids are PRESERVED, not renumbered; sorting is alphabetical over the
+    // original ids, so empty_1 comes before flat_1 (pat-21oab).
+    let id1_pos = output
+        .find("id=\"empty_1\"")
+        .expect("id=\"empty_1\" must appear");
+    let id2_pos = output
+        .find("id=\"flat_1\"")
+        .expect("id=\"flat_1\" must appear");
 
     assert!(
         id1_pos < id2_pos,
@@ -389,9 +399,9 @@ fn saver_roundtrip_preserves_subresource_class_names() {
     let saver = TresSaver::new();
     let saved = saver.save_to_string(&parent).unwrap();
 
-    // After renumbering: empty_1 → "1", flat_1 → "2"
-    assert!(saved.contains("[sub_resource type=\"StyleBoxEmpty\" id=\"1\"]"));
-    assert!(saved.contains("[sub_resource type=\"StyleBoxFlat\" id=\"2\"]"));
+    // Ids are PRESERVED, not renumbered (pat-21oab).
+    assert!(saved.contains("[sub_resource type=\"StyleBoxEmpty\" id=\"empty_1\"]"));
+    assert!(saved.contains("[sub_resource type=\"StyleBoxFlat\" id=\"flat_1\"]"));
 }
 
 #[test]
@@ -411,9 +421,17 @@ fn saver_roundtrip_preserves_uid() {
     let saver = TresSaver::new();
     let saved = saver.save_to_string(&parent).unwrap();
 
+    // ⚠️ The UID is written as Godot's BASE-34 encoding, not as the decimal id.
+    // `ResourceUid::new(99999)` renders as `uid://csrf`: the codec
+    // (gdresource/src/uid.rs:28-67) uses alphabet
+    // `abcdefghijklmnopqrstuvwxy012345678` with divisor 34, matching Godot's
+    // `base = ('z'-'a') + ('9'-'0')`. Decoding `csrf` gives 99999 back.
+    // Spelled as a literal rather than generated from the codec, so this pins
+    // the real Godot-compatible text instead of only proving that the saver and
+    // the codec agree with each other (pat-21oab).
     assert!(
-        saved.contains("uid=\"uid://99999\""),
-        "UID must survive save round-trip"
+        saved.contains("uid=\"uid://csrf\""),
+        "UID must survive the save round-trip in Godot's base-34 text form, got:\n{saved}"
     );
 }
 
@@ -491,9 +509,11 @@ fn saver_emits_header_for_empty_subresource() {
     let saver = TresSaver::new();
     let output = saver.save_to_string(&parent).unwrap();
 
-    // After renumbering: "empty" → "1"
+    // The id is PRESERVED, not renumbered (pat-21oab). The point of this test
+    // is that a sub-resource with NO properties still gets its section header,
+    // which it does.
     assert!(
-        output.contains("[sub_resource type=\"StyleBoxEmpty\" id=\"1\"]"),
+        output.contains("[sub_resource type=\"StyleBoxEmpty\" id=\"empty\"]"),
         "empty sub-resource must still emit its section header, got:\n{output}"
     );
 }

@@ -134,19 +134,38 @@ impl<L: ResourceLoader> UnifiedLoader<L> {
         self.cache.len()
     }
 
-    /// Returns `true` if the given path is currently cached.
-    pub fn is_cached(&self, path: &str) -> bool {
-        self.cache.contains(path)
+    /// Returns `true` if `reference` is currently cached.
+    ///
+    /// Accepts the same reference space as [`Self::load`]: a `res://` path or a
+    /// `uid://` reference, resolved through the registry first. A `uid://` that
+    /// is malformed or unregistered resolves to nothing and so is not cached.
+    pub fn is_cached(&self, reference: &str) -> bool {
+        self.resolve_to_path(reference)
+            .is_ok_and(|path| self.cache.contains(&path))
     }
 
     /// Inserts or replaces a resource in the cache under the given path.
+    ///
+    /// ⚠️ Unlike [`Self::get_cached`], this takes a **path only**. Writing
+    /// through a `uid://` reference is not supported here because nothing asks
+    /// for it and the failure would be silent — an unregistered UID would
+    /// insert under a key no reader can reach. The same applies to
+    /// [`Self::invalidate`]. See the note on `get_cached`.
     pub fn replace_cached(&mut self, path: &str, resource: Arc<Resource>) {
         self.cache.insert(path, resource);
     }
 
-    /// Returns a cached resource by path, or `None` if not cached.
-    pub fn get_cached(&self, path: &str) -> Option<Arc<Resource>> {
-        self.cache.get(path)
+    /// Returns a cached resource by `res://` path or `uid://` reference.
+    ///
+    /// ⚠️ The `uid://` half is why this takes a reference rather than a path.
+    /// [`Self::load`] has always accepted both, so a caller that loaded by UID
+    /// and then read the cache by the same UID got `None` — the resource was
+    /// there, under its resolved path, and the lookup missed it with no error
+    /// to say why (pat-21oab). `resolve_to_path` is reused rather than
+    /// re-deriving the lookup, so this cannot drift from `load`'s resolution.
+    pub fn get_cached(&self, reference: &str) -> Option<Arc<Resource>> {
+        let path = self.resolve_to_path(reference).ok()?;
+        self.cache.get(&path)
     }
 }
 
@@ -255,5 +274,65 @@ mod tests {
         // The same resource resolves by its concrete path (shared Arc).
         let by_path = ul.load("res://item.tres").unwrap();
         assert!(Arc::ptr_eq(&res, &by_path));
+    }
+
+    /// The bug: `load` accepted a `uid://` reference but `get_cached` did not,
+    /// so a caller that loaded by UID and read the cache back by the SAME UID
+    /// got `None` — with no error to say the resource was sitting there under
+    /// its resolved path (pat-21oab).
+    #[test]
+    fn get_cached_resolves_a_uid_reference() {
+        let mut ul = UnifiedLoader::new(FakeLoader);
+        ul.register_uid_str("uid://cachedref", "res://cached.tres");
+
+        let loaded = ul.load("uid://cachedref").unwrap();
+        let by_uid = ul
+            .get_cached("uid://cachedref")
+            .expect("a resource loaded by UID must be readable back by that UID");
+        let by_path = ul
+            .get_cached("res://cached.tres")
+            .expect("and by its resolved path");
+
+        assert!(Arc::ptr_eq(&loaded, &by_uid));
+        assert!(Arc::ptr_eq(&loaded, &by_path));
+    }
+
+    /// ⚠️ `is_cached` is the predicate form of `get_cached`, so leaving it
+    /// path-only would have produced the worst shape: `get_cached(uid)`
+    /// returning `Some` while `is_cached(uid)` answered `false`.
+    #[test]
+    fn is_cached_resolves_a_uid_reference() {
+        let mut ul = UnifiedLoader::new(FakeLoader);
+        ul.register_uid_str("uid://widget", "res://widget.tres");
+        ul.load("res://widget.tres").unwrap();
+
+        assert!(ul.is_cached("uid://widget"));
+        assert!(ul.is_cached("res://widget.tres"));
+    }
+
+    /// A UID that is well-formed but was never registered resolves to nothing,
+    /// so it is reported as uncached rather than panicking or inventing a path.
+    #[test]
+    fn an_unregistered_uid_is_not_cached() {
+        let mut ul = UnifiedLoader::new(FakeLoader);
+        ul.load("res://present.tres").unwrap();
+
+        assert!(ul.get_cached("uid://neverregistered").is_none());
+        assert!(!ul.is_cached("uid://neverregistered"));
+        // The control: the cache is not empty, so `None` really is about the
+        // UID and not about an empty cache.
+        assert!(ul.is_cached("res://present.tres"));
+    }
+
+    /// ⚠️ A malformed UID must come back as "not cached", not as a panic. `_`
+    /// is outside the codec's `[a-z0-9]` alphabet, so this decodes to the
+    /// INVALID sentinel before any lookup happens.
+    #[test]
+    fn a_malformed_uid_is_not_cached() {
+        let mut ul = UnifiedLoader::new(FakeLoader);
+        ul.load("res://present.tres").unwrap();
+
+        assert!(ul.get_cached("uid://bad_uid").is_none());
+        assert!(!ul.is_cached("uid://bad_uid"));
     }
 }

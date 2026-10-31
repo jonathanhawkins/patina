@@ -23,7 +23,8 @@ pub mod web_output;
 
 pub use bus::AudioBus;
 pub use decode::{
-    decode_mp3, is_mp3, AudioBuffer, AudioStreamGenerator, DecodeError, PolyphonicPlayer,
+    clear_mp3_decoder, decode_mp3, install_mp3_decoder, installed_mp3_decoder, is_mp3, AudioBuffer,
+    AudioStreamGenerator, DecodeError, Mp3Decoder, PolyphonicPlayer,
 };
 pub use effects::{
     process_buffer, AudioEffect, AudioEffectAmplify, AudioEffectCompressor, AudioEffectDelay,
@@ -48,7 +49,8 @@ pub use wav::{decode_wav, parse_wav_header, WavError, WavHeader};
 /// JS that registers it. Exported on every target so the producer/consumer
 /// contract stays unit-testable natively (pat-0q2kx.59, pat-u3l8c.112).
 pub use web_output::{
-    audio_worklet_glue, resample_interleaved, AudioRingBuffer, WebAudioOutput, WORKLET_QUEUE_DEPTH,
+    audio_worklet_glue, resample_interleaved, AudioRingBuffer, SharedWebAudioOutput,
+    WebAudioOutput, WORKLET_QUEUE_DEPTH,
 };
 
 #[cfg(test)]

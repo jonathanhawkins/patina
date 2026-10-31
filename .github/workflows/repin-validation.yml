@@ -20,6 +20,24 @@ on:
           - "false"
           - "true"
 
+  # Path-scoped on purpose. A repin is a rare event and these jobs are
+  # expensive, so a push/PR trigger firing on every commit would be a standing
+  # cost for no signal. Scoped to the submodule pin and the fixtures a repin
+  # invalidates, the lane runs exactly when the inputs it validates move
+  # (pat-21oab).
+  push:
+    paths:
+      - "upstream/godot"
+      - "upstream/godot/**"
+      - "fixtures/oracle_outputs/**"
+      - "fixtures/golden/**"
+  pull_request:
+    paths:
+      - "upstream/godot"
+      - "upstream/godot/**"
+      - "fixtures/oracle_outputs/**"
+      - "fixtures/golden/**"
+
 concurrency:
   group: repin-${{ github.ref }}-${{ inputs.godot_version }}
   cancel-in-progress: true
@@ -29,6 +47,46 @@ concurrency:
 # golden-staleness checks.  These are the tests that verify Patina's runtime
 # behaviour matches Godot's oracle outputs.
 jobs:
+  # Resolves the Godot version once, for every job and the summary to share.
+  #
+  # Two triggers mean two sources. A manual dispatch STATES the version it is
+  # repinning to, which is authoritative. A push or PR that moves the submodule
+  # carries no such input, and before this job those runs would have labelled
+  # everything with an empty string. The fallback reads Godot's own
+  # `version.py` — the file Godot's build uses — rather than a tag, because a
+  # submodule checked out at a detached commit need not carry one (pat-21oab).
+  detect-version:
+    name: Detect Godot version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Resolve godot_version
+        id: resolve
+        run: |
+          requested="${{ inputs.godot_version }}"
+          if [ -n "$requested" ]; then
+            resolved="$requested"
+            echo "Using dispatched godot_version: $resolved"
+          elif [ -f upstream/godot/version.py ]; then
+            maj=$(sed -n 's/^major *= *//p' upstream/godot/version.py | head -1)
+            min=$(sed -n 's/^minor *= *//p' upstream/godot/version.py | head -1)
+            pat=$(sed -n 's/^patch *= *//p' upstream/godot/version.py | head -1)
+            sta=$(sed -n 's/^status *= *"\(.*\)"/\1/p' upstream/godot/version.py | head -1)
+            resolved="${maj}.${min}.${pat}-${sta}"
+            echo "Auto-detected godot_version from version.py: $resolved"
+          else
+            resolved="unknown"
+            echo "::warning::Could not resolve a Godot version; using 'unknown'."
+          fi
+          echo "version=$resolved" >> "$GITHUB_OUTPUT"
+
   oracle-parity:
     name: "Oracle parity (${{ inputs.godot_version }})"
     runs-on: ubuntu-latest
@@ -225,10 +283,170 @@ jobs:
 # ── Job 4: Parity summary ─────────────────────────────────────────────────
 # Collects results from upstream jobs and writes a human-readable Markdown
 # summary to the GitHub Actions job summary page.
+  # ── Gate: physics trace + determinism goldens ────────────────────────────
+  physics-trace-goldens:
+    name: "Physics trace goldens (${{ needs.detect-version.outputs.version }})"
+    runs-on: ubuntu-latest
+    needs: detect-version
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: engine-rs/target
+          key: ${{ runner.os }}-cargo-target-repin-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-repin-
+
+      # A repin changes Godot's own integrator, so the traces are the gate that
+      # notices. `--no-fail-fast` because the point is the full picture, not the
+      # first mismatch.
+      #
+      # The filterset is a UNION, so a term that matches nothing costs nothing.
+      # Two of the five names the validation test requires — `physics_stepping`
+      # and `mainloop_physics` — currently match NO test in the workspace, so
+      # `mainloop` and `physics_step` are included alongside them to make the
+      # gate actually select the tests those names were reaching for. Keeping
+      # the required names means the coverage list stays honest the day a test
+      # is added under one of them (pat-21oab).
+      - name: Run physics trace and determinism goldens
+        working-directory: engine-rs
+        run: |
+          cargo nextest run --workspace --no-fail-fast \
+            -E 'test(physics_trace) + test(deterministic_physics) + test(physics_playground) + test(physics_stepping) + test(mainloop_physics) + test(mainloop) + test(physics_step)' \
+            2>&1 | tee /tmp/physics_trace.txt
+
+      - name: Upload physics trace logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: physics-trace-logs-${{ needs.detect-version.outputs.version }}
+          path: /tmp/physics_trace.txt
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ── Gate: runtime compatibility slices ──────────────────────────────────
+  runtime-compat-slices:
+    name: "Runtime compat slices (${{ needs.detect-version.outputs.version }})"
+    runs-on: ubuntu-latest
+    needs: detect-version
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: engine-rs/target
+          key: ${{ runner.os }}-cargo-target-repin-${{ hashFiles('engine-rs/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-repin-
+
+      # Two slices, kept as separate steps so the summary can tell which half
+      # broke: resource/headless loading, then 2D render compat.
+      - name: Headless runtime compat slice
+        working-directory: engine-rs
+        run: |
+          cargo nextest run --workspace --no-fail-fast \
+            -E 'test(resource_) + test(headless)' \
+            2>&1 | tee /tmp/runtime_headless.txt
+
+      - name: 2D render compat slice
+        working-directory: engine-rs
+        run: |
+          cargo nextest run --workspace --no-fail-fast \
+            -E 'test(render_) + test(canvas) + test(_2d)' \
+            2>&1 | tee /tmp/runtime_2d.txt
+
+      - name: Upload runtime compat logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-compat-logs-${{ needs.detect-version.outputs.version }}
+          path: |
+            /tmp/runtime_headless.txt
+            /tmp/runtime_2d.txt
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ── Gate: the pin itself ────────────────────────────────────────────────
+  pin-verification:
+    name: "Pin verification (${{ needs.detect-version.outputs.version }})"
+    runs-on: ubuntu-latest
+    needs: detect-version
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Every other gate compares behaviour. This one checks the thing being
+      # repinned is actually there and consistent — a submodule left at the old
+      # commit, or oracle fixtures never regenerated, would otherwise make the
+      # whole lane pass while validating the PREVIOUS version.
+      - name: Verify upstream/godot submodule is checked out
+        run: |
+          git submodule status upstream/godot
+          test -d upstream/godot || { echo "::error::upstream/godot submodule is missing"; exit 1; }
+          test -f upstream/godot/version.py || { echo "::error::upstream/godot has no version.py"; exit 1; }
+          echo "Submodule commit: $(git -C upstream/godot rev-parse HEAD)"
+
+      - name: Verify the version matches the requested pin
+        run: |
+          detected="${{ needs.detect-version.outputs.version }}"
+          echo "Resolved version under validation: $detected"
+          test "$detected" != "unknown" || { echo "::error::could not resolve a Godot version"; exit 1; }
+
+      - name: Verify oracle output fixtures are present
+        run: |
+          test -d fixtures/oracle_outputs || { echo "::error::fixtures/oracle_outputs is missing"; exit 1; }
+          count=$(find fixtures/oracle_outputs -type f | wc -l)
+          echo "oracle_outputs files: $count"
+          test "$count" -gt 0 || { echo "::error::fixtures/oracle_outputs is empty"; exit 1; }
+
   parity-summary:
     name: "Parity summary (${{ inputs.godot_version }})"
     runs-on: ubuntu-latest
-    needs: [oracle-parity, render-goldens]
+    needs:
+      [
+        detect-version,
+        oracle-parity,
+        render-goldens,
+        physics-trace-goldens,
+        runtime-compat-slices,
+        pin-verification,
+      ]
     if: always()
 
     steps:
@@ -254,6 +472,9 @@ jobs:
           GODOT_VERSION: ${{ inputs.godot_version }}
           ORACLE_RESULT: ${{ needs.oracle-parity.result }}
           RENDER_RESULT: ${{ needs.render-goldens.result }}
+          PHYSICS_RESULT: ${{ needs.physics-trace-goldens.result }}
+          RUNTIME_RESULT: ${{ needs.runtime-compat-slices.result }}
+          PIN_RESULT: ${{ needs.pin-verification.result }}
         run: |
           python3 - <<'PYEOF'
           import os
@@ -263,6 +484,9 @@ jobs:
           godot_ver   = os.environ.get("GODOT_VERSION", "unknown")
           oracle_res  = os.environ.get("ORACLE_RESULT", "unknown")
           render_res  = os.environ.get("RENDER_RESULT", "unknown")
+          physics_res = os.environ.get("PHYSICS_RESULT", "unknown")
+          runtime_res = os.environ.get("RUNTIME_RESULT", "unknown")
+          pin_res     = os.environ.get("PIN_RESULT", "unknown")
           now         = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
           def status_badge(result):
@@ -309,6 +533,9 @@ jobs:
               f"|------|--------|",
               f"| Oracle parity tests | {status_badge(oracle_res)} |",
               f"| Render golden tests | {status_badge(render_res)} |",
+              f"| Physics trace goldens | {status_badge(physics_res)} |",
+              f"| Runtime compat slices | {status_badge(runtime_res)} |",
+              f"| Pin verification | {status_badge(pin_res)} |",
               f"",
               f"## Test Counts",
               f"",
@@ -356,7 +583,10 @@ jobs:
       - name: Fail if any required gate failed
         if: >
           needs.oracle-parity.result == 'failure' ||
-          needs.render-goldens.result == 'failure'
+          needs.render-goldens.result == 'failure' ||
+          needs.physics-trace-goldens.result == 'failure' ||
+          needs.runtime-compat-slices.result == 'failure' ||
+          needs.pin-verification.result == 'failure'
         run: |
           echo "::error::One or more repin validation gates failed."
           echo "Review the job logs and summary above before updating the pin."

@@ -89,11 +89,24 @@
 
       // Returns a getter for the audio status line, or null if audio failed to
       // start — a page with no audio should still render.
-      async function startAudio() {
+      async function startAudio(engine) {
         // 44100 is Godot's audio/driver/mix_rate default; the AudioContext
         // picks its own rate and the engine resamples to it. The channel count
         // is the mixer's, reported back as audio.channels.
         const audio = startWebAudio(44100);
+        // Route the SCENE's AudioServer -- the one every AudioStreamPlayer in
+        // the loaded tree mixes through -- into this same worklet. Without this
+        // the graph is built and only the demo tone is ever audible, because
+        // the MainLoop's AudioServerBridge has no output attached and throws
+        // its mix away (pat-mgixk.4).
+        audio.attachSceneAudio(engine);
+        // Let the engine play MP3 streams (pat-mgixk.4). gdaudio's ISO MP3
+        // decoder is minimp3, which builds C sources and is target-gated off
+        // wasm32, so without this every AudioStreamMP3 in a scene decodes to
+        // UnsupportedFormat. The browser has a decoder of its own; this routes
+        // decodeAudioData's output into the engine's loader, the same way
+        // Godot's web export leans on the browser for MP3.
+        audio.enableBrowserMp3Decoding();
         const glue = await importSource(audio.workletGlue);
 
         glue.patinaInstallGestureUnlock(audio.context, () => audio.markUnlocked());
@@ -107,11 +120,63 @@
         toneButton.disabled = false;
         toneButton.addEventListener("click", () => audio.playTone(440, 1.0, 0.4));
 
+        // Decode one MP3 asset with the browser and hand the PCM to the engine.
+        //
+        // This has to happen BEFORE the scene that names the file loads:
+        // decodeAudioData is async, while AudioServerBridge::process loads a
+        // stream synchronously inside a frame, so the PCM must already be
+        // registered when the scene asks for it. Preloading is what a web game
+        // does with its audio anyway -- a loading screen, then play.
+        //
+        // The BYTES are the key, not the path: the engine's decode hook is
+        // handed bytes and nothing else. So whatever is registered here must be
+        // byte-identical to what the scene loads.
+        async function preloadMp3(url) {
+          const bytes = new Uint8Array(await (await fetch(url)).arrayBuffer());
+          // decodeAudioData detaches the ArrayBuffer it is given, so hand it a
+          // copy and keep `bytes` intact to use as the key.
+          const decoded = await audio.context.decodeAudioData(bytes.slice().buffer);
+          // Channel-major, which is registerDecodedMp3's layout: the interleave
+          // happens on the Rust side, where it is unit-tested.
+          const planar = new Float32Array(decoded.length * decoded.numberOfChannels);
+          for (let c = 0; c < decoded.numberOfChannels; c += 1) {
+            planar.set(decoded.getChannelData(c), c * decoded.length);
+          }
+          return audio.registerDecodedMp3(
+            bytes,
+            planar,
+            Math.round(decoded.sampleRate),
+            decoded.numberOfChannels,
+          );
+        }
+
+        // The repo ships no binary MP3 for the demo, so the asset is named by
+        // the URL instead of hardcoded: `?mp3=<url>` exercises the whole
+        // fetch -> decodeAudioData -> registerDecodedMp3 path against any file
+        // the page can reach. Without it the engine simply has no MP3 to play.
+        //
+        // ⚠️ Registering here, after startEngine(), is only safe because this
+        // demo's scene names no audio stream. A real game must preload before
+        // loading the scene that references the .mp3: the engine's loader runs
+        // synchronously inside a frame and a miss is a silent player, not a
+        // retry.
+        const mp3Url = new URLSearchParams(location.search).get("mp3");
+        if (mp3Url) {
+          try {
+            await preloadMp3(mp3Url);
+          } catch (err) {
+            console.error(`mp3 preload of ${mp3Url} failed`, err);
+          }
+        }
+
         return () =>
           `audio:   ${audio.contextRate} Hz context / ${audio.mixRate} Hz mix, ` +
           `${audio.channels}ch\n` +
           `         ${audio.isUnlocked ? "unlocked" : "SUSPENDED — click or press a key"}, ` +
-          `${audio.framesPulled} frames pulled, ${audio.queuedFrames} queued`;
+          `${audio.framesPulled} frames pulled, ${audio.queuedFrames} queued\n` +
+          `scene:   ${audio.sceneAttached ? "audio attached" : "NOT ATTACHED — scene players are mute"}` +
+          `, ${audio.sceneQueuedFrames} frames queued from MainLoop\n` +
+          `mp3:     ${audio.decodedMp3Count} browser-decoded stream(s) registered`;
       }
 
       try {
@@ -139,7 +204,7 @@
         // create an AudioContext should still show the render check.
         let audioLine = () => "audio:   not started";
         try {
-          audioLine = await startAudio();
+          audioLine = await startAudio(engine);
         } catch (err) {
           audioLine = () => `audio:   failed: ${err}`;
         }

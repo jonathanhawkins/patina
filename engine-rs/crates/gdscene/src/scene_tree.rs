@@ -2840,6 +2840,65 @@ impl SceneTree {
         Ok(removed)
     }
 
+    /// Detaches `child` from `parent` but leaves it alive in the arena
+    /// (Godot `Node.remove_child`, upstream/godot/scene/main/node.cpp).
+    ///
+    /// ⚠️ Deliberately NOT [`remove_node`](Self::remove_node), which also drops
+    /// the whole subtree out of the arena. Godot's `remove_child` hands the
+    /// caller an **orphan it still owns** — the standard move-a-node idiom is
+    /// `old.remove_child(n)` then `new.add_child(n)`, and freeing `n` here would
+    /// turn every one of those into a use-after-free. Keeping it in the arena is
+    /// what makes the round trip work: [`SceneAccess::add_child`] re-attaches an
+    /// in-arena node whose `parent()` is `None` through `take_node` +
+    /// [`add_child`](Self::add_child) (`scripting.rs`), so the orphan can come
+    /// back. `queue_free`/`free` remain the ways to destroy it.
+    ///
+    /// `exit_tree` fires on the subtree BEFORE the parent link is cut, matching
+    /// `remove_node` and Godot's `_propagate_exit_tree`: an `_exit_tree` handler
+    /// can still walk up to its parent.
+    pub fn remove_child(&mut self, parent: NodeId, child: NodeId) -> EngineResult<()> {
+        if child == self.root_id {
+            return Err(EngineError::InvalidOperation(
+                "cannot remove the root node".into(),
+            ));
+        }
+        // Godot errors when the argument is not actually a child of this node
+        // rather than detaching it from wherever it really lives.
+        let actual_parent = self.nodes.get(&child).and_then(|node| node.parent());
+        if actual_parent != Some(parent) {
+            return Err(EngineError::InvalidOperation(format!(
+                "node {child} is not a child of {parent}"
+            )));
+        }
+
+        let should_exit_tree = self
+            .nodes
+            .get(&child)
+            .map(|node| node.is_inside_tree())
+            .unwrap_or(false);
+        if should_exit_tree {
+            LifecycleManager::exit_tree(self, child);
+        }
+
+        if let Some(parent_node) = self.nodes.get_mut(&parent) {
+            parent_node.remove_child_id(child);
+        }
+        if let Some(child_node) = self.nodes.get_mut(&child) {
+            child_node.set_parent(None);
+        }
+
+        self.trace_record(child, TraceEventType::Notification, "UNPARENTED");
+        if let Some(child_node) = self.nodes.get_mut(&child) {
+            child_node.receive_notification(NOTIFICATION_UNPARENTED);
+        }
+        self.trace_record(parent, TraceEventType::Notification, "CHILD_ORDER_CHANGED");
+        if let Some(parent_node) = self.nodes.get_mut(&parent) {
+            parent_node.receive_notification(NOTIFICATION_CHILD_ORDER_CHANGED);
+        }
+
+        Ok(())
+    }
+
     /// Drops every replication registry entry belonging to a removed node
     /// (pat-s3rrv.17 item 6).
     ///
@@ -2902,6 +2961,19 @@ impl SceneTree {
             }
         }
 
+        // Godot reparents by delegating to remove_child + add_child, so the moved
+        // subtree leaves and re-enters the tree. `remove_child` propagates
+        // EXIT_TREE bottom-up only when the node is actually in the tree
+        // (node.cpp:2077-2078 -> _propagate_exit_tree).
+        let was_inside_tree = self
+            .nodes
+            .get(&node_id)
+            .map(|n| n.is_inside_tree())
+            .unwrap_or(false);
+        if was_inside_tree {
+            LifecycleManager::exit_tree(self, node_id);
+        }
+
         // Detach from old parent.
         if let Some(old_parent_id) = self.nodes.get(&node_id).and_then(|n| n.parent()) {
             if let Some(old_parent) = self.nodes.get_mut(&old_parent_id) {
@@ -2943,6 +3015,19 @@ impl SceneTree {
         );
         if let Some(parent) = self.nodes.get_mut(&new_parent_id) {
             parent.receive_notification(NOTIFICATION_CHILD_ORDER_CHANGED);
+        }
+
+        // ...and `add_child` propagates ENTER_TREE top-down then READY bottom-up,
+        // gated on the NEW parent being in the tree -- the same condition
+        // `add_child` itself uses (`should_enter_tree`). Ordered after
+        // CHILD_ORDER_CHANGED to match Godot's global notification order.
+        let new_parent_in_tree = self
+            .nodes
+            .get(&new_parent_id)
+            .map(|n| n.is_inside_tree())
+            .unwrap_or(false);
+        if new_parent_in_tree {
+            LifecycleManager::enter_tree(self, node_id);
         }
 
         Ok(())
@@ -3826,12 +3911,19 @@ impl SceneTree {
         for (target_id, method, has_callback, deferred, resolved) in connections {
             if !has_callback {
                 let target_node_id = NodeId::from_object_id(target_id);
-                if self.scripts.contains_key(&target_node_id) {
-                    if deferred {
-                        self.call_deferred(target_node_id, &method, &resolved);
-                    } else {
-                        self.call_script_with_access(target_node_id, &method, &resolved);
-                    }
+                if deferred {
+                    // The deferred queue resolves the target when it drains, so
+                    // it must be queued whether or not the target has a script
+                    // — `process_deferred_calls` goes through
+                    // `call_object_method` for the same reason this does.
+                    self.call_deferred(target_node_id, &method, &resolved);
+                } else {
+                    // ⚠️ This used to be gated on
+                    // `self.scripts.contains_key(&target_node_id)`, so a
+                    // connection whose target had no script — or whose method
+                    // was native rather than script-defined — was silently
+                    // dropped (pat-mgixk.9).
+                    self.call_object_method(target_node_id, &method, &resolved);
                 }
             }
         }
@@ -4344,9 +4436,17 @@ impl SceneTree {
                     // otherwise win over the key. Clear it so the keyed stream
                     // is what plays.
                     node.set_property("__extres__stream", Variant::Nil);
-                    if start_offset > 0.0 {
-                        node.set_property("seek_request", Variant::Float(start_offset));
-                    }
+                    // A key is a `play(start_offset)`, not a seek on whatever
+                    // voice happens to be live. `seek_request` could express
+                    // neither half of that: it was skipped entirely at offset
+                    // 0, so crossing the same key twice did not retrigger the
+                    // clip, and otherwise it moved the playhead of the OLD
+                    // voice, so a key that switches clips kept playing the
+                    // previous one (pat-mgixk.5).
+                    node.set_property(
+                        crate::audio_server_bridge::PLAY_REQUEST_PROP,
+                        Variant::Float(start_offset.max(0.0)),
+                    );
                     node.set_property("playing", Variant::Bool(true));
                 }
             }
@@ -4368,6 +4468,16 @@ impl SceneTree {
                             node_id,
                             "animation_changed",
                             &[Variant::String(old), Variant::String(new)],
+                        );
+                    }
+                    // Registered in ClassDB (`class_db.rs:5031`) with nothing
+                    // emitting it until now (pat-mgixk.2), so a script
+                    // connected to `current_animation_changed` never ran.
+                    AnimationPlayerSignal::CurrentAnimationChanged(name) => {
+                        self.emit_signal(
+                            node_id,
+                            "current_animation_changed",
+                            &[Variant::String(name)],
                         );
                     }
                 }
@@ -5058,6 +5168,50 @@ impl SceneTree {
         args: &[Variant],
     ) {
         let _ = self.call_script_method(node_id, method, args);
+    }
+
+    /// Godot's `Object::callp` order, for a call that arrives from the ENGINE
+    /// rather than from a running script: the target's script instance first,
+    /// then the engine's own method for its class
+    /// (`upstream/godot/core/object/object.cpp`).
+    ///
+    /// ⚠️ This is the missing second half of signal emission (pat-mgixk.9).
+    /// `emit_signal` dispatched a no-callback connection only when the target
+    /// had a script, and `call_script_method` declines a method the script does
+    /// not declare — so `timer.timeout.connect(enemy.queue_free)`,
+    /// `$Button.pressed.connect($Label.hide)` and a `.tscn`
+    /// `[connection ... method="queue_free"]` onto a scriptless node all
+    /// connected successfully and then did nothing at all. The native table
+    /// ([`crate::scripting::SceneTreeAccessor::call_node_method`]) existed the
+    /// whole time; emission simply never reached it.
+    ///
+    /// Returns whether anything handled the call, which is what lets a caller
+    /// distinguish "dispatched" from "no such method on this target".
+    pub(crate) fn call_object_method(
+        &mut self,
+        target: NodeId,
+        method: &str,
+        args: &[Variant],
+    ) -> bool {
+        // The script instance wins, as in Godot: a script-defined `hide` must
+        // override the engine's. `call_script_method` already returns `None`
+        // for a node with no script or a method it does not declare, so this
+        // needs no separate `contains_key` gate.
+        if self.call_script_method(target, method, args).is_some() {
+            return true;
+        }
+        // SAFETY: the same invariant `call_script_method` relies on — the
+        // accessor is created here, used only within this call frame, and
+        // dropped before returning, so the raw pointer cannot escape.
+        let mut accessor =
+            unsafe { crate::scripting::SceneTreeAccessor::new(self as *mut SceneTree) };
+        gdscript_interop::bindings::SceneAccess::call_node_method(
+            &mut accessor,
+            target.raw(),
+            method,
+            args,
+        )
+        .is_some()
     }
 
     /// Calls `method` on the script attached to `node_id` and returns its value.
@@ -7810,6 +7964,19 @@ impl SceneTree {
             .all_nodes_in_process_order()
             .into_iter()
             .filter(|id| self.should_process_node(*id))
+            // `set_process(false)` silences the idle callback independently of
+            // `process_mode` (pat-mgixk.6).
+            //
+            // ⚠️ This gate already existed — in `process_all_scripts_process`
+            // below, which has NO production caller. `MainLoop::step` drives
+            // THIS function, so the flag was being written and read back
+            // faithfully while `_process` kept running: a script calling
+            // `set_process(false)` observed nothing.
+            //
+            // Gating the whole iteration rather than only the script call,
+            // because Godot removes the node from the process group — so
+            // `NOTIFICATION_PROCESS` stops as well, not just `_process(delta)`.
+            .filter(|id| self.is_node_processing(*id))
             .collect();
         for id in ids {
             self.trace_record(id, TraceEventType::Notification, "PROCESS");
@@ -7835,6 +8002,12 @@ impl SceneTree {
             .all_nodes_in_process_order()
             .into_iter()
             .filter(|id| self.should_process_node(*id))
+            // The physics half of the same gap (pat-mgixk.6): `MainLoop::step`
+            // calls this, not the `process_all_scripts_physics_process` that
+            // carried the only `is_node_physics_processing` filter. The two
+            // toggles are independent — a node may stop `_process` and keep
+            // `_physics_process` — so this reads its own flag.
+            .filter(|id| self.is_node_physics_processing(*id))
             .collect();
         for id in ids {
             self.trace_record(id, TraceEventType::Notification, "PHYSICS_PROCESS");
@@ -7921,9 +8094,12 @@ impl SceneTree {
                     }
                     continue;
                 }
-                if self.scripts.contains_key(&call.node_id) {
-                    self.call_script_with_access(call.node_id, &call.method, &call.args);
-                }
+                // ⚠️ Was gated on `self.scripts.contains_key(&call.node_id)`,
+                // which silently dropped every deferred call to a native method
+                // or to a scriptless node — including a CONNECT_DEFERRED signal
+                // connection, whose whole delivery runs through here
+                // (pat-mgixk.9).
+                self.call_object_method(call.node_id, &call.method, &call.args);
             }
         }
     }

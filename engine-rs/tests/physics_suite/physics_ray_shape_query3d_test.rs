@@ -116,28 +116,49 @@ fn classdb_shape_query_inherits_refcounted() {
     assert_eq!(info.parent_class.as_str(), "RefCounted");
 }
 
+/// 🔑 `PhysicsShapeQueryParameters3D` exposes exactly Godot's nine members.
+///
+/// ⚠️ This test used to require `position` and `max_results`, and Godot has
+/// **neither** (pat-21oab):
+///
+/// * `position` is a member of `PhysicsPointQueryParameters3D`, not of the
+///   shape query — the shape query locates itself with `transform`.
+/// * `max_results` is a **parameter** of
+///   `PhysicsDirectSpaceState3D.intersect_shape()`, not a property of the
+///   parameter object.
+///
+/// Patina registers all nine documented members and nothing else, so it was the
+/// assertions that were wrong. Source:
+/// `doc/classes/PhysicsShapeQueryParameters3D.xml`.
+///
+/// Asserted as a SET rather than as spot-checks, so a dropped registration and
+/// an invented one both fail here. Sorted because `get_property_list` walks the
+/// inheritance chain base-first and we care about membership, not order.
 #[test]
 fn classdb_shape_query_has_properties() {
     class_db::register_3d_classes();
     let props = class_db::get_property_list("PhysicsShapeQueryParameters3D");
-    let names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
-    assert!(names.contains(&"shape"), "missing 'shape'");
-    assert!(names.contains(&"position"), "missing 'position'");
-    assert!(
-        names.contains(&"collision_mask"),
-        "missing 'collision_mask'"
+    let mut names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
+    names.sort_unstable();
+
+    // doc/classes/PhysicsShapeQueryParameters3D.xml, in full.
+    let expected = [
+        "collide_with_areas",
+        "collide_with_bodies",
+        "collision_mask",
+        "exclude",
+        "margin",
+        "motion",
+        "shape",
+        "shape_rid",
+        "transform",
+    ];
+    assert_eq!(
+        names, expected,
+        "PhysicsShapeQueryParameters3D must expose exactly Godot's nine \
+         members. `position` belongs to PhysicsPointQueryParameters3D and \
+         `max_results` is an intersect_shape() parameter, not a property."
     );
-    assert!(
-        names.contains(&"collide_with_bodies"),
-        "missing 'collide_with_bodies'"
-    );
-    assert!(
-        names.contains(&"collide_with_areas"),
-        "missing 'collide_with_areas'"
-    );
-    assert!(names.contains(&"motion"), "missing 'motion'");
-    assert!(names.contains(&"margin"), "missing 'margin'");
-    assert!(names.contains(&"max_results"), "missing 'max_results'");
 }
 
 // ── SceneTree Integration ────────────────────────────────────────────────────
@@ -169,7 +190,11 @@ fn ray_query_defaults() {
     assert!(q.exclude.is_empty());
     assert!(q.collide_with_bodies);
     assert!(!q.collide_with_areas);
-    assert!(!q.hit_back_faces);
+    // ⚠️ `hit_back_faces` defaults to **true**, not false
+    // (doc/classes/PhysicsRayQueryParameters3D.xml: `default="true"`). This
+    // asserted `!q.hit_back_faces` and failed against a correct default
+    // (pat-21oab). `hit_from_inside` really is false there.
+    assert!(q.hit_back_faces);
     assert!(!q.hit_from_inside);
 }
 

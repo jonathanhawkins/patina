@@ -277,6 +277,13 @@ impl ScriptInstance for GDScriptNodeInstance {
             })
     }
 
+    fn drain_print_output(&mut self) -> Vec<String> {
+        // Straight to the interpreter rather than through the inherent
+        // `take_output` above, so the call can never be read as recursing into
+        // this trait method.
+        self.interpreter.take_output()
+    }
+
     fn get_property(&self, name: &str) -> Option<Variant> {
         self.instance.properties.get(name).cloned()
     }
@@ -2628,6 +2635,19 @@ impl SceneAccess for SceneTreeAccessor {
             return Some(value);
         }
 
+        // Camera3D's own surface (pat-nzgdu); declines every non-Camera3D node.
+        //
+        // ⚠️ Camera3D registers 19 methods in ClassDB and had NO arm here, so
+        // `node_has_method` said true and every call returned `Nil` silently.
+        // Only the four needing no viewport are served; the projection family
+        // waits on a viewport size reaching this layer. See
+        // `camera3d::call_camera3d_method`.
+        if let Some(value) =
+            crate::camera3d::call_camera3d_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
+
         // VehicleWheel3D's script surface (pat-s3rrv.194); declines every other
         // node.
         //
@@ -2772,6 +2792,20 @@ impl SceneAccess for SceneTreeAccessor {
             return Some(value);
         }
 
+        // The core Node / CanvasItem / Node3D / Viewport method surface
+        // (pat-mgixk.8); declines every name it does not serve, so the table
+        // below is reached unchanged.
+        //
+        // ⚠️ Deliberately does NOT carry `hide` / `show` / `set_visible` /
+        // `is_visible` / `find_child`: this runs BEFORE the table, so a second
+        // implementation of a name the table already serves would SHADOW it
+        // rather than fill a gap. Only names with no arm anywhere live there.
+        if let Some(value) =
+            crate::core_node_methods::call_core_node_method(self.tree_mut(), nid, method, args)
+        {
+            return Some(value);
+        }
+
         // NavigationRegion3D's runtime bake (pat-s3rrv.180); declines every
         // other node. A 3D baker has existed in `gdserver3d` since the port
         // began with no caller able to reach it — this arm is what lets a script
@@ -2913,6 +2947,222 @@ impl SceneAccess for SceneTreeAccessor {
         };
 
         match method {
+            // -- Signal-targetable native methods (pat-mgixk.9) --------------
+            //
+            // `timer.timeout.connect(enemy.queue_free)` and
+            // `$Button.pressed.connect($Label.hide)` are core Godot idioms, and
+            // in Godot they work because `Object::emit_signalp` ends at
+            // `Object::callp`, which tries the script instance and then the
+            // ClassDB method bind. Patina's emission path had no second half at
+            // all, so these connected fine and did nothing. They are wired HERE
+            // rather than in `SceneTree::emit_signal` so the SAME arm serves a
+            // signal target, a `.tscn` `[connection]`, and a plain
+            // `$Label.hide()` written in a script.
+            //
+            // ⚠️ `hide`/`show` had no arm in ANY table before this, and
+            // `queue_free` had one only in the interpreter's own ObjectId match
+            // — which emission never reaches.
+            //
+            // ⚠️⚠️ THIS TABLE OWNS `hide`/`show`/`set_visible`/`is_visible`.
+            // `core_node_methods::call_core_node_method` (pat-mgixk.8) runs
+            // EARLIER in this same function, so an implementation there would
+            // shadow these rather than fill a gap — its own comment says it
+            // deliberately omits these four names for exactly that reason. Do
+            // not "deduplicate" by deleting them here: I did, on the assumption
+            // that module still carried them, and `hide` became implemented
+            // NOWHERE — a signal-driven `$Label.hide` silently stopped hiding
+            // and the acceptance test caught it.
+            "queue_free" => {
+                self.tree_mut().queue_free(nid);
+                Some(Variant::Nil)
+            }
+            "free" => {
+                // Godot `Object.free()`: immediate, unlike `queue_free`.
+                // `remove_node` fires EXIT_TREE/UNPARENTED and drops the
+                // subtree from the arena; the root cannot be freed this way, so
+                // the error is discarded exactly as `free_object` does.
+                let _ = self.tree_mut().remove_node(nid);
+                Some(Variant::Nil)
+            }
+            "hide" | "show" | "set_visible" => {
+                // Godot: `hide()` is `set_visible(false)`, `show()` is
+                // `set_visible(true)` (`canvas_item.cpp`, `node_3d.cpp`).
+                let visible = match method {
+                    "hide" => false,
+                    "show" => true,
+                    // A malformed `set_visible` argument is a no-op rather than
+                    // a hide: reading a missing argument as `false` would blank
+                    // the node, the opposite of what a bad call should do.
+                    _ => match args.first() {
+                        Some(Variant::Bool(b)) => *b,
+                        Some(Variant::Int(i)) => *i != 0,
+                        _ => return Some(Variant::Nil),
+                    },
+                };
+                // `node2d::set_visible` and `node3d::set_visible` are both
+                // exactly this one property write, so there is nothing to gain
+                // by branching on the node's dimension here.
+                if let Some(target) = self.tree_mut().get_node_mut(nid) {
+                    target.set_property("visible", Variant::Bool(visible));
+                }
+                Some(Variant::Nil)
+            }
+            "is_visible" => Some(Variant::Bool(
+                // Godot's default is visible, so an unset property reads true;
+                // only an explicit `false` hides.
+                self.tree()
+                    .get_node(nid)
+                    .map(|n| !matches!(n.get_property("visible"), Variant::Bool(false)))
+                    .unwrap_or(false),
+            )),
+            // -- Node/Object core API (pat-mgixk.6) --------------------------
+            //
+            // Every name in this block is registered in ClassDB
+            // (`gdobject/src/class_db.rs`: `notification`, then
+            // `get_node_or_null` / `remove_child` / `get_child` /
+            // `is_inside_tree` / `set_process` / `is_processing` /
+            // `set_physics_process` / `is_physics_processing`) and had NO
+            // dispatch arm in ANY table. That combination is the worst one:
+            // `node_has_method` answers true off the registration, so
+            // `call_object_method` takes its `responds` branch and returns the
+            // `Variant::Nil` placeholder (`interpreter.rs`). `$X.get_child(0)`
+            // read as null, `n.is_inside_tree()` as null, and
+            // `other.set_process(false)` did nothing at all — silently, with no
+            // script error to notice.
+            //
+            // Wired HERE and nowhere else on purpose: `call_object_method` and
+            // `call_self_func_or_native` both fall back to this table, so one
+            // arm serves both `$X.m()` and the bare `m()` a script on the node
+            // itself writes. Adding them to the interpreter's own ObjectId match
+            // would cover only the first spelling.
+            //
+            // Answered for ANY node, like the authority arms below: in Godot
+            // these are `Node`/`Object` members, so no subclass table may shadow
+            // them.
+            "get_child" => {
+                // Godot `get_child(idx, include_internal = false)`: a negative
+                // index counts back from the end, and out of range is null.
+                let idx = match args.first() {
+                    Some(Variant::Int(i)) => *i,
+                    Some(Variant::Float(f)) => *f as i64,
+                    _ => return Some(Variant::Nil),
+                };
+                let children = self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.children().to_vec())
+                    .unwrap_or_default();
+                let len = children.len() as i64;
+                // ⚠️ Wrap BEFORE the bounds test. A raw `-1` satisfies
+                // `idx < len`, so testing first and wrapping after would index
+                // with a negative number instead of returning the last child.
+                let resolved = if idx < 0 { idx + len } else { idx };
+                if resolved < 0 || resolved >= len {
+                    return Some(Variant::Nil);
+                }
+                Some(Variant::ObjectId(children[resolved as usize].object_id()))
+            }
+            "get_node_or_null" => {
+                let Some(path) = arg_str(0) else {
+                    return Some(Variant::Nil);
+                };
+                // The null-returning twin of `get_node`, which raises instead.
+                // Reuses this impl's own resolver so both spellings agree on
+                // what a path means (relative lookup, then child/sibling name).
+                match SceneAccess::get_node(self, node, &path) {
+                    Some(found) => Some(Variant::ObjectId(ObjectId::from_raw(found))),
+                    None => Some(Variant::Nil),
+                }
+            }
+            // ⚠️ `add_child` had NO arm here, which made
+            // `get_parent().call_deferred("add_child", n)` — the single most
+            // common deferred idiom in Godot — a silent no-op (pat-mgixk.10).
+            //
+            // The direct spellings were never broken: the bare form
+            // (`interpreter.rs:7014`) and `$X.add_child(n)`
+            // (`interpreter.rs:12897`) both call `SceneAccess::add_child`
+            // themselves. Only the DEFERRED route came through here, because a
+            // queued call is replayed as `SceneTree::process_deferred_calls` ->
+            // `call_object_method` -> `call_script_method`, then this table. So
+            // the method worked everywhere except through the queue, and
+            // pat-mgixk.9 removing the queue's `scripts.contains_key` gate was
+            // necessary but not sufficient to fix it.
+            //
+            // Delegates to the trait's own `add_child`, which already handles
+            // both shapes a child can arrive in: detached (`take_node` +
+            // `add_child`) or already parented, e.g. straight out of
+            // `instantiate_packed_scene` (`reparent`). Spelled
+            // `SceneAccess::add_child` to name the trait explicitly, as the
+            // `get_node` call in this table does.
+            "add_child" => {
+                let Some(child) = args.first().and_then(variant_object_raw) else {
+                    return Some(Variant::Nil);
+                };
+                // Godot's second argument is `force_readable_name`, and the
+                // third is `internal`; neither changes where the child lands,
+                // so both are accepted and ignored rather than rejected.
+                SceneAccess::add_child(self, node, child);
+                Some(Variant::Nil)
+            }
+            "remove_child" => {
+                let Some(child) = args.first().and_then(variant_object_raw) else {
+                    return Some(Variant::Nil);
+                };
+                let child_nid = NodeId::from_object_id(ObjectId::from_raw(child));
+                // Detaches and fires `_exit_tree`; the node stays alive as an
+                // orphan, so `add_child` can re-home it. See
+                // `SceneTree::remove_child` for why this is not `remove_node`.
+                let _ = self.tree_mut().remove_child(nid, child_nid);
+                Some(Variant::Nil)
+            }
+            "is_inside_tree" => Some(Variant::Bool(
+                self.tree()
+                    .get_node(nid)
+                    .map(|n| n.is_inside_tree())
+                    .unwrap_or(false),
+            )),
+            "set_process" | "set_physics_process" => {
+                // A malformed argument is a no-op, not a disable: reading a
+                // missing argument as `false` would silently stop the node's
+                // callbacks, the opposite of what a bad call should do.
+                let enabled = match args.first() {
+                    Some(Variant::Bool(b)) => *b,
+                    Some(Variant::Int(i)) => *i != 0,
+                    Some(Variant::Float(f)) => *f != 0.0,
+                    _ => return Some(Variant::Nil),
+                };
+                let tree = self.tree_mut();
+                if method == "set_process" {
+                    tree.set_node_process(nid, enabled);
+                } else {
+                    tree.set_node_physics_process(nid, enabled);
+                }
+                Some(Variant::Nil)
+            }
+            "is_processing" => Some(Variant::Bool(self.tree().is_node_processing(nid))),
+            "is_physics_processing" => {
+                Some(Variant::Bool(self.tree().is_node_physics_processing(nid)))
+            }
+            "notification" => {
+                let what = match args.first() {
+                    Some(Variant::Int(i)) => *i,
+                    Some(Variant::Float(f)) => *f as i64,
+                    _ => return Some(Variant::Nil),
+                };
+                // Godot `Object.notification(what, reversed = false)` delivers
+                // to THIS object only — the recursive form is
+                // `Node.propagate_notification`. Recorded on the node as well as
+                // handed to the script so `notification_log` sees the same
+                // delivery an engine-side notification makes.
+                let tree = self.tree_mut();
+                if let Some(target) = tree.get_node_mut(nid) {
+                    target.receive_notification(gdobject::notification::Notification::new(
+                        what as i32,
+                    ));
+                }
+                tree.notify_script(nid, what);
+                Some(Variant::Nil)
+            }
             // -- Multiplayer authority (pat-s3rrv.17) ------------------------
             //
             // Answered for ANY node: in Godot authority is a `Node` property,
@@ -4904,7 +5154,32 @@ impl SceneAccess for SceneTreeAccessor {
             // another on an OptionButton — so they dispatch on the node's class
             // inside `item_views` rather than adding a dozen arms here. Last,
             // so a method named above keeps its meaning for every class.
-            _ => crate::item_views::call_item_view_method(self.tree_mut(), nid, method, args),
+            _ => {
+                if let Some(value) =
+                    crate::item_views::call_item_view_method(self.tree_mut(), nid, method, args)
+                {
+                    return Some(value);
+                }
+                // LAST of all: a registered ClassDB property accessor
+                // (pat-mgixk.8). Godot routes every bound getter/setter method
+                // to its property, so `set_modulate` / `get_rotation_degrees`
+                // and ~500 siblings work without a per-method arm. Placed here
+                // so every explicit meaning above keeps precedence, and it
+                // still answers `None` for a name that is not an accessor —
+                // which is what keeps an unknown method an error rather than a
+                // silent `Nil`.
+                let class_name = self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.class_name().to_owned())?;
+                crate::core_node_methods::call_accessor_backed_method(
+                    self,
+                    node,
+                    &class_name,
+                    method,
+                    args,
+                )
+            }
         }
     }
 
@@ -6888,6 +7163,12 @@ impl SceneAccess for SceneTreeAccessor {
 
     fn tree_node_count(&self) -> i64 {
         self.tree().node_count() as i64
+    }
+
+    /// pat-mgixk.8 — `SceneTree.get_current_scene()`. `None` before any scene
+    /// has been instanced, which Godot reports as `null` rather than `/root`.
+    fn current_scene(&self) -> Option<u64> {
+        self.tree().current_scene().map(|id| id.object_id().raw())
     }
 
     fn nodes_in_group(&self, group: &str) -> Vec<u64> {

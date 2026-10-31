@@ -562,15 +562,38 @@ These are supported by direct tests or Phase 6 report evidence:
 - low-level 3D ray and shape query objects
 - `RayCast3D` / `ShapeCast3D` scene nodes over those queries (ClassDB + parity test)
 
+## Upstream 3D Class Surface Matrix
+
+The three tables below are the per-family class-surface matrix for the Phase 6
+3D slice. Each row names the upstream family, the upstream path it comes from,
+one of the four approved statuses, and the Patina evidence for that status.
+
+A family is `Measured` only when the test cited for it is **green at HEAD**.
+`Implemented, not yet measured` means the code exists but the evidence does not
+currently pass. `Deferred` means consciously out of the Phase 6 slice with an
+implementation or stub present. `Missing` means there is no Patina
+implementation at all — it describes the surface, while the deferral decision is
+recorded in `docs/migration-guide.md`.
+
+Red-row counts come from `docs/test-debt/2026-10-30-failing-tests-at-HEAD.txt`,
+which drifts within the day: a caveat means **re-measure**, not "permanently
+red".
+
 ### scene/3d/physics — Physics Families
 
-| Upstream Family | Patina Area | Current Status | Evidence |
-|-----------------|-------------|----------------|----------|
-| `Area3D` | `gdphysics3d::area3d` | Implemented, not yet measured | overlap storage; no body_entered runtime signal parity test |
-| `PhysicsRayQueryParameters3D` | `gdphysics3d::query::PhysicsRayQuery3D` | Measured | `physics_ray_shape_query3d_test.rs` |
-| `PhysicsShapeQueryParameters3D` | `gdphysics3d::query::PhysicsShapeQuery3D` | Measured | `physics_ray_shape_query3d_test.rs` |
-| `RayCast3D` | `gdscene::raycast3d` + ClassDB | Measured | unit tests + `raycast3d_shapecast3d_parity_test.rs` |
-| `ShapeCast3D` | `gdscene::shapecast3d` + ClassDB | Measured | unit tests + `raycast3d_shapecast3d_parity_test.rs` |
+| Upstream Family | Upstream Path | Status | Patina Evidence |
+|-----------------|---------------|--------|-----------------|
+| `RigidBody3D` | `scene/3d/physics/rigid_body_3d.*` | Measured | `gdphysics3d`; `physics3d_trace_comparison_test.rs` and `physics3d_single_body_golden_test.rs`, both green at HEAD |
+| `StaticBody3D` | `scene/3d/physics/static_body_3d.*` | Measured | `gdphysics3d`; `physics3d_scene_hooks_deterministic_test.rs` and `real_3d_demo_unified_parity_test.rs`, both green at HEAD |
+| `RayCast3D` | `scene/3d/physics/ray_cast_3d.*` | Measured | `gdscene::raycast3d` + ClassDB; `raycast3d_shapecast3d_parity_test.rs`, green at HEAD |
+| `ShapeCast3D` | `scene/3d/physics/shape_cast_3d.*` | Measured | `gdscene::shapecast3d` + ClassDB; `raycast3d_shapecast3d_parity_test.rs`, green at HEAD |
+| `PhysicsRayQueryParameters3D` | `servers/physics_3d/physics_server_3d.*` | Measured | `gdphysics3d::query::PhysicsRayQuery3D`; `physics_ray_shape_query3d_test.rs` — 2 rows red in the HEAD snapshot, repaired in-tree under pat-21oab |
+| `PhysicsShapeQueryParameters3D` | `servers/physics_3d/physics_server_3d.*` | Measured | `gdphysics3d::query::PhysicsShapeQuery3D`; `physics_ray_shape_query3d_test.rs` — same 2 rows |
+| `CharacterBody3D` | `scene/3d/physics/character_body_3d.*` | Implemented, not yet measured | `gdphysics3d`; `characterbody3d_move_and_slide_test.rs` has 3 rows red at HEAD, so the audit's earlier "Measured narrowly" no longer holds |
+| `Area3D` | `scene/3d/physics/area_3d.*` | Implemented, not yet measured | `gdphysics3d::area3d`; overlap storage only, with no `body_entered` runtime signal parity test |
+| `SpringArm3D` | `scene/3d/physics/spring_arm_3d.*` | Deferred | `gdscene::springarm3d` helper exists; broader parity is not claimed |
+| `SoftBody3D` | `scene/3d/physics/soft_body_3d.*` | Missing | no Patina implementation; limitation documented in `docs/migration-guide.md` |
+| `VehicleBody3D` | `scene/3d/physics/vehicle_body_3d.*` | Missing | no Patina implementation; limitation documented in `docs/migration-guide.md` |
 
 Note: low-level query objects remain a distinct measured layer from the
 query-object layer; node parity is measured separately above.
@@ -607,29 +630,30 @@ No Phase 6 doc should imply parity for deferred systems without measured evidenc
 
 ### scene/3d — Node and Rendering Families
 
-| Upstream Family | Patina Area | Current Status | Evidence |
-|-----------------|-------------|----------------|----------|
-| `Node3D` | `gdscene::node3d` | Measured | transform propagation tests |
-| `Camera3D` | `gdscene`, `gdrender3d` | Measured | fixture + render parity |
-| `MeshInstance3D` | `gdserver3d`, `gdrender3d` | Measured | software render path |
-| `SoftBody3D` | — | Deferred | outside Phase 6 slice |
-| `VehicleBody3D` | — | Deferred | outside Phase 6 slice |
-| `SpringArm3D` | `gdscene::springarm3d` | Deferred | helper exists; broader parity limited |
-| `NavigationAgent3D` | — | Deferred | runtime pathfinding out of slice |
-| `LightmapGI` | `gdserver3d::gi` | Deferred | config stubs only |
+| Upstream Family | Upstream Path | Status | Patina Evidence |
+|-----------------|---------------|--------|-----------------|
+| `Node3D` | `scene/3d/node_3d.*` | Measured | `gdscene::node3d`; `node3d_transform_propagation_parity_test.rs` and `real_3d_demo_unified_parity_test.rs`, both green at HEAD |
+| `Camera3D` | `scene/3d/camera_3d.*` | Measured | `gdscene`, `gdrender3d`; `transform3d_camera_light_contract_test.rs` and `real_3d_demo_unified_parity_test.rs`, both green at HEAD |
+| `MeshInstance3D` | `scene/3d/mesh_instance_3d.*` | Measured | `gdserver3d`, `gdrender3d`; `real_3d_demo_unified_parity_test.rs` is green, while `render_3d_parity_test.rs` has 2 rows red at HEAD |
+| `MultiMeshInstance3D` | `scene/3d/multimesh_instance_3d.*` | Measured | `gdserver3d`; `multimesh_instance3d_rendering_test.rs`, green at HEAD |
+| `LightmapGI` | `scene/3d/lightmap_gi.*` | Deferred | `gdserver3d::gi` config stubs only; baking is out of the slice |
+| `NavigationAgent3D` | `scene/3d/navigation/navigation_agent_3d.*` | Missing | no runtime pathfinding implementation; limitation documented in `docs/migration-guide.md` |
+
+`SoftBody3D`, `VehicleBody3D` and `SpringArm3D` are physics families and are
+classified in the physics table above rather than duplicated here.
 
 ### Render Server / Material Families
 
-| Upstream Family | Patina Area | Current Status | Evidence |
-|-----------------|-------------|----------------|----------|
-| `RenderingServer3D` | `gdserver3d`, `gdrender3d` | Measured | software path tests |
-| `StandardMaterial3D` | `gdserver3d::material` | Implemented, not yet measured | albedo/shading slice |
-| `ShaderMaterial3D` | `gdrender3d::shader` | Measured | narrow override tests |
-| `ConeTwistJoint3D` | `gdphysics3d::joint` | Deferred | no full runtime parity claim |
-| `Generic6DOFJoint3D` | `gdphysics3d::joint` | Deferred | no full runtime parity claim |
-| `PinJoint3D` | `gdphysics3d::joint` | Deferred | data-model only |
-| `HingeJoint3D` | `gdphysics3d::joint` | Deferred | data-model only |
-| `SliderJoint3D` | `gdphysics3d::joint` | Deferred | data-model only |
+| Upstream Family | Upstream Path | Status | Patina Evidence |
+|-----------------|---------------|--------|-----------------|
+| `RenderingServer3D` | `servers/rendering/rendering_server.*` | Measured | `gdserver3d`, `gdrender3d`; `render_3d_gpu_pipeline_test.rs`, green at HEAD |
+| `StandardMaterial3D` | `scene/resources/material.*` | Implemented, not yet measured | `gdserver3d::material` albedo/shading slice; no dedicated green parity test |
+| `ShaderMaterial3D` | `scene/resources/material.*` | Implemented, not yet measured | `gdrender3d::shader` override slice; the audit called this Measured on prose evidence, but no green dedicated 3D shader-material parity test exists at HEAD |
+| `ConeTwistJoint3D` | `scene/3d/physics/joints/cone_twist_joint_3d.*` | Deferred | `gdphysics3d::joint`; no runtime parity claim |
+| `Generic6DOFJoint3D` | `scene/3d/physics/joints/generic_6dof_joint_3d.*` | Deferred | `gdphysics3d::joint`; no runtime parity claim |
+| `PinJoint3D` | `scene/3d/physics/joints/pin_joint_3d.*` | Deferred | `gdphysics3d::joint`; data-model only |
+| `HingeJoint3D` | `scene/3d/physics/joints/hinge_joint_3d.*` | Deferred | `gdphysics3d::joint`; data-model only |
+| `SliderJoint3D` | `scene/3d/physics/joints/slider_joint_3d.*` | Deferred | `gdphysics3d::joint`; data-model only |
 
 ## 3D Fixture Corpus Definition
 

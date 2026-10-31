@@ -22,9 +22,14 @@ tracing.workspace = true
 #
 # * cpal drives the system audio device and has no wasm32-unknown-unknown backend.
 # * minimp3 wraps the C `minimp3` sources through `cc`, which needs a clang that
-#   can target wasm32; the browser decodes MP3 itself, so the web build reports
-#   `UnsupportedFormat` for ISO MP3 rather than dragging a C toolchain into the
-#   wasm build. The `PATMP3` fixture path stays available on every target.
+#   can target wasm32. Rather than drag a C toolchain into the wasm build, the
+#   web build borrows the decoder the browser already has: `decode::decode_mp3`
+#   consults a host-installed `Mp3Decoder` first, and `patina-web`'s
+#   `mp3_bridge::BrowserMp3Decoder` fills it from `AudioContext.decodeAudioData`
+#   — the same arrangement Godot's own web export uses (pat-mgixk.4). With no
+#   decoder installed the wasm build still reports `UnsupportedFormat`, which is
+#   the honest answer for a page that never preloaded its audio. The `PATMP3`
+#   fixture path stays available on every target.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 cpal = "0.15"
 # Real ISO MP3 decoding (pat-p0s82.13); Godot uses the same minimp3 decoder.

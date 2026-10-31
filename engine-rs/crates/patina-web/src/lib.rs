@@ -49,6 +49,16 @@ pub mod browser_runtime;
 /// browser (see [`web_audio`]).
 pub mod audio;
 
+/// Browser-decoded MP3 for the web runtime (pat-mgixk.4).
+///
+/// `gdaudio` decodes ISO MP3 with `minimp3`, which is target-gated off wasm32
+/// because it builds C sources — so every `AudioStreamMP3` in a web game came
+/// back `UnsupportedFormat` and played silence. This is the store the page
+/// registers `decodeAudioData` output into, installed as `gdaudio`'s host
+/// decoder hook. Portable like [`audio`], so the whole path is driven by native
+/// tests.
+pub mod mp3_bridge;
+
 /// Browser bindings for [`audio`]: creates the `AudioContext`, emits the
 /// worklet source, and serves the worklet's pulls (pat-u3l8c.112).
 #[cfg(target_arch = "wasm32")]

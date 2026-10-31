@@ -4072,6 +4072,25 @@ impl MainLoop {
             // and passing one would be inventing a number.
             self.tree.process_timers_phase(physics_dt, physics_dt, true);
 
+            // Flush the deferred queue at the END OF EVERY PHYSICS TICK, not
+            // just once per frame (pat-mgixk.10).
+            //
+            // Godot's SceneTree flushes the MessageQueue after `_physics_process`
+            // as well as after `_process` (scene/main/scene_tree.cpp:647, :704,
+            // :711). Patina flushed only after the idle pass, so with more than
+            // one tick per frame — which is the normal case at 60 physics ticks
+            // against a slower frame rate — a `call_deferred` issued from
+            // `_physics_process` was not applied until AFTER every remaining
+            // tick of that frame had already run. A body that deferred its own
+            // `queue_free` kept colliding for the rest of the frame, and the
+            // canonical `get_parent().call_deferred("add_child", n)` from a
+            // physics callback could not be seen by the next tick.
+            //
+            // ⚠️ Inside the loop, after the tick's own work. Flushing before it
+            // would apply the PREVIOUS tick's deferrals in the middle of this
+            // one's; flushing after the loop is what it already did.
+            self.tree.process_deferred_calls();
+
             self.physics_accumulator -= physics_dt;
             self.physics_time += physics_dt;
             physics_steps += 1;

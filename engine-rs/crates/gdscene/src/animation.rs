@@ -640,13 +640,24 @@ pub enum AnimationPlayerSignal {
     AnimationStarted(String),
     /// `animation_finished(name)` — a non-looping `name` reached its end.
     AnimationFinished(String),
-    /// `animation_changed(old, new)` — the current animation switched.
+    /// `animation_changed(old, new)` — the playback QUEUE advanced.
+    ///
+    /// ⚠️ Not "the clip switched". Godot emits this only from the finish path
+    /// draining `playback_queue` (`animation_player.cpp:348-350`); an ordinary
+    /// `play("other")` emits [`CurrentAnimationChanged`](Self::CurrentAnimationChanged)
+    /// instead. Patina used to push it on every switch, so a script connected to
+    /// `animation_changed` fired on manual `play` calls Godot stays silent for
+    /// (pat-mgixk.2).
     AnimationChanged {
         /// Previously-current animation name.
         old: String,
         /// Newly-current animation name.
         new: String,
     },
+    /// `current_animation_changed(name)` — the assigned clip changed, with the
+    /// empty string when playback finished with nothing queued
+    /// (`animation_player.cpp:356`).
+    CurrentAnimationChanged(String),
 }
 
 /// Which loop phase advances a mixer's playback — Godot's
@@ -742,6 +753,11 @@ pub struct AnimationPlayer {
     /// Crossfade used when no `(from, to)` pair is registered and `play` was
     /// given no `custom_blend` (Godot `playback_default_blend_time`).
     pub default_blend_time: f64,
+    /// Godot's `end_reached`: set for the duration of the finish handling, so a
+    /// `play` issued from that path (draining the queue, or from an
+    /// `animation_finished` handler) does not clear the very queue being
+    /// drained (`animation_player.cpp:509`).
+    end_reached: bool,
 }
 
 /// Tracks an in-progress crossfade between two animations.
@@ -793,6 +809,7 @@ impl AnimationPlayer {
             queue: VecDeque::new(),
             section: None,
             default_blend_time: 0.0,
+            end_reached: false,
         }
     }
 
@@ -813,10 +830,15 @@ impl AnimationPlayer {
     /// Godot's full `play(name, custom_blend, custom_speed, from_end)`
     /// (pat-0q2kx.52).
     ///
-    /// - **Same-clip continuation.** Calling `play` on the clip already playing
-    ///   RESUMES it — Godot only rewinds when the clip changes. Restarting
-    ///   unconditionally (the old behaviour) made a per-frame
-    ///   `play("walk")` in `_process` freeze the animation on frame 0.
+    /// - **Same-clip continuation**, in Godot's three ordered cases
+    ///   (`animation_player.cpp:522-531`): a `from_end` call with the playhead
+    ///   at the start seeks to the end; a forward call with the playhead at or
+    ///   past the end REWINDS (so a finished clip replays); otherwise, if the
+    ///   clip is already playing, the call returns silently with no
+    ///   `animation_started`. Restarting unconditionally made a per-frame
+    ///   `play("walk")` in `_process` freeze the animation on frame 0;
+    ///   resuming unconditionally — what this did before pat-mgixk.2 — left a
+    ///   finished clip parked at its end, so it could never play twice.
     /// - `custom_blend >= 0` crossfades over that many seconds; a negative value
     ///   falls back to the registered `(from, to)` blend time and then to
     ///   [`default_blend_time`](Self::default_blend_time).
@@ -831,16 +853,58 @@ impl AnimationPlayer {
         }
         let already_current = self.current.as_deref() == Some(name);
         self.custom_speed = custom_speed;
-        self.playing = true;
+        // ⚠️ Read BEFORE `playing` is set. Godot's `else if (playing) return`
+        // (`animation_player.cpp:524`) asks whether the clip was ALREADY
+        // running; assigning the flag first — as this did — makes that branch
+        // unconditional, which is why a per-frame `play("walk")` could never
+        // emit its one `animation_started`.
+        let was_playing = self.playing;
+
+        // An explicit `play` clears the queue, but the finish path draining that
+        // same queue must not (`animation_player.cpp:509`).
+        if !self.end_reached {
+            self.queue.clear();
+        }
 
         if already_current {
-            // Resume in place: no rewind, no crossfade with itself, and no
-            // `animation_changed` — the clip never changed.
+            // Godot's same-clip branch (`animation_player.cpp:522-531`). The
+            // three cases are ordered, and the order is the whole behaviour.
+            let start = self.section_start();
+            let end = self.section_end_or_length();
+            if from_end && self.position <= start {
+                // Reset but asked to play backwards: start from the end.
+                self.position = end;
+                self.ping_pong_forward = false;
+            } else if !from_end && self.position >= end {
+                // THE REPLAY CASE. The clip has already run to its end, so
+                // `play` rewinds. Without this the playhead stayed at `end`,
+                // the next `advance` tripped the `position >= upper` test
+                // immediately, and the clip finished again without ever
+                // playing — so `play("attack")` could fire an attack animation
+                // exactly once per scene.
+                self.position = start;
+                self.ping_pong_forward = true;
+            } else if was_playing {
+                // Still mid-clip. Godot returns here with NO
+                // `animation_started`, which is what keeps a `play("walk")`
+                // called every frame in `_process` down to one signal.
+                return;
+            }
+            // Falls through on a rewind, and on a resume from `pause` (where
+            // `was_playing` is false and the playhead is mid-clip) — both of
+            // which Godot reports as a fresh start.
+            //
+            // ⚠️ `ping_pong_forward` is set by the two seek branches above and
+            // NOT here: Godot's resume does not touch the travel direction, so
+            // assigning it unconditionally would flip a paused ping-pong clip
+            // that happened to be on its backward leg.
+            self.playing = true;
             self.pending_signals
                 .push(AnimationPlayerSignal::AnimationStarted(name.to_owned()));
             return;
         }
 
+        self.playing = true;
         let previous = self.current.take();
         // Crossfade from whatever was playing, if a blend time applies.
         if let Some(ref prev) = previous {
@@ -872,15 +936,15 @@ impl AnimationPlayer {
         };
         self.ping_pong_forward = !from_end;
 
-        if let Some(prev) = previous {
-            if prev != name {
-                self.pending_signals
-                    .push(AnimationPlayerSignal::AnimationChanged {
-                        old: prev,
-                        new: name.to_owned(),
-                    });
-            }
-        }
+        // Godot emits `current_animation_changed(name)` here — NOT
+        // `animation_changed`, which it reserves for the queue advancing
+        // (`animation_player.cpp:516` vs `:348-350`). `previous` is no longer
+        // needed for a signal, only for the crossfade above.
+        let _ = previous;
+        self.pending_signals
+            .push(AnimationPlayerSignal::CurrentAnimationChanged(
+                name.to_owned(),
+            ));
         self.pending_signals
             .push(AnimationPlayerSignal::AnimationStarted(name.to_owned()));
     }
@@ -1022,22 +1086,56 @@ impl AnimationPlayer {
         let Some(name) = self.current.clone() else {
             return;
         };
+        // Godot's `end_reached` window (`animation_player.cpp:334-365`): held
+        // across the whole handler so the `play` below, and any `play` a
+        // connected `animation_finished` handler makes, leaves the queue alone
+        // instead of clearing the list it is walking.
+        self.end_reached = true;
         self.pending_signals
             .push(AnimationPlayerSignal::AnimationFinished(name.clone()));
+
         // Godot drains `queue()` first: an explicitly queued clip wins over the
         // clip's registered `animation_set_next` successor (pat-0q2kx.52).
+        let mut successor = None;
         while let Some(queued) = self.queue.pop_front() {
             if self.animations.contains_key(&queued) {
-                // `play` emits `animation_changed` + `animation_started`.
-                self.play(&queued);
-                return;
+                successor = Some(queued);
+                break;
             }
         }
-        if let Some(next) = self.next_animations.get(&name).cloned() {
-            if self.animations.contains_key(&next) {
+        if successor.is_none() {
+            if let Some(next) = self.next_animations.get(&name).cloned() {
+                if self.animations.contains_key(&next) {
+                    successor = Some(next);
+                }
+            }
+        }
+
+        match successor {
+            Some(next) => {
+                // `play` emits `current_animation_changed` + `animation_started`.
                 self.play(&next);
+                // `animation_changed(old, new)` fires HERE and nowhere else —
+                // the queue advancing is the only thing Godot reports with it
+                // (`animation_player.cpp:348-350`). Pushed after `play` so the
+                // order matches Godot's: finished, started, then changed.
+                self.pending_signals
+                    .push(AnimationPlayerSignal::AnimationChanged {
+                        old: name,
+                        new: next,
+                    });
+            }
+            None => {
+                // ⚠️ `current` deliberately stays set. Godot keeps
+                // `playback.assigned` and only reports the empty name
+                // (`animation_player.cpp:356`) — and it has to, or the
+                // `play(same-clip)` rewind above would have no clip to
+                // recognise and every replay would read as a fresh start.
+                self.pending_signals
+                    .push(AnimationPlayerSignal::CurrentAnimationChanged(String::new()));
             }
         }
+        self.end_reached = false;
     }
 
     /// Seeks to `time` seconds within the current animation (clamped to its
@@ -2681,8 +2779,14 @@ mod tests {
         assert!(player.blend_state().is_none());
     }
 
+    /// ⚠️ This test used to assert `AnimationChanged` on a manual clip switch.
+    /// That was the bug pat-mgixk.2 fixes: Godot emits `animation_changed` only
+    /// when the playback QUEUE advances (`animation_player.cpp:348-350`) and
+    /// reports a manual switch with `current_animation_changed`
+    /// (`:516`). `advance_past_end_emits_finished_and_plays_queued_next` below
+    /// is where `AnimationChanged` is now expected.
     #[test]
-    fn play_emits_started_and_changed_signals() {
+    fn play_emits_started_and_current_animation_changed_signals() {
         let mut p = AnimationPlayer::new();
         p.add_animation(Animation::new("idle", 1.0));
         p.add_animation(Animation::new("run", 1.0));
@@ -2690,21 +2794,102 @@ mod tests {
         p.play("idle");
         assert_eq!(
             p.drain_signals(),
-            vec![AnimationPlayerSignal::AnimationStarted("idle".into())]
+            vec![
+                AnimationPlayerSignal::CurrentAnimationChanged("idle".into()),
+                AnimationPlayerSignal::AnimationStarted("idle".into()),
+            ]
         );
 
         p.play("run");
         assert_eq!(
             p.drain_signals(),
             vec![
-                AnimationPlayerSignal::AnimationChanged {
-                    old: "idle".into(),
-                    new: "run".into(),
-                },
+                AnimationPlayerSignal::CurrentAnimationChanged("run".into()),
                 AnimationPlayerSignal::AnimationStarted("run".into()),
             ]
         );
         assert!(!p.has_pending_signals(), "drain clears the queue");
+    }
+
+    /// The per-frame `play()` case: Godot returns silently from `_play` while
+    /// the same clip is still running, so a looping `play("walk")` in `_process`
+    /// emits ONE `animation_started`, not one per frame
+    /// (`animation_player.cpp:528-530`).
+    #[test]
+    fn repeated_play_while_still_playing_emits_one_started() {
+        let mut p = AnimationPlayer::new();
+        let mut walk = Animation::new("walk", 1.0);
+        walk.loop_mode = LoopMode::Linear;
+        p.add_animation(walk);
+
+        for _ in 0..10 {
+            p.play("walk");
+            p.advance(1.0 / 60.0);
+        }
+
+        let started = p
+            .drain_signals()
+            .into_iter()
+            .filter(|s| matches!(s, AnimationPlayerSignal::AnimationStarted(n) if n == "walk"))
+            .count();
+        assert_eq!(started, 1, "a per-frame play() must start the clip once");
+    }
+
+    /// The replay case, at the unit level: a non-looping clip that has finished
+    /// rewinds on the next `play` instead of sitting at its end
+    /// (`animation_player.cpp:526-528`).
+    #[test]
+    fn play_after_finish_rewinds_and_restarts() {
+        let mut p = AnimationPlayer::new();
+        p.add_animation(Animation::new("attack", 0.2));
+
+        p.play("attack");
+        p.advance(0.5);
+        assert!(!p.playing, "a non-looping clip stops at its end");
+        assert_eq!(p.current_animation(), Some("attack"));
+        let _ = p.drain_signals();
+
+        p.play("attack");
+        assert!(p.playing, "play() must restart a finished clip");
+        assert_eq!(
+            p.position(),
+            0.0,
+            "play() must rewind to the start, not resume at the end",
+        );
+        let sigs = p.drain_signals();
+        assert!(
+            sigs.contains(&AnimationPlayerSignal::AnimationStarted("attack".into())),
+            "the replay must report a fresh start: {sigs:?}",
+        );
+
+        // And it must actually run, rather than finish again at once.
+        p.advance(0.1);
+        assert!(p.playing, "the replayed clip must still be mid-flight");
+    }
+
+    /// Finishing with nothing queued reports the empty current animation
+    /// (`animation_player.cpp:356`) while KEEPING `current` assigned, which is
+    /// what lets the replay above recognise the clip.
+    #[test]
+    fn finish_reports_empty_current_animation() {
+        let mut p = AnimationPlayer::new();
+        p.add_animation(Animation::new("attack", 0.2));
+        p.play("attack");
+        let _ = p.drain_signals();
+
+        p.advance(0.5);
+        let sigs = p.drain_signals();
+        assert!(
+            sigs.contains(&AnimationPlayerSignal::CurrentAnimationChanged(
+                String::new()
+            )),
+            "finish must emit current_animation_changed(\"\"): {sigs:?}",
+        );
+        assert_eq!(
+            p.current_animation(),
+            Some("attack"),
+            "current stays assigned after finish, as Godot's playback.assigned does",
+        );
     }
 
     #[test]

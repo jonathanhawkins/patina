@@ -242,20 +242,20 @@ aligned with the project's milestone phases:
 Phase 7 currently provides a measured desktop/runtime slice, not full native
 platform parity across every OS shell behavior.
 
-Measured today:
+**Measured:**
 
 - headless platform backend and stable-layer composition
 - supported-target metadata and CI matrix coverage
 - repeatable startup/bootstrap flow
 - Patina's current packaging/staging executor
 
-Implemented but not yet broadly parity-measured:
+**Implemented, not yet measured:**
 
 - Linux, macOS, and Windows platform-layer APIs beyond the headless slice
 - native window-shell integrations such as menu bar, taskbar, DPI, and desktop
   protocol behavior
 
-Deferred or limited:
+**Deferred:**
 
 - mobile platforms
 - full web platform parity
@@ -308,6 +308,12 @@ Deferred or limited:
      measured Phase 7 evidence is still the headless/stable-layer slice.
 
 ---
+
+**Missing:**
+
+- native-runtime parity tests that drive a real X11, Wayland, Cocoa or Win32
+  stack on that OS; every platform test today is headless or an API model, so
+  no row in `COMPAT_MATRIX.md`'s per-OS table is classified `Native-runtime`
 
 ## Milestone 6: Editor Support (Phase 8)
 

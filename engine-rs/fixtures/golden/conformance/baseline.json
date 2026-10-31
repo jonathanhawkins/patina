@@ -1,0 +1,27 @@
+{
+  "_note": [
+    "Ratchet for the conformance gate (pat-mgixk.403). `min_passing` is a",
+    "FLOOR, never a target: the suite prints the measured pass count on every",
+    "run, and the rule is to raise this number as projects start passing and",
+    "never to lower it without an operator note saying why.",
+    "",
+    "It starts at 0 because the gate is being introduced against a runtime the",
+    "2026-10-30 port audit measured at 93 unwired and 19 stub features — the",
+    "honest floor is 'no project is yet required to pass'. The first verified",
+    "run of `conformance_gate_ratchet` prints the real count; set it here.",
+    "",
+    "`expected_failing` is the other half of the ratchet: a project listed",
+    "here MUST fail, so the gate is proven able to see an unwired feature",
+    "rather than passing everything vacuously. `timer_queue_free` is listed",
+    "because Godot's capture records a `hidden` signal on the Label when the",
+    "Button's `pressed` connection calls Label.hide, and the only matches for",
+    "`grep -rn '\"hidden\"' engine-rs/crates` are XR visibility-state strings",
+    "and a test comment — Patina has no such signal to emit, so the project",
+    "cannot pass. When a listed project does start passing, that is progress:",
+    "remove it from this list and raise `min_passing`."
+  ],
+  "min_passing": 0,
+  "expected_failing": [
+    "timer_queue_free"
+  ]
+}

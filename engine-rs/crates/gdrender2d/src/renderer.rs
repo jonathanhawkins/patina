@@ -853,6 +853,47 @@ impl SoftwareRenderer {
         to_screen * zoom * rotation * to_camera
     }
 
+    /// Whether every ancestor of `item` is visible.
+    ///
+    /// 🔑 `item.visible` alone is NOT enough. Godot hides a subtree
+    /// structurally: `RenderingServer` draws canvas items by parent->child
+    /// recursion and stops at a hidden one, so nothing below it is ever
+    /// reached. This renderer rasterizes **flat** (see `render_frame`), which
+    /// is why the parent chain already has to be walked for the transform —
+    /// and why visibility needs the same walk rather than coming for free.
+    ///
+    /// Without this, hiding a parent left every child drawing: five
+    /// `render_suite::render_2d_parity_test::hidden_*` rows, including a hidden
+    /// high-z child still occluding a visible lower-z sibling (pat-21oab).
+    ///
+    /// ⚠️ Ancestors only. The item's own flag stays where it is, in
+    /// `rasterize_item`, so a hidden leaf is still skipped at the cheapest
+    /// point and this walk is not paid for it.
+    ///
+    /// A `parent` id that resolves to no item ends the walk as visible, mirroring
+    /// `resolve_parent_transform`'s identity fallback: a dangling parent must not
+    /// silently blank the subtree.
+    ///
+    /// ⚠️ Applied at the two VIEWPORT call sites only. The third
+    /// `rasterize_item` call renders `self.items` — items created through
+    /// `create_canvas_item` — and the `RenderingServer2D` trait exposes no
+    /// `canvas_item_set_parent`, so those can never have an ancestor to check.
+    /// A guard there would be dead code, and the lookup would have to search a
+    /// different collection.
+    fn ancestors_visible(&self, item: &CanvasItem, viewport: &Viewport) -> bool {
+        let mut parent = item.parent;
+        while let Some(parent_id) = parent {
+            let Some(ancestor) = viewport.get_canvas_item(parent_id) else {
+                return true;
+            };
+            if !ancestor.visible {
+                return false;
+            }
+            parent = ancestor.parent;
+        }
+        true
+    }
+
     /// Resolves the global transform for a canvas item by walking up the parent chain.
     fn resolve_parent_transform(&self, item: &CanvasItem, viewport: &Viewport) -> Transform2D {
         match item.parent {
@@ -924,6 +965,9 @@ impl RenderingServer2D for SoftwareRenderer {
             let layer_xform = camera_xform * layer.transform;
             let items = viewport.get_items_for_layer(layer.layer_id);
             for item in items {
+                if !self.ancestors_visible(item, viewport) {
+                    continue;
+                }
                 let parent_xform = self.resolve_parent_transform(item, viewport);
                 self.rasterize_item(&mut fb, item, layer_xform * parent_xform);
             }
@@ -932,6 +976,9 @@ impl RenderingServer2D for SoftwareRenderer {
         // Render unlayered items with camera transform.
         let unlayered = viewport.get_unlayered_items();
         for item in unlayered {
+            if !self.ancestors_visible(item, viewport) {
+                continue;
+            }
             let parent_xform = self.resolve_parent_transform(item, viewport);
             self.rasterize_item(&mut fb, item, camera_xform * parent_xform);
         }
@@ -1221,6 +1268,56 @@ mod tests {
         let frame = renderer.render_frame(&vp);
         // Should remain black since item is invisible.
         assert_eq!(frame.pixels[0], Color::BLACK);
+    }
+
+    /// 🔑 A hidden parent hides its children, even visible ones.
+    ///
+    /// `rasterize_item` checks the item's OWN `visible` flag, and items are
+    /// rasterized flat — the parent chain is walked for the transform and
+    /// previously for nothing else — so a hidden parent left every child
+    /// drawing (pat-21oab). Godot gets this structurally, by drawing canvas
+    /// items parent->child and stopping at a hidden one.
+    ///
+    /// ⚠️ The parent here draws NOTHING of its own, so this cannot pass by the
+    /// parent simply being skipped: the only pixel under test belongs to the
+    /// child.
+    #[test]
+    fn hidden_parent_hides_a_visible_child() {
+        let mut renderer = SoftwareRenderer::new();
+        let mut vp = Viewport::new(10, 10, Color::BLACK);
+
+        let mut parent = CanvasItem::new(CanvasItemId(1));
+        parent.visible = false;
+        vp.add_canvas_item(parent);
+
+        let mut child = CanvasItem::new(CanvasItemId(2));
+        child.parent = Some(CanvasItemId(1));
+        child.commands.push(DrawCommand::DrawRect {
+            rect: Rect2::new(Vector2::ZERO, Vector2::new(10.0, 10.0)),
+            color: Color::WHITE,
+            filled: true,
+        });
+        vp.add_canvas_item(child);
+
+        let frame = renderer.render_frame(&vp);
+        assert_eq!(
+            frame.pixels[0],
+            Color::BLACK,
+            "a visible child of a hidden parent must not render"
+        );
+
+        // The control: with the parent visible the same child DOES draw, so the
+        // assertion above is about ancestry and not about the child being
+        // broken.
+        if let Some(p) = vp.get_canvas_item_mut(CanvasItemId(1)) {
+            p.visible = true;
+        }
+        let frame = renderer.render_frame(&vp);
+        assert_eq!(
+            frame.pixels[0],
+            Color::WHITE,
+            "with the parent visible the child must draw"
+        );
     }
 
     #[test]

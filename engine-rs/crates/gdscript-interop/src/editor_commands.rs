@@ -150,17 +150,39 @@ pub fn clear() {
 mod tests {
     use super::*;
 
-    /// Resets the process-global store.
+    /// Resets the process-global store AND serializes this test against every
+    /// other test in this module. Bind it for the whole test body:
+    /// `let _guard = fresh();`.
     ///
-    /// Safe because this repo runs tests under nextest, which gives each test
-    /// its own process, so one test's `clear()` cannot race another's data.
-    fn fresh() {
+    /// ⚠️ The previous version just called `clear()` and justified itself with
+    /// "this repo runs tests under nextest, which gives each test its own
+    /// process". That is true of `cargo nextest run` and FALSE of `cargo test`
+    /// and of running this lib test binary directly, where libtest runs these
+    /// tests as THREADS IN ONE PROCESS. One test's `clear()` then wiped
+    /// another's entries mid-assertion and this module failed
+    /// nondeterministically — six identical runs of the lib binary scored
+    /// anywhere from 751 to 754 passing, with the failing set moving around
+    /// (pat-21oab).
+    ///
+    /// The store itself stays process-global on purpose; see the module header.
+    /// The fix belongs in the tests, which is why the lock lives here and not
+    /// around the production API.
+    #[must_use = "bind the guard for the whole test (`let _guard = fresh();`); \
+                  dropping it immediately serializes nothing"]
+    fn fresh() -> std::sync::MutexGuard<'static, ()> {
+        static TEST_LOCK: Mutex<()> = Mutex::new(());
+        // Poison-tolerant: one panicking test must not cascade into every
+        // other test in the module failing with `PoisonError`.
+        let guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         clear();
+        guard
     }
 
     #[test]
     fn add_then_list_roundtrips() {
-        fresh();
+        let _guard = fresh();
         add_command("Say Hello", "plugin/hello", Some("_on_hello".into()), None);
         let all = all();
         assert_eq!(all.len(), 1);
@@ -172,7 +194,7 @@ mod tests {
 
     #[test]
     fn re_adding_a_key_replaces_rather_than_duplicating() {
-        fresh();
+        let _guard = fresh();
         add_command("First", "plugin/x", None, None);
         add_command("Second", "plugin/x", None, None);
         assert_eq!(count(), 1, "a re-enabled plugin must not double its entry");
@@ -181,7 +203,7 @@ mod tests {
 
     #[test]
     fn godots_none_shortcut_is_stored_as_absent() {
-        fresh();
+        let _guard = fresh();
         add_command("A", "plugin/a", None, Some("None".into()));
         add_command("B", "plugin/b", None, Some("Ctrl+Shift+P".into()));
         assert_eq!(find("plugin/a").unwrap().shortcut, None);
@@ -193,7 +215,7 @@ mod tests {
 
     #[test]
     fn category_comes_from_the_key_prefix() {
-        fresh();
+        let _guard = fresh();
         add_command("A", "project/run", None, None);
         add_command("B", "bare", None, None);
         assert_eq!(find("project/run").unwrap().category(), "project");
@@ -206,7 +228,7 @@ mod tests {
 
     #[test]
     fn remove_reports_whether_it_removed_anything() {
-        fresh();
+        let _guard = fresh();
         add_command("A", "plugin/a", None, None);
         assert!(remove_command("plugin/a"));
         assert!(!remove_command("plugin/a"), "a second remove is a no-op");
@@ -215,11 +237,51 @@ mod tests {
 
     #[test]
     fn registration_order_is_preserved() {
-        fresh();
+        let _guard = fresh();
         for k in ["plugin/c", "plugin/a", "plugin/b"] {
             add_command("x", k, None, None);
         }
         let keys: Vec<String> = all().into_iter().map(|c| c.key_name).collect();
         assert_eq!(keys, vec!["plugin/c", "plugin/a", "plugin/b"]);
+    }
+
+    /// ⚠️ Concurrency cover for the process-global store, which `CLAUDE.md`
+    /// requires for server-side state and which this module had none of. The
+    /// header above explains why the store is global: Godot's editor registers
+    /// plugin commands from whichever connection thread arrives next. So
+    /// registration from many threads at once is the PRODUCTION path, not a
+    /// synthetic one, and `add_command` is only correct because it holds the
+    /// lock across both halves of its find-then-push — drop that and distinct
+    /// keys start overwriting each other under contention.
+    #[test]
+    fn concurrent_registrations_each_land_exactly_once() {
+        let _guard = fresh();
+        const THREADS: usize = 8;
+        const PER_THREAD: usize = 25;
+        let handles: Vec<_> = (0..THREADS)
+            .map(|t| {
+                std::thread::spawn(move || {
+                    for i in 0..PER_THREAD {
+                        add_command("x", &format!("plugin/t{t}_{i}"), None, None);
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("registration worker thread panicked");
+        }
+        assert_eq!(
+            count(),
+            THREADS * PER_THREAD,
+            "every concurrent registration must land exactly once"
+        );
+        for t in 0..THREADS {
+            for i in 0..PER_THREAD {
+                assert!(
+                    contains(&format!("plugin/t{t}_{i}")),
+                    "plugin/t{t}_{i} was lost under contention"
+                );
+            }
+        }
     }
 }

@@ -57,8 +57,8 @@ fn phase7_audit_documents_ci_matrix() {
 #[test]
 fn sibling_ci_matrix_test_anchors_exist() {
     for f in [
-        "engine-rs/tests/ci_build_matrix_platform_test.rs",
-        "engine-rs/tests/phase7_ci_matrix_target_guard_test.rs",
+        "engine-rs/tests/ci_suite/ci_build_matrix_platform_test.rs",
+        "engine-rs/tests/phase_suite/phase7_ci_matrix_target_guard_test.rs",
     ] {
         let p = repo_root().join(f);
         assert!(

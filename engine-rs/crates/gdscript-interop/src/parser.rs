@@ -419,7 +419,43 @@ pub struct Parser {
     tokens: Vec<TokenSpan>,
     pos: usize,
     source_lines: Vec<String>,
+    /// Current expression-recursion depth, bounded by [`MAX_EXPR_DEPTH`].
+    expr_depth: usize,
 }
+
+/// How deeply expressions may nest before the parser reports an error instead
+/// of recursing further (pat-21oab).
+///
+/// ⚠️ This is a STACK guard, not a style rule. Each nesting level of `(((…)))`
+/// costs one frame per precedence tier — `parse_expr` -> ternary -> or -> and ->
+/// … -> unary -> primary — so a few dozen parens is already hundreds of frames
+/// deep, and `fuzz_deeply_nested_parens` could abort the whole test binary with
+/// "fatal runtime error: stack overflow" at a depth under 50. An abort is far
+/// worse than a failure: it takes down every other test in the process, which
+/// is why a bare `cargo nextest run -p gdscript-interop` was unusable as a
+/// verification command for ANY bead.
+///
+/// ⚠️ The limit is bracketed from BOTH sides by measurement, because each side
+/// has already been got wrong once (pat-21oab.4):
+///
+/// * **Upper bound — where the stack dies.** Binary-searching `RUST_MIN_STACK`
+///   against a pre-guard binary put a depth-30 parse-and-evaluate at ~1.33 MiB,
+///   i.e. ~43 KiB of native stack per nesting level, so the default 2 MiB
+///   thread stack holds only ~46 levels. `fuzz_deeply_nested_parens` generates
+///   depths of `1..50`, which is exactly why it aborted.
+/// * **Lower bound — what real tests need.** The limit must clear the deepest
+///   nesting the suite legitimately parses. It does not: an earlier value of 24
+///   silently broke `fuzz_gdscript::interpreter_tests::edge_deeply_nested_arithmetic`,
+///   which BUILDS `(((…1 + 1…)))` at depth 30 in a loop and expects `Int(31)`.
+///   A textual search for literal parens cannot find a nesting that is
+///   generated at run time, which is how that regression got shipped.
+///
+/// 32 is the smallest round value above the required 30, which keeps the most
+/// stack margin (32 × 43 KiB ≈ 1.4 MiB, comfortably inside 2 MiB) while still
+/// refusing the depths that abort. Hand-written GDScript rarely nests past
+/// about five levels, so a script needing more than 32 is better served by an
+/// explicit parse error than by an aborted process.
+pub const MAX_EXPR_DEPTH: usize = 32;
 
 impl Parser {
     /// Creates a new parser from a token stream.
@@ -428,6 +464,7 @@ impl Parser {
             tokens,
             pos: 0,
             source_lines: source.lines().map(|l| l.to_string()).collect(),
+            expr_depth: 0,
         }
     }
 
@@ -1350,6 +1387,51 @@ impl Parser {
     // --- Expression parsing (precedence climbing) ---
 
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
+        // ⚠️ The stack guard lives HERE because every expression recursion
+        // passes through this function — the `(…)` grouping arm of
+        // `parse_primary` calls back into it, which is the cycle that could
+        // overflow (pat-21oab). The depth is decremented on EVERY path,
+        // including the error ones, by capturing the result rather than
+        // returning through `?`; a guard that leaked on the error path would
+        // make an earlier parse failure lower the ceiling for every later
+        // expression in the same script.
+        self.expr_depth += 1;
+        if self.expr_depth > MAX_EXPR_DEPTH {
+            self.expr_depth -= 1;
+            return Err(self.expr_too_deep());
+        }
+        let result = self.parse_expr_inner();
+        self.expr_depth -= 1;
+        result
+    }
+
+    /// The error a too-deeply-nested expression reports.
+    ///
+    /// Reuses `UnexpectedToken` rather than adding a `ParseError` variant: the
+    /// enum has only two, nothing in the tree matches it exhaustively today,
+    /// and a new variant is a breaking change to every consumer for a message
+    /// this one can carry perfectly well.
+    fn expr_too_deep(&self) -> ParseError {
+        // Same shape as `expect`'s error, so a too-deep expression reports its
+        // position the way every other parse error in this file does.
+        let (token, line, col) = match self.tokens.get(self.pos) {
+            Some(ts) => (ts.token.to_string(), ts.line, ts.col),
+            None => ("EOF".to_string(), 0, 0),
+        };
+        ParseError::UnexpectedToken {
+            token,
+            expected: format!("an expression nested at most {MAX_EXPR_DEPTH} deep"),
+            line,
+            col,
+            source_line: if line > 0 {
+                self.source_lines.get(line - 1).cloned()
+            } else {
+                None
+            },
+        }
+    }
+
+    fn parse_expr_inner(&mut self) -> Result<Expr, ParseError> {
         // `as` (cast) has the loosest precedence of any operator except
         // assignment, so it wraps the whole ternary expression.
         let mut value = self.parse_ternary()?;
@@ -3611,6 +3693,87 @@ mod tests {
         assert!(
             matches!(expr, Expr::Index { .. }),
             "expected an Index expression, got {expr:?}"
+        );
+    }
+
+    // -- expression recursion depth guard (pat-21oab) -----------------------
+
+    /// 🔑 The bug this closes: `fuzz_deeply_nested_parens` ABORTED the whole
+    /// test binary with "fatal runtime error: stack overflow" — not a failure,
+    /// an abort, which took every other test in the process with it and made a
+    /// bare `-p gdscript-interop` unusable as a verification command for any
+    /// bead.
+    #[test]
+    fn deeply_nested_parens_report_an_error_instead_of_overflowing_the_stack() {
+        let depth = MAX_EXPR_DEPTH + 50;
+        let src = format!("{}1{}", "(".repeat(depth), ")".repeat(depth));
+        let tokens = tokenize(&src).expect("parens tokenize");
+        let mut parser = Parser::new(tokens, &src);
+        let err = parser
+            .parse_expr()
+            .expect_err("an over-deep expression must be refused, not recursed");
+        assert!(
+            err.to_string().contains("nested at most"),
+            "the error should name the depth limit, got: {err}"
+        );
+    }
+
+    /// ⚠️ The control that makes the guard safe rather than merely safe-looking:
+    /// ordinary nesting still parses. A limit set too low — or a guard that
+    /// counted the wrong thing — would reject real scripts, and the test above
+    /// alone could not tell the difference.
+    #[test]
+    fn ordinary_nesting_is_unaffected_by_the_depth_guard() {
+        // `parse_expr_str` unwraps, so reaching the next line is the assertion.
+        let _ = parse_expr_str("((1 + 2) * (3 - 4))");
+        let deep_but_legal = format!(
+            "{}1{}",
+            "(".repeat(MAX_EXPR_DEPTH - 2),
+            ")".repeat(MAX_EXPR_DEPTH - 2)
+        );
+        let tokens = tokenize(&deep_but_legal).expect("tokenizes");
+        let mut parser = Parser::new(tokens, &deep_but_legal);
+        assert!(
+            parser.parse_expr().is_ok(),
+            "nesting just under the limit must still parse"
+        );
+    }
+
+    /// ⚠️ The depth must be released on the ERROR path too. If it leaked, one
+    /// failed expression would permanently lower the ceiling for every later
+    /// expression parsed by the same `Parser` — a bug that only shows up in a
+    /// script with two expressions, which is why it is asserted here.
+    /// ⚠️ The REGRESSION TEST for the lower bound, and the one whose absence let
+    /// a too-low limit ship: `edge_deeply_nested_arithmetic` nests 30 deep, so
+    /// the guard must admit 30. That test generates its parens in a loop, so no
+    /// grep of the sources can reveal the requirement — it is pinned here, as a
+    /// literal, next to the constant it constrains.
+    #[test]
+    fn nesting_thirty_deep_still_parses_because_an_existing_test_needs_it() {
+        let depth = 30;
+        let src = format!("{}1{}", "(".repeat(depth), ")".repeat(depth));
+        let tokens = tokenize(&src).expect("tokenizes");
+        let mut parser = Parser::new(tokens, &src);
+        assert!(
+            parser.parse_expr().is_ok(),
+            "depth {depth} must parse: edge_deeply_nested_arithmetic builds \
+             exactly this and expects a value, so refusing it is a regression"
+        );
+        assert!(
+            MAX_EXPR_DEPTH > depth,
+            "the limit must stay above the deepest nesting the suite parses"
+        );
+    }
+
+    #[test]
+    fn a_failed_expression_does_not_consume_the_depth_budget() {
+        let src = "1 +";
+        let tokens = tokenize(src).expect("tokenizes");
+        let mut parser = Parser::new(tokens, src);
+        let _ = parser.parse_expr();
+        assert_eq!(
+            parser.expr_depth, 0,
+            "depth must return to zero after a failed parse"
         );
     }
 }

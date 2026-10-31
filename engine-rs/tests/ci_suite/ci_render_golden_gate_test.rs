@@ -297,7 +297,7 @@ fn ci_workflow_sets_patina_ci_env() {
 
 #[test]
 fn golden_staleness_test_exists() {
-    let test_file = engine_rs_dir().join("tests/golden_staleness_test.rs");
+    let test_file = engine_rs_dir().join("tests/misc_suite_c/golden_staleness_test.rs");
     assert!(
         test_file.exists(),
         "engine-rs/tests/golden_staleness_test.rs must exist for staleness detection"

@@ -423,7 +423,7 @@ fn resource_ext_resource_construction() {
         "1".to_string(),
         ExtResource {
             resource_type: "Texture2D".to_string(),
-            uid: "uid://tex_icon".to_string(),
+            uid: "uid://texicon".to_string(),
             path: "res://icon.png".to_string(),
             id: "1".to_string(),
         },
@@ -432,7 +432,7 @@ fn resource_ext_resource_construction() {
         "2".to_string(),
         ExtResource {
             resource_type: "Script".to_string(),
-            uid: "uid://player_script".to_string(),
+            uid: "uid://playerscript".to_string(),
             path: "res://scripts/player.gd".to_string(),
             id: "2".to_string(),
         },
@@ -513,13 +513,13 @@ func _process(delta):
 #[test]
 fn unified_loader_multiple_uids() {
     let mut loader = UnifiedLoader::new(FakeLoader);
-    loader.register_uid_str("uid://res_a", "res://a.tres");
-    loader.register_uid_str("uid://res_b", "res://b.tres");
-    loader.register_uid_str("uid://res_c", "res://c.tres");
+    loader.register_uid_str("uid://resa", "res://a.tres");
+    loader.register_uid_str("uid://resb", "res://b.tres");
+    loader.register_uid_str("uid://resc", "res://c.tres");
 
-    let a = loader.load("uid://res_a").unwrap();
-    let b = loader.load("uid://res_b").unwrap();
-    let c = loader.load("uid://res_c").unwrap();
+    let a = loader.load("uid://resa").unwrap();
+    let b = loader.load("uid://resb").unwrap();
+    let c = loader.load("uid://resc").unwrap();
 
     assert!(!Arc::ptr_eq(&a, &b));
     assert!(!Arc::ptr_eq(&b, &c));

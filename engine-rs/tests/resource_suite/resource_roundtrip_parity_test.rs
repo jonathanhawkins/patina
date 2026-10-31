@@ -321,15 +321,33 @@ fn tres_roundtrip_preserves_uid() {
     let saver = TresSaver::new();
     let saved = saver.save_to_string(&original).unwrap();
 
-    // Verify the uid:// appears in the saved output
-    assert!(saved.contains("uid=\"uid://12345678\""));
+    // ⚠️ The saved attribute carries the uid's base-34 TEXT form, not its
+    // decimal id. This used to assert `uid="uid://12345678"` for a numeric uid
+    // of 12345678, conflating the id with its encoding: `id_to_text(12345678)`
+    // is `uid://jidwg`, while `uid://12345678` is the text of an entirely
+    // different id (1408628984669). Derived from the codec here so the literal
+    // and the encoder can never drift apart again (pat-21oab).
+    let expected_uid_text = gdresource::id_to_text(original.uid.raw());
+    assert!(
+        saved.contains(&format!("uid=\"{expected_uid_text}\"")),
+        "saved header must carry the uid text {expected_uid_text}, got:\n{saved}"
+    );
 
     let loader = TresLoader::new();
     let reloaded = loader.parse_str(&saved, &original.path).unwrap();
 
-    // The loader hashes the uid string portion to produce a stable numeric UID.
-    // The important invariant is that the UID is valid and stable across reloads.
+    // ⚠️ Stronger than the `is_valid()` this used to settle for, and correct:
+    // the comment here claimed the loader "hashes the uid string", implying the
+    // value could not survive. It is not a hash — base-34 encode/decode is a
+    // bijection for any id the encoder can emit, so the id must come back
+    // EXACTLY. Asserting only validity would pass even if the codec mangled
+    // every value.
     assert!(reloaded.uid.is_valid());
+    assert_eq!(
+        reloaded.uid.raw(),
+        original.uid.raw(),
+        "a save/load round trip must preserve the uid exactly"
+    );
 
     // Roundtrip again to verify stability: same saved string → same UID hash
     let saved2 = saver.save_to_string(&original).unwrap();

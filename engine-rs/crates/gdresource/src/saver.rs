@@ -305,6 +305,113 @@ fn format_variant(v: &Variant) -> String {
             format_f32(c.a)
         ),
         // Fallback for types we don't write in .tres format.
+        // ⚠️ The arms below used to fall through to `other => format!("{other}")`
+        // and were written with `Display`, i.e. as debug text: a Quaternion came
+        // out as `(0.1, 0.2, 0.3, 0.9)` with no constructor, and AABB/Basis/
+        // Plane/Rect2 as labelled forms like `P: (-1, -2, -3)`. Godot cannot read
+        // any of it and neither can our own loader, so saving a resource holding
+        // one of these types produced an unloadable file (pat-21oab).
+        //
+        // Element order in every arm is taken from the matching parse arm in
+        // `loader.rs`, so `parse(format(v)) == v` holds by construction.
+        Variant::Rect2(r) => format!(
+            "Rect2({}, {}, {}, {})",
+            format_f32(r.position.x),
+            format_f32(r.position.y),
+            format_f32(r.size.x),
+            format_f32(r.size.y)
+        ),
+        Variant::Quaternion(q) => format!(
+            "Quaternion({}, {}, {}, {})",
+            format_f32(q.x),
+            format_f32(q.y),
+            format_f32(q.z),
+            format_f32(q.w)
+        ),
+        // Normal first, then the signed distance (loader.rs:610).
+        Variant::Plane(p) => format!(
+            "Plane({}, {}, {}, {})",
+            format_f32(p.normal.x),
+            format_f32(p.normal.y),
+            format_f32(p.normal.z),
+            format_f32(p.d)
+        ),
+        Variant::Aabb(a) => format!(
+            "AABB({}, {}, {}, {}, {}, {})",
+            format_f32(a.position.x),
+            format_f32(a.position.y),
+            format_f32(a.position.z),
+            format_f32(a.size.x),
+            format_f32(a.size.y),
+            format_f32(a.size.z)
+        ),
+        // Three ROW vectors, the same walk the loader uses (loader.rs:647) and
+        // the same order as the basis embedded in Transform3D below.
+        Variant::Basis(b) => format!(
+            "Basis({}, {}, {}, {}, {}, {}, {}, {}, {})",
+            format_f32(b.x.x),
+            format_f32(b.x.y),
+            format_f32(b.x.z),
+            format_f32(b.y.x),
+            format_f32(b.y.y),
+            format_f32(b.y.z),
+            format_f32(b.z.x),
+            format_f32(b.z.y),
+            format_f32(b.z.z)
+        ),
+        Variant::Transform2D(t) => format!(
+            "Transform2D({}, {}, {}, {}, {}, {})",
+            format_f32(t.x.x),
+            format_f32(t.x.y),
+            format_f32(t.y.x),
+            format_f32(t.y.y),
+            format_f32(t.origin.x),
+            format_f32(t.origin.y)
+        ),
+        Variant::Transform3D(t) => format!(
+            "Transform3D({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+            format_f32(t.basis.x.x),
+            format_f32(t.basis.x.y),
+            format_f32(t.basis.x.z),
+            format_f32(t.basis.y.x),
+            format_f32(t.basis.y.y),
+            format_f32(t.basis.y.z),
+            format_f32(t.basis.z.x),
+            format_f32(t.basis.z.y),
+            format_f32(t.basis.z.z),
+            format_f32(t.origin.x),
+            format_f32(t.origin.y),
+            format_f32(t.origin.z)
+        ),
+        // Godot's `&"name"` literal, which the loader accepts (loader.rs:671).
+        // Escaped exactly like the String arm above; `Display` wrote `&jump`,
+        // unquoted, which the loader rejects outright.
+        Variant::StringName(sn) => {
+            let escaped = sn
+                .as_str()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\t', "\\t");
+            format!("&\"{escaped}\"")
+        }
+        // `{"key": value, ...}` with quoted keys, per `parse_dictionary`.
+        //
+        // ⚠️ SORTED by formatted key. `Dictionary` is hash-backed, so emitting
+        // iteration order would make the saver non-deterministic and every .tres
+        // golden unstable — a worse failure than the one this fixes.
+        // ⚠️ The payload is a `SharedDictionary` (an `Arc<RwLock<..>>` handle), NOT
+        // a `Dictionary`, so `iter()` is not available on it directly — reaching
+        // for it is an E0599. `with` borrows the inner `Dictionary` for the
+        // closure and returns whatever the closure returns.
+        Variant::Dictionary(d) => d.with(|dict| {
+            let mut pairs: Vec<String> = dict
+                .iter()
+                .map(|(k, val)| format!("{}: {}", format_variant(k), format_variant(val)))
+                .collect();
+            pairs.sort();
+            format!("{{{}}}", pairs.join(", "))
+        }),
         other => format!("{other}"),
     }
 }

@@ -282,14 +282,16 @@ fn class_coverage_summary() {
 #[test]
 fn non_fixture_measured_families_have_test_evidence() {
     // CharacterBody3D and query objects are measured via tests, not scene goldens
+    // Paths relative to `engine-rs/`, current as of the suite-directory layout;
+    // both of these were `tests/<name>.rs` and reported missing (pat-21oab).
     let test_evidence = [
         (
             "CharacterBody3D",
-            "tests/characterbody3d_move_and_slide_test.rs",
+            "tests/misc_suite_a/characterbody3d_move_and_slide_test.rs",
         ),
         (
             "PhysicsRayQuery3D / PhysicsShapeQuery3D",
-            "tests/physics_ray_shape_query3d_test.rs",
+            "tests/physics_suite/physics_ray_shape_query3d_test.rs",
         ),
     ];
 

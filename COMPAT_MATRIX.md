@@ -185,14 +185,58 @@ Test files: `oracle_parity_test.rs`, `oracle_regression_test.rs`, `comparison_to
 | Platform | Status | Notes |
 |----------|--------|-------|
 | macOS (aarch64) | **Measured** | Primary dev target for the current headless/runtime slice; native shell parity remains narrower |
-| Linux (x86_64) | Claimed | Target metadata and CI matrix coverage exist; native Linux runtime parity is only partly measured |
-| macOS (x86_64) | Claimed | Target metadata exists; native macOS parity beyond the bounded slice is not fully measured |
-| Windows (x86_64) | Claimed | Platform-layer tests exist; full native runtime parity remains Phase 7 work |
+| Linux (x86_64) | Implemented, not yet measured | Target metadata and CI matrix coverage are green; native X11/Wayland behaviour is model-level only, and `linux_x11_wayland_platform_test.rs` has 6 rows red at HEAD |
+| macOS (x86_64) | Implemented, not yet measured | Target metadata is green; native Cocoa behaviour beyond the bounded slice is model-level only (`macos_platform_layer_test.rs`) |
+| Windows (x86_64) | Implemented, not yet measured | Platform-layer and runtime-smoke tests are green but model-level; `windows_platform_win32_backend_test.rs` has 7 rows red at HEAD |
 | Android | Deferred | Phase 7+ |
 | iOS | Deferred | Phase 7+ |
 | Web (WASM) | Deferred | Phase 7+ |
 
 ---
+
+### Per-OS Native Platform-Layer Classification
+
+Phase 7's platform work is classified per OS and per surface, because "the
+platform layer is implemented" and "this OS's native shell behaves like Godot's"
+are different claims and only the first is backed by tests.
+
+Vocabulary, deliberately narrower than the matrix statuses above:
+
+* **Headless/model** — the surface is exercised through Patina's headless
+  backend or an OS-API model. The test runs on any host, so it proves the model
+  agrees with itself; it does not prove a real OS shell agrees.
+* **Native-runtime** — a test drives the real OS windowing/input stack on that
+  OS. **No row below is classified this way**, because no test in the repo does
+  it. The row stays absent rather than aspirational.
+* **Deferred** — not attempted in this phase.
+
+#### Linux
+
+| Surface | Classification | Evidence | Caveat |
+|---------|----------------|----------|--------|
+| Target metadata and toolchain | Headless/model | `engine-rs/tests/platform_suite/platform_targets_validation_test.rs` | green at HEAD |
+| Stable-layer composition (window/input/timing) | Headless/model | `engine-rs/tests/platform_suite/platform_first_stable_layer_test.rs`, `engine-rs/tests/platform_suite/platform_backend_test.rs` | green at HEAD |
+| Native X11/Wayland windowing | Headless/model | `engine-rs/tests/misc_suite_d/linux_x11_wayland_platform_test.rs` | ⚠️ 6 rows red at HEAD — protocol/model coverage only, no X11 or Wayland server is contacted |
+
+#### macOS
+
+| Surface | Classification | Evidence | Caveat |
+|---------|----------------|----------|--------|
+| Target metadata and toolchain | Headless/model | `engine-rs/tests/platform_suite/platform_targets_validation_test.rs` | green at HEAD |
+| Stable-layer composition (window/input/timing) | Headless/model | `engine-rs/tests/platform_suite/platform_first_stable_layer_test.rs`, `engine-rs/tests/platform_suite/platform_backend_test.rs` | green at HEAD; this is the primary dev host, so "runs here" is not per-OS evidence |
+| Native Cocoa windowing and menu bar | Headless/model | `engine-rs/tests/misc_suite_d/macos_platform_layer_test.rs` | green at HEAD — API/model coverage only, no NSApplication is started |
+
+#### Windows
+
+| Surface | Classification | Evidence | Caveat |
+|---------|----------------|----------|--------|
+| Target metadata and toolchain | Headless/model | `engine-rs/tests/platform_suite/platform_targets_validation_test.rs` | green at HEAD |
+| Runtime startup, input and audio smoke | Headless/model | `engine-rs/tests/platform_suite/windows_runtime_smoke_test.rs` | green at HEAD, but a MODEL test — it asserts modelled DPI/window/theme state and passes on macOS |
+| Native Win32 windowing backend | Headless/model | `engine-rs/tests/misc_suite_g/windows_platform_layer_test.rs`, `engine-rs/tests/misc_suite_g/windows_platform_win32_backend_test.rs` | ⚠️ win32 backend test has 7 rows red at HEAD; no HWND is created |
+
+Red-row counts are from `docs/test-debt/2026-10-30-failing-tests-at-HEAD.txt`,
+which drifts within the day — a caveat above means **re-measure**, not
+"permanently red".
 
 ## Measured Scene Inventory
 
@@ -227,6 +271,83 @@ Test files: `oracle_parity_test.rs`, `oracle_regression_test.rs`, `comparison_to
 Test files: `oracle_parity_test.rs` (32 tests), `oracle_regression_test.rs` (43 tests), `v1_acceptance_gate_test.rs`
 
 ---
+
+## Phase 9 Hardening Artifact Classification
+
+Source of truth: `prd/PHASE9_HARDENING_AUDIT.md` (2026-03-29). That audit defines
+the four labels used below — `Measured`, `Implemented, not yet measured`,
+`Deferred`, `Missing` — and the rule that keeps this table honest: *"keep 'doc
+exists' separate from 'doc is validated by tests'."*
+
+This table applies that rule one step further than the audit could. A deliverable
+counts as `Measured` only if its evidence test is **green at HEAD**. Three of the
+six are not, so they are classified by what the repo can currently prove, not by
+what the artifact set implies.
+
+So the split below is between **measured test-backed** artifacts and **docs-only**
+claims: a `Measured` row means a green test asserts the behaviour, while
+`Implemented, not yet measured` means the artifact and its documentation exist but
+the test that would validate them is currently failing. A docs-only claim is not
+evidence, which is the whole point of the audit's separation rule.
+
+| Deliverable | Classification | Evidence (paths current as of 2026-10-30) | Gap | Bead |
+|-------------|----------------|-------------------------------------------|-----|------|
+| Benchmark dashboards | Measured for the committed dashboard/tooling slice | `engine-rs/tests/misc_suite_a/benchmark_dashboard_test.rs`, `engine-rs/tests/misc_suite_e/perf_benchmark_ci_gate_test.rs`, `docs/BENCHMARK_BASELINES.md` | missing breadth — a checked-in dashboard framework, not a published external service | `pat-5jwj9` |
+| Crash triage process | Measured for the local process/model slice | `engine-rs/tests/crash_suite/crash_triage_process_test.rs`, `engine-rs/tests/crash_suite/crash_triage_auto_issue_test.rs`, `docs/TRIAGE_PROCESS.md` | missing breadth — severity, queueing, regression labelling and auto-issue generation are validated; operational response is not | `pat-t8hgz` |
+| Contributor onboarding | Measured | `engine-rs/tests/contributor_suite/contributor_onboarding_docs_test.rs`, `engine-rs/tests/contributor_suite/contributor_onboarding_validation_test.rs`, `docs/contributor-onboarding.md` | none | onboarding bead |
+| Fuzz/property tests | Implemented, not yet measured | `engine-rs/tests/fuzz_suite/fuzz_property_coverage_test.rs` (3 rows red at HEAD: `all_fuzz_modules_exist`, `fuzz_modules_contain_tests`, `fuzz_modules_meet_minimum_test_counts`) | the coverage gate itself is failing, so current fuzz breadth is unproven — do not read it as exhaustive engine-wide coverage | `pat-3pstd`, `pat-21oab` |
+| Release train | Implemented, not yet measured | `engine-rs/tests/release_suite/release_train_workflow_test.rs` (2 rows red at HEAD: `integration_test_count_floor`, `parity_tests_cover_key_subsystems`), `docs/RELEASE_PROCESS.md` | docs-overclaim — the audit already flagged that the docs imply automation the artifacts do not guarantee; the contract tests that would prove the rest are red | `pat-d59t7`, `pat-21oab` |
+| Migration guide | Implemented, not yet measured | `engine-rs/tests/misc_suite_d/migration_guide_validation_test.rs` (3 rows red at HEAD: `guide_has_porting_walkthrough`, `limitations_mention_key_missing_features`, `porting_walkthrough_has_compatibility_checklist`), `docs/migration-guide.md` | the guide exists but its structure/scope validation is failing, so its stated coverage is unverified | `pat-1b7i6`, `pat-21oab` |
+
+Red-row counts are from `docs/test-debt/2026-10-30-failing-tests-at-HEAD.txt`
+(653 failures across 114 targets, found by the first full workspace test run in
+months). That snapshot is a point-in-time measurement and drifts within the day,
+so a row above means **re-measure before trusting it**, not "permanently red" —
+`docs/test-debt/2026-10-30-reverified-against-prebuilt-binaries.md` records the
+re-measurement method and which targets are trustworthy.
+
+⚠️ The audit's own `Sources To Compare` list points every test at
+`engine-rs/tests/<name>.rs`. Those paths no longer resolve: `engine-rs/tests` was
+reorganised into suite directories, so each former standalone file is now a module
+inside `tests/<suite>/main.rs`. The paths in this table were each located on disk
+and are the current ones.
+
+## Editor Tooling (Phase 8)
+
+### Selected Editor Tooling Classification
+
+Source of truth: `prd/PHASE8_EDITOR_PARITY_AUDIT.md` (2026-04-22).
+
+These rows classify **selected tooling slices that have tests**. They
+deliberately **do not imply blanket Godot editor parity** — each row is scoped to
+the behaviour its cited test actually drives, and the gap in every case is
+breadth, not absence.
+
+A family is `Measured` only when its evidence test is **green at HEAD**. One is
+not, and is classified by what the repo can currently prove rather than by what
+the audit claimed in April.
+
+| Tooling Family | Classification | Evidence (paths current as of 2026-10-30) | Scope and caveats |
+|----------------|----------------|-------------------------------------------|-------------------|
+| Script editor | Implemented, not yet measured | `engine-rs/tests/script_suite/script_editor_core_parity_test.rs` | core editing, find/replace and gutter slice; ⚠️ `gutter_bookmark_navigation` is red at HEAD, so the audit's April "Measured for tested slice" no longer holds |
+| Inspector | Measured for the typed-editor and resource sub-editor slice | `engine-rs/tests/property_suite/property_inspector_typed_editors_test.rs`, `engine-rs/tests/property_suite/property_inspector_resource_sub_editor_test.rs` | green at HEAD; typed editors and resource sub-editors only, not the full inspector surface |
+| Animation editor | Measured for the tested tooling slice | `engine-rs/tests/animation_suite/animation_editor_parity_test.rs` | green at HEAD; track/key model parity, not the full animation UI |
+| Theme editor | Measured for the live-preview slice | `engine-rs/tests/theme_suite/theme_editor_live_preview_test.rs` | green at HEAD; live preview path only |
+| Tilemap tooling | Measured for the painting slice | `engine-rs/tests/misc_suite_f/tilemap_editor_painting_test.rs` | green at HEAD; painting operations only, not terrain or autotile breadth |
+| Editor systems | Measured for the local API/model slice | `engine-rs/tests/editor_suite/editor_systems_parity_test.rs` | green at HEAD; settings, VCS and export-dialog models. The audit flags this row as `docs-overclaim`: it is bounded systems parity, **not** full editor parity |
+| EditorInterface compatibility layer | Measured for the explicit API slice | `engine-rs/tests/editor_suite/editor_interface_compat_test.rs` | green at HEAD; the explicitly implemented `EditorInterface` methods only |
+| Import pipeline / import settings | Implemented, not yet measured | `engine-rs/tests/` — the audit cites `audio_import_pipeline_test.rs` and `import_settings_panel_test.rs` | carried over from the audit, which already classified this family below Measured |
+
+⚠️ The audit's evidence column cites bare `<name>_test.rs` filenames that no
+longer resolve: `engine-rs/tests` was reorganised into suite directories, so each
+former standalone file is now a module inside `tests/<suite>/main.rs`. The paths
+in this table were each located on disk. The same staleness is why
+`phase8_editor_compat_layer_validation_test::all_audit_evidence_test_files_exist`
+reports 13 "missing" files that all exist.
+
+Red-row state is from `docs/test-debt/2026-10-30-failing-tests-at-HEAD.txt`,
+which drifts within the day — a caveat above means **re-measure**, not
+"permanently red".
 
 ## Update Protocol
 

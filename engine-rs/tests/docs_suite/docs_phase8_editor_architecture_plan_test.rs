@@ -78,8 +78,14 @@ fn plan_calls_out_deferred_scope() {
 fn validation_test_anchor_cites_plan_as_source_of_truth() {
     // The sibling pat-z20hm test reads EDITOR_ARCHITECTURE.md by name; assert
     // it survives so the doc-validation chain stays intact.
+    // ⚠️ Was `.join("tests").join("editor_architecture_plan_test.rs")`, which no
+    // longer resolves: engine-rs/tests was reorganised into suite directories,
+    // so this file is now a module inside tests/editor_suite/main.rs. A sweep
+    // over string literals does not catch a path built by `.join()`, which is
+    // why this one is corrected by hand (pat-21oab).
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
+        .join("editor_suite")
         .join("editor_architecture_plan_test.rs");
     let body = std::fs::read_to_string(&p)
         .unwrap_or_else(|e| panic!("editor_architecture_plan_test.rs must exist at {}: {e}", p.display()));

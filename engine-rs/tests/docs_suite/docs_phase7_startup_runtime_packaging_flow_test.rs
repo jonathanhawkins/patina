@@ -28,7 +28,7 @@ fn packaging_flow_doc_exists_and_scopes_phase7() {
 
 #[test]
 fn integration_test_anchor_exists_and_drives_flow() {
-    let p = repo_root().join("engine-rs/tests/startup_runtime_packaging_flow_test.rs");
+    let p = repo_root().join("engine-rs/tests/misc_suite_f/startup_runtime_packaging_flow_test.rs");
     let body = std::fs::read_to_string(&p)
         .unwrap_or_else(|e| panic!("integration test must exist at {}: {e}", p.display()));
     // Anchor that the integration test drives the four documented steps.

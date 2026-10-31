@@ -131,9 +131,9 @@ This is the first audit pass, not the final matrix.
 | packaging/export config and staging pipeline | `gdplatform::export` | Measured for Patina packaging flow | `startup_runtime_packaging_flow_test.rs` | docs-overclaim | `pat-vjmfv` | keep scoped to Patina packaging flow, not full Godot export parity |
 | CI matrix for supported desktop platforms | `.github/workflows/ci.yml`, `gdplatform::platform_targets` | Measured as repo policy | `ci_build_matrix_platform_test.rs` | none | `pat-s3700`, `pat-2uc5z`, `pat-vjmfv` | reuse existing beads |
 | generic window lifecycle abstraction | `gdplatform::window`, `gdplatform::display` | Measured for headless/backend abstraction | `window_creation_abstraction_test.rs`, `window_lifecycle_test.rs`, `window_lifecycle_parity_test.rs` | missing native breadth | historical windowing work, `pat-yzdv7` | add measurement only if live native parity enters scope |
-| Linux platform layer | `gdplatform::linux` | Implemented, partly measured | `linux_x11_wayland_platform_test.rs` | missing-test / docs-overclaim | none active specific | classify as bounded Linux protocol/model coverage |
-| macOS platform layer | `gdplatform::macos` | Implemented, partly measured | `macos_platform_layer_test.rs` | missing-test / docs-overclaim | none active specific | classify as bounded macOS API/model coverage |
-| Windows platform layer | `gdplatform::windows` | Implemented, partly measured | `windows_platform_layer_test.rs`, `windows_platform_win32_backend_test.rs` | missing-test / docs-overclaim | none active specific | classify as bounded Windows API/model coverage |
+| Linux native platform layer | `gdplatform::linux` | Implemented, not yet measured | `linux_x11_wayland_platform_test.rs` | missing-test / docs-overclaim | none active specific | classify as bounded Linux protocol/model coverage |
+| macOS native platform layer | `gdplatform::macos` | Implemented, not yet measured | `macos_platform_layer_test.rs` | missing-test / docs-overclaim | none active specific | classify as bounded macOS API/model coverage |
+| Windows native platform layer | `gdplatform::windows` | Implemented, not yet measured | `windows_platform_layer_test.rs`, `windows_platform_win32_backend_test.rs` | missing-test / docs-overclaim | none active specific | classify as bounded Windows API/model coverage |
 | Web/WASM export surface | `gdplatform::web`, target metadata | Deferred / limited | `web_wasm_export_interop_test.rs`, migration guide limitation section | deferred | none | keep explicitly outside supported desktop slice |
 
 ### Stable Layer / Startup Notes
@@ -216,7 +216,7 @@ This is the highest-risk overclaim area in Phase 7.
 - Patina evidence:
   - `engine-rs/crates/gdplatform/src/linux.rs`
   - `engine-rs/tests/linux_x11_wayland_platform_test.rs`
-- Current classification: `Implemented, partly measured`
+- Current classification: `Implemented, not yet measured`
 - Reason:
   - Protocol detection, desktop-environment flags, compositing, IME, cursor
     configuration, and headless defaults are all tested.
@@ -229,7 +229,7 @@ This is the highest-risk overclaim area in Phase 7.
 - Patina evidence:
   - `engine-rs/crates/gdplatform/src/macos.rs`
   - `engine-rs/tests/macos_platform_layer_test.rs`
-- Current classification: `Implemented, partly measured`
+- Current classification: `Implemented, not yet measured`
 - Reason:
   - Menu bar, app menu, dock badge, theme/accessibility flags, and action
     routing are covered in headless/native-model tests.
@@ -242,7 +242,7 @@ This is the highest-risk overclaim area in Phase 7.
   - `engine-rs/crates/gdplatform/src/windows.rs`
   - `engine-rs/tests/windows_platform_layer_test.rs`
   - `engine-rs/tests/windows_platform_win32_backend_test.rs`
-- Current classification: `Implemented, partly measured`
+- Current classification: `Implemented, not yet measured`
 - Reason:
   - DPI awareness, display info, taskbar integration, backend delegation, and
     lifecycle behavior are covered in focused tests.
