@@ -13,6 +13,7 @@ mod prd_parser;
 mod project_config;
 mod tmux;
 mod verifier;
+mod wiring;
 mod worker;
 
 use std::path::{Path, PathBuf};

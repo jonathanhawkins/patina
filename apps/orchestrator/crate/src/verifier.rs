@@ -372,7 +372,7 @@ fn is_runnable_command(cmd: &str) -> bool {
 ///
 /// Matched as a whole token so `--test scene_tree` does not satisfy a demand
 /// for `scene_tree_script_bridge` (or the reverse).
-fn command_mentions_test(cmd: &str, test_name: &str) -> bool {
+pub(crate) fn command_mentions_test(cmd: &str, test_name: &str) -> bool {
     if test_name.is_empty() {
         return false;
     }
@@ -511,7 +511,7 @@ pub fn command_workdir(project_root: &Path, command: &str) -> PathBuf {
 /// scoped to the named package when the command carries `-p`/`--package`
 /// (a full `cargo check --workspace` compiles every crate, wgpu/metal
 /// included), falling back to the workspace check only for unscoped commands.
-fn rewrite_broad_command(cmd: &str) -> String {
+pub(crate) fn rewrite_broad_command(cmd: &str) -> String {
     let lower = cmd.to_lowercase();
     let fallback_check = || match crate_breaker::extract_crate_from_command(cmd) {
         Some(pkg) => format!("cargo check -p {pkg}"),
@@ -711,7 +711,7 @@ pub fn count_tests_run(output: &str) -> Option<u64> {
 /// Whether a command is a test-runner (so a zero-tests-run result is suspicious).
 /// `cargo check` / `cargo build` / `cargo fmt` / `rg` legitimately run no tests
 /// and must NOT be flagged as vacuous.
-fn is_test_run_command(cmd: &str) -> bool {
+pub(crate) fn is_test_run_command(cmd: &str) -> bool {
     let lower = cmd.to_lowercase();
     if lower.starts_with("cargo check")
         || lower.starts_with("cargo build")
@@ -729,12 +729,12 @@ fn is_test_run_command(cmd: &str) -> bool {
 }
 
 /// Outcome of running a single command. `None` means the command timed out.
-type CommandOutcome = Option<(std::process::ExitStatus, String)>;
+pub(crate) type CommandOutcome = Option<(std::process::ExitStatus, String)>;
 
 /// Spawn a command under bash, draining stdout+stderr on reader threads so a
 /// verbose build can never deadlock by filling the OS pipe buffer, and return
 /// the exit status plus combined output (or `None` on timeout).
-fn run_command_capture(
+pub(crate) fn run_command_capture(
     cwd: &Path,
     cmd: &str,
     timeout: Duration,

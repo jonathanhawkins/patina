@@ -203,6 +203,7 @@ widget is absent. See `prd/EDITOR_PARITY_VISUAL_FIDELITY_METHODOLOGY.md`.
 - NEVER write a bead with literal placeholder text (`TITLE`, `PRIORITY`, `LABELS`, `KEY`, or `ACCEPTANCE`) appearing verbatim in any field. Always substitute the recommendation's real values from the JSON.
 - NEVER create a bead whose `acceptance_criteria` field is null/empty. If the recommendation's `acceptance_command` is missing, SKIP that recommendation and log the skip — workers without concrete acceptance criteria will invent their own scope and produce broken work (see pat-03sbm root-cause incident).
 - ALWAYS run the post-create verification (`br show $ID --json | jq '.[0] | {description, acceptance_criteria}'`) and abort the cycle if either field is empty/placeholder.
+- Any bead for engine, runtime or editor behavior (not tooling or docs) MUST have a `**Wiring requirement:**` line in its description. That line names the end-to-end path from a public entry point (a `.tscn`/project fixture, `patina_runner`, MainLoop, the editor server, the web runtime) to the new code. Its acceptance must describe what a game or the editor *observes*, never "function X returns Y". The line opts the bead into the verifier's entry-point rule, and every bead gets the red check (the acceptance test must fail with the change reverted). See `apps/orchestrator/crate/src/wiring.rs`. Write beads per **behavior**, not per Godot API: per-class API-completeness beads are where unconnected code comes from.
 
 ## Error Handling
 

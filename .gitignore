@@ -9,6 +9,7 @@ out/
 .turbo/
 target/
 target-verifier/
+target-redcheck/
 .shadertest-target/
 
 # Large regenerable Godot ClassDB dump (recreate: godot --headless --dump-extension-api)
@@ -85,3 +86,6 @@ storage.sqlite3-wal
 # Create Node dialog per-project state (favorites/recent), like Godot's .godot/
 .patina/
 **/.patina/
+
+# Orchestrator red check (apps/orchestrator/crate/src/wiring.rs): isolated tree snapshot
+.orchestrator/redcheck/

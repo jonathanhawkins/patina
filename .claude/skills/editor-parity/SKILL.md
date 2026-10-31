@@ -173,9 +173,19 @@ forbidden (workers invent their own scope — see the planner's hard rules):
 
 ```bash
 br sync --rebuild 2>&1 | tail -1
-ID=$(br create "<title>" -p <priority> --type <bug|feature> --labels editor --json | jq -r '.id')
+ID=$(br create "<title>" -p <priority> --type <bug|feature> --labels editor \
+  -d "<what Godot shows, with the upstream/godot/editor/ file:line>
+
+**Wiring requirement:** served /editor HTML from the editor server (EditorServer / EDITOR_HTML) renders the widget; the test fetches it, it never calls a helper directly." \
+  --json | jq -r '.id')
 br update "$ID" --acceptance-criteria "Served /editor HTML renders <element> with <label/icon> matching Godot's <widget> (always present). (test: \`<dom_test_name>\`)"
 ```
+
+The `**Wiring requirement:**` line is load-bearing. It opts the bead into the
+verifier's entry-point rule (`apps/orchestrator/crate/src/wiring.rs`): the
+acceptance test must live under a `tests/` directory and drive the served editor.
+After a green run, the verifier also reverts the worker's non-test files in a
+snapshot and re-runs the test. A test that still passes there is rejected.
 
 For a permanent-chrome gap, phrase the title as the widget, not the feature:
 "Render the always-present `★ Favorites:` section header in the FileSystem dock",

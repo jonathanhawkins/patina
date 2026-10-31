@@ -65,6 +65,9 @@ struct VerifyRequest {
     partial: bool,
     /// Carried through to [`VerifyResult::remaining_scope`].
     remaining_scope: String,
+    /// Test names the bead demands (`(test: \`name\`)`); the red check only
+    /// runs for beads that name one (see wiring.rs).
+    acceptance_tests: Vec<String>,
 }
 
 /// Outcome bundle from one verification run, feeding both circuit breakers
@@ -648,6 +651,8 @@ impl Coordinator {
             // Stale recovery has no worker and therefore no keep-open request.
             partial: false,
             remaining_scope: String::new(),
+            // Stale recovery skips the red check (no files_changed to revert).
+            acceptance_tests: Vec::new(),
         });
     }
 
@@ -1065,7 +1070,37 @@ impl Coordinator {
                 // test the worker still has to run.
                 let (commands, unmet_acceptance) =
                     match verifier::select_verify_commands(&reported, &demand) {
-                        Ok(cmds) => (cmds, None),
+                        Ok(cmds) => match crate::wiring::check_entry_point(
+                            &self.config.project_root,
+                            &format!(
+                                "{}\n{}",
+                                criteria.as_deref().unwrap_or(""),
+                                description.as_deref().unwrap_or("")
+                            ),
+                            &demand.test_names,
+                            &completion.files_changed,
+                        ) {
+                            // The bead has a Wiring requirement and its acceptance
+                            // test calls the implementation directly: reject before
+                            // spending a build on it.
+                            crate::wiring::EntryPointVerdict::Rejected(why) => {
+                                tracing::info!(
+                                    bead = %completion.bead_id,
+                                    reason = %why,
+                                    "REJECT: acceptance test does not use a public entry point"
+                                );
+                                (Vec::new(), Some(why))
+                            }
+                            crate::wiring::EntryPointVerdict::Inconclusive(why) => {
+                                tracing::info!(
+                                    bead = %completion.bead_id,
+                                    reason = %why,
+                                    "entry-point rule inconclusive; not blocking"
+                                );
+                                (cmds, None)
+                            }
+                            _ => (cmds, None),
+                        },
                         Err(why) => {
                             tracing::info!(
                                 bead = %completion.bead_id,
@@ -1120,6 +1155,7 @@ impl Coordinator {
                     enqueued_at: Instant::now(),
                     partial: completion.partial,
                     remaining_scope: completion.remaining_scope.clone(),
+                    acceptance_tests: demand.test_names.clone(),
                 });
 
                 // Do NOT ack here — ack only after drain_verify_results successfully
@@ -2848,7 +2884,23 @@ fn process_one_verification(
     );
 
     let run_start = Instant::now();
-    let verify_result = verifier::verify_commands(project_root, &request.commands, timeout);
+    let mut verify_result = verifier::verify_commands(project_root, &request.commands, timeout);
+    // Red check: a green acceptance test must also go RED with the change
+    // removed, or it does not exercise the change (see wiring.rs). Only a
+    // clean "still passes" result rejects; anything undecidable is logged.
+    if verify_result.is_ok() && !request.is_stale_recovery {
+        let red = crate::wiring::red_check(
+            project_root,
+            &request.files_changed,
+            &request.commands,
+            &request.acceptance_tests,
+            timeout,
+        );
+        verifier_log_append(verifier_log_path, &format!("RED-CHECK bead={bead_id} {red:?}"));
+        if let crate::wiring::RedVerdict::NotDetected(why) = red {
+            verify_result = Err(crate::error::OrchestratorError::Verification(why));
+        }
+    }
     let run_ms = run_start.elapsed().as_millis() as u64;
     let passed = verify_result.is_ok();
     let reject_reason = verify_result.err().map(|e| format!("{e}"));
@@ -3418,6 +3470,7 @@ mod tests {
             enqueued_at: Instant::now(),
             partial: false,
             remaining_scope: String::new(),
+            acceptance_tests: Vec::new(),
         }
     }
 
@@ -3562,6 +3615,7 @@ mod tests {
                     enqueued_at: Instant::now(),
                     partial: false,
                     remaining_scope: String::new(),
+                    acceptance_tests: Vec::new(),
                 })
                 .unwrap();
         }
@@ -5602,6 +5656,32 @@ mod tests {
         let r = source.find("struct VerifyRequest").unwrap();
         let req = &source[r..r + 900];
         assert!(req.contains("partial: bool"), "request must carry the flag");
+    }
+
+    /// The red check must run on the verifier lane after a green verify, and
+    /// only a NotDetected verdict may turn the pass into a rejection.
+    #[test]
+    fn test_verify_lane_runs_the_red_check_after_a_green_verify() {
+        let source = include_str!("coordinator.rs");
+        let f = source.find("fn process_one_verification(").unwrap();
+        let body = &source[f..f + 3500];
+        let verify = body.find("verifier::verify_commands(").unwrap();
+        let red = body.find("crate::wiring::red_check(").expect("red check must be called");
+        assert!(red > verify, "red check runs after the green verify");
+        assert!(body.contains("RedVerdict::NotDetected(why) = red"));
+        assert!(body.contains("!request.is_stale_recovery"));
+    }
+
+    /// The entry-point rule runs on the completion path, before enqueueing a
+    /// build, and a rejection reuses the unmet-acceptance reopen path.
+    #[test]
+    fn test_completion_path_applies_the_entry_point_rule() {
+        let source = include_str!("coordinator.rs");
+        let sel = source.find("verifier::select_verify_commands(&reported, &demand)").unwrap();
+        let window = &source[sel..sel + 2500];
+        assert!(window.contains("crate::wiring::check_entry_point("));
+        assert!(window.contains("EntryPointVerdict::Rejected(why) => {"));
+        assert!(window.contains("(Vec::new(), Some(why))"));
     }
 
     #[test]
