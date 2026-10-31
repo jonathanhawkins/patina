@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use gdcore::math::{Rect2, Vector2, Vector2i};
+use gdcore::math::{Rect2, Rect2i, Vector2, Vector2i};
 use gdvariant::Variant;
 
 use crate::node::NodeId;
@@ -1824,6 +1824,158 @@ fn bresenham_cells(from: Vector2i, to: Vector2i) -> Vec<Vector2i> {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// pat-mgixk.112 — TileMapPattern.
+// ---------------------------------------------------------------------------
+
+/// A rectangular block of cells lifted off a layer, ready to be stamped
+/// elsewhere (Godot `TileMapPattern`).
+///
+/// Godot stores these inside the TileSet and the TileMap editor's Patterns tab
+/// paints with them. This is the data half: capture a region, ask its size,
+/// stamp it at an offset.
+///
+/// 🔑 **Cells are held relative to the pattern's own origin, not to where they
+/// were captured.** Godot normalises on insert — `set_cell` grows the pattern's
+/// size to fit the coordinate — so a pattern lifted from (10, 10) stamps the
+/// same shape at (0, 0). Storing absolute coordinates would make a pattern
+/// paintable only back where it came from.
+///
+/// ⚠️ A pattern is **sparse**. Godot's `get_used_cells` returns only the cells
+/// that were set, and `size` is the bounding box, so a pattern with a hole in
+/// it leaves the destination's existing cell alone rather than erasing it. A
+/// dense `Vec` would silently blank those holes on every stamp.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TileMapPattern {
+    cells: HashMap<Vector2i, TileData>,
+    size: Vector2i,
+}
+
+impl TileMapPattern {
+    /// Creates an empty pattern.
+    pub fn new() -> Self {
+        Self {
+            cells: HashMap::new(),
+            size: Vector2i::ZERO,
+        }
+    }
+
+    /// Sets one cell, growing the pattern's size to contain it.
+    ///
+    /// ⚠️ Negative coordinates are rejected rather than clamped, matching
+    /// Godot's `ERR_FAIL_COND(p_coords.x < 0 || p_coords.y < 0)`: a pattern's
+    /// own space starts at its origin, and accepting a negative coordinate
+    /// would give it a cell that `size` cannot describe and that no stamp could
+    /// ever reach.
+    pub fn set_cell(&mut self, coords: Vector2i, data: TileData) {
+        if coords.x < 0 || coords.y < 0 {
+            return;
+        }
+        self.size.x = self.size.x.max(coords.x + 1);
+        self.size.y = self.size.y.max(coords.y + 1);
+        self.cells.insert(coords, data);
+    }
+
+    /// The tile at `coords`, if the pattern sets one there.
+    pub fn get_cell(&self, coords: Vector2i) -> Option<&TileData> {
+        self.cells.get(&coords)
+    }
+
+    /// Whether the pattern sets a cell at `coords`.
+    pub fn has_cell(&self, coords: Vector2i) -> bool {
+        self.cells.contains_key(&coords)
+    }
+
+    /// Removes a cell.
+    ///
+    /// ⚠️ Does NOT shrink `size`. Godot's `remove_cell` has a
+    /// `p_update_size` flag that defaults to true for the editor's own use, but
+    /// shrinking on every removal would make a pattern's size depend on the
+    /// order cells were cleared in. [`recompute_size`] is the explicit way to
+    /// tighten it.
+    pub fn remove_cell(&mut self, coords: Vector2i) {
+        self.cells.remove(&coords);
+    }
+
+    /// The pattern's bounding size in cells.
+    pub fn size(&self) -> Vector2i {
+        self.size
+    }
+
+    /// Overrides the bounding size.
+    ///
+    /// Cells outside the new bounds are dropped, so the invariant that every
+    /// cell fits inside `size` holds however callers use this.
+    pub fn set_size(&mut self, size: Vector2i) {
+        let size = Vector2i::new(size.x.max(0), size.y.max(0));
+        self.cells
+            .retain(|c, _| c.x < size.x && c.y < size.y && c.x >= 0 && c.y >= 0);
+        self.size = size;
+    }
+
+    /// Tightens `size` to the actual extent of the cells present.
+    pub fn recompute_size(&mut self) {
+        let mut s = Vector2i::ZERO;
+        for c in self.cells.keys() {
+            s.x = s.x.max(c.x + 1);
+            s.y = s.y.max(c.y + 1);
+        }
+        self.size = s;
+    }
+
+    /// Whether the pattern holds no cells.
+    pub fn is_empty(&self) -> bool {
+        self.cells.is_empty()
+    }
+
+    /// The cells the pattern sets, in a deterministic order.
+    ///
+    /// ⚠️ Sorted, because the backing store is a `HashMap` whose iteration
+    /// order is randomised per process. A caller that stamps in iteration order
+    /// would otherwise produce a different undo history on every run, and a
+    /// test asserting on the list would be flaky rather than wrong.
+    pub fn used_cells(&self) -> Vec<Vector2i> {
+        let mut v: Vec<Vector2i> = self.cells.keys().copied().collect();
+        v.sort_by_key(|c| (c.y, c.x));
+        v
+    }
+
+    /// Lifts the cells of `rect` off `cells` into a new pattern.
+    ///
+    /// The captured cells are rebased on the rect's top-left corner, so the
+    /// result stamps the same shape wherever it is applied. Cells the layer
+    /// does not set are simply absent — see the note on sparseness.
+    pub fn capture(cells: &HashMap<Vector2i, TileData>, rect: Rect2i) -> Self {
+        let mut pattern = Self::new();
+        for y in 0..rect.size.y {
+            for x in 0..rect.size.x {
+                let src = Vector2i::new(rect.position.x + x, rect.position.y + y);
+                if let Some(data) = cells.get(&src) {
+                    pattern.set_cell(Vector2i::new(x, y), data.clone());
+                }
+            }
+        }
+        pattern.size = Vector2i::new(rect.size.x.max(0), rect.size.y.max(0));
+        pattern
+    }
+
+    /// Stamps this pattern into `cells` with its origin at `at`.
+    ///
+    /// Returns the destination coordinates written, so the caller can build one
+    /// undo entry per cell the way the other tile edits do.
+    pub fn stamp(&self, cells: &mut HashMap<Vector2i, TileData>, at: Vector2i) -> Vec<Vector2i> {
+        let mut written = Vec::new();
+        for coords in self.used_cells() {
+            if let Some(data) = self.cells.get(&coords) {
+                let dest = Vector2i::new(at.x + coords.x, at.y + coords.y);
+                cells.insert(dest, data.clone());
+                written.push(dest);
+            }
+        }
+        written
+    }
+}
 
 #[cfg(test)]
 mod tests {

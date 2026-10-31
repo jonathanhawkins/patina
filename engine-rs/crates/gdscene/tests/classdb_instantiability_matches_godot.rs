@@ -121,7 +121,9 @@ fn call(fx: &mut Fixture, method: &str, args: &[Variant]) -> Option<Variant> {
         "the probe script must define `{method}`, or a `None` result below \
          would mean 'no such method' rather than 'construction refused'",
     );
-    fx.main_loop.tree_mut().call_script_method(fx.probe, method, args)
+    fx.main_loop
+        .tree_mut()
+        .call_script_method(fx.probe, method, args)
 }
 
 fn s(v: &str) -> Variant {

@@ -985,12 +985,14 @@ impl StateMachine {
         // hop must not be blocked by the transition guard in `advance`.
         self.transition = None;
         let next = self.travel_queue.remove(0);
-        let crossfade = self
+        // pat-mgixk.82: the curve comes off the SAME edge lookup as the
+        // crossfade time, so a hop cannot pick up one without the other.
+        let (crossfade, curve) = self
             .transitions
             .iter()
             .find(|t| t.from == self.current && t.to == next)
-            .map(|t| t.crossfade)
-            .unwrap_or(0.0);
+            .map(|t| (t.crossfade, t.xfade_curve.clone()))
+            .unwrap_or((0.0, None));
         let from_node = self.states.get(&self.current).cloned();
         let prev_state = std::mem::replace(&mut self.current, next);
         if let Some(n) = self.states.get_mut(&self.current) {
@@ -1003,6 +1005,7 @@ impl StateMachine {
                     from_node: Box::new(from_node),
                     elapsed: 0.0,
                     duration: crossfade,
+                    curve,
                 });
             }
         }
@@ -1522,11 +1525,21 @@ pub struct StateTransition {
     /// current cycle rather than letting it loop again. Only meaningful
     /// alongside [`SwitchMode::AtEnd`].
     pub break_loop_at_end: bool,
-    /// Godot `xfade_curve` — the easing curve for the crossfade, as the
-    /// serialized sub-resource id. Stored, not applied: Patina has no `Curve`
-    /// resource, so the crossfade stays linear (see the note on
-    /// [`crate::animation_tree`]).
-    pub xfade_curve: Option<String>,
+    /// Godot `xfade_curve` — the easing curve that shapes this transition's
+    /// crossfade, baked to evenly spaced samples over `t` in `0..=1`.
+    ///
+    /// **Applied as of pat-mgixk.82.** This used to hold the serialized
+    /// sub-resource id under a note reading *"Stored, not applied: Patina has
+    /// no `Curve` resource, so the crossfade stays linear"* — true at the time,
+    /// but the crate did already know how to read a Godot `Curve`:
+    /// `packed_scene::bake_curve_samples` has parsed `_data` and sampled the
+    /// cubic Bezier since pat-0q2kx.104 for Line2D/particle curves. The id is
+    /// now resolved at load time through that same baker, and
+    /// `sample_state_machine` remaps the blend factor through the table.
+    ///
+    /// `None` means no curve was authored, and the crossfade stays linear —
+    /// which is Godot's behaviour for an unset `xfade_curve`, not a fallback.
+    pub xfade_curve: Option<Vec<f32>>,
 }
 
 impl Default for StateTransition {
@@ -1592,6 +1605,41 @@ struct ActiveTransition {
     from_node: Box<AnimationNode>,
     elapsed: f64,
     duration: f64,
+    /// The taken edge's baked `xfade_curve`, captured at transition start
+    /// (pat-mgixk.82).
+    ///
+    /// ⚠️ Captured rather than looked up again while sampling. The edge is
+    /// found by `(from, to)` name, and `travel()` can re-enter the same pair
+    /// with a different hop in flight; re-resolving per frame would also make
+    /// the curve change under a transition if the graph were edited mid-fade.
+    curve: Option<Vec<f32>>,
+}
+
+/// Remaps a linear crossfade factor through a baked `xfade_curve` table
+/// (pat-mgixk.82).
+///
+/// The table is evenly spaced over `0..=1` — that is what
+/// `packed_scene::bake_curve_samples` produces — so entry `i` is at
+/// `i / (n - 1)` and a factor lands between two entries at worst.
+///
+/// ⚠️ An empty table returns the factor UNCHANGED rather than 0.0. A curve that
+/// failed to parse must leave the crossfade linear; mapping it to zero would
+/// silently freeze every transition on the from-state instead.
+fn apply_xfade_curve(samples: &[f32], factor: f32) -> f32 {
+    match samples.len() {
+        0 => factor,
+        // A single sample is a constant curve, with no span to interpolate.
+        1 => samples[0],
+        n => {
+            let x = factor.clamp(0.0, 1.0) * (n - 1) as f32;
+            let i = x.floor() as usize;
+            if i >= n - 1 {
+                return samples[n - 1];
+            }
+            let frac = x - i as f32;
+            samples[i] + (samples[i + 1] - samples[i]) * frac
+        }
+    }
 }
 
 /// Root container that evaluates a graph of [`AnimationNode`]s.
@@ -2464,6 +2512,7 @@ fn take_transition(sm: &mut StateMachine, t: &StateTransition) {
             from_node: Box::new(from_node),
             elapsed: 0.0,
             duration: t.crossfade,
+            curve: t.xfade_curve.clone(),
         });
     }
 }
@@ -2489,12 +2538,12 @@ fn advance_state_machine(
             // Travel: take the next queued hop regardless of transition
             // conditions, using the declared crossfade for that edge (if any).
             let next = sm.travel_queue.remove(0);
-            let crossfade = sm
+            let (crossfade, curve) = sm
                 .transitions
                 .iter()
                 .find(|t| t.from == sm.current && t.to == next)
-                .map(|t| t.crossfade)
-                .unwrap_or(0.0);
+                .map(|t| (t.crossfade, t.xfade_curve.clone()))
+                .unwrap_or((0.0, None));
             if let Some(from_node) = sm.states.get(&sm.current).cloned() {
                 let prev_state = std::mem::replace(&mut sm.current, next);
                 if let Some(node) = sm.states.get_mut(&sm.current) {
@@ -2506,6 +2555,7 @@ fn advance_state_machine(
                         from_node: Box::new(from_node),
                         elapsed: 0.0,
                         duration: crossfade,
+                        curve,
                     });
                 }
             }
@@ -2934,7 +2984,13 @@ fn sample_state_machine(
         return to_values;
     }
     let from_values = sample_node(&t.from_node, library);
-    let factor = (t.elapsed / t.duration).clamp(0.0, 1.0) as f32;
+    let linear = (t.elapsed / t.duration).clamp(0.0, 1.0) as f32;
+    // 🔑 pat-mgixk.82: Godot's `xfade_curve` remaps this weight. Without it the
+    // crossfade was always linear however the scene authored the curve.
+    let factor = match &t.curve {
+        Some(samples) => apply_xfade_curve(samples, linear),
+        None => linear,
+    };
     blend_value_lists(&from_values, &to_values, factor)
 }
 

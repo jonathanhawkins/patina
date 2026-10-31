@@ -6160,7 +6160,12 @@ fn bezier_scalar(start: f32, c1: f32, c2: f32, end: f32, t: f32) -> f32 {
 /// Line2D reads its curve through `sample_baked`, so baking here is what Godot
 /// itself does rather than an approximation of it. Returns `None` for a bag
 /// whose `_data` is absent, empty, or not a whole number of points.
-fn bake_curve_samples(data: &[Variant]) -> Option<Vec<f32>> {
+/// ⚠️ `pub(crate)` as of pat-mgixk.82: the state-machine loader bakes a
+/// transition's `xfade_curve` through this same function. Widening the
+/// visibility rather than copying it keeps ONE implementation of Godot's
+/// `Curve::sample` in the crate — the cubic Bezier below is easy to get subtly
+/// wrong, and two copies would drift.
+pub(crate) fn bake_curve_samples(data: &[Variant]) -> Option<Vec<f32>> {
     const ELEMS: usize = 5;
     if data.is_empty() || data.len() % ELEMS != 0 {
         return None;

@@ -559,6 +559,15 @@ fn read_resource_source(path: &str) -> Option<String> {
 ///
 /// Returns `None` when the file is missing or does not parse, leaving the
 /// caller to fall back to a path-only placeholder.
+/// Property key holding a `Curve`'s points, as an Array of `Vector2`
+/// (pat-mgixk.101).
+///
+/// ⚠️ Underscore-prefixed because it is not one of Godot's documented `Curve`
+/// members: Godot serialises the points through `_data`. Named in one place so
+/// the point arms and any later `sample()` cannot disagree about the spelling —
+/// a mismatch there would read as a curve that forgets its points.
+const CURVE_POINTS: &str = "_points";
+
 fn load_text_resource(path: &str) -> Option<ResourceRef> {
     // Pack-first (pat-s3rrv.34): `load("res://theme.tres")` must work in an
     // exported game, where the file exists only inside the pack.
@@ -4432,7 +4441,10 @@ impl Interpreter {
                 let val = self.eval_expr(expr)?;
                 match op {
                     UnaryOp::Neg => match val {
-                        Variant::Int(i) => Ok(Variant::Int(-i)),
+                        // `-i64::MIN` is not representable and PANICS under
+                        // `overflow-checks`; C++ wraps it back to itself
+                        // (pat-mgixk.104).
+                        Variant::Int(i) => Ok(Variant::Int(i.wrapping_neg())),
                         Variant::Float(f) => Ok(Variant::Float(-f)),
                         Variant::Vector2(v) => Ok(Variant::Vector2(-v)),
                         Variant::Vector3(v) => Ok(Variant::Vector3(-v)),
@@ -6152,7 +6164,11 @@ impl Interpreter {
 
     fn binary_add(&self, lhs: &Variant, rhs: &Variant) -> Result<Variant, RuntimeError> {
         match (lhs, rhs) {
-            (Variant::Int(a), Variant::Int(b)) => Ok(Variant::Int(a + b)),
+            // `int64_t` arithmetic WRAPS in Godot (C++ two's complement); it does
+            // not trap. `[profile.dev]` keeps `overflow-checks` on, so a plain
+            // `a + b` PANICKED the whole interpreter here — a GDScript hash loop
+            // `h = h * 31 + c` is enough to reach it (pat-mgixk.104).
+            (Variant::Int(a), Variant::Int(b)) => Ok(Variant::Int(a.wrapping_add(*b))),
             (Variant::Float(a), Variant::Float(b)) => Ok(Variant::Float(a + b)),
             (Variant::Int(a), Variant::Float(b)) => Ok(Variant::Float(*a as f64 + b)),
             (Variant::Float(a), Variant::Int(b)) => Ok(Variant::Float(a + *b as f64)),
@@ -6188,7 +6204,11 @@ impl Interpreter {
 
     fn binary_sub(&self, lhs: &Variant, rhs: &Variant) -> Result<Variant, RuntimeError> {
         match (lhs, rhs) {
-            (Variant::Int(a), Variant::Int(b)) => Ok(Variant::Int(a - b)),
+            // `int64_t` arithmetic WRAPS in Godot (C++ two's complement); it does
+            // not trap. `[profile.dev]` keeps `overflow-checks` on, so a plain
+            // `a - b` PANICKED the whole interpreter here — a GDScript hash loop
+            // `h = h * 31 + c` is enough to reach it (pat-mgixk.104).
+            (Variant::Int(a), Variant::Int(b)) => Ok(Variant::Int(a.wrapping_sub(*b))),
             (Variant::Float(a), Variant::Float(b)) => Ok(Variant::Float(a - b)),
             (Variant::Int(a), Variant::Float(b)) => Ok(Variant::Float(*a as f64 - b)),
             (Variant::Float(a), Variant::Int(b)) => Ok(Variant::Float(a - *b as f64)),
@@ -6210,7 +6230,11 @@ impl Interpreter {
 
     fn binary_mul(&self, lhs: &Variant, rhs: &Variant) -> Result<Variant, RuntimeError> {
         match (lhs, rhs) {
-            (Variant::Int(a), Variant::Int(b)) => Ok(Variant::Int(a * b)),
+            // `int64_t` arithmetic WRAPS in Godot (C++ two's complement); it does
+            // not trap. `[profile.dev]` keeps `overflow-checks` on, so a plain
+            // `a * b` PANICKED the whole interpreter here — a GDScript hash loop
+            // `h = h * 31 + c` is enough to reach it (pat-mgixk.104).
+            (Variant::Int(a), Variant::Int(b)) => Ok(Variant::Int(a.wrapping_mul(*b))),
             (Variant::Float(a), Variant::Float(b)) => Ok(Variant::Float(a * b)),
             (Variant::Int(a), Variant::Float(b)) => Ok(Variant::Float(*a as f64 * b)),
             (Variant::Float(a), Variant::Int(b)) => Ok(Variant::Float(a * *b as f64)),
@@ -6239,56 +6263,33 @@ impl Interpreter {
 
     fn binary_div(&self, lhs: &Variant, rhs: &Variant) -> Result<Variant, RuntimeError> {
         match (lhs, rhs) {
+            // int/int is the ONE division Godot guards: `OperatorEvaluatorDivNZ`
+            // (`core/variant/variant_op.cpp:353`). Keep the error.
+            //
+            // ⚠️ `wrapping_div`, not `/`: `i64::MIN / -1` has no representable
+            // result and PANICS under `overflow-checks` (pat-mgixk.104).
             (Variant::Int(a), Variant::Int(b)) => {
                 if *b == 0 {
                     return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
                 }
-                Ok(Variant::Int(a / b))
+                Ok(Variant::Int(a.wrapping_div(*b)))
             }
-            (Variant::Float(a), Variant::Float(b)) => {
-                if *b == 0.0 {
-                    return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
-                }
-                Ok(Variant::Float(a / b))
-            }
-            (Variant::Int(a), Variant::Float(b)) => {
-                if *b == 0.0 {
-                    return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
-                }
-                Ok(Variant::Float(*a as f64 / b))
-            }
-            (Variant::Float(a), Variant::Int(b)) => {
-                if *b == 0 {
-                    return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
-                }
-                Ok(Variant::Float(a / *b as f64))
-            }
+            // The seven float-involving rows: every one is a plain `Div` upstream,
+            // never `DivNZ` (variant_op.cpp:354-356 scalars, :359-360 Vector2,
+            // :367-368 Vector3), so a zero divisor yields inf/-inf/nan per IEEE
+            // rather than aborting the script (pat-mgixk.104).
+            //
+            // ⚠️ Do NOT reinstate a zero check on any of them. Only int/int above
+            // and the INT-vector rows in `variant_math::div` error on zero.
+            (Variant::Float(a), Variant::Float(b)) => Ok(Variant::Float(a / b)),
+            (Variant::Int(a), Variant::Float(b)) => Ok(Variant::Float(*a as f64 / b)),
+            (Variant::Float(a), Variant::Int(b)) => Ok(Variant::Float(a / *b as f64)),
             // Vector2 / scalar
-            (Variant::Vector2(v), Variant::Float(s)) => {
-                if *s == 0.0 {
-                    return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
-                }
-                Ok(Variant::Vector2(*v / *s as f32))
-            }
-            (Variant::Vector2(v), Variant::Int(s)) => {
-                if *s == 0 {
-                    return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
-                }
-                Ok(Variant::Vector2(*v / *s as f32))
-            }
+            (Variant::Vector2(v), Variant::Float(s)) => Ok(Variant::Vector2(*v / *s as f32)),
+            (Variant::Vector2(v), Variant::Int(s)) => Ok(Variant::Vector2(*v / *s as f32)),
             // Vector3 / scalar
-            (Variant::Vector3(v), Variant::Float(s)) => {
-                if *s == 0.0 {
-                    return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
-                }
-                Ok(Variant::Vector3(*v / *s as f32))
-            }
-            (Variant::Vector3(v), Variant::Int(s)) => {
-                if *s == 0 {
-                    return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
-                }
-                Ok(Variant::Vector3(*v / *s as f32))
-            }
+            (Variant::Vector3(v), Variant::Float(s)) => Ok(Variant::Vector3(*v / *s as f32)),
+            (Variant::Vector3(v), Variant::Int(s)) => Ok(Variant::Vector3(*v / *s as f32)),
             // Componentwise vector division, the int-vector `DivNZ` rows,
             // Color and transform-by-scalar (pat-mgixk.11). `Some(Err(..))` is
             // a zero divisor on a DivNZ row, which Godot reports as a script
@@ -6318,11 +6319,13 @@ impl Interpreter {
             return Ok(Variant::String(string_format(&fmt, &values)));
         }
         match (lhs, rhs) {
+            // `ModNZ` upstream (variant_op.cpp:398) — the error stays. But
+            // `i64::MIN % -1` traps like the division, so wrap (pat-mgixk.104).
             (Variant::Int(a), Variant::Int(b)) => {
                 if *b == 0 {
                     return Err(RuntimeError::new(RuntimeErrorKind::DivisionByZero));
                 }
-                Ok(Variant::Int(a % b))
+                Ok(Variant::Int(a.wrapping_rem(*b)))
             }
             (Variant::Float(a), Variant::Float(b)) => {
                 if *b == 0.0 {
@@ -7069,6 +7072,205 @@ impl Interpreter {
                 let n = to_int(&args[2])?;
                 Ok(Some(Variant::String(tr_lookup_plural(&key, &plural, n))))
             }
+            // `bool(v)` (pat-mgixk.106). Godot registers four constructors —
+            // default, bool, int, float — and `int`/`float` were already here
+            // while the third of the trio was not, so `bool(0)` raised
+            // `UndefinedFunction`.
+            //
+            // ⚠️ A String is deliberately REFUSED. Godot has no
+            // `bool(String)` constructor, and the obvious guess is wrong in a
+            // way that would bite: `bool("false")` is `true` in every language
+            // that allows it, because a non-empty string is truthy.
+            // `Array()` and its conversion / typed forms (pat-mgixk.106).
+            //
+            // Godot registers 13 Array constructors; the ones a script actually
+            // writes are the empty form, the copy, the `PackedXArray` unpack and
+            // the 4-argument typed constructor.
+            "Array" => match args.len() {
+                0 => Ok(Some(Variant::Array(SharedArray::new()))),
+                1 => {
+                    // ⚠️ A COPY, not the same handle. `SharedArray` is shared by
+                    // reference, so returning `a.clone()` would make
+                    // `Array(other)` an alias — every later `append` would be
+                    // visible through `other`, which is not what a constructor
+                    // means.
+                    let items = match &args[0] {
+                        Variant::Array(a) => a.to_vec(),
+                        // The packed arrays unpack elementwise, which is the
+                        // only way a script can get at their contents as
+                        // Variants.
+                        Variant::PackedByteArray(v) => {
+                            v.iter().map(|b| Variant::Int(*b as i64)).collect()
+                        }
+                        Variant::PackedInt32Array(v) => {
+                            v.iter().map(|i| Variant::Int(*i as i64)).collect()
+                        }
+                        Variant::PackedInt64Array(v) => {
+                            v.iter().map(|i| Variant::Int(*i)).collect()
+                        }
+                        Variant::PackedFloat32Array(v) => {
+                            v.iter().map(|f| Variant::Float(*f as f64)).collect()
+                        }
+                        Variant::PackedFloat64Array(v) => {
+                            v.iter().map(|f| Variant::Float(*f)).collect()
+                        }
+                        Variant::PackedStringArray(v) => {
+                            v.iter().map(|s| Variant::String(s.clone())).collect()
+                        }
+                        Variant::PackedVector2Array(v) => {
+                            v.iter().map(|p| Variant::Vector2(*p)).collect()
+                        }
+                        Variant::PackedVector3Array(v) => {
+                            v.iter().map(|p| Variant::Vector3(*p)).collect()
+                        }
+                        Variant::PackedVector4Array(v) => {
+                            v.iter().map(|p| Variant::Vector4(*p)).collect()
+                        }
+                        Variant::PackedColorArray(v) => {
+                            v.iter().map(|c| Variant::Color(*c)).collect()
+                        }
+                        other => {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                                "cannot convert {} to Array",
+                                other.variant_type()
+                            ))))
+                        }
+                    };
+                    Ok(Some(Variant::Array(SharedArray::from_vec(items))))
+                }
+                // `Array(base, type, class_name, script)`.
+                4 => {
+                    let source = match &args[0] {
+                        Variant::Array(a) => a.to_vec(),
+                        other => {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                                "Array()'s first argument must be an Array, got {}",
+                                other.variant_type()
+                            ))))
+                        }
+                    };
+                    let typed = container_type_from_args(&args[1], &args[2], &args[3])?;
+                    let out = SharedArray::new();
+                    // 🔑 Order is forced: `set_typed` refuses a non-empty array,
+                    // and `assign` is what VALIDATES the elements. Building the
+                    // array from `source` first and typing it afterwards would
+                    // reject every non-empty call.
+                    out.set_typed(typed).map_err(container_error)?;
+                    out.assign(&SharedArray::from_vec(source))
+                        .map_err(container_error)?;
+                    Ok(Some(Variant::Array(out)))
+                }
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Array() takes 0, 1 or 4 arguments".into(),
+                ))),
+            },
+            // `Dictionary()` and its copy / typed forms (pat-mgixk.106).
+            "Dictionary" => match args.len() {
+                0 => Ok(Some(
+                    Variant::Dictionary(gdvariant::SharedDictionary::new()),
+                )),
+                1 => match &args[0] {
+                    // A copy for the same reason as Array above: a shared handle
+                    // would alias.
+                    Variant::Dictionary(d) => Ok(Some(Variant::Dictionary(d.to_dict().into()))),
+                    other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "cannot convert {} to Dictionary",
+                        other.variant_type()
+                    )))),
+                },
+                // `Dictionary(base, key_type, key_class, key_script,
+                //             value_type, value_class, value_script)`.
+                7 => {
+                    let source = match &args[0] {
+                        Variant::Dictionary(d) => d.to_dict(),
+                        other => {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                                "Dictionary()'s first argument must be a Dictionary, got {}",
+                                other.variant_type()
+                            ))))
+                        }
+                    };
+                    let key = container_type_from_args(&args[1], &args[2], &args[3])?;
+                    let value = container_type_from_args(&args[4], &args[5], &args[6])?;
+                    let out = gdvariant::SharedDictionary::new();
+                    out.set_typed(key, value).map_err(container_error)?;
+                    out.assign(&gdvariant::SharedDictionary::from(source))
+                        .map_err(container_error)?;
+                    Ok(Some(Variant::Dictionary(out)))
+                }
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Dictionary() takes 0, 1 or 7 arguments".into(),
+                ))),
+            },
+            "bool" => match args.len() {
+                0 => Ok(Some(Variant::Bool(false))),
+                1 => match &args[0] {
+                    Variant::Bool(b) => Ok(Some(Variant::Bool(*b))),
+                    Variant::Int(i) => Ok(Some(Variant::Bool(*i != 0))),
+                    Variant::Float(f) => Ok(Some(Variant::Bool(*f != 0.0))),
+                    other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "cannot convert {} to bool",
+                        other.variant_type()
+                    )))),
+                },
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "bool() takes 0 or 1 arguments".into(),
+                ))),
+            },
+            // `String(v)` (pat-mgixk.106) — the same stringification `print`
+            // and `str` use, so the three cannot disagree about how a value
+            // renders. Godot's own `String(42)` answers "42".
+            "String" => match args.len() {
+                0 => Ok(Some(Variant::String(String::new()))),
+                1 => {
+                    let text = self.display_variant(&args[0]);
+                    Ok(Some(Variant::String(text)))
+                }
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "String() takes 0 or 1 arguments".into(),
+                ))),
+            },
+            // `Signal(object, name)` (pat-mgixk.106).
+            //
+            // 🔑 The object is carried as a RAW id, matching how
+            // `object.signal_name` already builds this variant — a `Signal`
+            // that bound nothing would be resumed by any other object's signal
+            // of the same name, which is the exact bug `Variant::Signal`'s own
+            // doc comment records.
+            "Signal" => match args.len() {
+                // Godot's no-arg `Signal()` is the null signal: bound to
+                // nothing, and falsy for that reason.
+                0 => Ok(Some(Variant::Signal {
+                    object_id: 0,
+                    name: String::new(),
+                })),
+                2 => {
+                    let object_id = match &args[0] {
+                        Variant::ObjectId(id) => id.raw(),
+                        Variant::Nil => 0,
+                        other => {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                                "Signal() takes an object as its first argument, got {}",
+                                other.variant_type()
+                            ))))
+                        }
+                    };
+                    let name = match &args[1] {
+                        Variant::String(s) => s.clone(),
+                        Variant::StringName(s) => s.as_str().to_string(),
+                        other => {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                                "Signal() takes a signal name as its second argument, got {}",
+                                other.variant_type()
+                            ))))
+                        }
+                    };
+                    Ok(Some(Variant::Signal { object_id, name }))
+                }
+                _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "Signal() takes 0 or 2 arguments".into(),
+                ))),
+            },
             "int" => {
                 if args.len() != 1 {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -8494,9 +8696,26 @@ impl Interpreter {
                 if args.is_empty() {
                     return Ok(Some(Variant::Vector2(gdcore::math::Vector2::ZERO)));
                 }
+                // The copy and conversion forms (pat-mgixk.106). `Vector2i`
+                // below already accepted its 1-argument forms; this direction
+                // did not, so `Vector2(Vector2i(1, 2))` raised "Vector2() takes
+                // 0 or 2 arguments" — a script could narrow a vector but never
+                // widen one.
+                if args.len() == 1 {
+                    return match &args[0] {
+                        Variant::Vector2(v) => Ok(Some(Variant::Vector2(*v))),
+                        Variant::Vector2i(v) => Ok(Some(Variant::Vector2(
+                            gdcore::math::Vector2::new(v.x as f32, v.y as f32),
+                        ))),
+                        other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "cannot convert {} to Vector2",
+                            other.variant_type()
+                        )))),
+                    };
+                }
                 if args.len() != 2 {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                        "Vector2() takes 0 or 2 arguments".into(),
+                        "Vector2() takes 0, 1 or 2 arguments".into(),
                     )));
                 }
                 let x = to_float(&args[0])? as f32;
@@ -8684,9 +8903,25 @@ impl Interpreter {
                 if args.is_empty() {
                     return Ok(Some(Variant::Vector3(gdcore::math::Vector3::ZERO)));
                 }
+                // The copy and conversion forms, as for `Vector2` above
+                // (pat-mgixk.106): `Vector3(Vector3i(1, 2, 3))` raised
+                // "Vector3() takes 0 or 3 arguments", so widening an integer
+                // vector — a GridMap coordinate, say — was impossible.
+                if args.len() == 1 {
+                    return match &args[0] {
+                        Variant::Vector3(v) => Ok(Some(Variant::Vector3(*v))),
+                        Variant::Vector3i(v) => Ok(Some(Variant::Vector3(
+                            gdcore::math::Vector3::new(v.x as f32, v.y as f32, v.z as f32),
+                        ))),
+                        other => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "cannot convert {} to Vector3",
+                            other.variant_type()
+                        )))),
+                    };
+                }
                 if args.len() != 3 {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                        "Vector3() takes 0 or 3 arguments".into(),
+                        "Vector3() takes 0, 1 or 3 arguments".into(),
                     )));
                 }
                 let x = to_float(&args[0])? as f32;
@@ -14743,6 +14978,253 @@ impl Interpreter {
                         true,
                     ))))
                 }
+
+                // -- byte buffers (pat-mgixk.107) -------------------------
+                "to_utf8_buffer" => Ok(Variant::PackedByteArray(s.as_bytes().to_vec())),
+                // ⚠️ Godot's `to_ascii_buffer` goes through `String::ascii()`,
+                // which CASTS each code point to one byte — it is lossy rather
+                // than an error, so `"é"` becomes a single truncated byte. Kept
+                // lossy on purpose: refusing non-ASCII would diverge.
+                "to_ascii_buffer" => Ok(Variant::PackedByteArray(
+                    s.chars().map(|c| c as u32 as u8).collect(),
+                )),
+                "to_utf16_buffer" => Ok(Variant::PackedByteArray(
+                    s.encode_utf16()
+                        .flat_map(|u| u.to_le_bytes())
+                        .collect::<Vec<u8>>(),
+                )),
+                "to_utf32_buffer" => Ok(Variant::PackedByteArray(
+                    s.chars()
+                        .flat_map(|c| (c as u32).to_le_bytes())
+                        .collect::<Vec<u8>>(),
+                )),
+                // ⚠️ `wchar_t` is 32-bit on Linux/macOS and 16-bit on Windows,
+                // so Godot's buffer is platform-dependent. This follows the
+                // Unix width, which is what this engine builds for; a Windows
+                // host would want UTF-16 here. Noted rather than silently
+                // picking one.
+                "to_wchar_buffer" => Ok(Variant::PackedByteArray(
+                    s.chars()
+                        .flat_map(|c| (c as u32).to_le_bytes())
+                        .collect::<Vec<u8>>(),
+                )),
+                // Godot's multibyte buffer is locale-encoded; with no locale
+                // layer here, UTF-8 is the only defensible answer and matches
+                // every UTF-8 locale.
+                "to_multibyte_char_buffer" => Ok(Variant::PackedByteArray(s.as_bytes().to_vec())),
+
+                // -- hashing ----------------------------------------------
+                "md5_text" => Ok(Variant::String(gdcore::crypto::md5_hex(s.as_bytes()))),
+                "sha1_text" => Ok(Variant::String(gdcore::crypto::sha1_hex(s.as_bytes()))),
+                "md5_buffer" => Ok(Variant::PackedByteArray(
+                    gdcore::crypto::md5(s.as_bytes()).to_vec(),
+                )),
+                "sha1_buffer" => Ok(Variant::PackedByteArray(
+                    gdcore::crypto::sha1(s.as_bytes()).to_vec(),
+                )),
+                "sha256_buffer" => Ok(Variant::PackedByteArray(
+                    gdcore::crypto::sha256(s.as_bytes()).to_vec(),
+                )),
+                // Godot returns an EMPTY buffer for odd length or a non-hex
+                // digit rather than erroring or decoding a prefix.
+                "hex_decode" => Ok(Variant::PackedByteArray(gd_hex_decode(s))),
+
+                // -- validation -------------------------------------------
+                //
+                // `is_valid_identifier` is Godot's deprecated alias of the
+                // ASCII form, so both share one implementation.
+                "is_valid_identifier" | "is_valid_ascii_identifier" => {
+                    Ok(Variant::Bool(gd_is_valid_ascii_identifier(s)))
+                }
+                "is_valid_unicode_identifier" => {
+                    Ok(Variant::Bool(gd_is_valid_unicode_identifier(s)))
+                }
+                "is_valid_hex_number" => {
+                    let with_prefix = args.first().map(|v| v.is_truthy()).unwrap_or(false);
+                    Ok(Variant::Bool(gd_is_valid_hex_number(s, with_prefix)))
+                }
+                "is_valid_html_color" => Ok(Variant::Bool(gd_is_valid_html_color(s))),
+                "is_valid_ip_address" => Ok(Variant::Bool(gd_is_valid_ip_address(s))),
+                "is_valid_filename" => Ok(Variant::Bool(gd_is_valid_filename(s))),
+                "validate_node_name" => Ok(Variant::String(gd_validate_node_name(s))),
+                "validate_filename" => Ok(Variant::String(gd_validate_filename(s))),
+                // ⚠️ `uri_file_decode` is percent-decoding WITHOUT the `+` to
+                // space rule, which is the only thing separating it from
+                // `uri_decode`. This engine's `gd_uri_decode` never implemented
+                // the `+` rule, so it already behaves as the file variant and is
+                // reused verbatim here. That also means `uri_decode` itself
+                // diverges from Godot — reported on the bead, not changed, since
+                // altering it would move existing behaviour.
+                "uri_file_decode" => Ok(Variant::String(gd_uri_decode(s))),
+
+                // -- slicing / matching / editing (pat-mgixk.107) ----------
+                "get_slice" => {
+                    Self::require_args("get_slice", args, 2)?;
+                    let delim = arg_str(&args[0]);
+                    let idx = to_int(&args[1])?;
+                    Ok(Variant::String(gd_get_slice(s, &delim, idx)))
+                }
+                // Same as `get_slice` but the delimiter arrives as a code point.
+                "get_slicec" => {
+                    Self::require_args("get_slicec", args, 2)?;
+                    let delim = u32::try_from(to_int(&args[0])?)
+                        .ok()
+                        .and_then(char::from_u32)
+                        .map(String::from)
+                        .unwrap_or_default();
+                    let idx = to_int(&args[1])?;
+                    if delim.is_empty() {
+                        return Ok(Variant::String(String::new()));
+                    }
+                    Ok(Variant::String(gd_get_slice(s, &delim, idx)))
+                }
+                "get_slice_count" => {
+                    Self::require_args("get_slice_count", args, 1)?;
+                    Ok(Variant::Int(gd_get_slice_count(s, &arg_str(&args[0]))))
+                }
+                "match" => {
+                    Self::require_args("match", args, 1)?;
+                    Ok(Variant::Bool(gd_wildcard_match_entry(
+                        s,
+                        &arg_str(&args[0]),
+                        true,
+                    )))
+                }
+                "matchn" => {
+                    Self::require_args("matchn", args, 1)?;
+                    Ok(Variant::Bool(gd_wildcard_match_entry(
+                        s,
+                        &arg_str(&args[0]),
+                        false,
+                    )))
+                }
+                // ⚠️ Direction: SELF is the subsequence, the ARGUMENT is the
+                // haystack. Reading it the other way round makes
+                // `"ab".is_subsequence_of("axb")` false and the method looks
+                // broken only for the cases that matter.
+                "is_subsequence_of" => {
+                    Self::require_args("is_subsequence_of", args, 1)?;
+                    Ok(Variant::Bool(gd_is_subsequence_of(
+                        s,
+                        &arg_str(&args[0]),
+                        true,
+                    )))
+                }
+                "is_subsequence_ofn" => {
+                    Self::require_args("is_subsequence_ofn", args, 1)?;
+                    Ok(Variant::Bool(gd_is_subsequence_of(
+                        s,
+                        &arg_str(&args[0]),
+                        false,
+                    )))
+                }
+                "bigrams" => Ok(Variant::PackedStringArray(gd_bigrams(s))),
+                "replacen" => {
+                    Self::require_args("replacen", args, 2)?;
+                    Ok(Variant::String(gd_replacen(
+                        s,
+                        &arg_str(&args[0]),
+                        &arg_str(&args[1]),
+                    )))
+                }
+                "replace_char" => {
+                    Self::require_args("replace_char", args, 2)?;
+                    let from = gd_char_arg(&args[0]);
+                    let to = gd_char_arg(&args[1]);
+                    Ok(Variant::String(match (from, to) {
+                        (Some(f), Some(t)) => s.chars().map(|c| if c == f { t } else { c }).collect(),
+                        // Godot replaces with nothing when the target is 0.
+                        (Some(f), None) => s.chars().filter(|c| *c != f).collect(),
+                        _ => s.clone(),
+                    }))
+                }
+                "replace_chars" => {
+                    Self::require_args("replace_chars", args, 2)?;
+                    let set: Vec<char> = arg_str(&args[0]).chars().collect();
+                    let to = gd_char_arg(&args[1]);
+                    Ok(Variant::String(match to {
+                        Some(t) => s
+                            .chars()
+                            .map(|c| if set.contains(&c) { t } else { c })
+                            .collect(),
+                        None => s.chars().filter(|c| !set.contains(c)).collect(),
+                    }))
+                }
+                "remove_char" => {
+                    Self::require_args("remove_char", args, 1)?;
+                    Ok(Variant::String(match gd_char_arg(&args[0]) {
+                        Some(ch) => s.chars().filter(|c| *c != ch).collect(),
+                        None => s.clone(),
+                    }))
+                }
+                "remove_chars" => {
+                    Self::require_args("remove_chars", args, 1)?;
+                    let set: Vec<char> = arg_str(&args[0]).chars().collect();
+                    Ok(Variant::String(
+                        s.chars().filter(|c| !set.contains(c)).collect::<String>(),
+                    ))
+                }
+                // ⚠️ Reverses CHARACTERS, not bytes: reversing the UTF-8 bytes
+                // of any multi-byte string produces invalid UTF-8.
+                "reverse" => Ok(Variant::String(s.chars().rev().collect::<String>())),
+                "insert" => {
+                    Self::require_args("insert", args, 2)?;
+                    Ok(Variant::String(gd_insert(
+                        s,
+                        to_int(&args[0])?,
+                        &arg_str(&args[1]),
+                    )))
+                }
+                "erase" => {
+                    // ⚠️ RANGE, not exact: `require_args` demands
+                    // `args.len() == n`, so the exact form REJECTED Godot's
+                    // two-argument `erase(pos, chars)` before the arm could run
+                    // — the call raised rather than erasing. Every Godot method
+                    // with a DEFAULT parameter needs the range form, which is
+                    // what `substr` above already uses.
+                    Self::require_args_range("erase", args, 1, 2)?;
+                    // Godot's `chars` defaults to 1.
+                    let count = args
+                        .get(1)
+                        .map(|v| to_int(v).unwrap_or(1))
+                        .unwrap_or(1);
+                    Ok(Variant::String(gd_erase(s, to_int(&args[0])?, count)))
+                }
+                // Godot derives kebab from the same word split as snake, so
+                // reusing the existing converter keeps the two from drifting.
+                "to_kebab_case" => Ok(Variant::String(gd_to_snake_case(s).replace('_', "-"))),
+                "split_floats" => {
+                    // Same reason as `erase`: `allow_empty` is optional, so an
+                    // exact arity check would reject the two-argument form.
+                    Self::require_args_range("split_floats", args, 1, 2)?;
+                    let delim = arg_str(&args[0]);
+                    // Godot's `allow_empty` defaults to true.
+                    let allow_empty = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
+                    Ok(Variant::PackedFloat64Array(gd_split_floats(
+                        s,
+                        &delim,
+                        allow_empty,
+                    )))
+                }
+                "unicode_at" => {
+                    Self::require_args("unicode_at", args, 1)?;
+                    let idx = to_int(&args[0])?;
+                    let code = if idx < 0 {
+                        None
+                    } else {
+                        s.chars().nth(idx as usize).map(|c| c as u32 as i64)
+                    };
+                    // Godot errors and returns 0 past the end.
+                    Ok(Variant::Int(code.unwrap_or(0)))
+                }
+                "naturalcasecmp_to" => {
+                    Self::require_args("naturalcasecmp_to", args, 1)?;
+                    Ok(Variant::Int(ordering_to_int(natural_cmp(
+                        s,
+                        &arg_str(&args[0]),
+                        false,
+                    ))))
+                }
                 _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                     format!("String.{method}"),
                 ))),
@@ -17293,8 +17775,130 @@ impl Interpreter {
                             .collect(),
                     ))
                 }
+                // -- Curve point API (pat-mgixk.101) ---------------------
+                //
+                // `ClassDB.instantiate("Curve")` reaches here via `Curve.new()`,
+                // which the generic RefCounted tail renders as a
+                // `Variant::Resource`. Points live in the resource's own
+                // property bag, so they round-trip through `get()`/`set()` and
+                // through a `.tres` like any other resource state.
+                //
+                // ⚠️ Guarded on the class name. Without it, `add_point` would
+                // answer on EVERY resource — `StyleBox.add_point(..)` would
+                // silently succeed and store points nothing reads, which is
+                // worse than the `UndefinedFunction` a script gets today.
+                "add_point" | "get_point_count" | "get_point_position"
+                | "clear_points" | "remove_point"
+                    if res_ref.class_name == "Curve" =>
+                {
+                    let mut points: Vec<Variant> = match res_ref.properties.get(CURVE_POINTS) {
+                        Some(Variant::Array(a)) => a.to_vec(),
+                        _ => Vec::new(),
+                    };
+                    match method {
+                        "get_point_count" => Ok(Variant::Int(points.len() as i64)),
+                        "get_point_position" => {
+                            let idx = match args.first() {
+                                Some(Variant::Int(i)) => *i,
+                                Some(Variant::Float(f)) => *f as i64,
+                                _ => -1,
+                            };
+                            // Godot returns a zero Vector2 for a bad index
+                            // rather than raising.
+                            Ok(usize::try_from(idx)
+                                .ok()
+                                .and_then(|i| points.get(i).cloned())
+                                .unwrap_or(Variant::Vector2(gdcore::math::Vector2::ZERO)))
+                        }
+                        _ => {
+                            match method {
+                                "clear_points" => points.clear(),
+                                "remove_point" => {
+                                    let idx = match args.first() {
+                                        Some(Variant::Int(i)) => *i,
+                                        Some(Variant::Float(f)) => *f as i64,
+                                        _ => -1,
+                                    };
+                                    if let Ok(i) = usize::try_from(idx) {
+                                        if i < points.len() {
+                                            points.remove(i);
+                                        }
+                                    }
+                                }
+                                // add_point
+                                _ => {
+                                    let Some(Variant::Vector2(pos)) = args.first().cloned() else {
+                                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                            "Curve.add_point() takes a Vector2 position".into(),
+                                        )));
+                                    };
+                                    // 🔑 Godot keeps a Curve's points sorted by
+                                    // offset, and `sample()` walks them in that
+                                    // order — appending would make the order
+                                    // depend on insertion order instead.
+                                    let at = points
+                                        .iter()
+                                        .position(|p| match p {
+                                            Variant::Vector2(q) => q.x > pos.x,
+                                            _ => false,
+                                        })
+                                        .unwrap_or(points.len());
+                                    points.insert(at, Variant::Vector2(pos));
+                                }
+                            }
+                            let count = points.len();
+                            let mut new_ref = res_ref.clone();
+                            new_ref.properties.insert(
+                                CURVE_POINTS.to_string(),
+                                Variant::Array(SharedArray::from_vec(points)),
+                            );
+                            // Godot exposes the count as a property too, so
+                            // `curve.point_count` must agree with
+                            // `get_point_count()` rather than being a second,
+                            // independently-maintained number.
+                            new_ref
+                                .properties
+                                .insert("point_count".to_string(), Variant::Int(count as i64));
+                            self.write_place(object_expr, Variant::Resource(new_ref))?;
+                            if method == "add_point" {
+                                // Godot returns the index the point landed at.
+                                Ok(Variant::Int(count as i64 - 1))
+                            } else {
+                                Ok(Variant::Nil)
+                            }
+                        }
+                    }
+                }
                 "get_path" => Ok(Variant::String(res_ref.path.clone())),
                 "get_class" => Ok(Variant::String(res_ref.class_name.clone())),
+                // `Object.is_class` for a RESOURCE (pat-mgixk.101).
+                //
+                // ⚠️ The resource dispatch had `get_class` but no `is_class`, so
+                // `preload("res://x.tscn").is_class("Resource")` could not answer
+                // — the same registered-without-an-arm shape that once made
+                // `is_class` return Nil for every OBJECT in the engine. Mirrors
+                // that arm deliberately, including its fallback.
+                //
+                // 🔑 The `class_name == name` fallback is load-bearing: ClassDB
+                // is populated by the `register_*` entry points, and a chain
+                // lookup on a class that was never registered comes back EMPTY —
+                // which would make `is_class` false for a resource that
+                // demonstrably has that exact class.
+                "is_class" => {
+                    let name = match args.first() {
+                        Some(Variant::String(s)) => s.clone(),
+                        Some(Variant::StringName(s)) => s.as_str().to_string(),
+                        _ => {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                                "is_class() takes a class name string".into(),
+                            )))
+                        }
+                    };
+                    Ok(Variant::Bool(
+                        res_ref.class_name == name
+                            || gdobject::class_db::is_parent_class(&res_ref.class_name, &name),
+                    ))
+                }
                 "get" => {
                     if args.len() != 1 {
                         return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -19932,6 +20536,15 @@ fn build_packed_array(empty: Variant, args: &[Variant]) -> Result<Variant, Runti
     }
 }
 
+/// Godot's error for a component index outside a builtin's range.
+///
+/// `variant_setget.cpp` ERRORS rather than clamping or wrapping, so an
+/// out-of-range component must not silently answer the nearest valid one
+/// (pat-mgixk.105).
+fn component_oob(index: i64, length: usize) -> RuntimeError {
+    RuntimeError::new(RuntimeErrorKind::IndexOutOfBounds { index, length })
+}
+
 fn index_into(container: &Variant, idx: &Variant) -> Result<Variant, RuntimeError> {
     // Packed arrays index by int, with Python-style negative indices.
     if container.is_packed_array() {
@@ -20003,6 +20616,88 @@ fn index_into(container: &Variant, idx: &Variant) -> Result<Variant, RuntimeErro
                 length: 4,
             })),
         },
+        // pat-mgixk.105: the rest of Godot's `INDEXED_SETGET_STRUCT_TYPED`
+        // family (`core/variant/variant_setget.cpp`). Every type below fell
+        // through to "cannot index", so a script could not even read
+        // `position[0]` — while `Vector4` and `Projection` above already
+        // worked, which made the gap look like a deliberate subset.
+        //
+        // ⚠️ The element type follows Godot's `indexing_return_type`: the
+        // integer vectors answer `Int`, not `Float`. Widening them to float
+        // would make `v[0] == 3` false for `Vector2i(3, 4)`.
+        (Variant::Vector2(v), Variant::Int(i)) => match i {
+            0 => Ok(Variant::Float(v.x as f64)),
+            1 => Ok(Variant::Float(v.y as f64)),
+            _ => Err(component_oob(*i, 2)),
+        },
+        (Variant::Vector2i(v), Variant::Int(i)) => match i {
+            0 => Ok(Variant::Int(v.x as i64)),
+            1 => Ok(Variant::Int(v.y as i64)),
+            _ => Err(component_oob(*i, 2)),
+        },
+        (Variant::Vector3(v), Variant::Int(i)) => match i {
+            0 => Ok(Variant::Float(v.x as f64)),
+            1 => Ok(Variant::Float(v.y as f64)),
+            2 => Ok(Variant::Float(v.z as f64)),
+            _ => Err(component_oob(*i, 3)),
+        },
+        (Variant::Vector3i(v), Variant::Int(i)) => match i {
+            0 => Ok(Variant::Int(v.x as i64)),
+            1 => Ok(Variant::Int(v.y as i64)),
+            2 => Ok(Variant::Int(v.z as i64)),
+            _ => Err(component_oob(*i, 3)),
+        },
+        // Godot indexes a Color by channel: 0=r, 1=g, 2=b, 3=a.
+        (Variant::Color(c), Variant::Int(i)) => match i {
+            0 => Ok(Variant::Float(c.r as f64)),
+            1 => Ok(Variant::Float(c.g as f64)),
+            2 => Ok(Variant::Float(c.b as f64)),
+            3 => Ok(Variant::Float(c.a as f64)),
+            _ => Err(component_oob(*i, 4)),
+        },
+        (Variant::Quaternion(q), Variant::Int(i)) => match i {
+            0 => Ok(Variant::Float(q.x as f64)),
+            1 => Ok(Variant::Float(q.y as f64)),
+            2 => Ok(Variant::Float(q.z as f64)),
+            3 => Ok(Variant::Float(q.w as f64)),
+            _ => Err(component_oob(*i, 4)),
+        },
+        // 🔑 `basis[i]` is Godot's ROW i, and it has to be GATHERED here.
+        //
+        // Godot stores `Vector3 rows[3]` and `operator[]` returns `rows[i]`.
+        // Patina's `gdcore::math3d::Basis` stores the three vectors as
+        // **columns** — its own `xform` computes `x*v.x + y*v.y + z*v.z`, a
+        // linear combination of the stored vectors, which is the column
+        // convention, and its `Basis(x_axis, y_axis, z_axis)` constructor takes
+        // columns just as Godot's does.
+        //
+        // ⚠️ So returning `b.x` / `b.y` / `b.z` would be a TRANSPOSED accessor.
+        // It passes for the identity basis — which is its own transpose, and is
+        // the only case the bead's acceptance text names — and is wrong for
+        // every other basis. The gather below is the same construction
+        // `Basis::transposed()` uses.
+        (Variant::Basis(b), Variant::Int(i)) => match i {
+            0 => Ok(Variant::Vector3(gdcore::math::Vector3::new(
+                b.x.x, b.y.x, b.z.x,
+            ))),
+            1 => Ok(Variant::Vector3(gdcore::math::Vector3::new(
+                b.x.y, b.y.y, b.z.y,
+            ))),
+            2 => Ok(Variant::Vector3(gdcore::math::Vector3::new(
+                b.x.z, b.y.z, b.z.z,
+            ))),
+            _ => Err(component_oob(*i, 3)),
+        },
+        // `Transform2D` indexes by COLUMN, with 2 == origin
+        // (`Transform2D::operator[]` returns `columns[i]`). Patina stores
+        // `{x, y, origin}`, which already *is* that column order, so unlike
+        // Basis there is nothing to transpose.
+        (Variant::Transform2D(t), Variant::Int(i)) => match i {
+            0 => Ok(Variant::Vector2(t.x)),
+            1 => Ok(Variant::Vector2(t.y)),
+            2 => Ok(Variant::Vector2(t.origin)),
+            _ => Err(component_oob(*i, 3)),
+        },
         (Variant::Dictionary(d), key) => d.get(key).ok_or_else(|| {
             RuntimeError::new(RuntimeErrorKind::UndefinedVariable(key.to_string_lossy()))
         }),
@@ -20018,18 +20713,22 @@ fn index_into(container: &Variant, idx: &Variant) -> Result<Variant, RuntimeErro
             .cloned()
             .unwrap_or(Variant::Nil)),
         (Variant::String(s), Variant::Int(i)) => {
+            // ⚠️ CHARACTERS, not bytes. This used `s.len()` — the BYTE length —
+            // for the negative offset and the reported length while reading
+            // with `chars().nth()`, so `"héllo"[-1]` computed 6 - 1 = 5
+            // against a 5-character string and raised IndexOutOfBounds. Every
+            // negative index into any non-ASCII string was off by the number of
+            // multi-byte characters in it (pat-mgixk.105).
+            let chars = s.chars().count();
             let index = if *i < 0 {
-                (s.len() as i64 + i) as usize
+                (chars as i64 + i) as usize
             } else {
                 *i as usize
             };
             s.chars()
                 .nth(index)
                 .map(|c| Variant::String(c.to_string()))
-                .ok_or(RuntimeError::new(RuntimeErrorKind::IndexOutOfBounds {
-                    index: *i,
-                    length: s.len(),
-                }))
+                .ok_or(component_oob(*i, chars))
         }
         _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
             "cannot index {} with {}",
@@ -20100,6 +20799,222 @@ fn set_index(container: &mut Variant, idx: &Variant, value: Variant) -> Result<(
         // write path at all.
         (Variant::Resource(r), key) => {
             r.properties.insert(key.to_string_lossy(), value);
+            Ok(())
+        }
+        // pat-mgixk.105: the write half. `set_index` handled only packed
+        // arrays, Array, Dictionary and Resource, so `v[0] = 1.0` on ANY
+        // vector — including the Vector4 and Projection that could already be
+        // READ — answered "invalid index assignment".
+        //
+        // These mutate through the `&mut Variant` in place; the caller's
+        // existing lvalue write-back is what carries `position[0] = 42.0` on to
+        // the node property.
+        (Variant::Vector2(v), Variant::Int(i)) => match i {
+            0 => {
+                v.x = to_float(&value)? as f32;
+                Ok(())
+            }
+            1 => {
+                v.y = to_float(&value)? as f32;
+                Ok(())
+            }
+            _ => Err(component_oob(*i, 2)),
+        },
+        (Variant::Vector2i(v), Variant::Int(i)) => match i {
+            0 => {
+                v.x = to_int(&value)? as i32;
+                Ok(())
+            }
+            1 => {
+                v.y = to_int(&value)? as i32;
+                Ok(())
+            }
+            _ => Err(component_oob(*i, 2)),
+        },
+        (Variant::Vector3(v), Variant::Int(i)) => match i {
+            0 => {
+                v.x = to_float(&value)? as f32;
+                Ok(())
+            }
+            1 => {
+                v.y = to_float(&value)? as f32;
+                Ok(())
+            }
+            2 => {
+                v.z = to_float(&value)? as f32;
+                Ok(())
+            }
+            _ => Err(component_oob(*i, 3)),
+        },
+        (Variant::Vector3i(v), Variant::Int(i)) => match i {
+            0 => {
+                v.x = to_int(&value)? as i32;
+                Ok(())
+            }
+            1 => {
+                v.y = to_int(&value)? as i32;
+                Ok(())
+            }
+            2 => {
+                v.z = to_int(&value)? as i32;
+                Ok(())
+            }
+            _ => Err(component_oob(*i, 3)),
+        },
+        (Variant::Vector4(v), Variant::Int(i)) => match i {
+            0 => {
+                v.x = to_float(&value)? as f32;
+                Ok(())
+            }
+            1 => {
+                v.y = to_float(&value)? as f32;
+                Ok(())
+            }
+            2 => {
+                v.z = to_float(&value)? as f32;
+                Ok(())
+            }
+            3 => {
+                v.w = to_float(&value)? as f32;
+                Ok(())
+            }
+            _ => Err(component_oob(*i, 4)),
+        },
+        (Variant::Vector4i(v), Variant::Int(i)) => match i {
+            0 => {
+                v.x = to_int(&value)? as i32;
+                Ok(())
+            }
+            1 => {
+                v.y = to_int(&value)? as i32;
+                Ok(())
+            }
+            2 => {
+                v.z = to_int(&value)? as i32;
+                Ok(())
+            }
+            3 => {
+                v.w = to_int(&value)? as i32;
+                Ok(())
+            }
+            _ => Err(component_oob(*i, 4)),
+        },
+        (Variant::Color(c), Variant::Int(i)) => match i {
+            0 => {
+                c.r = to_float(&value)? as f32;
+                Ok(())
+            }
+            1 => {
+                c.g = to_float(&value)? as f32;
+                Ok(())
+            }
+            2 => {
+                c.b = to_float(&value)? as f32;
+                Ok(())
+            }
+            3 => {
+                c.a = to_float(&value)? as f32;
+                Ok(())
+            }
+            _ => Err(component_oob(*i, 4)),
+        },
+        (Variant::Quaternion(q), Variant::Int(i)) => match i {
+            0 => {
+                q.x = to_float(&value)? as f32;
+                Ok(())
+            }
+            1 => {
+                q.y = to_float(&value)? as f32;
+                Ok(())
+            }
+            2 => {
+                q.z = to_float(&value)? as f32;
+                Ok(())
+            }
+            3 => {
+                q.w = to_float(&value)? as f32;
+                Ok(())
+            }
+            _ => Err(component_oob(*i, 4)),
+        },
+        // 🔑 Writing `basis[i] = v` sets Godot's ROW i, so it SCATTERS one
+        // component into each stored column — the exact inverse of the gather
+        // in `index_into`. Assigning `b.x = v` instead would transpose.
+        (Variant::Basis(b), Variant::Int(i)) => {
+            let v = match &value {
+                Variant::Vector3(v) => *v,
+                other => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "a Basis row is a Vector3, got {}",
+                        other.variant_type()
+                    ))))
+                }
+            };
+            match i {
+                0 => {
+                    b.x.x = v.x;
+                    b.y.x = v.y;
+                    b.z.x = v.z;
+                    Ok(())
+                }
+                1 => {
+                    b.x.y = v.x;
+                    b.y.y = v.y;
+                    b.z.y = v.z;
+                    Ok(())
+                }
+                2 => {
+                    b.x.z = v.x;
+                    b.y.z = v.y;
+                    b.z.z = v.z;
+                    Ok(())
+                }
+                _ => Err(component_oob(*i, 3)),
+            }
+        }
+        (Variant::Transform2D(t), Variant::Int(i)) => {
+            let v = match &value {
+                Variant::Vector2(v) => *v,
+                other => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "a Transform2D column is a Vector2, got {}",
+                        other.variant_type()
+                    ))))
+                }
+            };
+            match i {
+                0 => {
+                    t.x = v;
+                    Ok(())
+                }
+                1 => {
+                    t.y = v;
+                    Ok(())
+                }
+                2 => {
+                    t.origin = v;
+                    Ok(())
+                }
+                _ => Err(component_oob(*i, 3)),
+            }
+        }
+        // `proj[i] = v` assigns a whole COLUMN, matching the read arm in
+        // `index_into`. Storage is `m[column][row]`, so the column is one
+        // contiguous entry.
+        (Variant::Projection(p), Variant::Int(i)) => {
+            let v = match &value {
+                Variant::Vector4(v) => *v,
+                other => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "a Projection column is a Vector4, got {}",
+                        other.variant_type()
+                    ))))
+                }
+            };
+            if !(0..4).contains(i) {
+                return Err(component_oob(*i, 4));
+            }
+            p.m[*i as usize] = [v.x, v.y, v.z, v.w];
             Ok(())
         }
         _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -20873,6 +21788,369 @@ fn gd_uri_encode(s: &str) -> String {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// String validation / decoding helpers (pat-mgixk.107), ported from
+// core/string/ustring.cpp.
+// ---------------------------------------------------------------------------
+
+/// Godot `String.get_slice`: the `idx`-th piece, or `""` when the delimiter is
+/// empty or the index is out of range.
+fn gd_get_slice(s: &str, delim: &str, idx: i64) -> String {
+    if delim.is_empty() || idx < 0 {
+        return String::new();
+    }
+    s.split(delim)
+        .nth(idx as usize)
+        .map(|p| p.to_string())
+        .unwrap_or_default()
+}
+
+/// Godot `String.get_slice_count`: 0 for an empty subject or delimiter,
+/// otherwise one more than the number of delimiter occurrences.
+fn gd_get_slice_count(s: &str, delim: &str) -> i64 {
+    if s.is_empty() || delim.is_empty() {
+        return 0;
+    }
+    s.matches(delim).count() as i64 + 1
+}
+
+/// Entry point for Godot `String.match` / `matchn`.
+///
+/// ⚠️ An empty pattern OR an empty subject is `false` in Godot, before the
+/// matcher runs at all — `"".match("*")` is false, which a plain glob library
+/// would answer true.
+fn gd_wildcard_match_entry(s: &str, pattern: &str, case_sensitive: bool) -> bool {
+    if pattern.is_empty() || s.is_empty() {
+        return false;
+    }
+    let pat: Vec<char> = pattern.chars().collect();
+    let src: Vec<char> = s.chars().collect();
+    gd_wildcard_match(&pat, &src, case_sensitive)
+}
+
+/// Port of Godot's `_wildcard_match` (`core/string/ustring.cpp`).
+///
+/// 🔑 `?` deliberately does NOT match `'.'`. That is a real Godot quirk, not an
+/// oversight to tidy: it is what keeps `"a.txt".match("a?txt")` false.
+fn gd_wildcard_match(pattern: &[char], src: &[char], case_sensitive: bool) -> bool {
+    match pattern.first() {
+        None => src.is_empty(),
+        Some('*') => {
+            gd_wildcard_match(&pattern[1..], src, case_sensitive)
+                || (!src.is_empty() && gd_wildcard_match(pattern, &src[1..], case_sensitive))
+        }
+        Some('?') => {
+            !src.is_empty()
+                && src[0] != '.'
+                && gd_wildcard_match(&pattern[1..], &src[1..], case_sensitive)
+        }
+        Some(p) => {
+            if src.is_empty() {
+                return false;
+            }
+            let same = if case_sensitive {
+                src[0] == *p
+            } else {
+                src[0].to_lowercase().eq(p.to_lowercase())
+            };
+            same && gd_wildcard_match(&pattern[1..], &src[1..], case_sensitive)
+        }
+    }
+}
+
+/// Godot `String.is_subsequence_of(n)`: is SELF a subsequence of `other`?
+fn gd_is_subsequence_of(s: &str, other: &str, case_sensitive: bool) -> bool {
+    // Godot treats the empty string as a subsequence of anything.
+    if s.is_empty() {
+        return true;
+    }
+    let norm = |c: char| {
+        if case_sensitive {
+            c
+        } else {
+            c.to_lowercase().next().unwrap_or(c)
+        }
+    };
+    let mut needle = s.chars().map(norm).peekable();
+    for c in other.chars().map(norm) {
+        if needle.peek() == Some(&c) {
+            needle.next();
+            if needle.peek().is_none() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Godot `String.bigrams`: every adjacent character pair.
+fn gd_bigrams(s: &str) -> Vec<String> {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() < 2 {
+        return Vec::new();
+    }
+    chars.windows(2).map(|w| w.iter().collect()).collect()
+}
+
+/// Godot `String.replacen`: case-insensitive replace of every occurrence.
+///
+/// Walks the lowercased subject to find match positions but splices from the
+/// ORIGINAL, so untouched text keeps its case.
+fn gd_replacen(s: &str, what: &str, with: &str) -> String {
+    if what.is_empty() {
+        return s.to_string();
+    }
+    let lower_s: Vec<char> = s.to_lowercase().chars().collect();
+    let lower_w: Vec<char> = what.to_lowercase().chars().collect();
+    let orig: Vec<char> = s.chars().collect();
+    // ⚠️ Lowercasing can change character COUNT for a few code points, which
+    // would desynchronise the index mapping. Fall back to the exact-case
+    // replace in that case rather than splicing at a wrong offset.
+    if lower_s.len() != orig.len() {
+        return s.replace(what, with);
+    }
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i < orig.len() {
+        if i + lower_w.len() <= lower_s.len() && lower_s[i..i + lower_w.len()] == lower_w[..] {
+            out.push_str(with);
+            i += lower_w.len();
+        } else {
+            out.push(orig[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Godot `String.insert`: insert at a CHARACTER position, clamped to the ends.
+fn gd_insert(s: &str, pos: i64, what: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let at = pos.clamp(0, chars.len() as i64) as usize;
+    let mut out: String = chars[..at].iter().collect();
+    out.push_str(what);
+    out.extend(chars[at..].iter());
+    out
+}
+
+/// Godot `String.erase`: drop `count` characters from `pos`.
+fn gd_erase(s: &str, pos: i64, count: i64) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if pos < 0 || count <= 0 || pos as usize >= chars.len() {
+        return s.to_string();
+    }
+    let start = pos as usize;
+    let end = (start + count as usize).min(chars.len());
+    chars[..start].iter().chain(chars[end..].iter()).collect()
+}
+
+/// Godot `String.split_floats`: each piece parsed as a float.
+///
+/// ⚠️ With `allow_empty` false, an empty piece is SKIPPED; with it true the
+/// piece still contributes, as `0.0` — Godot pushes the parse of an empty
+/// string rather than dropping the slot.
+fn gd_split_floats(s: &str, delim: &str, allow_empty: bool) -> Vec<f64> {
+    if delim.is_empty() {
+        return vec![str_to_float(s)];
+    }
+    s.split(delim)
+        .filter(|piece| allow_empty || !piece.is_empty())
+        .map(str_to_float)
+        .collect()
+}
+
+/// A code-point argument, or `None` for 0 / out of range — Godot treats 0 as
+/// "no character", which is what makes `replace_char(x, 0)` a deletion.
+fn gd_char_arg(v: &Variant) -> Option<char> {
+    let code = match v {
+        Variant::Int(i) => *i,
+        Variant::Float(f) => *f as i64,
+        Variant::String(s) => return s.chars().next(),
+        _ => return None,
+    };
+    if code <= 0 {
+        return None;
+    }
+    u32::try_from(code).ok().and_then(char::from_u32)
+}
+
+/// Godot `String.hex_decode`. An odd length or any non-hex digit yields an
+/// EMPTY buffer — Godot fails the whole call rather than decoding a prefix.
+fn gd_hex_decode(s: &str) -> Vec<u8> {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.is_empty() || chars.len() % 2 != 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(chars.len() / 2);
+    for pair in chars.chunks_exact(2) {
+        match (pair[0].to_digit(16), pair[1].to_digit(16)) {
+            (Some(hi), Some(lo)) => out.push((hi * 16 + lo) as u8),
+            _ => return Vec::new(),
+        }
+    }
+    out
+}
+
+/// Godot `String.is_valid_ascii_identifier` (and its deprecated
+/// `is_valid_identifier` alias): non-empty, must not start with a digit, and
+/// every character is ASCII alphanumeric or `_`.
+fn gd_is_valid_ascii_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => false,
+        Some(first) => {
+            if first.is_ascii_digit() || !(first.is_ascii_alphanumeric() || first == '_') {
+                return false;
+            }
+            chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
+    }
+}
+
+/// Godot `String.is_valid_unicode_identifier`.
+///
+/// ⚠️ APPROXIMATE: Godot tests Unicode `XID_Start` / `XID_Continue` from its own
+/// tables. With no Unicode property tables in this workspace this uses Rust's
+/// `is_alphabetic` / `is_alphanumeric`, which are Unicode-aware and agree with
+/// XID for the overwhelming majority of code points but are not identical at the
+/// margins (some modifier and connector punctuation). Reported on the bead.
+fn gd_is_valid_unicode_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => false,
+        Some(first) => {
+            if !(first.is_alphabetic() || first == '_') {
+                return false;
+            }
+            chars.all(|c| c.is_alphanumeric() || c == '_')
+        }
+    }
+}
+
+/// Godot `String.is_valid_hex_number(with_prefix)`.
+///
+/// A lone `+`/`-` is NOT a sign (Godot only skips it when the string is longer
+/// than one character), and with the prefix required the string must be at
+/// least three characters.
+fn gd_is_valid_hex_number(s: &str, with_prefix: bool) -> bool {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.is_empty() {
+        return false;
+    }
+    let mut from = 0usize;
+    if chars.len() != 1 && (chars[0] == '+' || chars[0] == '-') {
+        from = 1;
+    }
+    if with_prefix {
+        if chars.len() < 3 || chars.get(from) != Some(&'0') || chars.get(from + 1) != Some(&'x') {
+            return false;
+        }
+        from += 2;
+    }
+    if from >= chars.len() {
+        return false;
+    }
+    chars[from..].iter().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Godot `String.is_valid_html_color`: `#RGB`, `#RGBA`, `#RRGGBB` or
+/// `#RRGGBBAA`, with the `#` optional, or a known named colour.
+///
+/// ⚠️ Only the hex forms are accepted here; Godot also resolves its named
+/// colour table (`Color::named`). Reported on the bead rather than inventing a
+/// partial name list, which would answer `true` for some names and `false` for
+/// others with no visible rule.
+fn gd_is_valid_html_color(s: &str) -> bool {
+    let body = s.strip_prefix('#').unwrap_or(s);
+    matches!(body.len(), 3 | 4 | 6 | 8) && body.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Godot `String.is_valid_ip_address`: a dotted IPv4 quad, or an IPv6 address
+/// whose groups are 16-bit hex (an empty group is the `::` elision).
+fn gd_is_valid_ip_address(s: &str) -> bool {
+    if s.contains(':') {
+        for part in s.split(':') {
+            if part.is_empty() {
+                continue;
+            }
+            if gd_is_valid_hex_number(part, false) {
+                // A group wider than 16 bits is not an address.
+                match i64::from_str_radix(part, 16) {
+                    Ok(v) if (0..=0xffff).contains(&v) => continue,
+                    _ => return false,
+                }
+            }
+            // Godot recurses here, which is what accepts an IPv4-mapped tail
+            // like `::ffff:192.168.0.1`.
+            if !gd_is_valid_ip_address(part) {
+                return false;
+            }
+        }
+        true
+    } else {
+        let parts: Vec<&str> = s.split('.').collect();
+        if parts.len() != 4 {
+            return false;
+        }
+        parts.iter().all(|p| {
+            !p.is_empty()
+                && p.chars().all(|c| c.is_ascii_digit())
+                && p.parse::<i64>()
+                    .map(|v| (0..=255).contains(&v))
+                    .unwrap_or(false)
+        })
+    }
+}
+
+/// Characters Godot refuses in a filename (`invalid_filename_characters`).
+const GD_INVALID_FILENAME_CHARS: [char; 10] = [':', '/', '\\', '?', '*', '"', '|', '%', '<', '>'];
+
+/// Characters Godot replaces in a node name
+/// (`RESERVED_NODE_NAME_CHARACTERS`, `scene/main/node.cpp`).
+const GD_INVALID_NODE_NAME_CHARS: [char; 6] = ['.', ':', '@', '/', '"', '%'];
+
+/// Godot `String.is_valid_filename`: non-empty, already edge-stripped, and free
+/// of every reserved character.
+fn gd_is_valid_filename(s: &str) -> bool {
+    let stripped = s.trim();
+    // ⚠️ Godot compares against the UNSTRIPPED string, so leading or trailing
+    // whitespace alone makes a name invalid rather than being tolerated.
+    if stripped != s || stripped.is_empty() {
+        return false;
+    }
+    !stripped
+        .chars()
+        .any(|c| GD_INVALID_FILENAME_CHARS.contains(&c))
+}
+
+/// Godot `String.validate_node_name`: each reserved character becomes `_`.
+fn gd_validate_node_name(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if GD_INVALID_NODE_NAME_CHARS.contains(&c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// Godot `String.validate_filename`: edge-strip, then replace every reserved
+/// character with `_`.
+fn gd_validate_filename(s: &str) -> String {
+    s.trim()
+        .chars()
+        .map(|c| {
+            if GD_INVALID_FILENAME_CHARS.contains(&c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 fn gd_uri_decode(s: &str) -> String {
@@ -22017,6 +23295,65 @@ fn error_code_to_string(code: i64) -> &'static str {
         48 => "Printer on fire",
         _ => "(invalid error code)",
     }
+}
+
+/// The `(type, class_name, script)` triple a typed `Array`/`Dictionary`
+/// constructor takes, as a [`ContainerType`] (pat-mgixk.106).
+///
+/// 🔑 **Composes the two tables that already exist rather than adding a third.**
+/// [`type_code_to_name`] holds Godot's `TYPE_*` numbering and
+/// `ContainerType::from_hint_name` holds the hint-name spellings, so a code goes
+/// `2 -> "int" -> VariantType::Int` without any new mapping.
+///
+/// ⚠️ A direct `VariantType::X as i64` would be WRONG: `VariantType`'s
+/// declaration order is not Godot's. Godot has `TYPE_STRING = 4` and
+/// `TYPE_VECTOR2 = 5`, while `VariantType` declares `String, StringName,
+/// NodePath, Vector2` — two extra variants in between, so every code past
+/// `Float` would mean a different type. `from_hint_name`'s own doc records the
+/// matching hazard for names (`AABB` vs `Aabb`).
+fn container_type_from_args(
+    code: &Variant,
+    class_name: &Variant,
+    script: &Variant,
+) -> Result<gdvariant::ContainerType, RuntimeError> {
+    let code = match code {
+        Variant::Int(i) => *i,
+        Variant::Float(f) => *f as i64,
+        other => {
+            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "a container type must be a TYPE_* int, got {}",
+                other.variant_type()
+            ))))
+        }
+    };
+    let class_name = match class_name {
+        Variant::String(s) => s.clone(),
+        Variant::StringName(s) => s.as_str().to_string(),
+        // Godot accepts an empty name, and `null` reads the same way.
+        Variant::Nil => String::new(),
+        other => {
+            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                "a container class name must be a string, got {}",
+                other.variant_type()
+            ))))
+        }
+    };
+
+    // A class name names an engine/script class, which Godot stores as OBJECT
+    // plus the name — so it takes precedence over the bare code.
+    let mut typed = if !class_name.is_empty() {
+        gdvariant::ContainerType::object(class_name)
+    } else if code == 0 {
+        // TYPE_NIL is how Godot spells "no constraint".
+        gdvariant::ContainerType::untyped()
+    } else {
+        gdvariant::ContainerType::from_hint_name(type_code_to_name(code))
+    };
+    typed.script = match script {
+        Variant::Nil => None,
+        other => Some(Box::new(other.clone())),
+    };
+    Ok(typed)
 }
 
 fn type_code_to_name(code: i64) -> &'static str {
@@ -32213,6 +33550,32 @@ fn call_geometry_2d_static(method: &str, args: &[Variant]) -> Result<Variant, Ru
         }
     }
 
+    /// A `Vector2i` argument, accepting a float `Vector2` too: a script writes
+    /// `Vector2i(0, 0)` and `Vector2(0, 0)` interchangeably at a call site.
+    fn vec2i(
+        args: &[Variant],
+        i: usize,
+        method: &str,
+    ) -> Result<gdcore::math::Vector2i, RuntimeError> {
+        match args.get(i) {
+            Some(Variant::Vector2i(v)) => Ok(*v),
+            Some(Variant::Vector2(v)) => Ok(gdcore::math::Vector2i::new(v.x as i32, v.y as i32)),
+            _ => Err(bad(method, "a Vector2i")),
+        }
+    }
+
+    /// Boxes a boolean/offset result the way Godot types it: `Array` of
+    /// `PackedVector2Array`, one entry per output ring.
+    ///
+    /// ⚠️ An Array of rings, not a flat PackedVector2Array — `clip_polygons`
+    /// can return two rings (an outline and its hole) and flattening them would
+    /// read as one self-touching polygon.
+    fn rings(out: Vec<Vec<gdcore::math::Vector2>>) -> Variant {
+        Variant::Array(SharedArray::from_vec(
+            out.into_iter().map(Variant::PackedVector2Array).collect(),
+        ))
+    }
+
     match method {
         // Circle predicates + convex hull (pat-s3rrv.125).
         "is_point_in_circle" => {
@@ -32307,6 +33670,65 @@ fn call_geometry_2d_static(method: &str, args: &[Variant]) -> Result<Variant, Ru
         )
         .map(Variant::Vector2)
         .unwrap_or(Variant::Nil)),
+        // -- pat-mgixk.102: the polygon boolean family ---------------------
+        //
+        // Godot runs these through Clipper2; `gdcore::geometry2d::
+        // polygon_boolean` ports the semantics (edge splitting + midpoint
+        // classification + ring chaining), including Clipper's output
+        // orientation: outer rings counter-clockwise, holes clockwise.
+        "merge_polygons" | "clip_polygons" | "intersect_polygons" | "exclude_polygons" => {
+            let a = poly(args, 0, method)?;
+            let b = poly(args, 1, method)?;
+            let op = match method {
+                "merge_polygons" => gdcore::geometry2d::PolygonBooleanOp::Union,
+                "clip_polygons" => gdcore::geometry2d::PolygonBooleanOp::Difference,
+                "intersect_polygons" => gdcore::geometry2d::PolygonBooleanOp::Intersection,
+                _ => gdcore::geometry2d::PolygonBooleanOp::Xor,
+            };
+            Ok(rings(gdcore::geometry2d::polygon_boolean(&a, &b, op)))
+        }
+        // ⚠️ The third argument is the join type and Godot DEFAULTS IT TO
+        // `JOIN_SQUARE` (0), not miter — so an absent argument must not be read
+        // as "no join style".
+        "offset_polygon" => {
+            let p = poly(args, 0, method)?;
+            let delta = num(args, 1, method)?;
+            let join = gdcore::geometry2d::PolygonJoinType::from_godot(match args.get(2) {
+                Some(Variant::Int(n)) => *n,
+                Some(Variant::Float(f)) => *f as i64,
+                _ => 0,
+            });
+            Ok(rings(gdcore::geometry2d::offset_polygon(&p, delta, join)))
+        }
+        // ⚠️ Returns INDICES, not points: Godot's return type is
+        // `PackedInt32Array`, so a triangulated square is 6 entries.
+        "triangulate_polygon" => {
+            let p = poly(args, 0, method)?;
+            Ok(Variant::PackedInt32Array(
+                gdcore::geometry2d::triangulate_polygon(&p),
+            ))
+        }
+        // ⚠️ `Vector2i[]` — a plain Array of `Vector2i`, which is how Godot
+        // types it; there is no packed Vector2i array in its return.
+        "bresenham_line" => {
+            let from = vec2i(args, 0, method)?;
+            let to = vec2i(args, 1, method)?;
+            Ok(Variant::Array(SharedArray::from_vec(
+                gdcore::geometry2d::bresenham_line(from, to)
+                    .into_iter()
+                    .map(Variant::Vector2i)
+                    .collect(),
+            )))
+        }
+        "get_closest_points_between_segments" => {
+            let pair = gdcore::geometry2d::get_closest_points_between_segments(
+                vec2(args, 0, method)?,
+                vec2(args, 1, method)?,
+                vec2(args, 2, method)?,
+                vec2(args, 3, method)?,
+            );
+            Ok(Variant::PackedVector2Array(pair.to_vec()))
+        }
         _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("Geometry2D.{method}"),
         ))),
@@ -32474,6 +33896,43 @@ fn call_geometry_3d_static(method: &str, args: &[Variant]) -> Result<Variant, Ru
             .collect::<Vec<_>>()
             .into(),
         )),
+        // -- pat-mgixk.102 ------------------------------------------------
+        //
+        // ⚠️ Keeps the half BEHIND the plane. Godot's
+        // `Geometry3D::clip_polygon` marks a vertex `LOC_INSIDE` on a negative
+        // signed distance and returns the inside part, so the surviving half is
+        // the one `Plane::is_point_over` answers `false` for. Keeping the front
+        // half would return the complement — a polygon of the same size, which
+        // a single-polygon assertion cannot distinguish.
+        "clip_polygon" => {
+            let points = match args.first() {
+                Some(Variant::PackedVector3Array(v)) => v.clone(),
+                Some(Variant::Array(a)) => a
+                    .to_vec()
+                    .iter()
+                    .filter_map(|v| match v {
+                        Variant::Vector3(p) => Some(*p),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Geometry3D.clip_polygon() expects an array of Vector3".into(),
+                    )))
+                }
+            };
+            let plane = match args.get(1) {
+                Some(Variant::Plane(pl)) => *pl,
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Geometry3D.clip_polygon() expects a Plane".into(),
+                    )))
+                }
+            };
+            Ok(Variant::PackedVector3Array(
+                gdcore::geometry3d::clip_polygon(&points, plane),
+            ))
+        }
         _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("Geometry3D.{method}"),
         ))),

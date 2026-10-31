@@ -1311,19 +1311,122 @@ fn join_display<T: fmt::Display>(items: &[T]) -> String {
         .join(", ")
 }
 
+// ---------------------------------------------------------------------------
+// Godot-exact float stringification (pat-mgixk.103)
+// ---------------------------------------------------------------------------
+
+/// Godot's `String::num` (`core/string/ustring.cpp`): format with
+/// `%.<decimals>f`, then destroy trailing zeros, and the `.` with them if
+/// nothing is left after it.
+///
+/// ⚠️ The trailing `.` IS removed, despite Godot's comment saying "except one
+/// after the decimal point" — its loop breaks on `.` only after zeroing it. That
+/// is why `num_real` has to handle the integral case separately to produce
+/// `"1.0"`; `num(1.0, 14)` alone yields `"1"`.
+pub fn num_with_decimals(value: f64, decimals: i32) -> String {
+    if !value.is_finite() {
+        // C's `snprintf` spells these lowercase, and Godot inherits that;
+        // Rust's `{}` would give "NaN".
+        return if value.is_nan() {
+            "nan".to_string()
+        } else if value > 0.0 {
+            "inf".to_string()
+        } else {
+            "-inf".to_string()
+        };
+    }
+    // Godot clamps to MAX_DECIMALS (32) and treats a negative count as "use
+    // num_real's own default", which never reaches here.
+    let decimals = decimals.clamp(0, 32) as usize;
+    let mut out = format!("{value:.decimals$}");
+    if out.contains('.') {
+        while out.ends_with('0') {
+            out.pop();
+        }
+        if out.ends_with('.') {
+            out.pop();
+        }
+    }
+    out
+}
+
+/// Godot's `String::num_real(double, bool)` — the formatter
+/// `Variant::stringify` uses for FLOAT (`core/variant/variant.cpp`).
+///
+/// An integral value prints with a trailing `.0`, which is the whole reason
+/// `str(1.0)` is `"1.0"` in Godot and was `"1"` here. Otherwise 14 significant
+/// decimals, which is what turns `0.1 + 0.2` from
+/// `"0.30000000000000004"` into `"0.3"`.
+///
+/// ⚠️ The magnitude correction is `if value > 10.0`, POSITIVE only — Godot does
+/// not use `abs` here, so a large negative keeps all 14 decimals. Ported as-is
+/// rather than "fixed": this function exists to match Godot's output, and
+/// symmetrising it would diverge from the engine it is a port of.
+pub fn num_real_f64(value: f64, trailing: bool) -> String {
+    if value.is_finite() && value == ((value as i64) as f64) {
+        let int_part = format!("{}", value as i64);
+        return if trailing {
+            format!("{int_part}.0")
+        } else {
+            int_part
+        };
+    }
+    let mut decimals = 14;
+    if value > 10.0 {
+        decimals -= value.log10().floor() as i32;
+    }
+    num_with_decimals(value, decimals)
+}
+
+/// Godot's `String::num_real(float, bool)` overload, which every math type's
+/// `operator String` uses for its components (`core/math/vector2.cpp` and
+/// siblings).
+///
+/// 🔑 Identical to [`num_real_f64`] except the decimal budget is **6**, not 14 —
+/// single-precision carries no more than that, and Godot picks the overload by
+/// the component's own type. Using the f64 budget for an `f32` component would
+/// print the binary representation error (a `0.1f32` widened to f64 is
+/// `0.100000001490116...`), which is exactly the noise this is meant to hide.
+pub fn num_real_f32(value: f32, trailing: bool) -> String {
+    if value.is_finite() && value == ((value as i64) as f32) {
+        let int_part = format!("{}", value as i64);
+        return if trailing {
+            format!("{int_part}.0")
+        } else {
+            int_part
+        };
+    }
+    let mut decimals = 6;
+    if value > 10.0 {
+        decimals -= value.log10().floor() as i32;
+    }
+    num_with_decimals(value as f64, decimals)
+}
+
+/// Shorthand for a math-type component: Godot always passes `true` for
+/// `p_trailing` from an `operator String`.
+fn c(value: f32) -> String {
+    num_real_f32(value, true)
+}
+
 impl fmt::Display for Variant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Nil => write!(f, "<null>"),
             Self::Bool(b) => write!(f, "{b}"),
             Self::Int(i) => write!(f, "{i}"),
-            Self::Float(v) => write!(f, "{v}"),
+            // `Variant::stringify` routes FLOAT through `String::num_real(v, true)`.
+            Self::Float(v) => write!(f, "{}", num_real_f64(*v, true)),
             Self::String(s) => write!(f, "{s}"),
-            Self::StringName(sn) => write!(f, "&{sn}"),
-            Self::NodePath(np) => write!(f, "NodePath(\"{np}\")"),
-            Self::Vector2(v) => write!(f, "({}, {})", v.x, v.y),
+            // ⚠️ BARE, not `&name`. `Variant::stringify` prints STRING_NAME and
+            // NODE_PATH as their plain text; the decorated forms belong to
+            // `var_to_str`, which has its own formatter (`variant_to_gd_string`)
+            // and is deliberately untouched.
+            Self::StringName(sn) => write!(f, "{sn}"),
+            Self::NodePath(np) => write!(f, "{np}"),
+            Self::Vector2(v) => write!(f, "({}, {})", c(v.x), c(v.y)),
             Self::Vector2i(v) => write!(f, "({}, {})", v.x, v.y),
-            Self::Vector3(v) => write!(f, "({}, {}, {})", v.x, v.y, v.z),
+            Self::Vector3(v) => write!(f, "({}, {}, {})", c(v.x), c(v.y), c(v.z)),
             Self::Vector3i(v) => write!(f, "({}, {}, {})", v.x, v.y, v.z),
             // Godot's `operator String` shapes (core/variant/variant.cpp): a
             // Rect2 is `[P: …, S: …]`, a matrix type labels its columns, and a
@@ -1333,7 +1436,10 @@ impl fmt::Display for Variant {
             Self::Rect2(r) => write!(
                 f,
                 "[P: ({}, {}), S: ({}, {})]",
-                r.position.x, r.position.y, r.size.x, r.size.y
+                c(r.position.x),
+                c(r.position.y),
+                c(r.size.x),
+                c(r.size.y)
             ),
             // `Rect2i::operator String` (core/math/rect2i.cpp:36) is the same
             // `[P: …, S: …]` shape as Rect2 — the components differ, the
@@ -1343,18 +1449,38 @@ impl fmt::Display for Variant {
                 "[P: ({}, {}), S: ({}, {})]",
                 r.position.x, r.position.y, r.size.x, r.size.y
             ),
-            Self::Vector4(v) => write!(f, "({}, {}, {}, {})", v.x, v.y, v.z, v.w),
+            Self::Vector4(v) => write!(f, "({}, {}, {}, {})", c(v.x), c(v.y), c(v.z), c(v.w)),
             Self::Vector4i(v) => write!(f, "({}, {}, {}, {})", v.x, v.y, v.z, v.w),
             Self::Transform2D(t) => write!(
                 f,
                 "[X: ({}, {}), Y: ({}, {}), O: ({}, {})]",
-                t.x.x, t.x.y, t.y.x, t.y.y, t.origin.x, t.origin.y
+                c(t.x.x),
+                c(t.x.y),
+                c(t.y.x),
+                c(t.y.y),
+                c(t.origin.x),
+                c(t.origin.y)
             ),
-            Self::Color(c) => write!(f, "({}, {}, {}, {})", c.r, c.g, c.b, c.a),
+            Self::Color(col) => write!(
+                f,
+                "({}, {}, {}, {})",
+                c(col.r),
+                c(col.g),
+                c(col.b),
+                c(col.a)
+            ),
             Self::Basis(b) => write!(
                 f,
                 "[X: ({}, {}, {}), Y: ({}, {}, {}), Z: ({}, {}, {})]",
-                b.x.x, b.x.y, b.x.z, b.y.x, b.y.y, b.y.z, b.z.x, b.z.y, b.z.z
+                c(b.x.x),
+                c(b.x.y),
+                c(b.x.z),
+                c(b.y.x),
+                c(b.y.y),
+                c(b.y.z),
+                c(b.z.x),
+                c(b.z.y),
+                c(b.z.z)
             ),
             Self::Transform3D(t) => write!(
                 f,
@@ -1378,21 +1504,36 @@ impl fmt::Display for Variant {
             Self::Projection(p) => write!(
                 f,
                 "[X: ({}, {}, {}, {}), Y: ({}, {}, {}, {}), Z: ({}, {}, {}, {}), W: ({}, {}, {}, {})]",
-                p.m[0][0], p.m[0][1], p.m[0][2], p.m[0][3],
-                p.m[1][0], p.m[1][1], p.m[1][2], p.m[1][3],
-                p.m[2][0], p.m[2][1], p.m[2][2], p.m[2][3],
-                p.m[3][0], p.m[3][1], p.m[3][2], p.m[3][3],
+                c(p.m[0][0]), c(p.m[0][1]), c(p.m[0][2]), c(p.m[0][3]),
+                c(p.m[1][0]), c(p.m[1][1]), c(p.m[1][2]), c(p.m[1][3]),
+                c(p.m[2][0]), c(p.m[2][1]), c(p.m[2][2]), c(p.m[2][3]),
+                c(p.m[3][0]), c(p.m[3][1]), c(p.m[3][2]), c(p.m[3][3]),
             ),
-            Self::Quaternion(q) => write!(f, "({}, {}, {}, {})", q.x, q.y, q.z, q.w),
+            Self::Quaternion(q) => write!(
+                f,
+                "({}, {}, {}, {})",
+                c(q.x),
+                c(q.y),
+                c(q.z),
+                c(q.w)
+            ),
             Self::Aabb(a) => write!(
                 f,
                 "[P: ({}, {}, {}), S: ({}, {}, {})]",
-                a.position.x, a.position.y, a.position.z, a.size.x, a.size.y, a.size.z
+                c(a.position.x),
+                c(a.position.y),
+                c(a.position.z),
+                c(a.size.x),
+                c(a.size.y),
+                c(a.size.z)
             ),
             Self::Plane(p) => write!(
                 f,
                 "[N: ({}, {}, {}), D: {}]",
-                p.normal.x, p.normal.y, p.normal.z, p.d
+                c(p.normal.x),
+                c(p.normal.y),
+                c(p.normal.z),
+                c(p.d)
             ),
             // `Variant::stringify` (core/variant/variant.cpp:1739) prints a
             // handle as `RID(<id>)`, NOT the bare number.
@@ -1416,14 +1557,30 @@ impl fmt::Display for Variant {
             Self::PackedByteArray(v) => write!(f, "[{}]", join_display(v)),
             Self::PackedInt32Array(v) => write!(f, "[{}]", join_display(v)),
             Self::PackedInt64Array(v) => write!(f, "[{}]", join_display(v)),
-            Self::PackedFloat32Array(v) => write!(f, "[{}]", join_display(v)),
-            Self::PackedFloat64Array(v) => write!(f, "[{}]", join_display(v)),
+            // Packed REAL arrays stringify element-wise through num_real, like
+            // any other float; the integer-packed arrays keep `{}`.
+            Self::PackedFloat32Array(v) => write!(
+                f,
+                "[{}]",
+                v.iter()
+                    .map(|e| num_real_f32(*e, true))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::PackedFloat64Array(v) => write!(
+                f,
+                "[{}]",
+                v.iter()
+                    .map(|e| num_real_f64(*e, true))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Self::PackedStringArray(v) => write!(f, "[{}]", v.join(", ")),
             Self::PackedVector2Array(v) => write!(
                 f,
                 "[{}]",
                 v.iter()
-                    .map(|e| format!("({}, {})", e.x, e.y))
+                    .map(|e| format!("({}, {})", c(e.x), c(e.y)))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -1431,7 +1588,7 @@ impl fmt::Display for Variant {
                 f,
                 "[{}]",
                 v.iter()
-                    .map(|e| format!("({}, {}, {})", e.x, e.y, e.z))
+                    .map(|e| format!("({}, {}, {})", c(e.x), c(e.y), c(e.z)))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -1439,7 +1596,7 @@ impl fmt::Display for Variant {
                 f,
                 "[{}]",
                 v.iter()
-                    .map(|e| format!("({}, {}, {}, {})", e.r, e.g, e.b, e.a))
+                    .map(|e| format!("({}, {}, {}, {})", c(e.r), c(e.g), c(e.b), c(e.a)))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -1664,6 +1821,27 @@ mod tests {
         assert_eq!(format!("{}", Variant::Float(3.14)), "3.14");
     }
 
+    /// 🔑 The two cases the old `write!("{v}")` got wrong, which is the whole
+    /// point of the num_real port.
+    #[test]
+    fn display_float_matches_godot_num_real() {
+        // Integral floats keep a trailing `.0` — Rust's `{}` gave "1".
+        assert_eq!(format!("{}", Variant::Float(1.0)), "1.0");
+        assert_eq!(format!("{}", Variant::Float(-3.0)), "-3.0");
+        // 14 significant decimals hide binary representation error, which is
+        // why Godot prints 0.3 for this and Rust printed
+        // "0.30000000000000004".
+        assert_eq!(format!("{}", Variant::Float(0.1 + 0.2)), "0.3");
+        // Not integral, so the decimals path runs and trailing zeros go.
+        assert_eq!(format!("{}", Variant::Float(1.5)), "1.5");
+        // ⚠️ Above 10 the budget shrinks by the magnitude, matching Godot's
+        // `if (p_num > 10) decimals -= floor(log10(p_num))`.
+        assert_eq!(format!("{}", Variant::Float(1234.5)), "1234.5");
+        // Non-finite spells lowercase, as C's snprintf does and Godot inherits.
+        assert_eq!(format!("{}", Variant::Float(f64::NAN)), "nan");
+        assert_eq!(format!("{}", Variant::Float(f64::INFINITY)), "inf");
+    }
+
     #[test]
     fn display_string() {
         assert_eq!(format!("{}", Variant::String("hello".into())), "hello");
@@ -1672,7 +1850,10 @@ mod tests {
     #[test]
     fn display_string_name() {
         let sn = StringName::new("test_sn");
-        assert_eq!(format!("{}", Variant::StringName(sn)), "&test_sn");
+        // ⚠️ BARE now, not `&test_sn`. `Variant::stringify` prints a
+        // StringName as its plain text (pat-mgixk.103); the `&`-decorated form
+        // is `var_to_str`'s, which keeps its own formatter.
+        assert_eq!(format!("{}", Variant::StringName(sn)), "test_sn");
     }
 
     #[test]
@@ -1680,26 +1861,32 @@ mod tests {
         let np = NodePath::new("/root/Player");
         assert_eq!(
             format!("{}", Variant::NodePath(np)),
-            "NodePath(\"/root/Player\")"
+            // Bare text, as `Variant::stringify` prints NODE_PATH.
+            "/root/Player"
         );
     }
 
     #[test]
     fn display_vector2() {
         let v = Vector2::new(1.0, 2.0);
-        assert_eq!(format!("{}", Variant::Vector2(v)), "(1, 2)");
+        // Godot's `Vector2::operator String` runs each component through
+        // `num_real(x, true)`, so whole numbers carry a trailing `.0`.
+        assert_eq!(format!("{}", Variant::Vector2(v)), "(1.0, 2.0)");
     }
 
     #[test]
     fn display_vector3() {
         let v = gdcore::math::Vector3::new(1.0, 2.0, 3.0);
-        assert_eq!(format!("{}", Variant::Vector3(v)), "(1, 2, 3)");
+        assert_eq!(format!("{}", Variant::Vector3(v)), "(1.0, 2.0, 3.0)");
     }
 
     #[test]
     fn display_rect2() {
         let r = gdcore::math::Rect2::new(Vector2::new(1.0, 2.0), Vector2::new(3.0, 4.0));
-        assert_eq!(format!("{}", Variant::Rect2(r)), "[P: (1, 2), S: (3, 4)]");
+        assert_eq!(
+            format!("{}", Variant::Rect2(r)),
+            "[P: (1.0, 2.0), S: (3.0, 4.0)]"
+        );
     }
 
     #[test]
@@ -1707,14 +1894,14 @@ mod tests {
         let t = gdcore::math::Transform2D::IDENTITY;
         assert_eq!(
             format!("{}", Variant::Transform2D(t)),
-            "[X: (1, 0), Y: (0, 1), O: (0, 0)]"
+            "[X: (1.0, 0.0), Y: (0.0, 1.0), O: (0.0, 0.0)]"
         );
     }
 
     #[test]
     fn display_color() {
         let c = gdcore::math::Color::new(1.0, 0.5, 0.0, 1.0);
-        assert_eq!(format!("{}", Variant::Color(c)), "(1, 0.5, 0, 1)");
+        assert_eq!(format!("{}", Variant::Color(c)), "(1.0, 0.5, 0.0, 1.0)");
     }
 
     #[test]

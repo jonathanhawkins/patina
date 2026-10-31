@@ -7866,6 +7866,107 @@ pub fn register_3d_classes() {
                 .method(MethodInfo::new("base64_to_utf8", 1)),
         );
     }
+    // -- Geometry2D / Geometry3D (pat-mgixk.102) ---------------------------
+    //
+    // Both are Object-derived singletons in Godot, and both had a working
+    // script dispatcher (`call_geometry_2d_static` / `call_geometry_3d_static`)
+    // with no ClassDB entry at all — so `ClassDB.class_exists("Geometry2D")`
+    // answered false and `get_method_list` was empty for a surface scripts
+    // call every day.
+    //
+    // ⚠️ The full Godot 4.6.1 method lists are registered, including the names
+    // this bead did not implement. Registration is introspection metadata:
+    // `has_method` and `get_method_list` must match Godot, and the dispatcher
+    // is what decides whether a call is served. Registering only the
+    // implemented subset would make the class LOOK complete while reporting a
+    // method list no Godot project would recognise.
+    //
+    // ⚠️ Arities are the script-facing ones, counting optional parameters:
+    // `offset_polygon(polygon, delta, join_type = 0)` is 3, and
+    // `offset_polyline(polyline, delta, join_type = 0, end_type = 3)` is 4.
+    // ⚠️ NOT wrapped in `if !class_exists(..)`, unlike its neighbours, and that
+    // is load-bearing. `register_core_object_classes` ALREADY registers both of
+    // these as bare `ClassRegistration::new("Geometry2D").parent("Object")`
+    // with no methods (pat-mgixk.101) — so `ClassDB.class_exists` has been true
+    // all along and the real gap was the empty method list, not the class.
+    //
+    // `ClassDb::register` MERGES into an existing entry by name rather than
+    // replacing it, so calling this unconditionally is idempotent and the two
+    // registrations compose whichever runs first. A `class_exists` guard here
+    // would make the method list depend on registrar ORDER: today
+    // `register_3d_classes` runs before `register_core_object_classes`, so the
+    // guard would happen to pass — and silently register nothing the moment
+    // that order changed.
+    register_class(
+        ClassRegistration::new("Geometry2D")
+            .parent("Object")
+            .method(MethodInfo::new("is_point_in_circle", 3).const_method())
+            .method(MethodInfo::new("segment_intersects_circle", 4).const_method())
+            .method(MethodInfo::new("segment_intersects_segment", 4).const_method())
+            .method(MethodInfo::new("line_intersects_line", 4).const_method())
+            .method(MethodInfo::new("get_closest_points_between_segments", 4).const_method())
+            .method(MethodInfo::new("get_closest_point_to_segment", 3).const_method())
+            .method(MethodInfo::new("get_closest_point_to_segment_uncapped", 3).const_method())
+            .method(MethodInfo::new("point_is_inside_triangle", 4).const_method())
+            .method(MethodInfo::new("is_polygon_clockwise", 1).const_method())
+            .method(MethodInfo::new("is_point_in_polygon", 2).const_method())
+            .method(MethodInfo::new("triangulate_polygon", 1).const_method())
+            .method(MethodInfo::new("triangulate_delaunay", 1).const_method())
+            .method(MethodInfo::new("convex_hull", 1).const_method())
+            .method(MethodInfo::new("decompose_polygon_in_convex", 1).const_method())
+            .method(MethodInfo::new("merge_polygons", 2).const_method())
+            .method(MethodInfo::new("clip_polygons", 2).const_method())
+            .method(MethodInfo::new("intersect_polygons", 2).const_method())
+            .method(MethodInfo::new("exclude_polygons", 2).const_method())
+            .method(MethodInfo::new("clip_polyline_with_polygon", 2).const_method())
+            .method(MethodInfo::new("intersect_polyline_with_polygon", 2).const_method())
+            .method(MethodInfo::new("offset_polygon", 3).const_method())
+            .method(MethodInfo::new("offset_polyline", 4).const_method())
+            .method(MethodInfo::new("make_atlas", 1).const_method())
+            .method(MethodInfo::new("bresenham_line", 2).const_method())
+            .enumeration(
+                EnumInfo::new("PolyBooleanOperation")
+                    .constant("OPERATION_UNION", 0)
+                    .constant("OPERATION_DIFFERENCE", 1)
+                    .constant("OPERATION_INTERSECTION", 2)
+                    .constant("OPERATION_XOR", 3),
+            )
+            // ⚠️ JOIN_SQUARE is 0 and is `offset_polygon`'s DEFAULT; miter
+            // is 2. Reading the enum as "miter first" inverts the default.
+            .enumeration(
+                EnumInfo::new("PolyJoinType")
+                    .constant("JOIN_SQUARE", 0)
+                    .constant("JOIN_ROUND", 1)
+                    .constant("JOIN_MITER", 2),
+            )
+            .enumeration(
+                EnumInfo::new("PolyEndType")
+                    .constant("END_POLYGON", 0)
+                    .constant("END_JOINED", 1)
+                    .constant("END_BUTT", 2)
+                    .constant("END_SQUARE", 3)
+                    .constant("END_ROUND", 4),
+            ),
+    );
+    register_class(
+        ClassRegistration::new("Geometry3D")
+            .parent("Object")
+            .method(MethodInfo::new("compute_convex_mesh_points", 1).const_method())
+            .method(MethodInfo::new("build_box_planes", 1).const_method())
+            .method(MethodInfo::new("build_cylinder_planes", 4).const_method())
+            .method(MethodInfo::new("build_capsule_planes", 5).const_method())
+            .method(MethodInfo::new("get_closest_points_between_segments", 4).const_method())
+            .method(MethodInfo::new("get_closest_point_to_segment", 3).const_method())
+            .method(MethodInfo::new("get_closest_point_to_segment_uncapped", 3).const_method())
+            .method(MethodInfo::new("get_triangle_barycentric_coords", 4).const_method())
+            .method(MethodInfo::new("ray_intersects_triangle", 5).const_method())
+            .method(MethodInfo::new("segment_intersects_triangle", 5).const_method())
+            .method(MethodInfo::new("segment_intersects_sphere", 4).const_method())
+            .method(MethodInfo::new("segment_intersects_cylinder", 4).const_method())
+            .method(MethodInfo::new("segment_intersects_convex", 3).const_method())
+            .method(MethodInfo::new("clip_polygon", 2).const_method())
+            .method(MethodInfo::new("tetrahedralize_delaunay", 1).const_method()),
+    );
     if !class_exists("Resource") {
         register_class(ClassRegistration::new("Resource").parent("RefCounted"));
     }

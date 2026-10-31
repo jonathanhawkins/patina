@@ -160,6 +160,77 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hash.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+// ---------------------------------------------------------------------------
+// MD5 / SHA-1 hex wrappers (pat-mgixk.107)
+//
+// `String.md5_text` / `sha1_text` return lowercase hex; `md5_buffer` /
+// `sha1_buffer` return the raw digests, which `md5`/`sha1` below already give.
+//
+// ⚠️ The md5/sha1 CORE used to live here and was removed: a peer landed
+// `MD5_K`, `md5` and `sha1` in this same file concurrently (further down,
+// alongside `hash`/`hmac`), and two copies are both an E0428 and a guaranteed
+// source of drift. Only the hex wrappers, which that block does not provide,
+// are kept.
+//
+// 🔑 My own implementation was cross-checked against Python's `hashlib` over
+// the empty string, "abc", a multi-byte UTF-8 string, 1000 bytes and all 256
+// byte values before being discarded, so the known-answer tests below are
+// trustworthy independently of which implementation survives — they now
+// validate the surviving one.
+// ---------------------------------------------------------------------------
+
+/// Lowercase hex of [`md5`], which is what `String.md5_text` returns.
+pub fn md5_hex(data: &[u8]) -> String {
+    md5(data).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Lowercase hex of [`sha1`], which is what `String.sha1_text` returns.
+pub fn sha1_hex(data: &[u8]) -> String {
+    sha1(data).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod md5_sha1_tests {
+    use super::*;
+
+    /// 🔑 Published known-answer vectors. These were cross-checked against
+    /// Python's `hashlib` for the empty string, `"abc"`, a multi-byte UTF-8
+    /// string, a 1000-byte input (so the multi-block path runs) and all 256
+    /// byte values before this was written — a hash that is wrong only on
+    /// multi-block input still passes a single short vector.
+    #[test]
+    fn md5_known_answers() {
+        assert_eq!(md5_hex(b""), "d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(md5_hex(b"abc"), "900150983cd24fb0d6963f7d28e17f72");
+        // Multi-block: 1000 bytes spans 16 compression rounds, which is what
+        // catches a wrong padding length or endianness.
+        assert_eq!(
+            md5_hex(&b"a".repeat(1000)),
+            "cabe45dcc9ae5b66ba86600cca6b8ba8"
+        );
+    }
+
+    #[test]
+    fn sha1_known_answers() {
+        assert_eq!(sha1_hex(b""), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+        assert_eq!(sha1_hex(b"abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(
+            sha1_hex(&b"a".repeat(1000)),
+            "291e9a6c66994949b57ba5e650361e98fc36b1ba"
+        );
+    }
+
+    /// The two differ only in length-endianness and word order; a copy-paste
+    /// slip between them would make one equal the other's shape.
+    #[test]
+    fn md5_and_sha1_digests_have_godot_lengths() {
+        assert_eq!(md5(b"abc").len(), 16);
+        assert_eq!(sha1(b"abc").len(), 20);
+        assert_eq!(md5_hex(b"abc").len(), 32);
+        assert_eq!(sha1_hex(b"abc").len(), 40);
+    }
+}
+
 /// AES-256-CBC encryption context (pat-z35r2.6).
 ///
 /// Godot's `AESContext` provides AES-256-CBC encrypt/decrypt. Uses the `aes`

@@ -2568,6 +2568,10 @@ fn handle_connection(
         ("POST", "/api/node/delete") => api_delete_node(state, &req.body, &mut stream),
         ("POST", "/api/node/select") => api_select_node(state, &req.body, &mut stream),
         ("POST", "/api/node/reparent") => api_reparent_node(state, &req.body, &mut stream),
+        ("POST", "/api/node/detach_script") => api_detach_script(state, &req.body, &mut stream),
+        ("POST", "/api/node/extend_script") => api_extend_script(state, &req.body, &mut stream),
+        ("POST", "/api/node/reparent_to_new") => api_reparent_to_new(state, &req.body, &mut stream),
+        ("POST", "/api/node/make_root") => api_make_root(state, &req.body, &mut stream),
         ("POST", "/api/node/change_type") => api_change_node_type(state, &req.body, &mut stream),
         ("POST", "/api/node/editable_children") => {
             api_set_editable_children(state, &req.body, &mut stream)
@@ -2609,6 +2613,9 @@ fn handle_connection(
         }
         ("POST", "/api/property/resource/save_as") => {
             api_save_resource_property_as(state, &req.body, &mut stream)
+        }
+        ("POST", "/api/property/resource/make_unique") => {
+            api_make_resource_property_unique(state, &req.body, &mut stream)
         }
         ("PATCH", "/api/node/patch") => api_patch_node(state, &req.body, &mut stream),
         ("POST", "/api/undo") => api_undo(state, &mut stream),
@@ -6176,6 +6183,424 @@ fn api_reparent_node(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
     send_json(stream, r#"{"ok":true}"#);
 }
 
+/// `POST /api/node/detach_script` — clears the node's script (pat-mgixk.110).
+///
+/// Godot's `TOOL_DETACH_SCRIPT` (`scene_tree_dock.cpp` `_tool_selected`). The
+/// menu item existed in the editor only as a toast.
+///
+/// 🔑 No new `EditorCommand` variant: a node's script is the `_script_path`
+/// property (see the detection at the top of the node-info response), and
+/// `SetProperty` already captures the previous value on execute and restores it
+/// on undo. So `Ctrl+Z` works here through the same code path every other
+/// property edit uses, rather than through a second hand-written inverse.
+///
+/// ⚠️ The node-info detector is `_script_path` OR an attached `ScriptInstance`.
+/// Clearing only the property is complete because the editor's own tree never
+/// holds instances — the one `attach_script` call site in this file runs on a
+/// CLONE, on the play path.
+fn api_detach_script(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let parsed = match parse_json_body(body) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "invalid JSON");
+            return;
+        }
+    };
+    let node_raw = match parsed.get("node_id").and_then(|v| v.as_u64()) {
+        Some(v) => v,
+        None => {
+            send_error(stream, 400, "missing node_id");
+            return;
+        }
+    };
+
+    let mut state = state.lock().unwrap();
+    let node_id = match find_node_by_raw_id(&state.scene_tree, node_raw) {
+        Some(id) => id,
+        None => {
+            send_error(stream, 404, "node not found");
+            return;
+        }
+    };
+
+    // Refused rather than treated as a no-op: Godot greys the item out for a
+    // node with no script, and a silent success here would leave the client
+    // showing a cleared badge for a node that never had one.
+    let had_script = state
+        .scene_tree
+        .get_node(node_id)
+        .map(|n| !matches!(n.get_property("_script_path"), Variant::Nil))
+        .unwrap_or(false);
+    if !had_script {
+        send_error(stream, 400, "node has no script to detach");
+        return;
+    }
+
+    let mut cmd = EditorCommand::SetProperty {
+        node_id,
+        property: "_script_path".to_string(),
+        new_value: Variant::Nil,
+        // Populated by execute, which is what makes the undo exact.
+        old_value: Variant::Nil,
+    };
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 400, &e.to_string());
+        return;
+    }
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    // ⚠️ Required, not optional. `saved_undo_depth`'s doc states that forward
+    // mutations set this explicitly — the derived `undo_stack.len() ==
+    // saved_undo_depth` check alone misses an edit that lands back AT the saved
+    // depth after the redo stack was discarded, and the scene would then look
+    // clean with unsaved changes in it.
+    state.scene_modified = true;
+
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/node/extend_script {node_id, path}` — Godot's "Extend Script"
+/// (`TOOL_EXTEND_SCRIPT`, pat-mgixk.110).
+///
+/// Writes a new script whose first line inherits the node's CURRENT script, then
+/// attaches it. The menu item existed in the editor only as a toast.
+///
+/// 🔑 `res://` is resolved with `script_project_root`, the same resolver the
+/// sibling `/api/script/*` routes use, rather than another inline
+/// `strip_prefix("res://")` + CWD join. There are already 14 of those in this
+/// file and the helper additionally honours a configured `project_root`, which
+/// the inline form drops.
+///
+/// The attach is `SetProperty`, so `Ctrl+Z` restores the previous script through
+/// the same path as every other property edit.
+fn api_extend_script(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let Some(parsed) = parse_json_body(body) else {
+        send_error(stream, 400, "invalid JSON");
+        return;
+    };
+    let Some(node_raw) = parsed.get("node_id").and_then(|v| v.as_u64()) else {
+        send_error(stream, 400, "missing node_id");
+        return;
+    };
+    let new_path = parsed
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if new_path.is_empty() {
+        send_error(stream, 400, "missing path");
+        return;
+    }
+    // A write target: refuse traversal outside the project, as the branch-save
+    // route does.
+    if new_path.contains("..") {
+        send_error(stream, 400, "path must stay within the project");
+        return;
+    }
+
+    let mut state = state.lock().unwrap();
+    let Some(node_id) = find_node_by_raw_id(&state.scene_tree, node_raw) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+
+    // ⚠️ Extend needs something to extend FROM. Godot greys the item out for a
+    // node with no script; writing `extends ""` here would produce a file that
+    // cannot parse, which is worse than refusing.
+    let old_path = match state
+        .scene_tree
+        .get_node(node_id)
+        .map(|n| n.get_property("_script_path"))
+    {
+        Some(Variant::String(p)) if !p.is_empty() => p,
+        _ => {
+            send_error(stream, 400, "node has no script to extend");
+            return;
+        }
+    };
+
+    let root = script_project_root(&state);
+    let rel = new_path
+        .strip_prefix("res://")
+        .unwrap_or_else(|| new_path.trim_start_matches('/'));
+    let disk_path = root.join(rel);
+    // Refused rather than overwritten: this route is reachable from a menu
+    // item, and silently replacing a script the user already wrote is not
+    // recoverable through undo (the undo stack covers the tree, not the disk).
+    if disk_path.exists() {
+        send_error(stream, 400, "a file already exists at that path");
+        return;
+    }
+    if let Some(parent) = disk_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // The first line is the whole point of the operation, and the acceptance
+    // asserts exactly it.
+    let source = format!("extends \"{old_path}\"\n\n\nfunc _ready():\n\tpass\n");
+    if let Err(e) = std::fs::write(&disk_path, &source) {
+        send_error(stream, 500, &format!("could not write script: {e}"));
+        return;
+    }
+
+    let mut cmd = EditorCommand::SetProperty {
+        node_id,
+        property: "_script_path".to_string(),
+        new_value: Variant::String(new_path),
+        old_value: Variant::Nil,
+    };
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 400, &e.to_string());
+        return;
+    }
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    // ⚠️ Required, not optional. `saved_undo_depth`'s doc states that forward
+    // mutations set this explicitly — the derived `undo_stack.len() ==
+    // saved_undo_depth` check alone misses an edit that lands back AT the saved
+    // depth after the redo stack was discarded, and the scene would then look
+    // clean with unsaved changes in it.
+    state.scene_modified = true;
+
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/node/reparent_to_new {node_ids|node_id, class_name?, name?}` —
+/// Godot's "Reparent to New Node" (`TOOL_REPARENT_TO_NEW_NODE`, pat-mgixk.110).
+///
+/// Creates a node under the selection's common parent and moves the selection
+/// into it. The context menu had no such entry.
+///
+/// 🔑 Composed from `AddNode` + `ReparentNode` + `Group`, all of which already
+/// have tested inverses, so undo needs no new code. ⚠️ The sub-commands are
+/// executed INDIVIDUALLY and grouped afterwards, which is forced rather than
+/// stylistic: `AddNode.created_id` is only populated by `execute`, and the
+/// reparents need it as their `new_parent_id`.
+fn api_reparent_to_new(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let Some(parsed) = parse_json_body(body) else {
+        send_error(stream, 400, "invalid JSON");
+        return;
+    };
+
+    // Same shape as the delete route: `node_ids` for a multi-select, or a
+    // single `node_id`.
+    let mut raw_ids: Vec<u64> = Vec::new();
+    if let Some(arr) = parsed.get("node_ids").and_then(|v| v.as_array()) {
+        for iv in arr {
+            if let Some(r) = iv.as_u64() {
+                raw_ids.push(r);
+            }
+        }
+    } else if let Some(r) = parsed.get("node_id").and_then(|v| v.as_u64()) {
+        raw_ids.push(r);
+    }
+    if raw_ids.is_empty() {
+        send_error(stream, 400, "missing node_id or node_ids");
+        return;
+    }
+
+    let class_name = parsed
+        .get("class_name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Node2D")
+        .to_string();
+    let name = parsed
+        .get("name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&class_name)
+        .to_string();
+
+    let mut state = state.lock().unwrap();
+
+    let mut targets: Vec<NodeId> = Vec::new();
+    for r in raw_ids {
+        if let Some(id) = find_node_by_raw_id(&state.scene_tree, r) {
+            if !targets.contains(&id) {
+                targets.push(id);
+            }
+        }
+    }
+    if targets.is_empty() {
+        send_error(stream, 404, "node not found");
+        return;
+    }
+
+    // The wrapper goes where the selection currently lives, so the selection
+    // needs a parent to share.
+    let Some(parent_id) = state
+        .scene_tree
+        .get_node(targets[0])
+        .and_then(|n| n.parent())
+    else {
+        send_error(stream, 400, "cannot wrap the scene root");
+        return;
+    };
+    // ⚠️ Refused rather than silently reparenting across branches: Godot
+    // requires a common parent, and quietly moving a node out of a different
+    // subtree would be a destructive surprise.
+    for t in &targets[1..] {
+        if state.scene_tree.get_node(*t).and_then(|n| n.parent()) != Some(parent_id) {
+            send_error(stream, 400, "all nodes must share the same parent");
+            return;
+        }
+    }
+
+    let mut add = EditorCommand::AddNode {
+        parent_id,
+        name: name.clone(),
+        class_name: class_name.clone(),
+        created_id: None,
+    };
+    if let Err(e) = add.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+    let created = match &add {
+        EditorCommand::AddNode {
+            created_id: Some(id),
+            ..
+        } => *id,
+        _ => {
+            send_error(stream, 500, "wrapper node was not created");
+            return;
+        }
+    };
+
+    let mut commands = vec![add];
+    for t in &targets {
+        let mut cmd = EditorCommand::ReparentNode {
+            node_id: *t,
+            new_parent_id: created,
+            old_parent_id: None,
+            // The wrapper has an identity transform, so the children's locals
+            // already preserve their globals; compensation would correct for
+            // nothing.
+            keep_transform: false,
+            saved_transform: None,
+        };
+        if let Err(e) = cmd.execute(&mut state.scene_tree) {
+            send_error(stream, 400, &e.to_string());
+            return;
+        }
+        commands.push(cmd);
+    }
+
+    let moved = targets.len();
+    state.undo_stack.push(EditorCommand::Group {
+        label: format!("Reparent {moved} node(s) to new {class_name}"),
+        commands,
+    });
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    // Godot leaves the new parent selected.
+    state.selected_node = Some(created);
+    state.selected_nodes = vec![created];
+    state.add_log(
+        "info",
+        format!("Reparented {moved} node(s) under new '{name}'"),
+    );
+
+    send_json(stream, r#"{"ok":true}"#);
+}
+
+/// `POST /api/node/make_root {node_id}` — Godot's "Make Scene Root"
+/// (`TOOL_MAKE_ROOT`, pat-mgixk.110).
+///
+/// The selected node becomes the scene root; the old root becomes its child.
+///
+/// 🔑 No re-rooting API is needed, and none exists: the editor's SCENE root is
+/// the **first child of the tree root**. `scene_root_id` and the save path both
+/// resolve it that way, so swapping the two nodes with `ReparentNode` is the
+/// whole operation — which is also why the saved `.tscn` comes out with the new
+/// root, as the acceptance requires.
+///
+/// ⚠️ The order of the two reparents is forced. Moving the selection up FIRST
+/// detaches it from the old root's subtree; reversed, the second step would
+/// reparent the old root into its own descendant and be rejected.
+fn api_make_root(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let Some(parsed) = parse_json_body(body) else {
+        send_error(stream, 400, "invalid JSON");
+        return;
+    };
+    let Some(node_raw) = parsed.get("node_id").and_then(|v| v.as_u64()) else {
+        send_error(stream, 400, "missing node_id");
+        return;
+    };
+
+    let mut state = state.lock().unwrap();
+    let Some(node_id) = find_node_by_raw_id(&state.scene_tree, node_raw) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+
+    let tree_root = state.scene_tree.root_id();
+    let Some(old_root) = state
+        .scene_tree
+        .get_node(tree_root)
+        .and_then(|n| n.children().first().copied())
+    else {
+        send_error(stream, 400, "the scene has no root node");
+        return;
+    };
+
+    if node_id == old_root {
+        send_error(stream, 400, "node is already the scene root");
+        return;
+    }
+    if node_id == tree_root {
+        send_error(stream, 400, "cannot re-root the tree root");
+        return;
+    }
+
+    // 1. Lift the selection to the tree root, detaching it from the old root's
+    //    subtree. This MUST precede step 2.
+    let mut lift = EditorCommand::ReparentNode {
+        node_id,
+        new_parent_id: tree_root,
+        old_parent_id: None,
+        keep_transform: false,
+        saved_transform: None,
+    };
+    if let Err(e) = lift.execute(&mut state.scene_tree) {
+        send_error(stream, 400, &e.to_string());
+        return;
+    }
+
+    // 2. Put the old root underneath it.
+    let mut demote = EditorCommand::ReparentNode {
+        node_id: old_root,
+        new_parent_id: node_id,
+        old_parent_id: None,
+        keep_transform: false,
+        saved_transform: None,
+    };
+    if let Err(e) = demote.execute(&mut state.scene_tree) {
+        // ⚠️ Step 1 already landed, so undo it rather than leaving the scene
+        // with two roots — a half-applied re-root is worse than a refusal.
+        let _ = lift.undo(&mut state.scene_tree);
+        send_error(stream, 400, &e.to_string());
+        return;
+    }
+
+    let name = state
+        .scene_tree
+        .get_node(node_id)
+        .map(|n| n.name().to_string())
+        .unwrap_or_default();
+    state.undo_stack.push(EditorCommand::Group {
+        label: format!("Make '{name}' the scene root"),
+        commands: vec![lift, demote],
+    });
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    state.selected_node = Some(node_id);
+    state.selected_nodes = vec![node_id];
+    state.add_log("info", format!("'{name}' is now the scene root"));
+
+    send_json(stream, r#"{"ok":true}"#);
+}
+
 /// `POST /api/node/change_type` — converts a node to a different class in
 /// place. The node keeps its identity (id), name, children, and property bag,
 /// so any properties common to both types carry over automatically.
@@ -8059,6 +8484,172 @@ fn api_save_resource_property_as(
     state.add_log("info", format!("Saved {property} to {res_path}"));
 
     send_json(stream, &format!(r#"{{"ok":true,"path":"{res_path}"}}"#));
+}
+
+/// How many nodes in the open scene reference the inline sub-resource `id`
+/// (pat-mgixk.111).
+///
+/// Counted off `__resref__<prop>` = `Class::id` rather than off the property
+/// value, because that companion is the one the saver rebuilds a
+/// `[sub_resource]` header from — so this counts exactly the references that
+/// would collapse into one section on save, which is what "shared" means here.
+fn inline_resource_ref_count(tree: &SceneTree, root: NodeId, id: &str) -> usize {
+    let mut subtree = Vec::new();
+    tree.collect_subtree_top_down(root, &mut subtree);
+    let mut n = 0;
+    for nid in subtree {
+        let Some(node) = tree.get_node(nid) else {
+            continue;
+        };
+        for (key, value) in node.properties() {
+            if !key.starts_with("__resref__") {
+                continue;
+            }
+            let Variant::String(meta) = value else {
+                continue;
+            };
+            if meta.rsplit_once("::").map(|(_, i)| i) == Some(id) {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// `POST /api/property/resource/make_unique` — gives this node its own copy of a
+/// shared inline sub-resource (pat-mgixk.111).
+///
+/// Body: `{"node_id":N,"property":"texture"}`.
+///
+/// Godot's picker offers this as `OBJ_MENU_MAKE_UNIQUE`
+/// (`editor/inspector/editor_resource_picker.cpp:327`) and **disables** it when
+/// the resource is already internal to the scene and referenced exactly once —
+/// "This Resource is already unique." (:337-338). This route mirrors that: an
+/// unshared inline resource is refused rather than silently re-id'd, so the
+/// undo history does not fill with no-ops.
+///
+/// 🔑 Only the ID changes. An inline body is cached on the node under a
+/// property-keyed prefix ([`inline_resource_companion_prefix`]), never under the
+/// resource id, so each node already owns its own copy of the values and nothing
+/// needs deep-copying. Minting a fresh id is by itself what makes the saver emit
+/// two `[sub_resource]` sections instead of one shared one.
+///
+/// ⚠️ An ALREADY-EXTERNAL property is refused. Godot would duplicate the file's
+/// contents into the scene, but that is the inverse direction of this bead's
+/// separate "Make Resource Built-In" toolbar action and needs the `.tres` read
+/// off disk and flattened into companions; doing it here by halves would write a
+/// `[sub_resource]` with an empty body. Refusing names the right action instead.
+fn api_make_resource_property_unique(
+    state: &Arc<Mutex<EditorState>>,
+    body: &str,
+    stream: &mut TcpStream,
+) {
+    let Some(parsed) = parse_json_body(body) else {
+        send_error(stream, 400, "invalid JSON");
+        return;
+    };
+    let Some(node_raw) = parsed.get("node_id").and_then(|v| v.as_u64()) else {
+        send_error(stream, 400, "missing node_id");
+        return;
+    };
+    let Some(property) = parsed.get("property").and_then(|v| v.as_str()) else {
+        send_error(stream, 400, "missing property");
+        return;
+    };
+    let property = property.to_string();
+
+    let mut state = state.lock().unwrap();
+    // Resolved by walk, like every other node_id endpoint in this file: a raw id
+    // naming no live node must 404 rather than mint a `NodeId` that later reads
+    // as "property holds no inline resource".
+    let Some(node_id) = find_node_by_raw_id(&state.scene_tree, node_raw) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+    let Some(node) = state.scene_tree.get_node(node_id) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+    let current = node.get_property(&property);
+    let resref = node.get_property(&format!("__resref__{property}"));
+
+    // Checked BEFORE the inline lookup, so a stale `__resref__` left over from a
+    // previous inline value cannot make an external property look shared.
+    if let Variant::String(s) = &current {
+        if s.starts_with("ExtResource(") || s.starts_with("res://") {
+            send_error(
+                stream,
+                400,
+                "property is an external resource; use Make Resource Built-In to inline it first",
+            );
+            return;
+        }
+    }
+
+    let (class_name, old_id) = match (&current, &resref) {
+        // A file-backed resource edited in place. It has no id yet, so there is
+        // nothing shared to split off.
+        (Variant::Resource(_), _) => {
+            send_error(stream, 400, "property holds no inline sub-resource");
+            return;
+        }
+        (_, Variant::String(meta)) => match meta.rsplit_once("::") {
+            Some((cls, id)) if !cls.is_empty() && !id.is_empty() => {
+                (cls.to_string(), id.to_string())
+            }
+            _ => {
+                send_error(stream, 400, "malformed __resref__ companion");
+                return;
+            }
+        },
+        _ => {
+            send_error(stream, 400, "property holds no inline sub-resource");
+            return;
+        }
+    };
+
+    let tree_root = state.scene_tree.root_id();
+    if inline_resource_ref_count(&state.scene_tree, tree_root, &old_id) < 2 {
+        send_error(stream, 400, "resource is already unique");
+        return;
+    }
+
+    // Scan the whole tree, so the new id cannot collide with one already
+    // referenced anywhere in the open scene.
+    let used = used_resource_ids(&state.scene_tree, tree_root);
+    let new_id = next_resource_id(&used, &class_name);
+
+    // Applied as a command, not a direct write: clause (3) of the bead requires
+    // every operation to be undoable, and `SetProperty` is what records the old
+    // value on the undo stack.
+    let mut cmd = EditorCommand::SetProperty {
+        node_id,
+        property: property.clone(),
+        new_value: Variant::String(format!("SubResource(\"{new_id}\")")),
+        old_value: current.clone(),
+    };
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+    if let Some(node) = state.scene_tree.get_node_mut(node_id) {
+        node.set_property(
+            &format!("__resref__{property}"),
+            Variant::String(format!("{class_name}::{new_id}")),
+        );
+    }
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    state.add_log(
+        "info",
+        format!("Made {property} unique ({class_name}::{new_id})"),
+    );
+
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"id":"{new_id}","class_name":"{class_name}"}}"#),
+    );
 }
 
 fn api_new_resource_property(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
@@ -11458,6 +12049,10 @@ const CAPABILITIES: &[(&str, &str, &str, &str, &str)] = &[
     ("POST", "/api/node/select", "[]", "{\"node_id\":\"number\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/node/rename", "[]", "{\"node_id\":\"number\",\"new_name\":\"string\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/node/reparent", "[]", "{\"node_id\":\"number\",\"new_parent_id\":\"number\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/node/detach_script", "[]", "{\"node_id\":\"number\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/node/extend_script", "[]", "{\"node_id\":\"number\",\"path\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/node/reparent_to_new", "[]", "{\"node_ids\":\"array\",\"class_name\":\"string?\",\"name\":\"string?\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/node/make_root", "[]", "{\"node_id\":\"number\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/node/change_type", "[]", "{\"node_id\":\"number\",\"class_name\":\"string\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/node/duplicate", "[]", "{\"node_id\":\"number\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/property/set", "[]", "{\"node_id\":\"number\",\"property\":\"string\",\"value\":\"any\"}", "{\"type\":\"object\"}"),
@@ -12510,6 +13105,145 @@ fn api_export_run(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "project".to_string());
+
+    // ----- PCK/ZIP-only mode (pat-mgixk.109) -------------------------------
+    //
+    // Godot's export dialog offers "Export PCK/ZIP..." alongside "Export
+    // Project...": it packs `res://` WITHOUT a runtime, so it is available for
+    // every platform including Web, which is why this is checked before the
+    // Web branch below.
+    //
+    // 🔑 `project.godot` is written explicitly rather than left to collection.
+    // `to_export_config` fills `resources` from the preset's INCLUDE FILTERS
+    // (`export_dialog.rs`), so a preset with no filters collects nothing and the
+    // archive would be a valid zip containing no project at all — which is
+    // exactly the "succeeded and produced nothing" shape these sweeps exist to
+    // remove. Godot always carries the project file too.
+    if matches!(
+        v.get("mode").and_then(|x| x.as_str()),
+        Some("pck") | Some("zip")
+    ) {
+        let out_rel = std::path::Path::new(&preset.export_path);
+        // Godot replaces the preset's extension with `.zip` for this mode.
+        let zip_rel = out_rel.with_extension("zip");
+        let zip_path = project_root.join(&zip_rel);
+        if let Some(parent) = zip_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                send_error(stream, 500, &format!("cannot create output dir: {e}"));
+                return;
+            }
+        }
+
+        // 🔑 The project is WALKED, not collected through
+        // `PackageExecutor::validate_and_collect`.
+        //
+        // ⚠️ That function treats `config.resources` as RESOURCE PATHS and errors
+        // with `ResourceNotFound` for anything that does not exist — but
+        // `to_export_config` fills `resources` from the preset's include
+        // FILTERS, which are globs. The dialog's own default preset uses `["*"]`,
+        // so routing this mode through it would make "Export PCK/ZIP" answer 400
+        // for every freshly created preset. Walking `res://` is also what the
+        // mode means: pack the project, without a runtime.
+        let exclude: Vec<String> = preset
+            .exclude_filters
+            .iter()
+            .filter(|f| !f.trim().is_empty())
+            .cloned()
+            .collect();
+        let mut collected: Vec<(String, std::path::PathBuf)> = Vec::new();
+        let mut stack = vec![project_root.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(rel) = path.strip_prefix(&project_root) else {
+                    continue;
+                };
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                // Skip VCS and editor bookkeeping, and never pack the archive
+                // we are in the middle of writing.
+                let first = rel_str.split('/').next().unwrap_or("");
+                if first.starts_with('.') || path == zip_path {
+                    continue;
+                }
+                if path.is_dir() {
+                    stack.push(path);
+                } else if !exclude.iter().any(|e| rel_str.contains(e.as_str())) {
+                    collected.push((rel_str, path));
+                }
+            }
+        }
+        collected.sort();
+
+        let mut packer = gdresource::ZipPacker::new();
+        if let Err(e) = packer.open(&zip_path.to_string_lossy(), gdresource::ZipAppend::Create) {
+            send_error(stream, 500, &format!("cannot open archive: {e:?}"));
+            return;
+        }
+        let mut messages: Vec<String> = Vec::new();
+        let mut written = 0usize;
+
+        // Helper closure is avoided on purpose: each step can fail and the
+        // handler has to answer HTTP, so the control flow stays flat.
+        let project_file = project_root.join("project.godot");
+        match std::fs::read(&project_file) {
+            Ok(bytes) => {
+                if packer.start_file("project.godot").is_ok()
+                    && packer.write_file(&bytes).is_ok()
+                    && packer.close_file().is_ok()
+                {
+                    written += 1;
+                } else {
+                    messages.push("could not add project.godot".to_string());
+                }
+            }
+            Err(e) => {
+                send_error(stream, 400, &format!("cannot read project.godot: {e}"));
+                return;
+            }
+        }
+
+        for (rel_str, path) in &collected {
+            // The project file was written above; a second entry of the same
+            // name would make the archive self-contradictory.
+            if rel_str == "project.godot" {
+                continue;
+            }
+            match std::fs::read(path) {
+                Ok(bytes) => {
+                    if packer.start_file(rel_str).is_ok()
+                        && packer.write_file(&bytes).is_ok()
+                        && packer.close_file().is_ok()
+                    {
+                        written += 1;
+                    } else {
+                        messages.push(format!("could not add {rel_str}"));
+                    }
+                }
+                Err(e) => messages.push(format!("cannot read {rel_str}: {e}")),
+            }
+        }
+
+        if let Err(e) = packer.close() {
+            send_error(stream, 500, &format!("cannot finalize archive: {e:?}"));
+            return;
+        }
+        messages.push(format!("packed {written} file(s)"));
+        send_json(
+            stream,
+            &serde_json::json!({
+                "ok": true,
+                "platform": preset.platform.id(),
+                "mode": "pck",
+                "output_path": zip_path.display().to_string(),
+                "messages": messages,
+            })
+            .to_string(),
+        );
+        return;
+    }
 
     if preset.platform == crate::ExportPlatform::Web {
         let wasm_path = v
@@ -16265,6 +16999,11 @@ fn route_is_edit_locked(method: &str, path: &str) -> bool {
             | "/api/node/delete"
             | "/api/node/reparent"
             | "/api/node/change_type"
+            // Mutates the scene, so it must be refused while editing is locked.
+            | "/api/node/detach_script"
+            | "/api/node/extend_script"
+            | "/api/node/reparent_to_new"
+            | "/api/node/make_root"
             | "/api/node/make_local"
             | "/api/node/rename"
             | "/api/node/duplicate"

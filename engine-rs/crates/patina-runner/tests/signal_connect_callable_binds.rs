@@ -129,9 +129,15 @@ extends Node2D
 signal two_args
 ";
 
-/// ⚠️ Writes go through `self.` in the handlers. Both idioms appear in green
-/// fixtures, and this is the one `call_deferred_native_methods.rs` uses for a
-/// handler that has to persist a value past its own return.
+/// ⚠️ Handler writes are BARE, not `self.`-prefixed, and that is load-bearing.
+/// `object_api_surface_methods.rs:18-20` records that a handler's `self.*`
+/// writes **do not survive its return** — that test avoids script vars entirely
+/// and writes node metadata instead for exactly this reason. The green
+/// signal-handler reference at the same layer,
+/// `signal_value_connect_emit.rs`, uses bare `got = v` / `count += 1` and
+/// passes. `call_deferred_native_methods.rs` does use `self.`, but it is a
+/// *deferred call*, not a signal handler, so it is not the reference to copy
+/// here. `_ready` and `drop()` are not handlers and are unaffected.
 const MAIN_GD: &str = "\
 extends Node2D
 
@@ -154,12 +160,12 @@ func _ready():
     ready_done = true
 
 func _on_pick(v):
-    self.picks = self.picks * 10 + v + 1
-    self.pick_count += 1
+    picks = picks * 10 + v + 1
+    pick_count += 1
 
 func _on_one(a):
-    self.one_got = a
-    self.one_argc = 1
+    one_got = a
+    one_argc = 1
 
 func drop():
     $Pick0.disconnect(\"pressed\", _on_pick)

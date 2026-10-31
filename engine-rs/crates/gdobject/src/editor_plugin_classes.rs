@@ -105,6 +105,13 @@ pub fn register_editor_plugin_classes() {
         register_class(
             ClassRegistration::new("EditorDebuggerSession")
                 .parent("RefCounted")
+                // GDREGISTER_ABSTRACT_CLASS upstream, and
+                // `extension_api.json` agrees (`is_instantiable: false`). The
+                // comment above already stated the reason — sessions come from
+                // `EditorDebuggerPlugin.get_session()` — but the flag was
+                // never set, so `EditorDebuggerSession.new()` handed a script
+                // an object Godot refuses to create (pat-mgixk.97).
+                .abstract_class()
                 .method(MethodInfo::new("add_session_tab", 1))
                 .method(MethodInfo::new("is_active", 0))
                 .method(MethodInfo::new("is_breaked", 0))
@@ -164,6 +171,15 @@ pub fn register_editor_plugin_classes() {
         register_class(
             ClassRegistration::new("FileSystemDock")
                 .parent("EditorDock")
+                // `is_instantiable: false` in `extension_api.json`: the dock is
+                // the editor's own singleton instance, reached through
+                // `EditorInterface.get_file_system_dock()`, not constructed.
+                //
+                // ⚠️ Its PARENT `EditorDock` *is* instantiable (the oracle says
+                // so), so this is not a "whole family is abstract" rule — the
+                // flag has to be per class, and copying the parent's would be
+                // wrong in both directions here (pat-mgixk.97).
+                .abstract_class()
                 .method(MethodInfo::new("navigate_to_path", 1))
                 .method(MethodInfo::new("add_resource_tooltip_plugin", 1))
                 .method(MethodInfo::new("remove_resource_tooltip_plugin", 1))

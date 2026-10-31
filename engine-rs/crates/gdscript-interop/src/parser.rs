@@ -1803,7 +1803,24 @@ impl Parser {
                 }
                 Token::Dot => {
                     self.advance();
-                    let member = self.eat_ident()?;
+                    // 🔑 `match` is a KEYWORD, so the tokenizer hands back
+                    // `Token::Match` (tokenizer.rs:754) and `eat_ident` refuses
+                    // it — which made `"icon.png".match("*.png")` a PARSE error,
+                    // not a missing method. Godot accepts a keyword as an
+                    // attribute name, and `String.match` is a real method
+                    // (pat-mgixk.107).
+                    //
+                    // ⚠️ Scoped to this ONE token on purpose. Accepting every
+                    // keyword here would be closer to Godot but changes how
+                    // `.if`, `.for` and friends parse; `match` is the only
+                    // keyword that is also a method name this engine serves, so
+                    // this way the blast radius is provably nil.
+                    let member = if matches!(self.peek(), Token::Match) {
+                        self.advance();
+                        "match".to_string()
+                    } else {
+                        self.eat_ident()?
+                    };
                     expr = Expr::MemberAccess {
                         object: Box::new(expr),
                         member,

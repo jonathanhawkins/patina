@@ -389,6 +389,69 @@ pub fn build_capsule_planes(
     planes
 }
 
+// ---------------------------------------------------------------------------
+// pat-mgixk.102 — plane clipping.
+// ---------------------------------------------------------------------------
+
+/// Distance below which a point counts as lying ON a plane rather than over it.
+///
+/// ⚠️ Matters for the result's point count: a vertex exactly on the plane must
+/// be emitted once, not emitted twice (as both a kept vertex and a fresh
+/// crossing), so the "is this vertex over the plane" test and the "do these two
+/// vertices straddle it" test have to use the same threshold.
+const PLANE_EPS: f32 = 1e-6;
+
+/// `Geometry3D.clip_polygon` — the part of a planar polygon on the plane's
+/// **back** side.
+///
+/// ⚠️ Back side, not front. Godot's `Geometry3D::clip_polygon` classifies a
+/// vertex as `LOC_INSIDE` when its signed distance is negative and keeps the
+/// inside part, so the half kept is the one `Plane::is_point_over` reports
+/// `false` for. Keeping the front half instead would return the complement —
+/// a plausible-looking polygon of the same size, which is exactly the kind of
+/// inversion a single-polygon test cannot see.
+///
+/// Returns the polygon unchanged when it lies wholly behind the plane, and an
+/// empty vector when it lies wholly in front — again matching Godot, whose
+/// early-outs are `over == 0` and `under == 0`.
+pub fn clip_polygon(points: &[Vector3], plane: Plane) -> Vec<Vector3> {
+    let n = points.len();
+    if n < 3 {
+        return Vec::new();
+    }
+    let dist: Vec<f32> = points.iter().map(|p| plane.distance_to(*p)).collect();
+    let any_over = dist.iter().any(|d| *d > PLANE_EPS);
+    if !any_over {
+        return points.to_vec();
+    }
+    let any_under = dist.iter().any(|d| *d <= PLANE_EPS);
+    if !any_under {
+        return Vec::new();
+    }
+
+    let mut out = Vec::with_capacity(n + 2);
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let (a, b) = (points[i], points[j]);
+        let (da, db) = (dist[i], dist[j]);
+        // A vertex on or behind the plane survives.
+        if da <= PLANE_EPS {
+            out.push(a);
+        }
+        // Only a true straddle contributes a crossing; a vertex sitting on the
+        // plane was already emitted by the branch above.
+        if (da > PLANE_EPS) != (db > PLANE_EPS) {
+            let t = da / (da - db);
+            out.push(Vector3::new(
+                a.x + (b.x - a.x) * t,
+                a.y + (b.y - a.y) * t,
+                a.z + (b.z - a.z) * t,
+            ));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -336,7 +336,10 @@ fn build_state_machine(
                 if let Some(Variant::Bool(b)) = t_props.get("break_loop_at_end") {
                     edge.break_loop_at_end = *b;
                 }
-                edge.xfade_curve = sub_resource_id(t_props.get("xfade_curve"));
+                // pat-mgixk.82: resolve the id to the baked curve now, so
+                // nothing downstream needs the PackedScene again.
+                edge.xfade_curve = sub_resource_id(t_props.get("xfade_curve"))
+                    .and_then(|id| bake_xfade_curve(scene, &id));
             }
             sm.transitions.push(edge);
         }
@@ -732,6 +735,29 @@ fn named(name: &str, node: AnimationNode) -> AnimationNode {
 
 /// Extracts the id from a parsed `SubResource("id")` reference, which the `.tscn`
 /// value parser stores as `Variant::String("SubResource:id")`.
+/// Bakes a transition's `xfade_curve` sub-resource into evenly spaced samples
+/// (pat-mgixk.82).
+///
+/// ⚠️ The class is checked. A transition whose `xfade_curve` pointed at
+/// something that is not a `Curve` would otherwise be read as `_data` in a
+/// shape this cannot interpret, and `bake_curve_samples` would either refuse it
+/// or — worse — accept a 5-divisible array of unrelated values.
+///
+/// Godot serializes a `Curve` as
+/// `_data = [Vector2(x, y), left_tangent, right_tangent, left_mode, right_mode, ...]`
+/// (`scene/resources/curve.cpp`, `Curve::_set_data`), which is exactly what the
+/// shared baker already parses.
+fn bake_xfade_curve(scene: &PackedScene, id: &str) -> Option<Vec<f32>> {
+    if scene.sub_resource_type(id)? != "Curve" {
+        return None;
+    }
+    let data = match scene.sub_resource_props(id)?.get("_data") {
+        Some(Variant::Array(a)) => a.to_vec(),
+        _ => return None,
+    };
+    crate::packed_scene::bake_curve_samples(&data)
+}
+
 fn sub_resource_id(value: Option<&Variant>) -> Option<String> {
     match value {
         Some(Variant::String(s)) => s.strip_prefix("SubResource:").map(String::from),

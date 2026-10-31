@@ -38,4 +38,7 @@ pub use conversion::ConversionError;
 pub use dictionary::Dictionary;
 pub use shared::{ContainerError, ContainerType, SharedArray, SharedDictionary};
 pub use string_like::{hash_compare, string_like_eq};
-pub use variant::{CallableRef, ResourceRef, Variant, VariantType};
+pub use variant::{
+    num_real_f32, num_real_f64, num_with_decimals, CallableRef, ResourceRef, Variant,
+    VariantType,
+};

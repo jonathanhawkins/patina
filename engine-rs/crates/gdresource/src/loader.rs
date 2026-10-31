@@ -14,7 +14,7 @@ use gdcore::math3d::{Aabb, Basis, Plane, Projection, Quaternion, Transform3D};
 use gdcore::node_path::NodePath;
 use gdcore::string_name::StringName;
 use gdcore::ResourceUid;
-use gdvariant::{ContainerType, Dictionary, SharedArray, Variant};
+use gdvariant::{ContainerType, Dictionary, SharedArray, SharedDictionary, Variant};
 
 use crate::resource::{ExtResource, Resource};
 
@@ -855,6 +855,35 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
         }
     }
 
+    // Typed dictionary: `Dictionary[K, V]({"k": v, ...})`. Godot 4.4+ writes a
+    // typed dictionary in exactly this shape
+    // (`core/variant/variant_parser.cpp:2241`). Without this branch the literal
+    // fell past every case below to "unrecognized value", so a scene carrying
+    // one failed to load at all (pat-mgixk.108).
+    if let Some(rest) = s.strip_prefix("Dictionary[") {
+        // ⚠️ Depth-aware scan, not `find(']')`: the parameters may themselves be
+        // generic, as in `Dictionary[String, Array[int]]`, where the first `]`
+        // closes the inner `Array[int` and a naive search would split the hint
+        // in the wrong place.
+        if let Some(close) = closing_bracket(rest) {
+            let params = split_args(&rest[..close]);
+            let after = rest[close + 1..].trim();
+            if params.len() == 2 {
+                if let Some(call) = after.strip_prefix('(').and_then(|c| c.strip_suffix(')')) {
+                    let call = call.trim();
+                    if let Some(body) = call.strip_prefix('{').and_then(|c| c.strip_suffix('}')) {
+                        return as_typed_dictionary(
+                            &params[0],
+                            &params[1],
+                            parse_dictionary(body)?,
+                        );
+                    }
+                }
+            }
+        }
+        return Err(EngineError::Parse(format!("invalid typed Dictionary: {s}")));
+    }
+
     // Typed array: `Array[Type]([elem, ...])`. The element type is retained on
     // the array itself, so a scene property loads as a genuinely typed array
     // and `is_typed()` answers true (pat-s3rrv.265).
@@ -1075,6 +1104,69 @@ fn as_typed_array(elem_name: &str, parsed: Variant) -> EngineResult<Variant> {
         .assign(&items)
         .map_err(|err| EngineError::Parse(format!("Array[{elem_name}]: {err}")))?;
     Ok(Variant::Array(typed))
+}
+
+/// Byte offset of the `]` that closes the bracket this slice opens inside, or
+/// `None` if the brackets never balance.
+///
+/// `s` starts just *after* a consumed `[`, so the scan begins at depth 1.
+/// Quoted segments are skipped, because a type parameter can legitimately be a
+/// string-keyed nested container.
+fn closing_bracket(s: &str) -> Option<usize> {
+    let mut depth = 1i32;
+    let mut in_string = false;
+    let mut escape = false;
+    for (i, c) in s.char_indices() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        match c {
+            '\\' if in_string => escape = true,
+            '"' => in_string = !in_string,
+            _ if in_string => {}
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Re-homes a `Dictionary[K, V](…)` literal into a dictionary that actually
+/// carries its key and value types, so `is_typed()` answers true for a
+/// scene-loaded property — the dictionary counterpart of [`as_typed_array`].
+///
+/// The types must be applied to an **empty** dictionary and the entries
+/// assigned in: `SharedDictionary::set_typed` refuses a populated one, matching
+/// Godot's `dictionary.cpp`.
+fn as_typed_dictionary(key_name: &str, value_name: &str, parsed: Variant) -> EngineResult<Variant> {
+    let Variant::Dictionary(entries) = parsed else {
+        return Ok(parsed);
+    };
+    let key = ContainerType::from_hint_name(key_name);
+    let value = ContainerType::from_hint_name(value_name);
+    // `Dictionary[Variant, Variant]` constrains nothing, so leave the parsed
+    // dictionary as it is rather than inventing a type the scene never asked
+    // for — the same rule `as_typed_array` applies to `Array[Variant]`.
+    if !key.is_typed() && !value.is_typed() {
+        return Ok(Variant::Dictionary(entries));
+    }
+    let typed = SharedDictionary::new();
+    typed.set_typed(key, value).map_err(|err| {
+        EngineError::Parse(format!("Dictionary[{key_name}, {value_name}]: {err}"))
+    })?;
+    // A scene whose declared types disagree with its own literal is corrupt;
+    // reporting it beats loading a silently untyped dictionary.
+    typed.assign(&entries).map_err(|err| {
+        EngineError::Parse(format!("Dictionary[{key_name}, {value_name}]: {err}"))
+    })?;
+    Ok(Variant::Dictionary(typed))
 }
 
 /// Parses a dictionary body (content between `{` and `}`) into `Variant::Dictionary`.

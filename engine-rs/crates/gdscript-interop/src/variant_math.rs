@@ -63,6 +63,147 @@ fn num(v: &Variant, ctx: &str) -> Result<f32, RuntimeError> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// String static helpers (pat-mgixk.107), ported from core/string/ustring.cpp.
+// ---------------------------------------------------------------------------
+
+/// Full-width float argument. `arg_num` narrows to `f32`, which these
+/// formatters must not do.
+fn string_static_f64(args: &[Variant], idx: usize, ctx: &str) -> Result<f64, RuntimeError> {
+    match args.get(idx) {
+        Some(Variant::Float(f)) => Ok(*f),
+        Some(Variant::Int(i)) => Ok(*i as f64),
+        other => Err(type_error(format!(
+            "{ctx} expects a number for argument {idx}, got {}",
+            describe(other)
+        ))),
+    }
+}
+
+/// Integer argument, or `None` when absent so a caller can apply Godot's own
+/// default rather than a shared one.
+fn string_static_i64(args: &[Variant], idx: usize) -> Option<i64> {
+    match args.get(idx) {
+        Some(Variant::Int(i)) => Some(*i),
+        Some(Variant::Float(f)) => Some(*f as i64),
+        _ => None,
+    }
+}
+
+/// Godot `String::num_int64` / `num_uint64`: render in `base`, optionally with
+/// uppercase digits above 9.
+///
+/// Base is clamped to 2..=36 — Godot asserts on anything else, and a base of 0
+/// or 1 cannot terminate.
+fn gd_num_in_base(value: i128, base: i64, capitalize: bool) -> String {
+    let base = base.clamp(2, 36) as u32;
+    if value == 0 {
+        return "0".to_string();
+    }
+    let negative = value < 0;
+    let mut n = value.unsigned_abs();
+    let mut digits: Vec<char> = Vec::new();
+    while n > 0 {
+        let d = (n % base as u128) as u32;
+        let ch = std::char::from_digit(d, base).unwrap_or('0');
+        digits.push(if capitalize {
+            ch.to_ascii_uppercase()
+        } else {
+            ch
+        });
+        n /= base as u128;
+    }
+    if negative {
+        digits.push('-');
+    }
+    digits.iter().rev().collect()
+}
+
+/// Godot `String::num_scientific`, which is C's `%lg`.
+///
+/// ⚠️ Rust has no `%g`, so the rule is implemented explicitly: with precision
+/// `P = 6`, use `%e` when the decimal exponent is below -4 or at least `P`,
+/// otherwise `%f` with `P - 1 - exponent` decimals; then strip trailing zeros
+/// and a bare trailing point. Writing `{:e}` instead would print `3.14e0` where
+/// C prints `3.14`.
+fn gd_num_scientific(value: f64) -> String {
+    if value.is_nan() {
+        return "nan".to_string();
+    }
+    if value.is_infinite() {
+        return if value < 0.0 { "-inf" } else { "inf" }.to_string();
+    }
+    if value == 0.0 {
+        return "0".to_string();
+    }
+    const P: i32 = 6;
+    let exp = value.abs().log10().floor() as i32;
+    let mut out = if exp < -4 || exp >= P {
+        // `%e` carries P-1 fractional digits; normalise the exponent to C's
+        // at-least-two-digit form.
+        let mantissa_decimals = (P - 1) as usize;
+        let formatted = format!("{value:.mantissa_decimals$e}");
+        match formatted.split_once('e') {
+            Some((mantissa, e)) => {
+                let m = strip_trailing_zeros(mantissa);
+                let sign = if e.starts_with('-') { '-' } else { '+' };
+                let digits: String = e.trim_start_matches(['-', '+']).to_string();
+                format!("{m}e{sign}{:0>2}", digits)
+            }
+            None => formatted,
+        }
+    } else {
+        let decimals = (P - 1 - exp).max(0) as usize;
+        strip_trailing_zeros(&format!("{value:.decimals$}"))
+    };
+    if out.is_empty() {
+        out = "0".to_string();
+    }
+    out
+}
+
+/// Removes trailing zeros, and the decimal point if it is left bare — the same
+/// trim `String::num` applies.
+fn strip_trailing_zeros(s: &str) -> String {
+    if !s.contains('.') {
+        return s.to_string();
+    }
+    let trimmed = s.trim_end_matches('0');
+    trimmed.trim_end_matches('.').to_string()
+}
+
+/// Godot `String::humanize_size` (`core/string/ustring.cpp`).
+///
+/// 🔑 The digit count comes from the SCALED value, not the byte count:
+/// `_humanize_digits` gives 2 decimals below 100 and 1 below 1024, and the
+/// result runs through `String::num`, whose trailing-zero trim is what turns
+/// `1536` into `"1.5 KiB"` rather than `"1.50 KiB"`.
+fn gd_humanize_size(size: u64) -> String {
+    const PREFIXES: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
+    let mut div: u64 = 1;
+    let mut idx = 0usize;
+    while idx < PREFIXES.len() - 1 && size > div.saturating_mul(1024) {
+        div = div.saturating_mul(1024);
+        idx += 1;
+    }
+    let scaled = size / div.max(1);
+    let decimals = if idx == 0 {
+        0
+    } else if scaled < 100 {
+        2
+    } else if scaled < 1024 {
+        1
+    } else {
+        0
+    };
+    let value = size as f64 / div.max(1) as f64;
+    format!(
+        "{} {}",
+        gdvariant::num_with_decimals(value, decimals),
+        PREFIXES[idx]
+    )
+}
+
 fn arg_num(args: &[Variant], idx: usize, ctx: &str) -> Result<f32, RuntimeError> {
     match args.get(idx) {
         Some(v) => num(v, ctx),
@@ -3161,6 +3302,84 @@ pub(crate) fn vector_static_call(
     args: &[Variant],
 ) -> Option<Result<Variant, RuntimeError>> {
     match (type_name, method) {
+        // String's six statics (pat-mgixk.107). They land here because this
+        // hook is consulted for any `Ident.method(..)`, and routing them
+        // through it means the direct `String.num(..)` spelling and
+        // `ClassDB.class_call_static("String", "num", ..)` cannot disagree.
+        //
+        // ⚠️ These deliberately do NOT use `arg_num`: it returns **f32**, and
+        // Godot's `String.num` takes a double. Narrowing first would print the
+        // widening error for anything needing more than ~7 digits, which is the
+        // opposite of what these formatters are for.
+        ("String", "num") => {
+            let ctx = "String.num()";
+            Some((|| {
+                let n = string_static_f64(args, 0, ctx)?;
+                // Godot's `decimals` defaults to -1, which means "use num_real".
+                let decimals = string_static_i64(args, 1).unwrap_or(-1);
+                Ok(Variant::String(if decimals < 0 {
+                    gdvariant::num_real_f64(n, true)
+                } else {
+                    gdvariant::num_with_decimals(n, decimals.clamp(0, 32) as i32)
+                }))
+            })())
+        }
+        ("String", "num_int64") => {
+            let ctx = "String.num_int64()";
+            Some((|| {
+                let n = string_static_i64(args, 0)
+                    .ok_or_else(|| type_error(format!("{ctx} expects an int")))?;
+                let base = string_static_i64(args, 1).unwrap_or(10);
+                let capitalize = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
+                Ok(Variant::String(gd_num_in_base(n as i128, base, capitalize)))
+            })())
+        }
+        ("String", "num_uint64") => {
+            let ctx = "String.num_uint64()";
+            Some((|| {
+                let n = string_static_i64(args, 0)
+                    .ok_or_else(|| type_error(format!("{ctx} expects an int")))?;
+                let base = string_static_i64(args, 1).unwrap_or(10);
+                let capitalize = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
+                // Reinterpreted as unsigned, which is the whole difference from
+                // `num_int64`: -1 prints as 18446744073709551615, not "-1".
+                Ok(Variant::String(gd_num_in_base(
+                    (n as u64) as i128,
+                    base,
+                    capitalize,
+                )))
+            })())
+        }
+        ("String", "num_scientific") => {
+            let ctx = "String.num_scientific()";
+            Some(string_static_f64(args, 0, ctx).map(|n| Variant::String(gd_num_scientific(n))))
+        }
+        ("String", "chr") => {
+            let ctx = "String.chr()";
+            Some((|| {
+                let code = string_static_i64(args, 0)
+                    .ok_or_else(|| type_error(format!("{ctx} expects a code point")))?;
+                // An unpaired surrogate or out-of-range value is not a scalar
+                // value; Godot yields nothing usable there either, so an empty
+                // string is the honest answer rather than a replacement char
+                // that looks like successful conversion.
+                let out = u32::try_from(code)
+                    .ok()
+                    .and_then(char::from_u32)
+                    .map(String::from)
+                    .unwrap_or_default();
+                Ok(Variant::String(out))
+            })())
+        }
+        ("String", "humanize_size") => {
+            let ctx = "String.humanize_size()";
+            Some((|| {
+                let bytes = string_static_i64(args, 0)
+                    .ok_or_else(|| type_error(format!("{ctx} expects a byte count")))?;
+                Ok(Variant::String(gd_humanize_size(bytes.max(0) as u64)))
+            })())
+        }
+
         ("Vector2", "from_angle") => {
             let ctx = "Vector2.from_angle()";
             Some(arg_num(args, 0, ctx).map(|a| Variant::Vector2(Vector2::new(a.cos(), a.sin()))))

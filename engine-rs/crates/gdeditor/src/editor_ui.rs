@@ -3831,6 +3831,16 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
             <button id="exp-delete" style="color:#e55;border-color:#e55;">Delete Preset</button>
             <button id="exp-save" style="border-color:var(--accent);color:var(--accent);">Save Preset</button>
           </div>
+          <!-- Godot's export dialog runs the export from here (project_export.cpp:
+               export_button, export_pck_zip, export_all). The route existed at
+               /api/export/run but nothing in this page ever called it, so the
+               dialog could edit presets and never produce a build (pat-mgixk.109). -->
+          <div style="margin-top:10px;display:flex;gap:6px;justify-content:flex-end;border-top:1px solid var(--border);padding-top:10px;">
+            <button id="exp-run-all">Export All</button>
+            <button id="exp-run-pck">Export PCK/ZIP...</button>
+            <button id="exp-run" style="border-color:var(--accent);color:var(--accent);">Export Project...</button>
+          </div>
+          <div id="exp-result" style="margin-top:8px;font-size:11px;color:var(--text-dim);white-space:pre-wrap;word-break:break-all;"></div>
         </div>
       </div>
     </div>
@@ -5764,6 +5774,31 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         if (selectedNodeId) fetchSelected();
       });
   }
+  // Give this node its own copy of a SHARED inline resource, as Godot's picker
+  // does with OBJ_MENU_MAKE_UNIQUE (pat-mgixk.111). The server refuses an
+  // already-unique one with 400 "resource is already unique", mirroring the
+  // menu item Godot disables in that case — so the log line below is the
+  // feedback for the refusal too, rather than a silent no-op.
+  function makeResourceUnique(nodeId, property) {
+    return api('POST', '/api/property/resource/make_unique',
+               { node_id: nodeId, property: property })
+      .then(function(r) {
+        logMessage('info', 'Made unique: ' + humanizeProp(property) +
+                           (r && r.id ? ' → SubResource("' + r.id + '")' : ''));
+        if (selectedNodeId) fetchSelected();
+      });
+  }
+  // Write an inline resource out to a .tres and repoint the property at it
+  // ("Save As…", OBJ_MENU_SAVE_AS). The route already existed server-side and
+  // had no caller at all before this (pat-mgixk.111).
+  function saveResourceAs(nodeId, property, path) {
+    return api('POST', '/api/property/resource/save_as',
+               { node_id: nodeId, property: property, path: path })
+      .then(function() {
+        logMessage('info', 'Saved ' + humanizeProp(property) + ' → ' + path);
+        if (selectedNodeId) fetchSelected();
+      });
+  }
   // Every project file assignable to `resType`, flattened from the filesystem
   // tree — Godot's Quick Load lists the whole project, not one directory.
   function collectAssignableFiles(files, resType, out) {
@@ -5841,6 +5876,20 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         ['Quick Load …', function() { openLoadMenu(anchor); }]
       ];
       if (!isEmpty) {
+        // Godot's order is Edit, Clear, Make Unique, Save, Save As…; Patina keeps
+        // Clear LAST so the one destructive row is never adjacent to the two new
+        // ones a mis-click could otherwise hit (pat-mgixk.111).
+        rows.push(['Make Unique', function() {
+          closeResMenu();
+          makeResourceUnique(nodeId, prop.name);
+        }]);
+        rows.push(['Save As …', function() {
+          closeResMenu();
+          // `prompt` is this editor's established way of taking a path (8 other
+          // callers); a file dialog is Godot's, and is its own bead.
+          var path = prompt('Save resource as (res:// path):', 'res://' + prop.name + '.tres');
+          if (path && path.trim()) saveResourceAs(nodeId, prop.name, path.trim());
+        }]);
         rows.push(['Clear', function() {
           closeResMenu();
           assignResource(nodeId, prop.name, null, resType);
@@ -17025,6 +17074,86 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         custom_properties: customProps
       };
       api('POST', '/api/export/presets/update', preset).then(function() { loadExportPresets(); });
+    });
+
+    // ---- Running an export (pat-mgixk.109) ----
+    //
+    // `api()` swallows the HTTP status and returns the parsed body, so success
+    // and failure are told apart by the PAYLOAD: a run answers {ok:true,...}
+    // and `send_error` answers {"error":{"code","message"}}. Reporting
+    // `res.error.message` is what puts the server's own text in front of the
+    // user — notably the "web export needs a compiled wasm payload" case, which
+    // is otherwise indistinguishable from nothing happening.
+    function showExportResult(label, res) {
+      var out = document.getElementById('exp-result');
+      if (!out) return;
+      if (!res) {
+        out.style.color = '#e55';
+        out.textContent = label + ': no response from the server (timed out?)';
+        return;
+      }
+      if (res.error) {
+        out.style.color = '#e55';
+        out.textContent = label + ': ' + (res.error.message || res.error.code || 'failed');
+        return;
+      }
+      var lines = [label + ': ' + (res.ok ? 'ok' : 'failed')];
+      if (res.output_path) lines.push('output: ' + res.output_path);
+      if (res.messages && res.messages.length) lines.push(res.messages.join('\n'));
+      out.style.color = res.ok ? 'var(--text-dim)' : '#e55';
+      out.textContent = lines.join('\n');
+    }
+
+    function runExport(preset, mode) {
+      var body = { name: preset.name, debug: document.getElementById('exp-build').value === 'debug' };
+      if (mode) body.mode = mode;
+      // The server falls back to the preset's `patina/wasm_path` custom
+      // property, so this is only sent when the dialog has one in hand.
+      var wasm = preset.custom_properties && preset.custom_properties['patina/wasm_path'];
+      if (wasm) body.wasm_path = wasm;
+      return api('POST', '/api/export/run', body);
+    }
+
+    function selectedPreset() {
+      if (exportSelectedIdx < 0 || exportSelectedIdx >= exportPresets.length) return null;
+      return exportPresets[exportSelectedIdx];
+    }
+
+    document.getElementById('exp-run').addEventListener('click', function() {
+      var preset = selectedPreset();
+      if (!preset) return;
+      showExportResult('Export Project', { ok: true, messages: ['running...'] });
+      runExport(preset, null).then(function(res) { showExportResult('Export Project', res); });
+    });
+
+    document.getElementById('exp-run-pck').addEventListener('click', function() {
+      var preset = selectedPreset();
+      if (!preset) return;
+      showExportResult('Export PCK/ZIP', { ok: true, messages: ['running...'] });
+      runExport(preset, 'pck').then(function(res) { showExportResult('Export PCK/ZIP', res); });
+    });
+
+    // Godot's "Export All" runs every preset and reports per-preset errors
+    // rather than stopping at the first, which is why this collects results
+    // instead of chaining.
+    document.getElementById('exp-run-all').addEventListener('click', function() {
+      if (!exportPresets.length) return;
+      var out = document.getElementById('exp-result');
+      if (out) { out.style.color = 'var(--text-dim)'; out.textContent = 'Export All: running ' + exportPresets.length + ' preset(s)...'; }
+      var lines = [];
+      var remaining = exportPresets.length;
+      exportPresets.forEach(function(preset) {
+        runExport(preset, null).then(function(res) {
+          if (!res) lines.push(preset.name + ': no response');
+          else if (res.error) lines.push(preset.name + ': ' + (res.error.message || 'failed'));
+          else lines.push(preset.name + ': ' + (res.ok ? 'ok' : 'failed') + (res.output_path ? ' -> ' + res.output_path : ''));
+          remaining -= 1;
+          if (remaining === 0 && out) {
+            out.style.color = lines.some(function(l) { return l.indexOf(': ok') < 0; }) ? '#e55' : 'var(--text-dim)';
+            out.textContent = 'Export All\n' + lines.join('\n');
+          }
+        });
+      });
     });
   }
 
