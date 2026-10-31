@@ -12560,8 +12560,15 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
           api('POST', '/api/runtime/input/mouse_move', gameInputWithPen({ dx: e.movementX || 0, dy: e.movementY || 0 }));
           return;
         }
-        var rect = vp.getBoundingClientRect();
-        api('POST', '/api/runtime/input/mouse_move', gameInputWithPen({ x: e.clientX - rect.left, y: e.clientY - rect.top }));
+        // pat-mgixk.25: scale CSS pixels to the frame's natural size, exactly
+        // as every edit-mode handler does. `vp` is the container DIV and has
+        // no `naturalWidth`; the drawn frame is `viewportImg`, so
+        // `viewportCoords` is the right measurement — and reusing it keeps one
+        // implementation instead of a second, drifting one. Posting unscaled
+        // coords meant a game view displayed at any size other than 1:1 sent
+        // the engine a point from the wrong space, on top of the stretch
+        // transform never being inverted at all.
+        api('POST', '/api/runtime/input/mouse_move', gameInputWithPen(viewportCoords(e)));
       };
       gameInputMousedownHandler = function(e) {
         if (!runtimeRunning) return;
@@ -13939,7 +13946,13 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
                 ev.preventDefault(); ev.stopPropagation();
                 showSimpleContextMenu(ev.clientX, ev.clientY, [
                   { label: 'Edit...', act: function() { openConnectDialog(sgName); } },
-                  { label: 'Go to Method', act: function() { logMessage('info', 'Go to Method: ' + (conn.method || '')); showFsToast('Go to Method: ' + (conn.method || '')); } },
+                  { label: 'Go to Method', act: async function() {
+                      if (!conn.target_script) { showFsToast('Go to Method: the receiver has no script'); return; }
+                      var hit = await api('POST', '/api/signal/goto_method', { path: conn.target_script, method: conn.method, signal: sgName });
+                      if (!hit || !hit.script) { showFsToast('Go to Method: ' + (conn.method || '') + ' is not defined in ' + conn.target_script); return; }
+                      await fetchScript(hit.script);
+                      if (typeof scriptGotoLine === 'function') scriptGotoLine(hit.line || 1);
+                    } },
                   { label: 'Disconnect', act: function() { api('POST', '/api/signal/disconnect', { node_id: selectedNodeId, signal: sgName, method: conn.method, target_id: conn.target_id }).then(function() { fetchNodeDock(); }); } }
                 ]);
               });
@@ -14113,14 +14126,44 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       // pat-jwuv1.3: carry the advanced connect flags + bound args.
       var bindsRaw = (document.getElementById('connect-binds') || {}).value || '';
       var binds = bindsRaw.split(',').map(function(s) { return s.trim(); }).filter(function(s) { return s.length; });
+      // ⚠️ Captured BEFORE the await below: `closeConnectDialog` nulls
+      // `pendingConnectSignal`, and the stub creation needs the signal name
+      // after the round trip (pat-mgixk.13).
+      var sigName = pendingConnectSignal;
+      var nodeId = selectedNodeId;
       api('POST', '/api/node/signals/connect', {
-        node_id: selectedNodeId,
-        signal: pendingConnectSignal,
+        node_id: nodeId,
+        signal: sigName,
         method: method,
         deferred: !!(document.getElementById('connect-deferred') || {}).checked,
         one_shot: !!(document.getElementById('connect-oneshot') || {}).checked,
         binds: binds
-      }).then(function() {
+      }).then(async function() {
+        // Godot's ConnectDialog appends a correctly-signatured receiver stub
+        // when the method does not exist yet. `/api/signal/autocreate_receiver`
+        // has done that since pat-jwuv1.4 and had NO client caller, so the
+        // dialog happily connected a signal to a method nobody had written
+        // (pat-mgixk.13).
+        //
+        // The target's script path comes from re-reading the signal list: the
+        // connect response is only `{"ok":true}`, and `target_script` is a
+        // per-connection field, so it exists only once the connection does.
+        try {
+          var after = await api('GET', '/api/node/signals?node_id=' + nodeId);
+          var sig = ((after && after.signals) || []).find(function(s) { return s.name === sigName; });
+          var conn = sig && (sig.connections || []).find(function(c) { return c.method === method; });
+          if (conn && conn.target_script) {
+            await api('POST', '/api/signal/autocreate_receiver', {
+              path: conn.target_script,
+              method: method,
+              params: []
+            });
+          }
+        } catch (e) {
+          // The connection itself is already made and saved; a missing stub is
+          // a convenience, not a correctness failure, so it must not surface as
+          // a failed connect.
+        }
         closeConnectDialog();
         fetchNodeDock();
       });

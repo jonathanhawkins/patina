@@ -317,9 +317,14 @@ pub enum Stmt {
         /// constants (Godot semantics).
         name: Option<String>,
         /// Variants in declaration order. Each carries an optional explicit
-        /// integer value (`A = 5`); unset variants take the previous value + 1
-        /// (starting at 0), matching Godot's enum numbering.
-        variants: Vec<(String, Option<i64>)>,
+        /// value EXPRESSION (`A = 5`, `RUN = 1 << 2`); unset variants take the
+        /// previous value + 1 (starting at 0), matching Godot's enum numbering.
+        ///
+        /// ⚠️ An expression, not an `i64`, because Godot allows any constant
+        /// expression here (`gdscript_parser.cpp` `parse_enum`) and
+        /// `RUN = 1 << 2` is ordinary flag-enum style. It is folded to an
+        /// integer once, at `run_class` time (pat-mgixk.18).
+        variants: Vec<(String, Option<Expr>)>,
     },
     /// An expression used as a statement.
     ExprStmt(Expr),
@@ -343,10 +348,15 @@ pub enum Stmt {
         /// Optional local to bind the resumed value to.
         bind: Option<String>,
     },
-    /// Inner class definition: `class InnerName:`
+    /// Inner class definition: `class InnerName:` or
+    /// `class InnerName extends Base:`
     InnerClass {
         /// The inner class name.
         name: String,
+        /// Base class from an `extends` clause, if any (`gdscript_parser.cpp`
+        /// `parse_class`). The interpreter used to hardcode `None` here, so an
+        /// inner class could not inherit at all (pat-mgixk.18).
+        parent: Option<String>,
         /// The body statements of the inner class.
         body: Vec<Stmt>,
     },
@@ -725,6 +735,19 @@ impl Parser {
             // Peek: if next is `set` or `get` immediately, there's no type hint
             match self.peek() {
                 Token::Ident(n) if n == "set" || n == "get" => None,
+                // `var x := expr` — Godot's inference form, where the declared
+                // type comes from the initializer (`parse_variable`,
+                // COLON_EQUAL). The tokenizer has no `:=` token and needs none:
+                // it lexes as Colon then Assign, so peeking one token here
+                // absorbs the colon and lets the `= expr` branch below run
+                // unchanged.
+                //
+                // ⚠️ The INFERRED TYPE is deliberately not recorded. Doing so
+                // means a new field on `VarDecl`, and consuming it is
+                // pat-mgixk.19's job (typed vars defaulting and converting on
+                // assign); adding the field now would collide with that bead
+                // for no gain here, since nothing yet reads it.
+                Token::Assign => None,
                 _ => Some(self.parse_type_hint()?),
             }
         } else {
@@ -776,7 +799,12 @@ impl Parser {
         let name = self.eat_ident()?;
         let type_hint = if self.check(&Token::Colon) {
             self.advance();
-            Some(self.parse_type_hint()?)
+            // `const X := expr` infers the type, same shape as `var` above.
+            if self.check(&Token::Assign) {
+                None
+            } else {
+                Some(self.parse_type_hint()?)
+            }
         } else {
             None
         };
@@ -971,50 +999,44 @@ impl Parser {
         };
         self.expect(&Token::LBrace)?;
         let mut variants = Vec::new();
+        // An enum body may span lines. In practice the tokenizer's bracket-depth
+        // suppression (pat-mgixk.17) means no Newline/Indent token is emitted
+        // inside `{}` at all, so these calls are usually no-ops — they are here
+        // so the parser does not depend on that, and keeps working if the
+        // tokenizer's depth handling ever changes.
+        self.skip_newlines();
         if !self.check(&Token::RBrace) {
             variants.push(self.parse_enum_variant()?);
+            self.skip_newlines();
             while self.check(&Token::Comma) {
                 self.advance();
+                self.skip_newlines();
+                // A trailing comma before `}` is legal.
                 if self.check(&Token::RBrace) {
                     break;
                 }
                 variants.push(self.parse_enum_variant()?);
+                self.skip_newlines();
             }
         }
+        self.skip_newlines();
         self.expect(&Token::RBrace)?;
         Ok(Stmt::EnumDecl { name, variants })
     }
 
-    /// Parses one enum variant: `NAME` or `NAME = <int literal>` (an optional
-    /// leading `-` is allowed for negative values).
-    fn parse_enum_variant(&mut self) -> Result<(String, Option<i64>), ParseError> {
+    /// Parses one enum variant: `NAME` or `NAME = <const expression>`.
+    ///
+    /// ⚠️ A full expression, not an int literal. Godot allows any constant
+    /// expression (`parse_enum`), and the flag-enum idiom `RUN = 1 << 2` is the
+    /// common case; the old int-literal-only form rejected it outright, and also
+    /// rejected `-1` written as anything but a bare negated literal. The value
+    /// is folded to an integer once, at `run_class` time, where an expression
+    /// evaluator already exists (pat-mgixk.18).
+    fn parse_enum_variant(&mut self) -> Result<(String, Option<Expr>), ParseError> {
         let variant = self.eat_ident()?;
         let value = if self.check(&Token::Assign) {
             self.advance(); // consume `=`
-            let negative = self.check(&Token::Minus);
-            if negative {
-                self.advance();
-            }
-            match self.peek().clone() {
-                Token::IntLit(v) => {
-                    self.advance();
-                    Some(if negative { -v } else { v })
-                }
-                other => {
-                    let (line, col) = self
-                        .tokens
-                        .get(self.pos)
-                        .map(|ts| (ts.line, ts.col))
-                        .unwrap_or((0, 0));
-                    return Err(ParseError::UnexpectedToken {
-                        token: other.to_string(),
-                        expected: "integer literal for enum value".to_string(),
-                        line,
-                        col,
-                        source_line: None,
-                    });
-                }
-            }
+            Some(self.parse_expr()?)
         } else {
             None
         };
@@ -1024,9 +1046,18 @@ impl Parser {
     fn parse_inner_class(&mut self) -> Result<Stmt, ParseError> {
         self.advance(); // consume `class`
         let name = self.eat_ident()?;
+        // `class Bullet extends RefCounted:` — an inner class may declare a base
+        // (`gdscript_parser.cpp` `parse_class`). Rejecting it was a parse error
+        // on the ordinary spelling.
+        let parent = if self.check(&Token::Extends) {
+            self.advance();
+            Some(self.parse_type_hint()?)
+        } else {
+            None
+        };
         self.expect(&Token::Colon)?;
         let body = self.parse_block()?;
-        Ok(Stmt::InnerClass { name, body })
+        Ok(Stmt::InnerClass { name, parent, body })
     }
 
     fn parse_if(&mut self) -> Result<Stmt, ParseError> {
@@ -1075,6 +1106,15 @@ impl Parser {
     fn parse_for(&mut self) -> Result<Stmt, ParseError> {
         self.advance(); // consume `for`
         let var = self.eat_ident()?;
+        // `for i: int in range(n)` — Godot's `parse_for` accepts a type on the
+        // loop variable. Parsed and discarded: the loop variable's runtime value
+        // comes from the iterable's elements, and enforcing the annotation is
+        // pat-mgixk.19's scope. Accepting it is what matters, since rejecting it
+        // is a parse error on ordinary typed code.
+        if self.check(&Token::Colon) {
+            self.advance();
+            let _ = self.parse_type_hint()?;
+        }
         self.expect(&Token::In)?;
         let iterable = self.parse_expr()?;
         self.expect(&Token::Colon)?;
@@ -1126,7 +1166,13 @@ impl Parser {
         let name = self.eat_ident()?;
         let type_hint = if self.check(&Token::Colon) {
             self.advance();
-            Some(self.parse_type_hint()?)
+            // `func f(dmg := 1)` infers the parameter type from its default,
+            // same shape as `var`/`const` above.
+            if self.check(&Token::Assign) {
+                None
+            } else {
+                Some(self.parse_type_hint()?)
+            }
         } else {
             None
         };
@@ -1360,6 +1406,37 @@ impl Parser {
     /// The line is sampled *before* `parse_stmt` consumes anything, so it is the
     /// line the statement opens on rather than wherever it happened to end.
     fn parse_block_with_lines(&mut self) -> Result<(Vec<Stmt>, Vec<usize>), ParseError> {
+        // Godot's `parse_suite`: a suite may be a single line of statements on
+        // the SAME line as the `:` — `if dmg <= 0: return`, `func f(): pass`,
+        // one-line match arms — with `;` separating several of them.
+        //
+        // The tell is that no Newline follows the `:`. The indented form always
+        // has one, so this cannot misfire on a normal block.
+        if !self.check(&Token::Newline) {
+            let mut stmts = Vec::new();
+            let mut lines = Vec::new();
+            loop {
+                lines.push(self.current_line());
+                stmts.push(self.parse_stmt()?);
+                // ⚠️ Only continue when a `;` was actually consumed. Looping on
+                // "not a terminator" instead would spin forever on any token
+                // `parse_stmt` leaves unconsumed.
+                if !self.check(&Token::Semicolon) {
+                    break;
+                }
+                while self.check(&Token::Semicolon) {
+                    self.advance();
+                }
+                // A trailing `;` before the line ends is legal.
+                if self.check(&Token::Newline)
+                    || self.check(&Token::Eof)
+                    || self.check(&Token::Dedent)
+                {
+                    break;
+                }
+            }
+            return Ok((stmts, lines));
+        }
         self.skip_newlines();
         self.expect(&Token::Indent)?;
         let mut stmts = Vec::new();
@@ -1368,6 +1445,10 @@ impl Parser {
         while !self.check(&Token::Dedent) && !self.check(&Token::Eof) {
             lines.push(self.current_line());
             stmts.push(self.parse_stmt()?);
+            // `a = 1; b = 2` inside an ordinary indented body.
+            while self.check(&Token::Semicolon) {
+                self.advance();
+            }
             self.skip_newlines();
         }
         if self.check(&Token::Dedent) {
@@ -2379,15 +2460,60 @@ mod tests {
         }
     }
 
+    /// Folds an enum variant's value expression to an integer, for assertions.
+    ///
+    /// The parser stores a const EXPRESSION rather than an `i64` as of
+    /// pat-mgixk.18 (so `RUN = 1 << 2` parses); `run_class` is what folds it for
+    /// real. These tests only use literals and negation, so this covers them —
+    /// and returning `None` for any other shape keeps an unexpected tree from
+    /// quietly reading as a matching value.
+    fn enum_int(value: &Option<Expr>) -> Option<i64> {
+        match value.as_ref()? {
+            Expr::Literal(Variant::Int(i)) => Some(*i),
+            Expr::UnaryOp {
+                op: UnaryOp::Neg,
+                expr,
+            } => match expr.as_ref() {
+                Expr::Literal(Variant::Int(i)) => Some(-*i),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     #[test]
     fn parse_enum_with_explicit_values() {
         let stmts = parse("enum Bits { A = 1, B = 2, C, D = 10 }\n");
         if let Stmt::EnumDecl { name, variants } = &stmts[0] {
             assert_eq!(name.as_deref(), Some("Bits"));
-            assert_eq!(variants[0], ("A".to_string(), Some(1)));
-            assert_eq!(variants[1], ("B".to_string(), Some(2)));
-            assert_eq!(variants[2], ("C".to_string(), None));
-            assert_eq!(variants[3], ("D".to_string(), Some(10)));
+            assert_eq!(variants[0].0, "A");
+            assert_eq!(enum_int(&variants[0].1), Some(1));
+            assert_eq!(variants[1].0, "B");
+            assert_eq!(enum_int(&variants[1].1), Some(2));
+            assert_eq!(variants[2].0, "C");
+            assert_eq!(enum_int(&variants[2].1), None, "C has no explicit value");
+            assert_eq!(variants[3].0, "D");
+            assert_eq!(enum_int(&variants[3].1), Some(10));
+        } else {
+            panic!("expected EnumDecl");
+        }
+    }
+
+    /// The flag-enum idiom pat-mgixk.18 exists for: an enum value that is a
+    /// constant EXPRESSION rather than a literal. The old parser rejected this
+    /// outright with "integer literal for enum value".
+    #[test]
+    fn parse_enum_expression_value() {
+        let stmts = parse("enum Flags { NONE = 0, RUN = 1 << 2 }\n");
+        if let Stmt::EnumDecl { variants, .. } = &stmts[0] {
+            assert_eq!(variants[1].0, "RUN");
+            // Stored unfolded — a shift, not a literal, which is precisely why
+            // the folding moved to `run_class`.
+            assert!(
+                matches!(variants[1].1, Some(Expr::BinaryOp { op: BinOp::Shl, .. })),
+                "RUN must keep its `1 << 2` expression, got {:?}",
+                variants[1].1,
+            );
         } else {
             panic!("expected EnumDecl");
         }
@@ -2409,8 +2535,10 @@ mod tests {
     fn parse_enum_negative_value() {
         let stmts = parse("enum E { NONE = -1, ZERO = 0 }\n");
         if let Stmt::EnumDecl { variants, .. } = &stmts[0] {
-            assert_eq!(variants[0], ("NONE".to_string(), Some(-1)));
-            assert_eq!(variants[1], ("ZERO".to_string(), Some(0)));
+            assert_eq!(variants[0].0, "NONE");
+            assert_eq!(enum_int(&variants[0].1), Some(-1));
+            assert_eq!(variants[1].0, "ZERO");
+            assert_eq!(enum_int(&variants[1].1), Some(0));
         } else {
             panic!("expected EnumDecl");
         }
@@ -3416,7 +3544,7 @@ mod tests {
     #[test]
     fn parse_inner_class_simple() {
         let stmts = parse("class State:\n    var name = \"idle\"\n");
-        if let Stmt::InnerClass { name, body } = &stmts[0] {
+        if let Stmt::InnerClass { name, body, .. } = &stmts[0] {
             assert_eq!(name, "State");
             assert_eq!(body.len(), 1);
             assert!(matches!(&body[0], Stmt::VarDecl { name, .. } if name == "name"));
@@ -3429,7 +3557,7 @@ mod tests {
     fn parse_inner_class_with_method() {
         let stmts =
             parse("class Enemy:\n    var hp = 10\n    func take_damage(d):\n        hp = hp - d\n");
-        if let Stmt::InnerClass { name, body } = &stmts[0] {
+        if let Stmt::InnerClass { name, body, .. } = &stmts[0] {
             assert_eq!(name, "Enemy");
             assert_eq!(body.len(), 2);
             assert!(matches!(&body[0], Stmt::VarDecl { .. }));
@@ -3442,7 +3570,7 @@ mod tests {
     #[test]
     fn parse_inner_class_empty_pass() {
         let stmts = parse("class Empty:\n    pass\n");
-        if let Stmt::InnerClass { name, body } = &stmts[0] {
+        if let Stmt::InnerClass { name, body, .. } = &stmts[0] {
             assert_eq!(name, "Empty");
             assert_eq!(body.len(), 1);
             assert!(matches!(&body[0], Stmt::Pass));
@@ -3454,7 +3582,7 @@ mod tests {
     #[test]
     fn parse_inner_class_multiple_vars() {
         let stmts = parse("class Data:\n    var x = 0\n    var y = 0\n    var z = 0\n");
-        if let Stmt::InnerClass { name, body } = &stmts[0] {
+        if let Stmt::InnerClass { name, body, .. } = &stmts[0] {
             assert_eq!(name, "Data");
             assert_eq!(body.len(), 3);
         } else {
@@ -3495,7 +3623,7 @@ mod tests {
     #[test]
     fn parse_inner_class_with_signal() {
         let stmts = parse("class EventBus:\n    signal fired\n    var count = 0\n");
-        if let Stmt::InnerClass { name, body } = &stmts[0] {
+        if let Stmt::InnerClass { name, body, .. } = &stmts[0] {
             assert_eq!(name, "EventBus");
             assert!(matches!(&body[0], Stmt::SignalDecl { name, .. } if name == "fired"));
             assert!(matches!(&body[1], Stmt::VarDecl { .. }));

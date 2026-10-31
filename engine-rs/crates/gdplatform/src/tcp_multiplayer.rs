@@ -231,10 +231,37 @@ impl NetworkPeer for TcpMultiplayerPeer {
         self.peer_state.drain_signals()
     }
 
+    /// `PeerId(0)` broadcasts, matching Godot's `set_target_peer(0)`.
     fn send_packet(&mut self, to: PeerId, packet: Packet) -> Result<()> {
         if self.status != ConnectionStatus::Connected {
             return Err(NetworkError::Transport("not connected".into()));
         }
+        // Framed once: a broadcast writes the same bytes to every peer.
+        let mut body = Vec::with_capacity(5 + packet.data.len());
+        body.extend_from_slice(&packet.sender.0.to_be_bytes());
+        body.push(packet.channel);
+        body.extend_from_slice(&packet.data);
+
+        // `PeerId(0)` is Godot's "every peer" target, which `rpc()` now uses.
+        // Zero is not a peer id, so looking it up in the roster found nothing
+        // and a broadcast failed `PeerUnreachable(0)` — reaching nobody
+        // (pat-mgixk.26). Fanning out is the server's job: a client holds only
+        // the server connection, and the branch below already routes it there.
+        if self.is_server_role && to == PeerId::BROADCAST {
+            let mut last_err = None;
+            for stream in self.peers.values() {
+                // One dead socket must not strand the remaining peers, so the
+                // error is remembered and the loop carries on.
+                if let Err(e) = write_frame(stream, &body) {
+                    last_err = Some(NetworkError::Transport(e.to_string()));
+                }
+            }
+            return match last_err {
+                Some(e) => Err(e),
+                None => Ok(()),
+            };
+        }
+
         let target = if self.is_server_role {
             to
         } else {
@@ -244,10 +271,6 @@ impl NetworkPeer for TcpMultiplayerPeer {
             .peers
             .get(&target)
             .ok_or(NetworkError::PeerUnreachable(target))?;
-        let mut body = Vec::with_capacity(5 + packet.data.len());
-        body.extend_from_slice(&packet.sender.0.to_be_bytes());
-        body.push(packet.channel);
-        body.extend_from_slice(&packet.data);
         write_frame(stream, &body).map_err(|e| NetworkError::Transport(e.to_string()))
     }
 

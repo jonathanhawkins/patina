@@ -16,7 +16,7 @@
 use std::collections::{HashMap, HashSet};
 
 use gdcore::math::{Vector2, Vector3};
-use gdcore::math3d::{Quaternion, Transform3D};
+use gdcore::math3d::{Plane, Quaternion, Transform3D};
 use gdphysics3d::area3d::{
     Area3D, AreaId3D, AreaOverlapEvent3D, OverlapEvent3D, OverlapState3D, SpaceOverride,
 };
@@ -447,6 +447,16 @@ pub(crate) fn shape_from_node_3d(tree: &SceneTree, node_id: NodeId) -> Option<Sh
         };
         read(&ns).or_else(|| read(key)).unwrap_or(default)
     };
+    // Same namespaced-first shape as `v3`: a sub-resource's copied value
+    // (`__shape__plane`) wins over a property authored on the node itself.
+    let plane = |key: &str| -> Option<Plane> {
+        let ns = format!("__shape__{key}");
+        let read = |k: &str| match node.get_property(k) {
+            Variant::Plane(p) => Some(p),
+            _ => None,
+        };
+        read(&ns).or_else(|| read(key))
+    };
     let v3s = |key: &str| -> Vec<Vector3> {
         let namespaced = vec3_array_prop_3d(node, &format!("__shape__{key}"));
         if namespaced.is_empty() {
@@ -474,13 +484,26 @@ pub(crate) fn shape_from_node_3d(tree: &SceneTree, node_id: NodeId) -> Option<Sh
                 half_extents: Vector3::new(size.x / 2.0, size.y / 2.0, size.z / 2.0),
             })
         }
+        // 🔑 `height` defaults to 2.0, not 1.0 (`doc/classes/CapsuleShape3D.xml`
+        // and `CylinderShape3D.xml`), and `gdphysics3d` reads it as the TOTAL
+        // height (`shape.rs`: "defined by radius and total height", and its AABB
+        // spans -height/2..+height/2), so Godot's number maps straight across.
+        //
+        // ⚠️ This is not a cosmetic default. A `.tscn` OMITS a property that
+        // still holds its default, so an unedited `CapsuleShape3D` — the stock
+        // CharacterBody3D collider — authors no `height` line at all and landed
+        // here as a 1 m capsule: with radius 0.5 that is exactly a sphere. The
+        // character then collided as a ball while rendering as a 2 m capsule,
+        // and the gizmo path (`packed_scene.rs`, `unwrap_or(2.0)`) already used
+        // Godot's value, so the two layers disagreed about the same node
+        // (pat-mgixk.39).
         Some("CapsuleShape3D") => Some(Shape3D::CapsuleShape {
             radius: num("radius", 0.5),
-            height: num("height", 1.0),
+            height: num("height", 2.0),
         }),
         Some("CylinderShape3D") => Some(Shape3D::CylinderShape {
             radius: num("radius", 0.5),
-            height: num("height", 1.0),
+            height: num("height", 2.0),
         }),
         Some("ConvexPolygonShape3D") => Some(Shape3D::ConvexPolygonShape {
             points: v3s("points"),
@@ -518,10 +541,35 @@ pub(crate) fn shape_from_node_3d(tree: &SceneTree, node_id: NodeId) -> Option<Sh
                 truthy_prop_3d(tree, node_id, "slide_on_slope", false)
             },
         }),
-        Some("WorldBoundaryShape3D") => Some(Shape3D::WorldBoundaryShape {
-            normal: Vector3::new(0.0, 1.0, 0.0),
-            distance: 0.0,
-        }),
+        // 🔑 `WorldBoundaryShape3D.plane` is a real property (default
+        // `Plane(0, 1, 0, 0)`), and this arm used to hardcode that default and
+        // ignore the authored value entirely — so every world boundary was the
+        // ground at y=0 however the scene tilted or raised it (pat-mgixk.39).
+        //
+        // Godot stores the normal and the signed distance in one `Plane`, which
+        // `gdresource`'s `.tscn` reader already turns into `Variant::Plane`
+        // (`loader.rs`, "Plane(a, b, c, d) — normal (a, b, c) and signed
+        // distance d"), so the authored line arrives here typed. `normal` and
+        // `distance` are accepted as a fallback because they are the shape's
+        // OWN field names, which is what a runtime setter writes.
+        Some("WorldBoundaryShape3D") => {
+            let default_normal = Vector3::new(0.0, 1.0, 0.0);
+            let (normal, distance) = match plane("plane") {
+                Some(p) => (p.normal, p.d),
+                None => (v3("normal", default_normal), num("distance", 0.0)),
+            };
+            // ⚠️ A zero normal would make every contact test degenerate (the
+            // half-space has no orientation), so it falls back to Godot's +Y
+            // rather than being stored. `normalized()` because the contact
+            // maths treats the normal as a unit vector; Godot normalizes a
+            // `Plane` on construction too.
+            let normal = if normal.length() > 1e-6 {
+                normal.normalized()
+            } else {
+                default_normal
+            };
+            Some(Shape3D::WorldBoundaryShape { normal, distance })
+        }
         Some(_) => None,
         None => {
             // Fallback: check for "radius" (sphere) or "size" (box) properties.
@@ -555,11 +603,24 @@ pub(crate) fn shape_from_node_3d(tree: &SceneTree, node_id: NodeId) -> Option<Sh
 pub(crate) fn shapes_from_body_subtree(
     tree: &SceneTree,
     body_id: NodeId,
-) -> Vec<(Vector3, Shape3D)> {
-    let body_origin = node3d::get_global_transform(tree, body_id).origin;
+) -> Vec<(Vector3, Quaternion, Shape3D)> {
+    let body_global = node3d::get_global_transform(tree, body_id);
+    let body_origin = body_global.origin;
     let inv_rot = Quaternion::from_euler(node3d::get_rotation(tree, body_id)).inverse();
+    // The body's GLOBAL orientation, so a shape's rotation can be expressed
+    // relative to its body the way `Basis` composition does it — the same
+    // "parent inverse * child" idiom `skeleton3d.rs` uses for bone poses.
+    //
+    // ⚠️ PRE-EXISTING INCONSISTENCY, deliberately left alone: `inv_rot` above
+    // is built from the body's LOCAL euler (`node3d::get_rotation`), not its
+    // global one, so the position delta below is already mis-rotated for a body
+    // nested under a rotated parent. That is not this bead's bug and existing
+    // green tests may pin the current behaviour, so the offset line is
+    // untouched; the two agree whenever the body's ancestors are unrotated,
+    // which covers every case in the tree today. Worth its own bead.
+    let inv_rot_global = body_global.basis.get_rotation_quaternion().inverse();
 
-    let mut out: Vec<(Vector3, Shape3D)> = Vec::new();
+    let mut out: Vec<(Vector3, Quaternion, Shape3D)> = Vec::new();
     let mut stack: Vec<NodeId> = tree
         .get_node(body_id)
         .map(|n| n.children().to_vec())
@@ -580,8 +641,19 @@ pub(crate) fn shapes_from_body_subtree(
         }
 
         if let Some(shape) = shape_from_node_3d(tree, nid) {
-            let delta = node3d::get_global_transform(tree, nid).origin - body_origin;
-            out.push((inv_rot.xform(delta), shape));
+            let shape_global = node3d::get_global_transform(tree, nid);
+            let delta = shape_global.origin - body_origin;
+            // 🔑 The shape's FULL local transform is the shape owner's
+            // transform in Godot (`CollisionObject3D::shape_owner_set_transform`),
+            // rotation included. Only the translation was carried before, so a
+            // cylinder authored on its side or a box turned 90 degrees into a
+            // wall collided bolt upright (pat-mgixk.39).
+            //
+            // Taken from the GLOBAL basis rather than the node's own `rotation`
+            // so an intermediate `Node3D` between the body and the shape — which
+            // the walker explicitly supports — contributes its rotation too.
+            let local_rot = inv_rot_global * shape_global.basis.get_rotation_quaternion();
+            out.push((inv_rot.xform(delta), local_rot, shape));
         }
 
         kids.reverse();
@@ -796,16 +868,21 @@ impl PhysicsServer3D {
 
                         // Every CollisionShape3D in the subtree, with offsets.
                         let mut authored = shapes_from_body_subtree(tree, nid);
-                        let (shape, shape_offset) = if authored.is_empty() {
-                            (Shape3D::Sphere { radius: 0.5 }, Vector3::ZERO)
+                        let (shape, shape_offset, shape_rotation) = if authored.is_empty() {
+                            (
+                                Shape3D::Sphere { radius: 0.5 },
+                                Vector3::ZERO,
+                                Quaternion::IDENTITY,
+                            )
                         } else {
-                            let (off, sh) = authored.remove(0);
-                            (sh, off)
+                            let (off, rot, sh) = authored.remove(0);
+                            (sh, off, rot)
                         };
 
                         let mut body =
                             PhysicsBody3D::new(placeholder_id, body_type, position, shape, mass);
                         body.shape_offset = shape_offset;
+                        body.shape_rotation = shape_rotation;
                         body.extra_shapes = authored;
 
                         // Initial orientation from the node transform.
@@ -953,11 +1030,17 @@ impl PhysicsServer3D {
                                 // has rather than snapping it to the 0.5 sphere
                                 // fallback part-way through a simulation.
                                 b.shape_offset = Vector3::ZERO;
+                                b.shape_rotation = Quaternion::IDENTITY;
                                 b.extra_shapes.clear();
                             } else {
-                                let (off, sh) = authored.remove(0);
+                                let (off, rot, sh) = authored.remove(0);
                                 b.shape = sh;
                                 b.shape_offset = off;
+                                // Re-read every tick alongside the offset, so a
+                                // CollisionShape3D ROTATED after the first frame
+                                // is picked up — the same reason the offset is
+                                // refreshed here rather than set once.
+                                b.shape_rotation = rot;
                                 b.extra_shapes = authored;
                             }
                         }

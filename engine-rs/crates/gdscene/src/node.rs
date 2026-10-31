@@ -141,6 +141,22 @@ pub struct Node {
     /// Whether the input stages deliver to this node (Godot's
     /// `set_process_input`) — pat-0q2kx.138.
     process_input_enabled: bool,
+    /// Whether `_unhandled_input` reaches this node (Godot's
+    /// `set_process_unhandled_input`) — pat-mgixk.57.
+    ///
+    /// ⚠️ Godot keeps **one flag per input stage**: `set_process_input(false)`
+    /// silences `_input` and nothing else. This node had a single
+    /// `process_input_enabled` gating every stage, so opting out of `_input`
+    /// also killed `_unhandled_input`, `_unhandled_key_input` and
+    /// `_shortcut_input` — the usual idiom of handling only unhandled input was
+    /// unreachable.
+    process_unhandled_input_enabled: bool,
+    /// Whether `_unhandled_key_input` reaches this node (Godot's
+    /// `set_process_unhandled_key_input`) — pat-mgixk.57.
+    process_unhandled_key_input_enabled: bool,
+    /// Whether `_shortcut_input` reaches this node (Godot's
+    /// `set_process_shortcut_input`) — pat-mgixk.57.
+    process_shortcut_input_enabled: bool,
 }
 
 impl Node {
@@ -169,6 +185,9 @@ impl Node {
             process_enabled: true,
             physics_process_enabled: true,
             process_input_enabled: true,
+            process_unhandled_input_enabled: true,
+            process_unhandled_key_input_enabled: true,
+            process_shortcut_input_enabled: true,
         };
         node.notification_log.push(NOTIFICATION_POSTINITIALIZE);
         node
@@ -198,6 +217,9 @@ impl Node {
             process_enabled: true,
             physics_process_enabled: true,
             process_input_enabled: true,
+            process_unhandled_input_enabled: true,
+            process_unhandled_key_input_enabled: true,
+            process_shortcut_input_enabled: true,
         };
         node.notification_log.push(NOTIFICATION_POSTINITIALIZE);
         node
@@ -489,6 +511,50 @@ impl Node {
     /// `Node.is_processing_input`).
     pub fn is_processing_input(&self) -> bool {
         self.process_input_enabled
+    }
+
+    // -- per-stage input toggles (pat-mgixk.57) ------------------------------
+    //
+    // Godot exposes one setter and one getter per input stage
+    // (`scene/main/node.cpp`), and `SceneTree::_call_input_pause` consults the
+    // flag for the stage it is delivering. A node that wants only unhandled
+    // input calls `set_process_input(false)` and keeps the rest; with a single
+    // shared flag that call silenced every stage.
+
+    /// Enables or disables `_unhandled_input` on this node (Godot's
+    /// `Node.set_process_unhandled_input`).
+    pub fn set_process_unhandled_input(&mut self, enabled: bool) {
+        self.process_unhandled_input_enabled = enabled;
+    }
+
+    /// Whether `_unhandled_input` reaches this node (Godot's
+    /// `Node.is_processing_unhandled_input`).
+    pub fn is_processing_unhandled_input(&self) -> bool {
+        self.process_unhandled_input_enabled
+    }
+
+    /// Enables or disables `_unhandled_key_input` on this node (Godot's
+    /// `Node.set_process_unhandled_key_input`).
+    pub fn set_process_unhandled_key_input(&mut self, enabled: bool) {
+        self.process_unhandled_key_input_enabled = enabled;
+    }
+
+    /// Whether `_unhandled_key_input` reaches this node (Godot's
+    /// `Node.is_processing_unhandled_key_input`).
+    pub fn is_processing_unhandled_key_input(&self) -> bool {
+        self.process_unhandled_key_input_enabled
+    }
+
+    /// Enables or disables `_shortcut_input` on this node (Godot's
+    /// `Node.set_process_shortcut_input`).
+    pub fn set_process_shortcut_input(&mut self, enabled: bool) {
+        self.process_shortcut_input_enabled = enabled;
+    }
+
+    /// Whether `_shortcut_input` reaches this node (Godot's
+    /// `Node.is_processing_shortcut_input`).
+    pub fn is_processing_shortcut_input(&self) -> bool {
+        self.process_shortcut_input_enabled
     }
 
     // -- process priority / mode --------------------------------------------

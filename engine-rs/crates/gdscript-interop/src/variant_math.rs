@@ -2023,6 +2023,18 @@ pub(crate) fn cmp(lhs: &Variant, rhs: &Variant) -> Option<std::cmp::Ordering> {
 fn cmp_depth(lhs: &Variant, rhs: &Variant, depth: u32) -> Option<std::cmp::Ordering> {
     use std::cmp::Ordering;
     match (lhs, rhs) {
+        // ⚠️ The scalar and string rows are repeated here even though
+        // `binary_cmp` already handles them at the top level, because the
+        // `Array` arm below RECURSES through this function. Without them
+        // `[1, 2] < [1, 3]` compared its elements, found no ordering row for
+        // `(Int, Int)`, and failed the whole comparison — the Array arm was
+        // wired but could not compare anything a real array contains.
+        (Variant::Int(a), Variant::Int(b)) => Some(a.cmp(b)),
+        (Variant::Float(a), Variant::Float(b)) => Some(num_cmp(*a, *b)),
+        (Variant::Int(a), Variant::Float(b)) => Some(num_cmp(*a as f64, *b)),
+        (Variant::Float(a), Variant::Int(b)) => Some(num_cmp(*a, *b as f64)),
+        (Variant::String(a), Variant::String(b)) => Some(a.cmp(b)),
+        (Variant::StringName(a), Variant::StringName(b)) => Some(a.cmp(b)),
         // Lexicographic, component by component (vector2.h:164, vector3.h:484).
         (Variant::Vector2(a), Variant::Vector2(b)) => lex(&[(a.x, b.x), (a.y, b.y)]),
         (Variant::Vector3(a), Variant::Vector3(b)) => lex(&[(a.x, b.x), (a.y, b.y), (a.z, b.z)]),
@@ -2061,6 +2073,14 @@ fn cmp_depth(lhs: &Variant, rhs: &Variant, depth: u32) -> Option<std::cmp::Order
         }
         _ => None,
     }
+}
+
+/// Orders two floats, treating a NaN as equal to its counterpart.
+///
+/// Matches what the interpreter's own numeric arms do, and what Godot's
+/// `==`-then-`<` chain produces for a NaN (both tests are false).
+fn num_cmp(a: f64, b: f64) -> std::cmp::Ordering {
+    a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
 }
 
 /// Lexicographic order over float component pairs.

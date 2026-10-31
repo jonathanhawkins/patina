@@ -4,6 +4,7 @@
 //   cargo nextest run --test misc_suite_c -E 'test(/^<mod>::/)'
 mod ext_resource_cross_file_test;
 mod file_access_parity_test;
+mod fileaccess_typed_io_script_roundtrip;
 mod filesystem_dock_directory_tree_test;
 mod fixed_step_body_sync_parity_test;
 mod fixture_corpus_coverage_test;

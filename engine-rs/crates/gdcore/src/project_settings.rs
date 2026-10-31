@@ -436,6 +436,25 @@ impl ProjectSettings {
         self.properties.iter().map(|(k, v)| (k.as_str(), v))
     }
 
+    /// Every Godot-registered DEFAULT, as `(path, value)` in path order —
+    /// ignoring anything this project declared.
+    ///
+    /// The companion to [`iter`](Self::iter), which yields only declared keys.
+    /// Seeding another layer (the interpreter's `ProjectSettings` singleton)
+    /// needs both halves kept APART: overlay defaults first and declared keys
+    /// second and you get Godot's `get_setting` semantics, while the split still
+    /// tells "set by the project" from "engine default" — which is what
+    /// `ProjectSettings.save()` needs so it writes back only overrides, and what
+    /// `property_can_revert` would need (pat-mgixk.42).
+    ///
+    /// ⚠️ Deliberately NOT a merged `iter_with_defaults()`. A single merged
+    /// iterator loses that distinction, and the consumer that most needs it is
+    /// `save()`: fed a merged table it would write all ~230 engine defaults into
+    /// the user's `project.godot`, which Godot never does.
+    pub fn iter_defaults(&self) -> impl Iterator<Item = (&str, &SettingsValue)> {
+        self.defaults.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
     pub fn get_section(&self, prefix: &str) -> Vec<(&str, &SettingsValue)> {
         let prefix_slash = if prefix.ends_with('/') {
             prefix.to_string()
@@ -539,6 +558,826 @@ impl ProjectSettings {
 // Godot's registered default table (pat-0q2kx.126)
 // ---------------------------------------------------------------------------
 
+/// Every `ProjectSettings` member that `doc/classes/ProjectSettings.xml`
+/// documents with a `default=` under the sections a running game actually
+/// queries: `application/`, `display/`, `physics/`, `gui/`, `input_devices/`,
+/// `audio/`, `rendering/textures/`, `rendering/2d/`,
+/// `rendering/environment/defaults/` and `internationalization/`.
+///
+/// 🔑 **Transcribed from the XML, never derived.** Godot registers these with
+/// `GLOBAL_DEF` in `core/config/project_settings.cpp` and friends, so
+/// `get_setting("physics/2d/default_gravity")` answers `980.0` in a project
+/// whose `project.godot` never mentions it — which is exactly the
+/// `CharacterBody2D` idiom that used to come back `Nil` (pat-mgixk.42). Values
+/// read out of the doc XML's `default=` attribute by a script, so a typo here is
+/// a transcription error rather than a judgement call.
+///
+/// ⚠️ TWO documented keys in these sections are deliberately absent, because
+/// [`SettingsValue`] has no variant for them and inventing one would be worse
+/// than a recorded gap:
+///
+/// | key | type | default |
+/// |---|---|---|
+/// | `application/config/name_localized` | `Dictionary` | `{}` |
+/// | `display/window/size/initial_position` | `Vector2i` | `Vector2i(0, 0)` |
+///
+/// Adding those means adding the variant and teaching
+/// `settings_value_to_variant` about it.
+///
+/// This is the broad base. [`godot_default_table`] layers the hand-curated
+/// entries over it — those carry source citations for the specific settings the
+/// runtime consults, and cover keys outside these sections. The two agree
+/// wherever they overlap; that was checked key-by-key against the XML when this
+/// table was introduced.
+fn documented_project_settings_defaults() -> BTreeMap<String, SettingsValue> {
+    let mut t = BTreeMap::new();
+    for (key, value) in [
+        (
+            "application/boot_splash/bg_color",
+            SettingsValue::Color(0.14, 0.14, 0.14, 1.0),
+        ),
+        (
+            "application/boot_splash/image",
+            SettingsValue::String(String::new()),
+        ),
+        (
+            "application/boot_splash/minimum_display_time",
+            SettingsValue::Int(0),
+        ),
+        (
+            "application/boot_splash/show_image",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "application/boot_splash/stretch_mode",
+            SettingsValue::Int(1),
+        ),
+        (
+            "application/boot_splash/use_filter",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "application/config/auto_accept_quit",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "application/config/custom_user_dir_name",
+            SettingsValue::String(String::new()),
+        ),
+        (
+            "application/config/description",
+            SettingsValue::String(String::new()),
+        ),
+        (
+            "application/config/disable_project_settings_override",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "application/config/icon",
+            SettingsValue::String(String::new()),
+        ),
+        (
+            "application/config/macos_native_icon",
+            SettingsValue::String(String::new()),
+        ),
+        (
+            "application/config/name",
+            SettingsValue::String(String::new()),
+        ),
+        (
+            "application/config/project_settings_override",
+            SettingsValue::String(String::new()),
+        ),
+        (
+            "application/config/quit_on_go_back",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "application/config/use_custom_user_dir",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "application/config/use_hidden_project_data_directory",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "application/config/version",
+            SettingsValue::String(String::new()),
+        ),
+        (
+            "application/config/windows_native_icon",
+            SettingsValue::String(String::new()),
+        ),
+        ("application/run/delta_smoothing", SettingsValue::Bool(true)),
+        ("application/run/disable_stderr", SettingsValue::Bool(false)),
+        ("application/run/disable_stdout", SettingsValue::Bool(false)),
+        (
+            "application/run/enable_alt_space_menu",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "application/run/flush_stdout_on_print",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "application/run/flush_stdout_on_print.debug",
+            SettingsValue::Bool(true),
+        ),
+        ("application/run/frame_delay_msec", SettingsValue::Int(0)),
+        (
+            "application/run/load_shell_environment",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "application/run/low_processor_mode",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "application/run/low_processor_mode_sleep_usec",
+            SettingsValue::Int(6900),
+        ),
+        (
+            "application/run/main_loop_type",
+            SettingsValue::String("SceneTree".to_string()),
+        ),
+        (
+            "application/run/main_scene",
+            SettingsValue::String(String::new()),
+        ),
+        ("application/run/max_fps", SettingsValue::Int(0)),
+        ("application/run/print_header", SettingsValue::Bool(true)),
+        (
+            "audio/buses/channel_disable_threshold_db",
+            SettingsValue::Float(-60.0),
+        ),
+        (
+            "audio/buses/channel_disable_time",
+            SettingsValue::Float(2.0),
+        ),
+        (
+            "audio/buses/default_bus_layout",
+            SettingsValue::String("res://default_bus_layout.tres".to_string()),
+        ),
+        ("audio/driver/enable_input", SettingsValue::Bool(false)),
+        ("audio/driver/mix_rate", SettingsValue::Int(44100)),
+        ("audio/driver/mix_rate.web", SettingsValue::Int(0)),
+        ("audio/driver/output_latency", SettingsValue::Int(15)),
+        ("audio/driver/output_latency.web", SettingsValue::Int(50)),
+        (
+            "audio/general/2d_panning_strength",
+            SettingsValue::Float(0.5),
+        ),
+        (
+            "audio/general/3d_panning_strength",
+            SettingsValue::Float(0.5),
+        ),
+        ("audio/general/default_playback_type", SettingsValue::Int(0)),
+        (
+            "audio/general/default_playback_type.web",
+            SettingsValue::Int(1),
+        ),
+        (
+            "audio/general/ios/mix_with_others",
+            SettingsValue::Bool(false),
+        ),
+        ("audio/general/ios/session_category", SettingsValue::Int(0)),
+        ("audio/general/text_to_speech", SettingsValue::Bool(false)),
+        (
+            "audio/video/video_delay_compensation_ms",
+            SettingsValue::Int(0),
+        ),
+        (
+            "display/mouse_cursor/custom_image",
+            SettingsValue::String(String::new()),
+        ),
+        (
+            "display/mouse_cursor/custom_image_hotspot",
+            SettingsValue::Vector2(0.0, 0.0),
+        ),
+        (
+            "display/mouse_cursor/tooltip_position_offset",
+            SettingsValue::Vector2(10.0, 10.0),
+        ),
+        ("display/window/dpi/allow_hidpi", SettingsValue::Bool(true)),
+        (
+            "display/window/energy_saving/keep_screen_on",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "display/window/frame_pacing/android/enable_frame_pacing",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "display/window/frame_pacing/android/swappy_mode",
+            SettingsValue::Int(2),
+        ),
+        ("display/window/handheld/orientation", SettingsValue::Int(0)),
+        (
+            "display/window/ios/allow_high_refresh_rate",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "display/window/ios/hide_home_indicator",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "display/window/ios/hide_status_bar",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "display/window/ios/suppress_ui_gesture",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "display/window/per_pixel_transparency/allowed",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "display/window/size/always_on_top",
+            SettingsValue::Bool(false),
+        ),
+        ("display/window/size/borderless", SettingsValue::Bool(false)),
+        (
+            "display/window/size/extend_to_title",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "display/window/size/initial_position_type",
+            SettingsValue::Int(1),
+        ),
+        ("display/window/size/initial_screen", SettingsValue::Int(0)),
+        (
+            "display/window/size/maximize_disabled",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "display/window/size/minimize_disabled",
+            SettingsValue::Bool(false),
+        ),
+        ("display/window/size/mode", SettingsValue::Int(0)),
+        ("display/window/size/no_focus", SettingsValue::Bool(false)),
+        ("display/window/size/resizable", SettingsValue::Bool(true)),
+        (
+            "display/window/size/sharp_corners",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "display/window/size/transparent",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "display/window/size/viewport_height",
+            SettingsValue::Int(648),
+        ),
+        (
+            "display/window/size/viewport_width",
+            SettingsValue::Int(1152),
+        ),
+        (
+            "display/window/size/window_height_override",
+            SettingsValue::Int(0),
+        ),
+        (
+            "display/window/size/window_width_override",
+            SettingsValue::Int(0),
+        ),
+        (
+            "display/window/stretch/aspect",
+            SettingsValue::String("keep".to_string()),
+        ),
+        (
+            "display/window/stretch/mode",
+            SettingsValue::String("disabled".to_string()),
+        ),
+        ("display/window/stretch/scale", SettingsValue::Float(1.0)),
+        (
+            "display/window/stretch/scale_mode",
+            SettingsValue::String("fractional".to_string()),
+        ),
+        (
+            "display/window/subwindows/embed_subwindows",
+            SettingsValue::Bool(true),
+        ),
+        ("display/window/vsync/vsync_mode", SettingsValue::Int(1)),
+        ("gui/common/default_scroll_deadzone", SettingsValue::Int(0)),
+        ("gui/common/drag_threshold", SettingsValue::Int(10)),
+        (
+            "gui/common/show_focus_state_on_pointer_event",
+            SettingsValue::Int(1),
+        ),
+        (
+            "gui/common/snap_controls_to_pixels",
+            SettingsValue::Bool(true),
+        ),
+        ("gui/common/swap_cancel_ok", SettingsValue::Int(0)),
+        (
+            "gui/common/text_edit_undo_stack_max_size",
+            SettingsValue::Int(1024),
+        ),
+        (
+            "gui/fonts/dynamic_fonts/use_oversampling",
+            SettingsValue::Bool(true),
+        ),
+        ("gui/theme/custom", SettingsValue::String(String::new())),
+        (
+            "gui/theme/custom_font",
+            SettingsValue::String(String::new()),
+        ),
+        ("gui/theme/default_font_antialiasing", SettingsValue::Int(1)),
+        (
+            "gui/theme/default_font_generate_mipmaps",
+            SettingsValue::Bool(false),
+        ),
+        ("gui/theme/default_font_hinting", SettingsValue::Int(1)),
+        (
+            "gui/theme/default_font_multichannel_signed_distance_field",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "gui/theme/default_font_subpixel_positioning",
+            SettingsValue::Int(1),
+        ),
+        ("gui/theme/default_theme_scale", SettingsValue::Float(1.0)),
+        ("gui/theme/lcd_subpixel_layout", SettingsValue::Int(1)),
+        (
+            "gui/timers/button_shortcut_feedback_highlight_time",
+            SettingsValue::Float(0.2),
+        ),
+        (
+            "gui/timers/incremental_search_max_interval_msec",
+            SettingsValue::Int(2000),
+        ),
+        (
+            "gui/timers/text_edit_idle_detect_sec",
+            SettingsValue::Float(3.0),
+        ),
+        ("gui/timers/tooltip_delay_sec", SettingsValue::Float(0.5)),
+        (
+            "gui/timers/tooltip_delay_sec.editor_hint",
+            SettingsValue::Float(0.5),
+        ),
+        (
+            "input_devices/buffering/agile_event_flushing",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "input_devices/compatibility/legacy_just_pressed_behavior",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "input_devices/pointing/android/disable_scroll_deadzone",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "input_devices/pointing/android/enable_long_press_as_right_click",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "input_devices/pointing/android/enable_pan_and_scale_gestures",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "input_devices/pointing/android/override_volume_buttons",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "input_devices/pointing/android/rotary_input_scroll_axis",
+            SettingsValue::Int(1),
+        ),
+        (
+            "input_devices/pointing/emulate_mouse_from_touch",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "input_devices/pointing/emulate_touch_from_mouse",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "input_devices/sensors/enable_accelerometer",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "input_devices/sensors/enable_gravity",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "input_devices/sensors/enable_gyroscope",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "input_devices/sensors/enable_magnetometer",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "internationalization/locale/fallback",
+            SettingsValue::String("en".to_string()),
+        ),
+        (
+            "internationalization/locale/include_text_server_data",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "internationalization/locale/line_breaking_strictness",
+            SettingsValue::Int(0),
+        ),
+        (
+            "internationalization/locale/test",
+            SettingsValue::String(String::new()),
+        ),
+        (
+            "internationalization/pseudolocalization/double_vowels",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "internationalization/pseudolocalization/expansion_ratio",
+            SettingsValue::Float(0.0),
+        ),
+        (
+            "internationalization/pseudolocalization/fake_bidi",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "internationalization/pseudolocalization/override",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "internationalization/pseudolocalization/prefix",
+            SettingsValue::String("[".to_string()),
+        ),
+        (
+            "internationalization/pseudolocalization/replace_with_accents",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "internationalization/pseudolocalization/skip_placeholders",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "internationalization/pseudolocalization/suffix",
+            SettingsValue::String("]".to_string()),
+        ),
+        (
+            "internationalization/pseudolocalization/use_pseudolocalization",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "internationalization/rendering/force_right_to_left_layout_direction",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "internationalization/rendering/root_node_auto_translate",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "internationalization/rendering/root_node_layout_direction",
+            SettingsValue::Int(0),
+        ),
+        (
+            "internationalization/rendering/text_driver",
+            SettingsValue::String(String::new()),
+        ),
+        ("physics/2d/default_angular_damp", SettingsValue::Float(1.0)),
+        ("physics/2d/default_gravity", SettingsValue::Float(980.0)),
+        (
+            "physics/2d/default_gravity_vector",
+            SettingsValue::Vector2(0.0, 1.0),
+        ),
+        ("physics/2d/default_linear_damp", SettingsValue::Float(0.1)),
+        (
+            "physics/2d/physics_engine",
+            SettingsValue::String("DEFAULT".to_string()),
+        ),
+        (
+            "physics/2d/run_on_separate_thread",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "physics/2d/sleep_threshold_angular",
+            SettingsValue::Float(0.13962634),
+        ),
+        (
+            "physics/2d/sleep_threshold_linear",
+            SettingsValue::Float(2.0),
+        ),
+        (
+            "physics/2d/solver/contact_max_allowed_penetration",
+            SettingsValue::Float(0.3),
+        ),
+        (
+            "physics/2d/solver/contact_max_separation",
+            SettingsValue::Float(1.5),
+        ),
+        (
+            "physics/2d/solver/contact_recycle_radius",
+            SettingsValue::Float(1.0),
+        ),
+        (
+            "physics/2d/solver/default_constraint_bias",
+            SettingsValue::Float(0.2),
+        ),
+        (
+            "physics/2d/solver/default_contact_bias",
+            SettingsValue::Float(0.8),
+        ),
+        (
+            "physics/2d/solver/solver_iterations",
+            SettingsValue::Int(16),
+        ),
+        ("physics/2d/time_before_sleep", SettingsValue::Float(0.5)),
+        ("physics/3d/default_angular_damp", SettingsValue::Float(0.1)),
+        ("physics/3d/default_gravity", SettingsValue::Float(9.8)),
+        (
+            "physics/3d/default_gravity_vector",
+            SettingsValue::Vector3(0.0, -1.0, 0.0),
+        ),
+        ("physics/3d/default_linear_damp", SettingsValue::Float(0.1)),
+        (
+            "physics/3d/physics_engine",
+            SettingsValue::String("DEFAULT".to_string()),
+        ),
+        (
+            "physics/3d/physics_interpolation/scene_traversal",
+            SettingsValue::String("DEFAULT".to_string()),
+        ),
+        (
+            "physics/3d/run_on_separate_thread",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "physics/3d/sleep_threshold_angular",
+            SettingsValue::Float(0.13962634),
+        ),
+        (
+            "physics/3d/sleep_threshold_linear",
+            SettingsValue::Float(0.1),
+        ),
+        (
+            "physics/3d/solver/contact_max_allowed_penetration",
+            SettingsValue::Float(0.01),
+        ),
+        (
+            "physics/3d/solver/contact_max_separation",
+            SettingsValue::Float(0.05),
+        ),
+        (
+            "physics/3d/solver/contact_recycle_radius",
+            SettingsValue::Float(0.01),
+        ),
+        (
+            "physics/3d/solver/default_contact_bias",
+            SettingsValue::Float(0.8),
+        ),
+        (
+            "physics/3d/solver/solver_iterations",
+            SettingsValue::Int(16),
+        ),
+        ("physics/3d/time_before_sleep", SettingsValue::Float(0.5)),
+        (
+            "physics/common/enable_object_picking",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "physics/common/max_physics_steps_per_frame",
+            SettingsValue::Int(8),
+        ),
+        (
+            "physics/common/physics_interpolation",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "physics/common/physics_jitter_fix",
+            SettingsValue::Float(0.5),
+        ),
+        (
+            "physics/common/physics_ticks_per_second",
+            SettingsValue::Int(60),
+        ),
+        (
+            "physics/jolt_physics_3d/collisions/active_edge_threshold",
+            SettingsValue::Float(0.87266463),
+        ),
+        (
+            "physics/jolt_physics_3d/collisions/collision_margin_fraction",
+            SettingsValue::Float(0.08),
+        ),
+        (
+            "physics/jolt_physics_3d/joints/world_node",
+            SettingsValue::Int(0),
+        ),
+        (
+            "physics/jolt_physics_3d/limits/max_angular_velocity",
+            SettingsValue::Float(47.12389),
+        ),
+        (
+            "physics/jolt_physics_3d/limits/max_bodies",
+            SettingsValue::Int(10240),
+        ),
+        (
+            "physics/jolt_physics_3d/limits/max_body_pairs",
+            SettingsValue::Int(65536),
+        ),
+        (
+            "physics/jolt_physics_3d/limits/max_contact_constraints",
+            SettingsValue::Int(20480),
+        ),
+        (
+            "physics/jolt_physics_3d/limits/max_linear_velocity",
+            SettingsValue::Float(500.0),
+        ),
+        (
+            "physics/jolt_physics_3d/limits/temporary_memory_buffer_size",
+            SettingsValue::Int(32),
+        ),
+        (
+            "physics/jolt_physics_3d/limits/world_boundary_shape_size",
+            SettingsValue::Float(2000.0),
+        ),
+        (
+            "physics/jolt_physics_3d/motion_queries/recovery_amount",
+            SettingsValue::Float(0.4),
+        ),
+        (
+            "physics/jolt_physics_3d/motion_queries/recovery_iterations",
+            SettingsValue::Int(4),
+        ),
+        (
+            "physics/jolt_physics_3d/motion_queries/use_enhanced_internal_edge_removal",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "physics/jolt_physics_3d/queries/enable_ray_cast_face_index",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "physics/jolt_physics_3d/queries/use_enhanced_internal_edge_removal",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "physics/jolt_physics_3d/simulation/allow_sleep",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "physics/jolt_physics_3d/simulation/baumgarte_stabilization_factor",
+            SettingsValue::Float(0.2),
+        ),
+        (
+            "physics/jolt_physics_3d/simulation/body_pair_contact_cache_angle_threshold",
+            SettingsValue::Float(0.034906585),
+        ),
+        (
+            "physics/jolt_physics_3d/simulation/body_pair_contact_cache_distance_threshold",
+            SettingsValue::Float(0.001),
+        ),
+        (
+            "physics/jolt_physics_3d/simulation/body_pair_contact_cache_enabled",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "physics/jolt_physics_3d/simulation/bounce_velocity_threshold",
+            SettingsValue::Float(1.0),
+        ),
+        (
+            "physics/jolt_physics_3d/simulation/continuous_cd_max_penetration",
+            SettingsValue::Float(0.25),
+        ),
+        (
+            "physics/jolt_physics_3d/simulation/continuous_cd_movement_threshold",
+            SettingsValue::Float(0.75),
+        ),
+        (
+            "physics/jolt_physics_3d/simulation/generate_all_kinematic_contacts",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "physics/jolt_physics_3d/simulation/penetration_slop",
+            SettingsValue::Float(0.02),
+        ),
+        (
+            "physics/jolt_physics_3d/simulation/position_steps",
+            SettingsValue::Int(2),
+        ),
+        (
+            "physics/jolt_physics_3d/simulation/sleep_time_threshold",
+            SettingsValue::Float(0.5),
+        ),
+        (
+            "physics/jolt_physics_3d/simulation/sleep_velocity_threshold",
+            SettingsValue::Float(0.03),
+        ),
+        (
+            "physics/jolt_physics_3d/simulation/soft_body_point_radius",
+            SettingsValue::Float(0.01),
+        ),
+        (
+            "physics/jolt_physics_3d/simulation/speculative_contact_distance",
+            SettingsValue::Float(0.02),
+        ),
+        (
+            "physics/jolt_physics_3d/simulation/use_enhanced_internal_edge_removal",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "physics/jolt_physics_3d/simulation/velocity_steps",
+            SettingsValue::Int(10),
+        ),
+        (
+            "rendering/2d/batching/item_buffer_size",
+            SettingsValue::Int(16384),
+        ),
+        (
+            "rendering/2d/batching/uniform_set_cache_size",
+            SettingsValue::Int(4096),
+        ),
+        ("rendering/2d/sdf/oversize", SettingsValue::Int(1)),
+        ("rendering/2d/sdf/scale", SettingsValue::Int(1)),
+        ("rendering/2d/shadow_atlas/size", SettingsValue::Int(2048)),
+        (
+            "rendering/2d/snap/snap_2d_transforms_to_pixel",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "rendering/2d/snap/snap_2d_vertices_to_pixel",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "rendering/environment/defaults/default_clear_color",
+            SettingsValue::Color(0.3, 0.3, 0.3, 1.0),
+        ),
+        (
+            "rendering/environment/defaults/default_environment",
+            SettingsValue::String(String::new()),
+        ),
+        (
+            "rendering/textures/basis_universal/rdo_dict_size",
+            SettingsValue::Int(1024),
+        ),
+        (
+            "rendering/textures/basis_universal/zstd_supercompression",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "rendering/textures/basis_universal/zstd_supercompression_level",
+            SettingsValue::Int(6),
+        ),
+        (
+            "rendering/textures/canvas_textures/default_texture_filter",
+            SettingsValue::Int(1),
+        ),
+        (
+            "rendering/textures/canvas_textures/default_texture_repeat",
+            SettingsValue::Int(0),
+        ),
+        ("rendering/textures/decals/filter", SettingsValue::Int(3)),
+        (
+            "rendering/textures/default_filters/anisotropic_filtering_level",
+            SettingsValue::Int(2),
+        ),
+        (
+            "rendering/textures/default_filters/texture_mipmap_bias",
+            SettingsValue::Float(0.0),
+        ),
+        (
+            "rendering/textures/default_filters/use_nearest_mipmap_filter",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "rendering/textures/light_projectors/filter",
+            SettingsValue::Int(3),
+        ),
+        (
+            "rendering/textures/lossless_compression/force_png",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "rendering/textures/vram_compression/cache_gpu_compressor",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "rendering/textures/vram_compression/compress_with_gpu",
+            SettingsValue::Bool(true),
+        ),
+        (
+            "rendering/textures/vram_compression/import_etc2_astc",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "rendering/textures/vram_compression/import_s3tc_bptc",
+            SettingsValue::Bool(false),
+        ),
+        (
+            "rendering/textures/webp_compression/compression_method",
+            SettingsValue::Int(2),
+        ),
+        (
+            "rendering/textures/webp_compression/lossless_compression_factor",
+            SettingsValue::Float(25.0),
+        ),
+    ] {
+        t.insert(key.to_string(), value);
+    }
+    t
+}
+
 /// The runtime-relevant slice of Godot's `GLOBAL_DEF` table.
 ///
 /// Godot registers ~300 core defaults across `project_settings.cpp`,
@@ -554,7 +1393,9 @@ impl ProjectSettings {
 /// settings the runtime actually consults rather than all 932 documented
 /// members; adding a key here is the way to extend it.
 fn godot_default_table() -> BTreeMap<String, SettingsValue> {
-    let mut t = BTreeMap::new();
+    // Start from every documented default in the sections a game queries, then
+    // let the curated entries below win where they overlap (pat-mgixk.42).
+    let mut t = documented_project_settings_defaults();
     let mut put = |k: &str, v: SettingsValue| {
         t.insert(k.to_string(), v);
     };

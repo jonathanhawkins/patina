@@ -999,6 +999,73 @@ fn multiply_projection_transform(proj: &Projection, t: &Transform3D) -> Projecti
 // Tests
 // ===========================================================================
 
+// ===========================================================================
+// Godot's one-call mode constructors, and the behind test
+// ===========================================================================
+
+/// Switches the camera to perspective and sets FOV and depth range at once.
+///
+/// Godot's `Camera3D.set_perspective(fov, z_near, z_far)`. The MODE change is
+/// the part a script cannot express by assigning properties: setting `fov` on
+/// an orthogonal camera changes a number the orthogonal projection never reads.
+pub fn set_perspective(tree: &mut SceneTree, node_id: NodeId, fov: f64, z_near: f64, z_far: f64) {
+    set_projection_type(tree, node_id, ProjectionType::Perspective);
+    node3d::set_fov(tree, node_id, fov);
+    node3d::set_near(tree, node_id, z_near);
+    node3d::set_far(tree, node_id, z_far);
+}
+
+/// Switches the camera to orthogonal and sets its vertical size and depth range.
+///
+/// Godot's `Camera3D.set_orthogonal(size, z_near, z_far)`. `size` is the
+/// vertical extent in world units; the horizontal one is derived from the
+/// viewport aspect by [`get_camera_projection`].
+pub fn set_orthogonal(tree: &mut SceneTree, node_id: NodeId, size: f64, z_near: f64, z_far: f64) {
+    set_projection_type(tree, node_id, ProjectionType::Orthogonal);
+    set_size(tree, node_id, size);
+    node3d::set_near(tree, node_id, z_near);
+    node3d::set_far(tree, node_id, z_far);
+}
+
+/// Switches the camera to a frustum-offset projection.
+///
+/// Godot's `Camera3D.set_frustum(size, offset, z_near, z_far)`. ⚠️ The offset
+/// is the SECOND argument, between the two scalars — not trailing, which is
+/// where a reader scanning the other two constructors expects it.
+pub fn set_frustum(
+    tree: &mut SceneTree,
+    node_id: NodeId,
+    size: f64,
+    offset: Vector2,
+    z_near: f64,
+    z_far: f64,
+) {
+    set_projection_type(tree, node_id, ProjectionType::Frustum);
+    set_size(tree, node_id, size);
+    set_frustum_offset(tree, node_id, offset);
+    node3d::set_near(tree, node_id, z_near);
+    node3d::set_far(tree, node_id, z_far);
+}
+
+/// Whether a world-space point is behind the camera's near plane.
+///
+/// Godot's `Camera3D.is_position_behind` (`camera_3d.cpp`):
+/// `(-basis.column(2)).normalized().dot(point - origin) < near`.
+///
+/// 🔑 The comparison is against NEAR, not against zero. A point in FRONT of the
+/// camera but nearer than the near plane also reads `true`, which is the whole
+/// use of the call: it answers "would this be clipped away", not "is it behind
+/// me". An implementation testing `< 0.0` agrees with this one everywhere
+/// except the thin slab where the answer matters.
+pub fn is_position_behind(tree: &SceneTree, node_id: NodeId, point: Vector3) -> bool {
+    let cam = node3d::get_global_transform(tree, node_id);
+    // `basis.z` is the Z COLUMN, and the camera looks down its negation — the
+    // same idiom `project_ray_normal` uses for the ortho forward vector.
+    let eyedir = (cam.basis.z * -1.0).normalized();
+    let near = node3d::get_near(tree, node_id) as f32;
+    eyedir.dot(point - cam.origin) < near
+}
+
 /// Camera3D's script-callable method surface.
 ///
 /// Returns `None` for every non-Camera3D receiver and for every name it does
@@ -1012,15 +1079,27 @@ fn multiply_projection_transform(proj: &Projection, t: &Transform3D) -> Projecti
 /// and reported nothing, and a script could not even detect it, because the
 /// thing it would ask (`has_method`) was the thing that was wrong (pat-nzgdu).
 ///
-/// ⚠️ Only the four methods that need NO viewport are served here. The
-/// projection family (`get_camera_projection`, `get_camera_frustum`,
+/// 🔑 The projection family is served here too, since pat-mgixk.35. It used to
+/// be unwired for a reason worth keeping on the record: `get_camera_projection`,
 /// `is_position_in_frustum`, `project_position`, `unproject_position`,
-/// `project_ray_origin`, `project_ray_normal`) all take explicit
+/// `project_ray_origin` and `project_ray_normal` all take explicit
 /// `viewport_width`/`viewport_height`, which Godot's script API does not pass.
-/// That size lives on [`crate::main_loop`]'s `viewport_size()`, and `SceneTree`
-/// exposes none, so wiring them from here would mean inventing a default and
-/// returning confidently wrong projections. They stay unwired until a viewport
-/// size reaches this layer.
+/// The size lived only on [`crate::main_loop`]'s `viewport_size()`, so wiring
+/// them from here would have meant inventing a default and returning
+/// confidently wrong screen coordinates. The size was in fact already
+/// reachable — `tree.root_window().visible_size()`, which `visibility_3d.rs`
+/// uses for exactly this — so the arms read that.
+///
+/// ⚠️ STILL UNWIRED, deliberately, and each for its own reason — all four are
+/// registered in ClassDB, so each is a silent `Nil` today:
+/// - `get_frustum` returns `Array[Plane]` in Godot, whose plane ORDER is
+///   `[near, far, left, top, right, bottom]` (`Projection::get_projection_planes`).
+///   [`Frustum`] here stores `[left, right, bottom, top, near, far]`. Exposing
+///   it without settling that order would hand scripts a correctly-shaped array
+///   with the planes in the wrong slots — worse than Nil, because it looks right.
+/// - `project_local_ray_normal` is the camera-LOCAL counterpart of
+///   `project_ray_normal`; there is no local-space variant to call yet.
+/// - `get_camera_transform` and `get_camera_rid` are not projection.
 pub fn call_camera3d_method(
     tree: &mut SceneTree,
     node_id: NodeId,
@@ -1029,7 +1108,20 @@ pub fn call_camera3d_method(
 ) -> Option<Variant> {
     if !matches!(
         method,
-        "make_current" | "clear_current" | "get_cull_mask_value" | "set_cull_mask_value"
+        "make_current"
+            | "clear_current"
+            | "get_cull_mask_value"
+            | "set_cull_mask_value"
+            | "get_camera_projection"
+            | "is_position_behind"
+            | "is_position_in_frustum"
+            | "project_position"
+            | "project_ray_normal"
+            | "project_ray_origin"
+            | "unproject_position"
+            | "set_frustum"
+            | "set_orthogonal"
+            | "set_perspective"
     ) {
         return None;
     }
@@ -1048,6 +1140,46 @@ pub fn call_camera3d_method(
             _ => 0,
         }
     };
+
+    // ⚠️ A GDScript number literal without a decimal point is an `Int`, so
+    // `set_orthogonal(10, 0.1, 100)` arrives as Int, Float, Int. Matching only
+    // `Variant::Float` would read 0.0 for the size and the far plane and build
+    // a degenerate projection that still "worked" — so both numeric variants
+    // are accepted. Kept in f64 (`Variant::Float`'s own width) and cast to f32
+    // only where the geometry needs it.
+    let num = |v: Option<&Variant>, default: f64| -> f64 {
+        match v {
+            Some(Variant::Float(f)) => *f,
+            Some(Variant::Int(i)) => *i as f64,
+            _ => default,
+        }
+    };
+    let vec2 = |v: Option<&Variant>| -> Option<Vector2> {
+        match v {
+            Some(Variant::Vector2(v)) => Some(*v),
+            _ => None,
+        }
+    };
+    let vec3 = |v: Option<&Variant>| -> Option<Vector3> {
+        match v {
+            Some(Variant::Vector3(v)) => Some(*v),
+            _ => None,
+        }
+    };
+
+    // 🔑 The viewport size Godot's script API never passes, read from the
+    // tree rather than invented (pat-mgixk.35). This is the SAME source
+    // `visibility_3d.rs` already builds a camera frustum from, which is what
+    // makes the two agree about what is on screen.
+    //
+    // ⚠️ `visible_size()`, NOT the raw window size. Once content scaling is on
+    // they differ: a 640x360 base resolution in a 1920x1080 window reports
+    // 640x360, and that is the rect Godot's own Camera3D projects against
+    // (`get_viewport()->get_visible_rect().size`). Taking the window size
+    // instead would hand every projection the wrong aspect ratio on exactly
+    // the projects that configure stretching.
+    let viewport = tree.root_window().visible_size();
+    let (vw, vh) = (viewport.x.max(1.0) as u32, viewport.y.max(1.0) as u32);
 
     match method {
         // Not the same as `current = true`: Godot also clears `current` on every
@@ -1068,6 +1200,93 @@ pub fn call_camera3d_method(
         "set_cull_mask_value" => {
             let value = matches!(args.get(1), Some(Variant::Bool(true)));
             set_cull_mask_value(tree, node_id, layer(args.first()), value);
+            Some(Variant::Nil)
+        }
+
+        // -- projection / unprojection ---------------------------------------
+        //
+        // ⚠️ A wrong-typed argument returns `Some(Variant::Nil)`, NOT `None`.
+        // `None` means "not a native method", which would make the interpreter
+        // raise `UndefinedFunction` and blame the method rather than the
+        // argument. Nil is not silent either: it propagates to the use site and
+        // fails loudly there, whereas substituting `Vector3::ZERO` would return
+        // a plausible screen position for a point the script never named.
+        "unproject_position" => Some(match vec3(args.first()) {
+            Some(point) => Variant::Vector2(unproject_position(tree, node_id, point, vw, vh)),
+            None => Variant::Nil,
+        }),
+        "project_position" => Some(match vec2(args.first()) {
+            Some(screen) => Variant::Vector3(project_position(
+                tree,
+                node_id,
+                screen,
+                num(args.get(1), 0.0) as f32,
+                vw,
+                vh,
+            )),
+            None => Variant::Nil,
+        }),
+        "project_ray_origin" => Some(match vec2(args.first()) {
+            Some(screen) => Variant::Vector3(project_ray_origin(tree, node_id, screen, vw, vh)),
+            None => Variant::Nil,
+        }),
+        "project_ray_normal" => Some(match vec2(args.first()) {
+            Some(screen) => Variant::Vector3(project_ray_normal(tree, node_id, screen, vw, vh)),
+            None => Variant::Nil,
+        }),
+        "is_position_in_frustum" => Some(match vec3(args.first()) {
+            Some(point) => Variant::Bool(is_position_in_frustum(tree, node_id, point, vw, vh)),
+            None => Variant::Nil,
+        }),
+        // Needs no viewport — a half-space test against the near plane.
+        "is_position_behind" => Some(match vec3(args.first()) {
+            Some(point) => Variant::Bool(is_position_behind(tree, node_id, point)),
+            None => Variant::Nil,
+        }),
+        "get_camera_projection" => {
+            let proj = get_camera_projection(tree, node_id, vw, vh);
+            // ⚠️ TWO types named `Projection` are in play: the one this module
+            // defines (above) and `gdcore::math3d::Projection`, which is what
+            // `Variant::Projection` carries. They are field-for-field identical
+            // (`pub m: [[f32; 4]; 4]`, same column-major convention), so this
+            // is a re-wrap and not a conversion — but nothing in the NAME warns
+            // you, and passing `proj` straight in does not compile.
+            Some(Variant::Projection(gdcore::math3d::Projection { m: proj.m }))
+        }
+
+        // -- Godot's one-call mode constructors ------------------------------
+        //
+        // Defaults match `doc/classes/Camera3D.xml` (fov 75, near 0.05,
+        // far 4000) so a short call does what Godot's short call does.
+        "set_perspective" => {
+            set_perspective(
+                tree,
+                node_id,
+                num(args.first(), 75.0),
+                num(args.get(1), 0.05),
+                num(args.get(2), 4000.0),
+            );
+            Some(Variant::Nil)
+        }
+        "set_orthogonal" => {
+            set_orthogonal(
+                tree,
+                node_id,
+                num(args.first(), 1.0),
+                num(args.get(1), 0.05),
+                num(args.get(2), 4000.0),
+            );
+            Some(Variant::Nil)
+        }
+        "set_frustum" => {
+            set_frustum(
+                tree,
+                node_id,
+                num(args.first(), 1.0),
+                vec2(args.get(1)).unwrap_or(Vector2::ZERO),
+                num(args.get(2), 0.05),
+                num(args.get(3), 4000.0),
+            );
             Some(Variant::Nil)
         }
         _ => None,

@@ -176,6 +176,32 @@ pub struct Debugger {
     step_mode: Option<StepMode>,
     /// Call stack depth when step-over/step-out was initiated.
     step_depth: usize,
+    /// The script runtime's own live call depth, when the host reports one
+    /// (pat-mgixk.14).
+    ///
+    /// 🔑 [`call_stack`](Self::call_stack) is the debugger's OWN frame list, and
+    /// a host that never calls [`push_frame`](Self::push_frame) leaves it empty
+    /// — which makes `StepOver`'s `len() <= step_depth` and `StepOut`'s
+    /// `len() < step_depth` compare `0` against `0`. `StepOver` then behaves
+    /// like `StepIn` and `StepOut` like `Continue`: both buttons appear wired
+    /// and neither does what it says. The GDScript interpreter already tracks
+    /// its depth in `call_depth`, so it reports that here rather than
+    /// duplicating the frame list on the hot path.
+    runtime_depth: Option<usize>,
+    /// Swallows the ONE break check that fires on the statement a resume
+    /// re-enters.
+    ///
+    /// 🔑 A breakpoint pauses BEFORE its statement, so the line it stopped on
+    /// has not run yet and the resume re-enters that same statement. Without
+    /// this, [`should_break`](Self::should_break) sees the armed step on the
+    /// very line the user asked to step OFF and pauses again immediately —
+    /// Step Over kept reporting the same line, which is what pat-mgixk.14's
+    /// acceptance caught (`left: 5, right: 6`).
+    ///
+    /// ⚠️ It must swallow the BREAKPOINT check too, not only the step check.
+    /// Stepping off a line that carries a breakpoint would otherwise stop on it
+    /// again; that breakpoint has already been honoured once.
+    resume_skips_one_check: bool,
     /// Global/autoload variables visible across all frames.
     globals: HashMap<String, VariableValue>,
 }
@@ -190,7 +216,9 @@ impl Debugger {
             hit_counts: HashMap::new(),
             call_stack: Vec::new(),
             step_mode: None,
+            resume_skips_one_check: false,
             step_depth: 0,
+            runtime_depth: None,
             globals: HashMap::new(),
         }
     }
@@ -214,6 +242,7 @@ impl Debugger {
         self.call_stack.clear();
         self.step_mode = None;
         self.step_depth = 0;
+        self.runtime_depth = None;
         self.hit_counts.clear();
         self.globals.clear();
     }
@@ -290,6 +319,42 @@ impl Debugger {
 
     // -- Execution control --------------------------------------------------
 
+    /// The depth the step comparisons use: the host's reported runtime depth
+    /// when it has one, otherwise this debugger's own frame list.
+    ///
+    /// See [`runtime_depth`](Self::runtime_depth) for why the fallback alone is
+    /// not enough.
+    fn effective_depth(&self) -> usize {
+        self.runtime_depth.unwrap_or(self.call_stack.len())
+    }
+
+    /// Reports the script runtime's live call depth, so `StepOver`/`StepOut`
+    /// compare against something real (pat-mgixk.14).
+    pub fn set_runtime_depth(&mut self, depth: usize) {
+        self.runtime_depth = Some(depth);
+    }
+
+    /// Arms a step mode from the HOST's resume path, in whatever state the
+    /// debugger happens to be.
+    ///
+    /// ⚠️ Deliberately distinct from [`step`](Self::step), which requires
+    /// `Paused` and is the editor-facing transition. In a real session the
+    /// editor's press and the game's pickup happen on DIFFERENT threads and a
+    /// frame apart, and the host re-`attach()`es every frame in between — which
+    /// resets the state to `Running` and clears `step_mode`. A resume that
+    /// insisted on `Paused` would therefore arm nothing, and every Step button
+    /// would behave like Continue (pat-mgixk.14).
+    pub fn arm_step(&mut self, mode: StepMode, depth: usize) {
+        self.step_mode = Some(mode);
+        self.step_depth = depth;
+        self.runtime_depth = Some(depth);
+        self.state = DebuggerState::Running;
+        // The statement being resumed into is the one this step RUNS, so its
+        // check is already spent. Set for EVERY mode, Continue included: a
+        // Continue off a breakpointed line must not stop on it again either.
+        self.resume_skips_one_check = true;
+    }
+
     /// Checks whether the debugger should pause at the given location.
     ///
     /// Call this before executing each statement. Returns `true` if the
@@ -299,15 +364,24 @@ impl Debugger {
             return false;
         }
 
+        // The statement a resume re-enters has already had its break honoured —
+        // see `resume_skips_one_check`. This returns BEFORE both the step and
+        // the breakpoint checks, which is what lets a step actually advance.
+        if self.resume_skips_one_check {
+            self.resume_skips_one_check = false;
+            return false;
+        }
+
         let loc = BreakpointLocation::new(script, line);
 
         // Check step mode first.
         if let Some(mode) = self.step_mode {
+            let depth = self.effective_depth();
             let should_pause = match mode {
                 StepMode::Continue => false,
                 StepMode::StepIn => true,
-                StepMode::StepOver => self.call_stack.len() <= self.step_depth,
-                StepMode::StepOut => self.call_stack.len() < self.step_depth,
+                StepMode::StepOver => depth <= self.step_depth,
+                StepMode::StepOut => depth < self.step_depth,
             };
             if should_pause {
                 self.pause();
@@ -339,7 +413,7 @@ impl Debugger {
             return;
         }
         self.step_mode = Some(mode);
-        self.step_depth = self.call_stack.len();
+        self.step_depth = self.effective_depth();
         self.state = DebuggerState::Running;
     }
 
@@ -531,6 +605,180 @@ mod tests {
         assert_eq!(
             format!("{}", VariableValue::Object("Node2D".into(), 123)),
             "<Node2D#123>"
+        );
+    }
+
+    // -- pat-mgixk.14: stepping for a host that keeps its own call depth -----
+
+    /// A host that never pushes frames gets `StepOver` == `StepIn` and
+    /// `StepOut` == `Continue` from the frame-list fallback. Reporting the
+    /// runtime depth is what separates them.
+    #[test]
+    fn step_over_does_not_pause_inside_a_deeper_call() {
+        let mut dbg = Debugger::new();
+        dbg.attach();
+        // Stepping over from depth 1.
+        dbg.arm_step(StepMode::StepOver, 1);
+        // ⚠️ Consume the one-shot resume skip first, or the depth assertion
+        // below is VACUOUS: `arm_step` swallows the check for the statement the
+        // resume re-enters (see `resume_skips_one_check`), so a bare negative
+        // would pass whatever the depth. This stands in for that statement.
+        dbg.should_break("res://main.gd", 1);
+
+        // A statement one level DEEPER is the body of the call being stepped
+        // over, so it must run without pausing.
+        dbg.set_runtime_depth(2);
+        assert!(
+            !dbg.should_break("res://main.gd", 10),
+            "StepOver must run the callee's body, not stop inside it"
+        );
+
+        // Back at the original depth: this is the next statement of the frame
+        // the user stepped in, so it pauses.
+        dbg.set_runtime_depth(1);
+        assert!(
+            dbg.should_break("res://main.gd", 4),
+            "StepOver must pause on the next statement of the stepped frame"
+        );
+        assert_eq!(dbg.state(), DebuggerState::Paused);
+    }
+
+    /// `StepOut` is the strict version: it must not stop until the frame is
+    /// actually gone.
+    #[test]
+    fn step_out_pauses_only_after_the_frame_returns() {
+        let mut dbg = Debugger::new();
+        dbg.attach();
+        dbg.arm_step(StepMode::StepOut, 2);
+        // ⚠️ Consume the one-shot resume skip first, or the depth assertion
+        // below is VACUOUS: `arm_step` swallows the check for the statement the
+        // resume re-enters (see `resume_skips_one_check`), so a bare negative
+        // would pass whatever the depth. This stands in for that statement.
+        dbg.should_break("res://main.gd", 1);
+
+        dbg.set_runtime_depth(2);
+        assert!(
+            !dbg.should_break("res://main.gd", 11),
+            "StepOut must not stop in the frame it is leaving"
+        );
+        dbg.set_runtime_depth(1);
+        assert!(
+            dbg.should_break("res://main.gd", 5),
+            "StepOut must pause once the frame has returned"
+        );
+    }
+
+    /// `arm_step` exists because the host's resume runs a frame after the
+    /// editor's press, with a re-`attach()` in between that leaves the state
+    /// `Running`. `step` refuses that; `arm_step` must not.
+    #[test]
+    fn arm_step_works_from_the_running_state_where_step_refuses() {
+        let mut dbg = Debugger::new();
+        dbg.attach();
+        assert_eq!(dbg.state(), DebuggerState::Running);
+
+        // The editor-facing transition declines — it is only valid from Paused.
+        dbg.step(StepMode::StepIn);
+        assert!(
+            !dbg.should_break("res://main.gd", 1),
+            "`step` from Running must arm nothing"
+        );
+
+        // The host-facing one arms regardless, which is what keeps a Step from
+        // silently behaving like Continue.
+        dbg.attach();
+        dbg.arm_step(StepMode::StepIn, 0);
+        // ⚠️ The FIRST check after arming is swallowed by design: it is the
+        // statement the resume re-enters, which a breakpoint already stopped
+        // before. This assertion used to read `should_break(..) == true` here,
+        // and that expectation WAS the bug — if the first check pauses, a Step
+        // never advances, which is exactly what pat-mgixk.14's acceptance saw
+        // (`left: 5, right: 6`). The intent of this test is unchanged: arming
+        // from `Running` works, observed one statement later.
+        assert!(
+            !dbg.should_break("res://main.gd", 1),
+            "the resumed statement's check is spent, so this one must not pause"
+        );
+        assert!(
+            dbg.should_break("res://main.gd", 2),
+            "`arm_step` must arm from Running too — StepIn stops on the next \
+             statement"
+        );
+    }
+
+    /// A resume must not stop again on the statement it resumes INTO.
+    ///
+    /// 🔑 This is the whole of pat-mgixk.14's Step Over defect. A breakpoint
+    /// pauses BEFORE its statement, so that statement has not run and the
+    /// resume re-enters it. Re-evaluating the armed step there pauses on the
+    /// very line the user asked to step off, and `/api/debug/state` kept
+    /// reporting the same line however many times Step Over was pressed.
+    #[test]
+    fn a_resume_does_not_rebreak_on_the_statement_it_re_enters() {
+        let mut dbg = Debugger::new();
+        dbg.attach();
+        dbg.add_breakpoint(BreakpointLocation::new("res://main.gd", 5));
+
+        // The breakpoint stops BEFORE line 5 runs.
+        assert!(
+            dbg.should_break("res://main.gd", 5),
+            "precondition: the breakpoint must fire"
+        );
+        assert_eq!(dbg.state(), DebuggerState::Paused);
+
+        // Step Over resumes into line 5 — which must now RUN, not re-break.
+        dbg.arm_step(StepMode::StepOver, 0);
+        assert!(
+            !dbg.should_break("res://main.gd", 5),
+            "the statement being resumed into must run; re-breaking here is \
+             what made Step Over report the same line forever"
+        );
+        // ...and the step stops on the next statement.
+        assert!(
+            dbg.should_break("res://main.gd", 6),
+            "StepOver must pause on the statement AFTER the one it ran"
+        );
+
+        // 🔑 The skip is ONE-SHOT, not a standing suppression: a loop that
+        // comes back around to line 5 must stop there again.
+        dbg.arm_step(StepMode::Continue, 0);
+        assert!(
+            !dbg.should_break("res://main.gd", 5),
+            "the resumed statement is still spent, Continue included — \
+             otherwise Continue off a breakpointed line never leaves it"
+        );
+        assert!(
+            !dbg.should_break("res://main.gd", 7),
+            "Continue does not stop on an unbreakpointed line"
+        );
+        assert!(
+            dbg.should_break("res://main.gd", 5),
+            "but the breakpoint must fire again when execution returns to it"
+        );
+    }
+
+    /// A reported depth must not leak across a detach, or the next session
+    /// steps against a stale frame count.
+    ///
+    /// Observed through `step`, which captures `effective_depth()` as its
+    /// `step_depth`: with the stale 5 still in place it would capture 5 and
+    /// then pause at depth 1; with it cleared it captures the empty frame
+    /// list's 0 and correctly does not.
+    #[test]
+    fn detach_forgets_the_reported_runtime_depth() {
+        let mut dbg = Debugger::new();
+        dbg.attach();
+        dbg.set_runtime_depth(5);
+        dbg.detach();
+
+        dbg.attach();
+        dbg.pause();
+        dbg.step(StepMode::StepOver);
+        dbg.set_runtime_depth(1);
+        assert!(
+            !dbg.should_break("res://main.gd", 1),
+            "a stale depth of 5 would have made `step_depth` 5, and depth 1 \
+             would then satisfy `1 <= 5` and pause one level too deep"
         );
     }
 }

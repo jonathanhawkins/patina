@@ -5,7 +5,7 @@
 //! [`SceneTree`].
 
 use gdcore::math::{Color, Vector3};
-use gdcore::math3d::{Basis, Transform3D};
+use gdcore::math3d::{Basis, EulerOrder, Transform3D};
 use gdvariant::Variant;
 
 use crate::node::NodeId;
@@ -38,6 +38,19 @@ use crate::scene_tree::SceneTree;
 /// yields garbage angles — so the columns are normalised first. A zero-length
 /// column (degenerate scale) is left as-is rather than dividing by zero.
 fn decompose_basis(basis: Basis) -> (Vector3, Vector3) {
+    decompose_basis_ordered(basis, EulerOrder::default())
+}
+
+/// [`decompose_basis`] honouring the node's `rotation_order` (pat-mgixk.29).
+///
+/// 🔑 This is the half that makes the round trip hold: `set_position` reads the
+/// transform through [`local_transform_of`] (which COMPOSES with the node's
+/// order) and writes it back through [`store_local_transform`] (which
+/// DECOMPOSES here). Decomposing with a different order than the composition
+/// used would rewrite `rotation` into a different triple that happens to name
+/// the same basis — so moving a node would silently change its authored
+/// rotation numbers.
+fn decompose_basis_ordered(basis: Basis, order: EulerOrder) -> (Vector3, Vector3) {
     let scale = basis.get_scale();
     let norm = |v: Vector3, s: f32| {
         if s.abs() > 1e-6 {
@@ -51,12 +64,22 @@ fn decompose_basis(basis: Basis) -> (Vector3, Vector3) {
         y: norm(basis.y, scale.y),
         z: norm(basis.z, scale.z),
     };
-    (rotation.to_euler(), scale)
+    (rotation.to_euler_order(order), scale)
 }
 
 /// Rebuilds a basis from Euler angles and per-axis scale (Godot's R * S order).
 fn compose_basis(euler: Vector3, scale: Vector3) -> Basis {
-    let b = Basis::from_euler(euler);
+    compose_basis_ordered(euler, scale, EulerOrder::default())
+}
+
+/// [`compose_basis`] honouring the node's `rotation_order` (pat-mgixk.29).
+///
+/// `EulerOrder::default()` is `Yxz`, which is both Godot's default and the
+/// convention Patina's plain `Basis::from_euler` already used — so every
+/// existing caller keeps its exact behaviour and only a node that AUTHORS a
+/// non-default `rotation_order` takes a different path.
+fn compose_basis_ordered(euler: Vector3, scale: Vector3, order: EulerOrder) -> Basis {
+    let b = Basis::from_euler_order(euler, order);
     Basis {
         x: b.x * scale.x,
         y: b.y * scale.y,
@@ -64,9 +87,26 @@ fn compose_basis(euler: Vector3, scale: Vector3) -> Basis {
     }
 }
 
+/// The node's `rotation_order` as an [`EulerOrder`] (pat-mgixk.29).
+///
+/// ClassDB registers the property with a default of `Int(2)` = `Yxz`, and
+/// `from_i64` rejects out-of-range values, so an unauthored or nonsense value
+/// falls back to Godot's default rather than silently picking order 0.
+fn rotation_order_of(node: &crate::node::Node) -> EulerOrder {
+    match node.get_property("rotation_order") {
+        Variant::Int(i) => EulerOrder::from_i64(i).unwrap_or_default(),
+        _ => EulerOrder::default(),
+    }
+}
+
 /// The node's canonical local transform: the explicit `transform` when present,
 /// otherwise composed from the component keys.
-fn local_transform_of(node: &crate::node::Node) -> Transform3D {
+///
+/// Public because a caller holding only a `&Node` (an animation or root-motion
+/// apply, which never sees the tree) must read the SAME transform the setters
+/// write. Reading the raw `position` property instead is how root motion
+/// accumulated its delta onto a stale base (pat-mgixk.29).
+pub fn local_transform_of(node: &crate::node::Node) -> Transform3D {
     if let Variant::Transform3D(t) = node.get_property("transform") {
         return t;
     }
@@ -83,20 +123,171 @@ fn local_transform_of(node: &crate::node::Node) -> Transform3D {
         _ => Vector3::ONE,
     };
     Transform3D {
-        basis: compose_basis(rot, scl),
+        basis: compose_basis_ordered(rot, scl, rotation_order_of(node)),
         origin: pos,
     }
 }
 
-/// Stores `t` as the canonical `transform` and refreshes the component views so
-/// `position` / `rotation` / `scale` agree with it. Writing all four is what
-/// keeps reads coherent regardless of which representation a caller consults.
+/// Stores `t` as the canonical `transform` and refreshes EVERY component view
+/// so a raw `get_property` agrees with it whichever representation the caller
+/// consults — as in Godot, where `position` / `rotation` / `rotation_degrees` /
+/// `quaternion` / `basis` / `scale` are all views of one `data.local_transform`
+/// (`scene/3d/node_3d.cpp`).
+///
+/// ⚠️ `quaternion` and `basis` were MISSING here, and that was a regression I
+/// introduced with pat-mgixk.29. Routing animation and tween writes through this
+/// funnel was right, but the funnel converted an incoming `quaternion` into the
+/// basis and never wrote the `quaternion` KEY back — so a Rotation3D track moved
+/// the node correctly while a later raw `get_property("quaternion")` read `Nil`.
+/// `gltf_anim_import::gltf_import_animation_clip_plays` is the test that caught
+/// it ("the rotation track did not reach the node, got Nil"); my own pat-mgixk.29
+/// acceptance asserted on the composed basis instead of the raw property, which
+/// is exactly why it did not.
+///
+/// `get_derived_property` can compute both on demand, but that only serves
+/// callers who go through it; a direct `Node::get_property` cannot.
 fn store_local_transform(node: &mut crate::node::Node, t: Transform3D) {
-    let (euler, scale) = decompose_basis(t.basis);
+    let (euler, scale) = decompose_basis_ordered(t.basis, rotation_order_of(node));
     node.set_property("transform", Variant::Transform3D(t));
     node.set_property("position", Variant::Vector3(t.origin));
     node.set_property("rotation", Variant::Vector3(euler));
     node.set_property("scale", Variant::Vector3(scale));
+    node.set_property("basis", Variant::Basis(t.basis));
+    node.set_property(
+        "quaternion",
+        Variant::Quaternion(t.basis.get_rotation_quaternion()),
+    );
+}
+
+/// Whether this node stores a 3D transform, judged from the property types it
+/// already holds rather than from ClassDB.
+///
+/// Used only where the written value cannot discriminate on its own — a
+/// sub-path like `position:x` carries a bare `Float` whether the node is 2D or
+/// 3D. The whole-property cases need no guard, because `Vector3`, `Quaternion`,
+/// `Basis` and `Transform3D` are 3D-only payloads: a Node2D writes `position` as
+/// a `Vector2` and so falls through untouched.
+fn looks_like_node3d(node: &crate::node::Node) -> bool {
+    matches!(node.get_property("transform"), Variant::Transform3D(_))
+        || matches!(node.get_property("position"), Variant::Vector3(_))
+        || matches!(node.get_property("scale"), Variant::Vector3(_))
+        || matches!(node.get_property("rotation"), Variant::Vector3(_))
+}
+
+/// The node's local Euler rotation, derived from the canonical transform.
+///
+/// The companion read to [`local_transform_of`] for a caller holding only a
+/// `&Node`: reading the raw `rotation` property can disagree with the explicit
+/// `transform` a `.tscn` node carries, which is the whole defect pat-mgixk.29
+/// fixes.
+pub fn local_rotation_of(node: &crate::node::Node) -> Vector3 {
+    decompose_basis(local_transform_of(node).basis).0
+}
+
+/// Writes ONE transform property through the canonical local transform, the way
+/// Godot's `Node3D` setters all funnel into `data.local_transform`
+/// (`scene/3d/node_3d.cpp`).
+///
+/// Returns `false` when `prop` is not a transform property, so a caller can fall
+/// back to a raw `set_property` for everything else.
+///
+/// ⚠️ This exists because every non-script writer bypassed the component
+/// setters. Tweens, animation value tracks, 3D rotation tracks and root motion
+/// all called `Node::set_property` directly, which has no transform hook — so on
+/// a `.tscn`-loaded Node3D (which keeps an explicit `transform =`)
+/// `local_transform_of` returned that stale transform and ignored the animated
+/// `position` entirely. Nothing moved on screen (pat-mgixk.29).
+///
+/// `quaternion` and `basis` were worse than stale: `local_transform_of` never
+/// read them at all, so an animated `quaternion` — which is exactly what the
+/// glTF importer emits for a Rotation3D track — was inert on EVERY node,
+/// `.tscn` or not.
+pub fn set_transform_component(node: &mut crate::node::Node, prop: &str, value: &Variant) -> bool {
+    // A sub-path writes one axis of a vector component (`position:x`), which is
+    // how an animation track addresses a single channel. The other two axes have
+    // to be read back off the current transform, not defaulted, or animating one
+    // axis would silently zero the others.
+    if let Some((base, axis)) = prop.split_once(':') {
+        // ⚠️ `position:x` is a bare Float on a Node2D as well, so unlike the
+        // whole-property cases below the payload cannot discriminate 2D from 3D
+        // — and treating a Node2D's Vector2 position as 3D here would rewrite it
+        // as a Vector3 and corrupt it.
+        //
+        // Deliberately NOT `is_class("Node3D")`: ClassDB is not guaranteed to be
+        // populated in every runtime or test context, and a ClassDB miss would
+        // silently disable this routing exactly where it is hardest to notice.
+        // The node's own stored types are always available, so they decide.
+        if !looks_like_node3d(node) {
+            return false;
+        }
+        let component = match value {
+            Variant::Float(f) => *f as f32,
+            Variant::Int(i) => *i as f32,
+            _ => return false,
+        };
+        let current = local_transform_of(node);
+        let (euler, scale) = decompose_basis(current.basis);
+        let mut vec = match base {
+            "position" => current.origin,
+            "rotation" => euler,
+            "rotation_degrees" => Vector3::new(
+                euler.x.to_degrees(),
+                euler.y.to_degrees(),
+                euler.z.to_degrees(),
+            ),
+            "scale" => scale,
+            _ => return false,
+        };
+        match axis {
+            "x" => vec.x = component,
+            "y" => vec.y = component,
+            "z" => vec.z = component,
+            _ => return false,
+        }
+        return set_transform_component(node, base, &Variant::Vector3(vec));
+    }
+
+    let current = local_transform_of(node);
+    let (euler, scale) = decompose_basis(current.basis);
+    let updated = match (prop, value) {
+        ("position", Variant::Vector3(v)) => Transform3D {
+            basis: current.basis,
+            origin: *v,
+        },
+        ("rotation", Variant::Vector3(v)) => Transform3D {
+            basis: compose_basis(*v, scale),
+            origin: current.origin,
+        },
+        // Godot stores rotation in radians and exposes `rotation_degrees` as a
+        // view, so this converts rather than storing a second representation.
+        ("rotation_degrees", Variant::Vector3(v)) => Transform3D {
+            basis: compose_basis(
+                Vector3::new(v.x.to_radians(), v.y.to_radians(), v.z.to_radians()),
+                scale,
+            ),
+            origin: current.origin,
+        },
+        ("scale", Variant::Vector3(v)) => Transform3D {
+            basis: compose_basis(euler, *v),
+            origin: current.origin,
+        },
+        // `from_quaternion_scale` keeps the node's existing scale: a rotation
+        // track must not reset it to one.
+        ("quaternion", Variant::Quaternion(q)) => Transform3D {
+            basis: gdcore::math3d::Basis::from_quaternion_scale(*q, scale),
+            origin: current.origin,
+        },
+        // A basis carries its own scale, so it replaces the rotation AND scale
+        // and only the origin is preserved.
+        ("basis", Variant::Basis(b)) => Transform3D {
+            basis: *b,
+            origin: current.origin,
+        },
+        ("transform", Variant::Transform3D(t)) => *t,
+        _ => return false,
+    };
+    store_local_transform(node, updated);
+    true
 }
 
 /// Sets the node's local position, preserving its rotation and scale.
@@ -185,12 +376,30 @@ pub fn get_local_transform(tree: &SceneTree, node_id: NodeId) -> Transform3D {
 }
 
 /// Computes the global transform by walking the parent chain and multiplying
-/// local transforms from the root downward.
+/// local transforms from the root downward, stopping at a `top_level` node.
+///
+/// 🔑 The `top_level` check used to live in a SEPARATE
+/// [`get_global_transform_top_level`], which had no caller outside this module
+/// — so all 77 call sites of this function, the 3D render list among them,
+/// composed a `top_level` node's transform with its parent's anyway. Godot's
+/// `set_as_top_level` makes a node's transform independent of its parent
+/// (`scene/3d/node_3d.cpp`), and a node that opts out of its parent and moves
+/// with it regardless is the whole bug (pat-mgixk.32).
+///
+/// Folded in here rather than switched per call site for the reason the split
+/// caused the bug in the first place: two functions that differ by one
+/// condition get chosen by whoever is writing the call, and the one without the
+/// condition is shorter to type.
 pub fn get_global_transform(tree: &SceneTree, node_id: NodeId) -> Transform3D {
     let mut chain = Vec::new();
     let mut current = node_id;
     loop {
         chain.push(current);
+        // A top-level node ignores its parent chain entirely, so the walk ends
+        // with its own local transform as the base.
+        if is_top_level(tree, current) {
+            break;
+        }
         match tree.get_node(current).and_then(|n| n.parent()) {
             Some(parent_id) => current = parent_id,
             None => break,
@@ -272,30 +481,14 @@ pub fn is_top_level(tree: &SceneTree, node_id: NodeId) -> bool {
 
 /// Computes the global [`Transform3D`] while honoring `top_level`.
 ///
-/// Like [`get_global_transform`] this walks the parent chain multiplying local
-/// transforms from the root downward, but it stops as soon as it reaches a node
-/// whose `top_level` flag is set: that node's local transform becomes the base
-/// and everything above it in the hierarchy is ignored.
+/// ⚠️ Now identical to [`get_global_transform`], which honours `top_level`
+/// itself (pat-mgixk.32). Kept as a name rather than deleted because it reads
+/// at a call site as "and I did mean with top_level", and because deleting it
+/// would churn every existing caller for no behavioural gain. Delegating
+/// rather than duplicating is the point: the two bodies differing by one
+/// condition is exactly how the render list ended up on the wrong one.
 pub fn get_global_transform_top_level(tree: &SceneTree, node_id: NodeId) -> Transform3D {
-    let mut chain = Vec::new();
-    let mut current = node_id;
-    loop {
-        chain.push(current);
-        // A top-level node ignores its parent chain entirely.
-        if is_top_level(tree, current) {
-            break;
-        }
-        match tree.get_node(current).and_then(|n| n.parent()) {
-            Some(parent_id) => current = parent_id,
-            None => break,
-        }
-    }
-    chain.reverse();
-    let mut global = Transform3D::IDENTITY;
-    for id in chain {
-        global = global * get_local_transform(tree, id);
-    }
-    global
+    get_global_transform(tree, node_id)
 }
 
 /// Returns the global transform of the node's *effective* parent: the parent's
@@ -427,10 +620,40 @@ pub fn is_visible_in_tree(tree: &SceneTree, node_id: NodeId) -> bool {
         if !is_visible(tree, current) {
             return false;
         }
-        match tree.get_node(current).and_then(|n| n.parent()) {
-            Some(parent_id) => current = parent_id,
-            None => return true,
+        let Some(parent_id) = tree.get_node(current).and_then(|n| n.parent()) else {
+            return true;
+        };
+        // ⚠️ The walk STOPS at a non-Node3D ancestor, and that is Godot's rule,
+        // not a shortcut. `Node3D::is_visible_in_tree` climbs `data.parent`,
+        // which is `Object::cast_to<Node3D>(get_parent())` and therefore null
+        // the moment the parent is not a Node3D — so a hidden `Node` or
+        // `CanvasItem` above a 3D subtree does not hide it. Walking through
+        // would couple the two visibility families, and a hidden Control
+        // ancestor would blank the 3D scene under it.
+        //
+        // 🔑 BOTH tests, because each covers the other's blind spot and a miss
+        // here fails SILENTLY in the permissive direction (stop early => a
+        // hidden parent renders its children again, which is the very bug this
+        // function exists to fix):
+        //   * `is_class` compares the node's OWN class name before touching
+        //     ClassDB, so a bare `Node3D` group parent resolves even with an
+        //     empty ClassDB — but a `MeshInstance3D` parent needs the ClassDB
+        //     ancestor walk, and `set_transform_component` above documents that
+        //     ClassDB is not populated in every runtime or test context.
+        //   * `looks_like_node3d` reads stored property TYPES and so needs no
+        //     ClassDB at all — but a transform-less Node3D used purely as a
+        //     visibility group stores none of them.
+        // A node has to miss both — a ClassDB miss AND no stored transform — to
+        // stop the walk, and then it stops one level early rather than
+        // disabling propagation outright.
+        let parent_is_node3d = tree
+            .get_node(parent_id)
+            .map(|n| n.is_class("Node3D") || looks_like_node3d(n))
+            .unwrap_or(false);
+        if !parent_is_node3d {
+            return true;
         }
+        current = parent_id;
     }
 }
 
@@ -795,6 +1018,49 @@ pub fn get_multimesh_instance_color(tree: &SceneTree, node_id: NodeId, index: us
             _ => None,
         })
         .unwrap_or(Color::WHITE)
+}
+
+/// How many of a MultiMeshInstance3D's instances are actually drawn.
+///
+/// Godot's `MultiMesh.visible_instance_count` is a PREFIX count with `-1` as the
+/// "draw all" sentinel, so a buffer of 3 with the count at 2 draws the first two
+/// and leaves the third authored but unrendered.
+///
+/// ⚠️ The clamping rule is defined once, by
+/// [`gdserver3d::multimesh::MultiMesh3D::visible_count`]: negative means all,
+/// otherwise `min(count, instance_count)`. This reader returns the RAW authored
+/// value so callers apply that one rule rather than each inventing a clamp —
+/// the sync path ignored the property entirely and drew every instance
+/// (pat-mgixk.50).
+pub fn get_multimesh_visible_instance_count(tree: &SceneTree, node_id: NodeId) -> i64 {
+    tree.get_node(node_id)
+        .and_then(|n| {
+            // The authored sub-resource wins over the node-level property, as
+            // for `instance_count`.
+            match n.get_property("__multimesh__visible_instance_count") {
+                Variant::Int(v) => Some(v),
+                _ => match n.get_property("visible_instance_count") {
+                    Variant::Int(v) => Some(v),
+                    _ => None,
+                },
+            }
+        })
+        .unwrap_or(-1)
+}
+
+/// The number of instances to draw: [`get_multimesh_instance_count`] capped by
+/// [`get_multimesh_visible_instance_count`], applying Godot's `-1` sentinel.
+///
+/// The single place that rule lives on this path, so the editor list and the
+/// render-server adapter cannot disagree about how many blobs a scene has.
+pub fn multimesh_visible_count(tree: &SceneTree, node_id: NodeId) -> usize {
+    let total = get_multimesh_instance_count(tree, node_id) as usize;
+    let visible = get_multimesh_visible_instance_count(tree, node_id);
+    if visible < 0 {
+        total
+    } else {
+        (visible as usize).min(total)
+    }
 }
 
 /// Returns the mesh type name for a MultiMeshInstance3D, if set.
@@ -1683,5 +1949,338 @@ mod tests {
         );
 
         assert_eq!(out, target, "nothing is pushed");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Script surface: derived properties + the Node3D method table (pat-mgixk.30)
+// ---------------------------------------------------------------------------
+
+/// Radians per degree, for the `*_degrees` property pair.
+const DEG_TO_RAD: f32 = std::f32::consts::PI / 180.0;
+
+/// Whether `node_id` is a Node3D, so the 3D surface never answers for a 2D node.
+///
+/// ⚠️ `is_class` rather than a name equality test: every 3D node worth asking
+/// (Camera3D, CharacterBody3D, a scripted subclass) inherits Node3D, and
+/// `class_name() == "Node3D"` would answer only for the bare base.
+///
+/// The gate is load-bearing in the other direction too: `global_position` is a
+/// Node2D property as well, already served for 2D in `scene_tree.rs`. Without
+/// this check the 3D reader would capture a Sprite2D's read and hand back a
+/// `Vector3` where the script expects a `Vector2`.
+fn is_node3d(tree: &SceneTree, node_id: NodeId) -> bool {
+    tree.get_node(node_id)
+        .map(|n| n.is_class("Node3D"))
+        .unwrap_or(false)
+}
+
+/// The parent's global transform, or identity at the top of the chain.
+fn parent_global(tree: &SceneTree, node_id: NodeId) -> Transform3D {
+    tree.get_node(node_id)
+        .and_then(|n| n.parent())
+        .map(|pid| get_global_transform(tree, pid))
+        .unwrap_or(Transform3D::IDENTITY)
+}
+
+/// Reads one of Node3D's COMPUTED properties, or `None` for a name it does not
+/// serve (pat-mgixk.30).
+///
+/// Godot exposes `global_position`, `global_transform`, `global_basis`,
+/// `global_rotation(_degrees)`, `basis`, `quaternion` and `rotation_degrees` as
+/// real properties on Node3D (`doc/classes/Node3D.xml`). Patina stored only
+/// `transform`/`position`/`rotation`/`scale`, and `get_node_property` fell
+/// through to the raw bag — so `self.global_position` on a Node3D was an
+/// `UndefinedVariable`, the single most ordinary thing a 3D script does.
+///
+/// `global_*` uses [`get_global_transform_top_level`], which stops the parent
+/// walk at a `top_level` node, so a node that opted out of inheriting its
+/// parent's transform reports the position it is actually drawn at.
+pub fn get_derived_property(tree: &SceneTree, node_id: NodeId, prop: &str) -> Option<Variant> {
+    if !is_node3d(tree, node_id) {
+        return None;
+    }
+    let global = || get_global_transform_top_level(tree, node_id);
+    match prop {
+        "global_position" => Some(Variant::Vector3(global().origin)),
+        "global_transform" => Some(Variant::Transform3D(global())),
+        "global_basis" => Some(Variant::Basis(global().basis)),
+        // Rotation only: `to_euler` on a basis that also carries scale mixes the
+        // two, so the rotation is extracted first.
+        "global_rotation" => Some(Variant::Vector3(
+            global().basis.get_rotation_basis().to_euler(),
+        )),
+        "global_rotation_degrees" => {
+            let e = global().basis.get_rotation_basis().to_euler();
+            Some(Variant::Vector3(Vector3::new(
+                e.x / DEG_TO_RAD,
+                e.y / DEG_TO_RAD,
+                e.z / DEG_TO_RAD,
+            )))
+        }
+        "basis" => Some(Variant::Basis(get_local_transform(tree, node_id).basis)),
+        "quaternion" => Some(Variant::Quaternion(
+            get_local_transform(tree, node_id)
+                .basis
+                .get_rotation_quaternion(),
+        )),
+        "rotation_degrees" => {
+            let r = get_rotation(tree, node_id);
+            Some(Variant::Vector3(Vector3::new(
+                r.x / DEG_TO_RAD,
+                r.y / DEG_TO_RAD,
+                r.z / DEG_TO_RAD,
+            )))
+        }
+        _ => None,
+    }
+}
+
+/// Writes one of Node3D's computed properties. Returns whether it was handled.
+///
+/// Each global write is converted into the LOCAL transform the node actually
+/// stores, by composing against the parent's global — the same arithmetic
+/// [`set_global_position`] already used. Writing the global value straight into
+/// the local slot is the bug this avoids: under a translated parent the node
+/// would land at parent + target instead of at target.
+pub fn set_derived_property(
+    tree: &mut SceneTree,
+    node_id: NodeId,
+    prop: &str,
+    value: &Variant,
+) -> bool {
+    if !is_node3d(tree, node_id) {
+        return false;
+    }
+    match (prop, value) {
+        ("global_position", Variant::Vector3(v)) => {
+            set_global_position(tree, node_id, *v);
+            true
+        }
+        ("global_transform", Variant::Transform3D(t)) => {
+            let local = parent_global(tree, node_id).inverse() * *t;
+            if let Some(node) = tree.get_node_mut(node_id) {
+                store_local_transform(node, local);
+            }
+            true
+        }
+        ("global_basis", Variant::Basis(b)) => {
+            let mut target = get_global_transform(tree, node_id);
+            target.basis = *b;
+            let local = parent_global(tree, node_id).inverse() * target;
+            if let Some(node) = tree.get_node_mut(node_id) {
+                store_local_transform(node, local);
+            }
+            true
+        }
+        ("global_rotation", Variant::Vector3(e)) => {
+            set_global_rotation_euler(tree, node_id, *e);
+            true
+        }
+        ("global_rotation_degrees", Variant::Vector3(d)) => {
+            set_global_rotation_euler(
+                tree,
+                node_id,
+                Vector3::new(d.x * DEG_TO_RAD, d.y * DEG_TO_RAD, d.z * DEG_TO_RAD),
+            );
+            true
+        }
+        ("basis", Variant::Basis(b)) => {
+            if let Some(node) = tree.get_node_mut(node_id) {
+                let mut t = local_transform_of(node);
+                t.basis = *b;
+                store_local_transform(node, t);
+            }
+            true
+        }
+        ("quaternion", Variant::Quaternion(q)) => {
+            if let Some(node) = tree.get_node_mut(node_id) {
+                let mut t = local_transform_of(node);
+                // Scale is preserved: Godot's `quaternion` setter replaces the
+                // ROTATION, and rebuilding the basis from the quaternion alone
+                // would silently reset a scaled node to 1.
+                let scale = t.basis.get_scale();
+                t.basis = Basis::from_quaternion_scale(*q, scale);
+                store_local_transform(node, t);
+            }
+            true
+        }
+        ("rotation_degrees", Variant::Vector3(d)) => {
+            set_rotation(
+                tree,
+                node_id,
+                Vector3::new(d.x * DEG_TO_RAD, d.y * DEG_TO_RAD, d.z * DEG_TO_RAD),
+            );
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Sets the node's local rotation so its GLOBAL rotation is `euler`.
+fn set_global_rotation_euler(tree: &mut SceneTree, node_id: NodeId, euler: Vector3) {
+    let mut target = get_global_transform(tree, node_id);
+    let scale = target.basis.get_scale();
+    target.basis = Basis::from_quaternion_scale(Basis::from_euler(euler).to_quaternion(), scale);
+    let local = parent_global(tree, node_id).inverse() * target;
+    if let Some(node) = tree.get_node_mut(node_id) {
+        store_local_transform(node, local);
+    }
+}
+
+/// Dispatches a Node3D method, or `None` for a name it does not serve.
+///
+/// ⚠️ Carries ONLY names with no arm anywhere else. This runs before
+/// `scripting.rs`'s own method table, so an implementation of a name the table
+/// already serves would SHADOW it rather than fill a gap — the same warning the
+/// `pat-mgixk.8` block beside it carries. Verified absent from `scripting.rs`
+/// before being added here; `hide`, `show`, `set_visible` and `is_visible` are
+/// deliberately NOT here, because that table already dispatches them.
+pub fn call_node3d_method(
+    tree: &mut SceneTree,
+    node_id: NodeId,
+    method: &str,
+    args: &[Variant],
+) -> Option<Variant> {
+    if !is_node3d(tree, node_id) {
+        return None;
+    }
+    let vec3 = |i: usize| match args.get(i) {
+        Some(Variant::Vector3(v)) => Some(*v),
+        _ => None,
+    };
+    let float = |i: usize| match args.get(i) {
+        Some(Variant::Float(f)) => Some(*f as f32),
+        Some(Variant::Int(n)) => Some(*n as f32),
+        _ => None,
+    };
+    match method {
+        "is_visible_in_tree" => Some(Variant::Bool(is_visible_in_tree(tree, node_id))),
+        "get_global_transform" => Some(Variant::Transform3D(get_global_transform_top_level(
+            tree, node_id,
+        ))),
+        "set_global_transform" => match args.first() {
+            Some(v @ Variant::Transform3D(_)) => {
+                set_derived_property(tree, node_id, "global_transform", v);
+                Some(Variant::Nil)
+            }
+            _ => None,
+        },
+        "get_global_position" => Some(Variant::Vector3(
+            get_global_transform_top_level(tree, node_id).origin,
+        )),
+        "set_global_position" => {
+            let target = vec3(0)?;
+            set_global_position(tree, node_id, target);
+            Some(Variant::Nil)
+        }
+        "get_quaternion" | "get_basis" | "get_rotation_degrees" => {
+            // One arm: these are the getter spellings of properties
+            // `get_derived_property` already computes, so routing them keeps a
+            // single implementation instead of a second that can drift.
+            let prop = method.trim_start_matches("get_");
+            get_derived_property(tree, node_id, prop)
+        }
+        "set_quaternion" | "set_basis" | "set_rotation_degrees" => {
+            let prop = method.trim_start_matches("set_");
+            let value = args.first()?;
+            set_derived_property(tree, node_id, prop, value).then_some(Variant::Nil)
+        }
+        // Godot rotates about a GLOBAL axis through the node's own origin, so
+        // the basis is rebuilt in global space and converted back.
+        "global_rotate" => {
+            let axis = vec3(0)?;
+            let angle = float(1)?;
+            let mut target = get_global_transform(tree, node_id);
+            target.basis = target.basis.rotated(axis, angle);
+            set_derived_property(
+                tree,
+                node_id,
+                "global_transform",
+                &Variant::Transform3D(target),
+            );
+            Some(Variant::Nil)
+        }
+        "global_translate" => {
+            let offset = vec3(0)?;
+            let current = get_global_transform_top_level(tree, node_id).origin;
+            set_global_position(
+                tree,
+                node_id,
+                Vector3::new(
+                    current.x + offset.x,
+                    current.y + offset.y,
+                    current.z + offset.z,
+                ),
+            );
+            Some(Variant::Nil)
+        }
+        // "object local" means about the node's OWN axes, i.e. post-multiplied
+        // into the local basis rather than pre-multiplied like `rotate`.
+        "rotate_object_local" => {
+            let axis = vec3(0)?;
+            let angle = float(1)?;
+            if let Some(node) = tree.get_node_mut(node_id) {
+                let mut t = local_transform_of(node);
+                let local_axis = t.basis.xform(axis);
+                t.basis = t.basis.rotated(local_axis, angle);
+                store_local_transform(node, t);
+            }
+            Some(Variant::Nil)
+        }
+        "translate_object_local" => {
+            let offset = vec3(0)?;
+            if let Some(node) = tree.get_node_mut(node_id) {
+                let mut t = local_transform_of(node);
+                t.origin = t.origin + t.basis.xform(offset);
+                store_local_transform(node, t);
+            }
+            Some(Variant::Nil)
+        }
+        "orthonormalize" => {
+            if let Some(node) = tree.get_node_mut(node_id) {
+                let mut t = local_transform_of(node);
+                t.basis = t.basis.orthonormalized();
+                store_local_transform(node, t);
+            }
+            Some(Variant::Nil)
+        }
+        "set_identity" => {
+            if let Some(node) = tree.get_node_mut(node_id) {
+                store_local_transform(node, Transform3D::IDENTITY);
+            }
+            Some(Variant::Nil)
+        }
+        "look_at_from_position" => {
+            let from = vec3(0)?;
+            let target = vec3(1)?;
+            let up = vec3(2).unwrap_or(Vector3::new(0.0, 1.0, 0.0));
+            set_global_position(tree, node_id, from);
+            look_at(tree, node_id, target, up);
+            Some(Variant::Nil)
+        }
+        // Godot returns the nearest Node3D ANCESTOR, not merely the parent: a
+        // Node3D parented under a plain `Node` still has one above it.
+        "get_parent_node_3d" => {
+            let mut cursor = tree.get_node(node_id).and_then(|n| n.parent());
+            while let Some(id) = cursor {
+                if is_node3d(tree, id) {
+                    return Some(Variant::ObjectId(id.object_id()));
+                }
+                cursor = tree.get_node(id).and_then(|n| n.parent());
+            }
+            Some(Variant::Nil)
+        }
+        "set_as_top_level" => {
+            let enabled = matches!(args.first(), Some(Variant::Bool(true)));
+            set_top_level(tree, node_id, enabled);
+            Some(Variant::Nil)
+        }
+        "is_set_as_top_level" => Some(Variant::Bool(is_top_level(tree, node_id))),
+        // Patina recomputes transforms on read, so there is no deferred queue to
+        // flush. Answered rather than declined because a script calling it
+        // expects a no-op, not an UndefinedFunction.
+        "force_update_transform" => Some(Variant::Nil),
+        _ => None,
     }
 }

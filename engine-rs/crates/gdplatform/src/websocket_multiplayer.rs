@@ -539,6 +539,28 @@ impl NetworkPeer for WebSocketMultiplayerPeer {
         }
         let body = encode_data(packet.sender, packet.channel, &packet.data);
         if self.is_server_role {
+            // ⚠️ Target 0 is Godot's "every connected peer", not a peer id.
+            // Looking it up in `conns` is what made `rpc()` fail with
+            // `PeerUnreachable(0)` instead of broadcasting (pat-mgixk.26).
+            if to == PeerId::BROADCAST {
+                let bytes = encode_frame(&Frame::new(Opcode::Binary, body), None);
+                // Every peer gets the packet, and ONE unreachable peer must not
+                // swallow the rest of the broadcast: a client that dropped
+                // between poll and send is normal, and a datagram transport
+                // does not report it. The first error is kept and returned
+                // after the fan-out so the caller still learns something went
+                // wrong.
+                let mut first_err = None;
+                for conn in self.conns.values() {
+                    if let Err(e) = write_all_nonblocking(&conn.stream, &bytes) {
+                        first_err.get_or_insert(NetworkError::Transport(e.to_string()));
+                    }
+                }
+                return match first_err {
+                    Some(e) => Err(e),
+                    None => Ok(()),
+                };
+            }
             let conn = self
                 .conns
                 .get(&to)

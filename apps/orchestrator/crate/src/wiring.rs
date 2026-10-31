@@ -13,8 +13,9 @@
 //!    entry point (a `.tscn`/project fixture, the runner, MainLoop, the editor
 //!    server, the web runtime), not through a library function.
 //! 2. [`red_check`] (after a green verify): copy the tree to an isolated
-//!    snapshot, put the completion's NON-test files back to their HEAD
-//!    contents, and re-run the acceptance test. It must FAIL there. A test that
+//!    snapshot, put the completion's NON-test files back to their contents
+//!    from when the bead was assigned (HEAD when no assignment was recorded),
+//!    and re-run the acceptance test. It must FAIL there. A test that
 //!    passes with the change removed does not exercise the change.
 //!
 //! Both checks are deliberately one-sided: anything they cannot decide
@@ -35,7 +36,13 @@ pub const WIRING_MARKER: &str = "wiring requirement:";
 /// Substrings that show a test file drives the engine the way a game or the
 /// editor does. Any one is enough; the list is intentionally broad because a
 /// false rejection is worse than a lenient pass here — the red check is the
-/// stronger gate.
+/// stronger gate. Matched against code with comments stripped, so a doc
+/// comment that merely mentions a scene does not count.
+///
+/// `project.godot` is deliberately absent: a data-layer test that writes and
+/// re-parses a project file names it without entering the engine
+/// (pat-mgixk.16). A test that boots a project does so through one of the
+/// entry points below.
 pub const ENTRY_POINT_MARKERS: &[&str] = &[
     "patina_runner",
     "patina_web",
@@ -43,7 +50,7 @@ pub const ENTRY_POINT_MARKERS: &[&str] = &[
     "main_loop",
     "from_tscn",
     ".tscn",
-    "project.godot",
+    "PackedScene",
     "res://",
     "EditorServer",
     "editor_server",
@@ -117,12 +124,98 @@ pub fn resolve_repo_path(root: &Path, path: &str) -> Option<String> {
 }
 
 fn git_head_blob(root: &Path, rel: &str) -> Option<Vec<u8>> {
+    git_blob(root, "HEAD", rel)
+}
+
+fn git_blob(root: &Path, rev: &str, rel: &str) -> Option<Vec<u8>> {
     let out = Command::new("git")
-        .args(["show", &format!("HEAD:{rel}")])
+        .args(["show", &format!("{rev}:{rel}")])
         .current_dir(root)
         .output()
         .ok()?;
     out.status.success().then_some(out.stdout)
+}
+
+/// Rust source with `//` and `/* */` comments removed and string, raw-string
+/// and char literals kept verbatim, so `"res://x.tscn"` survives while a doc
+/// comment that only mentions a scene does not.
+pub fn strip_rust_comments(src: &str) -> String {
+    let b = src.as_bytes();
+    let n = b.len();
+    let mut out = String::with_capacity(n);
+    let mut i = 0;
+    let mut kept = 0;
+    let flush = |out: &mut String, from: usize, to: usize| out.push_str(&src[from..to]);
+    while i < n {
+        if b[i] == b'/' && i + 1 < n && b[i + 1] == b'/' {
+            flush(&mut out, kept, i);
+            while i < n && b[i] != b'\n' {
+                i += 1;
+            }
+            kept = i;
+        } else if b[i] == b'/' && i + 1 < n && b[i + 1] == b'*' {
+            flush(&mut out, kept, i);
+            let mut depth = 0usize;
+            while i < n {
+                if b[i] == b'/' && i + 1 < n && b[i + 1] == b'*' {
+                    depth += 1;
+                    i += 2;
+                } else if b[i] == b'*' && i + 1 < n && b[i + 1] == b'/' {
+                    depth -= 1;
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            out.push(' ');
+            kept = i;
+        } else if b[i] == b'r' && (i + 1 < n && (b[i + 1] == b'"' || b[i + 1] == b'#'))
+            && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_'))
+        {
+            // Raw string r"..." / r#"..."#; `r#ident` (raw identifier) has no quote.
+            let mut j = i + 1;
+            while j < n && b[j] == b'#' {
+                j += 1;
+            }
+            if j < n && b[j] == b'"' {
+                let close = format!("\"{}", "#".repeat(j - i - 1));
+                i = match src[j + 1..].find(&close) {
+                    Some(off) => j + 1 + off + close.len(),
+                    None => n,
+                };
+            } else {
+                i = j;
+            }
+        } else if b[i] == b'"' {
+            i += 1;
+            while i < n && b[i] != b'"' {
+                i += if b[i] == b'\\' { 2 } else { 1 };
+            }
+            i = (i + 1).min(n);
+        } else if b[i] == b'\'' {
+            // A char literal ('x', '\n', '\'') or a lifetime ('a). Only skip
+            // the former, so a quote inside it cannot open a string.
+            if i + 2 < n && b[i + 1] == b'\\' {
+                let mut k = i + 2;
+                while k < n && b[k] != b'\'' {
+                    k += 1;
+                }
+                i = (k + 1).min(n);
+            } else if let Some(c) = src[i + 1..].chars().next() {
+                let after = i + 1 + c.len_utf8();
+                i = if after < n && b[after] == b'\'' { after + 1 } else { i + 1 };
+            } else {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    flush(&mut out, kept, n);
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -233,16 +326,18 @@ pub fn check_entry_point(
                  MainLoop, the editor server or the web runtime."
             ));
         }
-        let src = test_source_with_support(&path);
+        let src = strip_rust_comments(&test_source_with_support(&path));
         if !ENTRY_POINT_MARKERS.iter().any(|m| src.contains(m)) {
             return EntryPointVerdict::Rejected(format!(
                 "wiring rule: the acceptance test `{name}` (in `{rel}`) never enters the engine \
                  through a public entry point. This bead has a Wiring requirement, so the test \
-                 must load a scene or project (`.tscn`, `res://`, `project.godot`, \
-                 `PackedScene::from_tscn`), boot through `patina_runner`/`MainLoop`, attach a \
-                 GDScript, or drive the editor server / web runtime, and assert what a game or \
-                 the editor would observe. A test that calls the new function directly proves \
-                 the code exists, not that anything reaches it. Accepted markers: {}",
+                 must load a scene (`.tscn`, `res://`, `PackedScene::from_tscn`), boot \
+                 through `patina_runner`/`MainLoop`, attach a GDScript, or drive the editor \
+                 server (`EditorServerHandle::start` + HTTP) / web runtime, and assert what a \
+                 game or the editor would observe. A test that calls the new function directly \
+                 proves the code exists, not that anything reaches it. Markers are matched in \
+                 code only, not in comments; writing or parsing a `project.godot` file by \
+                 itself does not count. Accepted markers: {}",
                 ENTRY_POINT_MARKERS.join(", ")
             ));
         }
@@ -316,10 +411,27 @@ const SNAPSHOT_EXCLUDES: &[&str] = &[
     ".orchestrator/redcheck",
     "*.trash-*",
     ".shadertest-target",
+    // Tracker state. Its SQLite WAL/SHM files come and go while the coordinator
+    // writes, and rsync fails on a file that vanishes mid-copy.
+    "/.beads",
+    // Agent Mail's store: lock files there appear and vanish every send.
+    "/.agent-mail-store",
     // Read-only reference source (vendored Godot). Symlinked into the
     // snapshot instead of copied: tests may read its doc XML, nothing edits it.
     "/upstream",
 ];
+
+/// Whether an rsync failure is only files that vanished during the copy.
+fn only_vanished_files(code: Option<i32>, stderr: &str) -> bool {
+    match code {
+        Some(24) => true,
+        Some(23) => stderr
+            .lines()
+            .filter(|l| l.contains("error:") || l.contains("error in"))
+            .all(|l| l.contains("No such file or directory") || l.contains("some files vanished") || l.contains("some files/attrs were not transferred")),
+        _ => false,
+    }
+}
 
 fn sync_snapshot(root: &Path, snap: &Path) -> Result<(), String> {
     std::fs::create_dir_all(snap).map_err(|e| format!("mkdir snapshot: {e}"))?;
@@ -331,7 +443,12 @@ fn sync_snapshot(root: &Path, snap: &Path) -> Result<(), String> {
     cmd.arg(format!("{}/", root.display()))
         .arg(format!("{}/", snap.display()));
     let out = cmd.output().map_err(|e| format!("rsync spawn: {e}"))?;
-    if !out.status.success() {
+    // A live tree always has churn (lock files, editor swap files), and a
+    // file that vanishes mid-copy is not a test input. rsync reports that as
+    // 24, or as 23 with "No such file or directory" when it disappears between
+    // the scan and the open.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() && !only_vanished_files(out.status.code(), &stderr) {
         return Err(format!(
             "rsync failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
@@ -376,6 +493,57 @@ fn recently_swept_by_checkpoint(root: &Path, rel: &str) -> bool {
     subject.starts_with("Checkpoint: auto") && now - ts < CHECKPOINT_SWEEP_WINDOW_SECS
 }
 
+/// Where the commit HEAD pointed at when each bead was assigned is kept.
+fn assignment_base_path(cache_dir: &Path, bead_id: &str) -> PathBuf {
+    let safe: String = bead_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    cache_dir.join("assign-base").join(safe)
+}
+
+/// Record HEAD as the red-check baseline for `bead_id`, at assignment time.
+///
+/// An auto-checkpoint commits the whole tree every N closes, so by the time a
+/// bead is verified HEAD often already holds part of its change, and reverting
+/// to HEAD removes only the last delta. The commit HEAD pointed at when the
+/// bead was handed out predates all of the worker's edits.
+///
+/// Re-sending the same bead to the same worker (a reprompt) keeps the first
+/// record; a different worker starts a fresh one.
+pub fn record_assignment_base(root: &Path, cache_dir: &Path, bead_id: &str, worker: &str) {
+    let path = assignment_base_path(cache_dir, bead_id);
+    if let Ok(prev) = std::fs::read_to_string(&path) {
+        if prev.trim_end().split('\t').nth(1) == Some(worker) {
+            return;
+        }
+    }
+    let Ok(out) = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(root).output() else {
+        return;
+    };
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !out.status.success() || sha.is_empty() {
+        return;
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, format!("{sha}\t{worker}\n"));
+}
+
+/// The recorded baseline commit for `bead_id`, if any and if it still exists.
+pub fn assignment_base(root: &Path, cache_dir: &Path, bead_id: &str) -> Option<String> {
+    let rec = std::fs::read_to_string(assignment_base_path(cache_dir, bead_id)).ok()?;
+    let sha = rec.split('\t').next()?.trim().to_string();
+    let ok = Command::new("git")
+        .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
+        .current_dir(root)
+        .status()
+        .ok()?
+        .success();
+    ok.then_some(sha)
+}
+
 /// Turn a verify command into one that runs in the snapshot's engine
 /// workspace, off the shared build slot, with the red-check target dir.
 pub fn snapshot_command(cmd: &str, target_dir: &Path) -> Option<String> {
@@ -396,6 +564,12 @@ pub fn snapshot_command(cmd: &str, target_dir: &Path) -> Option<String> {
 /// Revert the completion's non-test files inside `snap` and re-run the
 /// acceptance commands there.
 ///
+/// Files go back to their contents at `baseline` (the commit recorded when the
+/// bead was assigned, see [`record_assignment_base`]); with no baseline they go
+/// back to HEAD, guarded against auto-checkpoint sweeps. Reverting to an older
+/// commit can also undo a peer's change to the same file; if that breaks the
+/// build the result is `Detected`, which never rejects correct work.
+///
 /// Only beads that name an acceptance test (`acceptance_tests`, from the
 /// `(test: \`name\`)` form) are checked. A refactor, perf or test-coverage
 /// bead whose acceptance is "existing tests still pass" legitimately passes
@@ -407,6 +581,7 @@ pub fn red_check(
     files_changed: &str,
     commands: &[String],
     acceptance_tests: &[String],
+    baseline: Option<&str>,
     timeout: Duration,
 ) -> RedVerdict {
     if std::env::var("ORCH_RED_CHECK").is_ok_and(|v| v == "0") {
@@ -419,7 +594,7 @@ pub fn red_check(
         .iter()
         .filter_map(|f| resolve_repo_path(root, f))
         .collect();
-    let code: Vec<&String> = files
+    let mut code: Vec<&String> = files
         .iter()
         .filter(|f| !is_test_path(f))
         // Everything but prose and tracker state: logic also lives in .wgsl,
@@ -459,11 +634,23 @@ pub fn red_check(
         return RedVerdict::Skipped("no test-run command to re-run".into());
     }
 
+    if let Some(base) = baseline {
+        // A listed file identical to its assignment-time contents is not part
+        // of this change; there is nothing to revert in it.
+        code.retain(|f| std::fs::read(root.join(f)).ok() != git_blob(root, base, f));
+        if code.is_empty() {
+            return RedVerdict::Inconclusive(format!(
+                "no listed code file differs from the assignment baseline {base}"
+            ));
+        }
+    }
+    // Without a baseline, HEAD is the reference and two guards apply.
     // A file whose working copy already equals HEAD cannot be reverted: an
     // auto-checkpoint committed it before this verify ran. Reverting the rest
     // would test a half-removed change, so bail out instead of guessing.
     let mut already_committed = Vec::new();
-    for f in &code {
+    let guard: &[&String] = if baseline.is_some() { &[] } else { &code };
+    for f in guard {
         let live = std::fs::read(root.join(f)).ok();
         let head = git_head_blob(root, f);
         if live.is_some() && live == head {
@@ -480,7 +667,7 @@ pub fn red_check(
     // WIP into HEAD and the worker kept editing. Reverting to HEAD would only
     // remove the last delta and leave most of the feature in place, so a
     // pass there would be a false rejection.
-    let swept: Vec<&str> = code
+    let swept: Vec<&str> = guard
         .iter()
         .filter(|f| recently_swept_by_checkpoint(root, f))
         .map(|f| f.as_str())
@@ -497,10 +684,14 @@ pub fn red_check(
     if let Err(e) = sync_snapshot(root, &snap) {
         return RedVerdict::Inconclusive(e);
     }
+    let reference = baseline.unwrap_or("HEAD");
     for f in &code {
         let dest = snap.join(f);
-        match git_head_blob(root, f) {
+        match git_blob(root, reference, f) {
             Some(bytes) => {
+                if let Some(parent) = dest.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
                 if let Err(e) = std::fs::write(&dest, bytes) {
                     return RedVerdict::Inconclusive(format!("revert {f}: {e}"));
                 }
@@ -534,12 +725,16 @@ pub fn red_check(
     }
     if !not_detected.is_empty() && inconclusive.is_empty() {
         let reverted = code.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ");
+        let against = match baseline {
+            Some(b) => format!("their contents when the bead was assigned ({})", &b[..b.len().min(10)]),
+            None => "HEAD".to_string(),
+        };
         return RedVerdict::NotDetected(format!(
             "red check: your acceptance test still PASSES with your non-test changes reverted \
-             to HEAD ({reverted}), so it does not exercise your change. A test that passes \
+             to {against} ({reverted}), so it does not exercise your change. A test that passes \
              without the fix proves nothing about it. Make the test drive the feature through \
-             the path a game or the editor uses, so it fails on HEAD and passes with your \
-             change. Commands that passed on reverted code: {}",
+             the path a game or the editor uses, so it fails without your change and passes \
+             with it. Commands that passed on reverted code: {}",
             not_detected.join(" ; ")
         ));
     }
@@ -757,7 +952,7 @@ mod tests {
         let dir = repo();
         let r = dir.path();
         std::fs::write(r.join("engine-rs/crates/a/tests/t.rs"), "#[test] fn t() {}\n").unwrap();
-        let v = red_check(r, "engine-rs/crates/a/tests/t.rs", &["cargo test --test t".into()], &["t".into()], Duration::from_secs(5));
+        let v = red_check(r, "engine-rs/crates/a/tests/t.rs", &["cargo test --test t".into()], &["t".into()], None, Duration::from_secs(5));
         assert!(matches!(v, RedVerdict::Skipped(_)), "{v:?}");
     }
 
@@ -773,6 +968,7 @@ mod tests {
             "engine-rs/crates/a/src/lib.rs",
             &["cargo test --test t".into()],
             &["t".into()],
+            None,
             Duration::from_secs(5),
         );
         assert!(matches!(v, RedVerdict::Inconclusive(ref m) if m.contains("already committed")), "{v:?}");
@@ -783,7 +979,7 @@ mod tests {
         let dir = repo();
         let r = dir.path();
         std::fs::write(r.join("engine-rs/crates/a/src/lib.rs"), "pub fn v() -> i32 { 1 } // refactor\n").unwrap();
-        let v = red_check(r, "engine-rs/crates/a/src/lib.rs", &["cargo test -p a".into()], &[], Duration::from_secs(5));
+        let v = red_check(r, "engine-rs/crates/a/src/lib.rs", &["cargo test -p a".into()], &[], None, Duration::from_secs(5));
         assert!(matches!(v, RedVerdict::Skipped(ref m) if m.contains("no acceptance test")), "{v:?}");
     }
 
@@ -798,7 +994,7 @@ mod tests {
         sh("git add -A && git commit -qm 'Checkpoint: auto after 10 closes (orchestrator)'");
         // The worker's follow-up edit after the sweep.
         std::fs::write(r.join("engine-rs/crates/a/src/lib.rs"), "pub fn v() -> i32 { 2 } // tidy\n").unwrap();
-        let v = red_check(r, "engine-rs/crates/a/src/lib.rs", &["cargo test -p a --test t".into()], &["t".into()], Duration::from_secs(5));
+        let v = red_check(r, "engine-rs/crates/a/src/lib.rs", &["cargo test -p a --test t".into()], &["t".into()], None, Duration::from_secs(5));
         assert!(matches!(v, RedVerdict::Inconclusive(ref m) if m.contains("auto-checkpoint")), "{v:?}");
     }
 
@@ -840,10 +1036,10 @@ mod tests {
         let files = "engine-rs/crates/a/src/lib.rs\nengine-rs/crates/a/tests/sees.rs\nengine-rs/crates/a/tests/blind.rs";
         let t = Duration::from_secs(300);
 
-        let v = red_check(r, files, &["cargo test -p a --test sees".into()], &["sees_change".into()], t);
+        let v = red_check(r, files, &["cargo test -p a --test sees".into()], &["sees_change".into()], None, t);
         assert!(matches!(v, RedVerdict::Detected(_)), "{v:?}");
 
-        let v = red_check(r, files, &["cargo test -p a --test blind".into()], &["blind".into()], t);
+        let v = red_check(r, files, &["cargo test -p a --test blind".into()], &["blind".into()], None, t);
         assert!(matches!(v, RedVerdict::NotDetected(ref m) if m.contains("still PASSES")), "{v:?}");
 
         // The live tree is untouched by the check.
@@ -851,5 +1047,148 @@ mod tests {
             std::fs::read_to_string(r.join("engine-rs/crates/a/src/lib.rs")).unwrap(),
             "pub fn v() -> i32 { 2 }\n"
         );
+    }
+    /// The checkpoint-sweep case end to end: an auto-checkpoint committed the
+    /// change mid-bead, so HEAD already returns 2. Against HEAD the check can
+    /// only give up; against the assignment baseline it decides both ways.
+    #[test]
+    fn red_check_against_the_assignment_baseline_sees_through_a_checkpoint_sweep() {
+        if Command::new("cargo").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = repo();
+        let r = dir.path();
+        std::fs::write(
+            r.join("engine-rs/Cargo.toml"),
+            "[workspace]\nmembers=[\"crates/a\"]\nresolver=\"2\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            r.join("engine-rs/crates/a/Cargo.toml"),
+            "[package]\nname=\"a\"\nversion=\"0.1.0\"\nedition=\"2021\"\n",
+        )
+        .unwrap();
+        let sh = |c: &str| {
+            assert!(Command::new("bash").args(["-c", c]).current_dir(r).status().unwrap().success());
+        };
+        sh("git add -A && git commit -qm ws");
+        let cache = r.join(".codex/orchestrator");
+        record_assignment_base(r, &cache, "pat-x.1", "Worker");
+        let base = assignment_base(r, &cache, "pat-x.1").expect("baseline recorded");
+
+        std::fs::write(r.join("engine-rs/crates/a/src/lib.rs"), "pub fn v() -> i32 { 2 }\n").unwrap();
+        sh("git add -A && git commit -qm 'Checkpoint: auto after 10 closes (orchestrator)'");
+        std::fs::write(r.join("engine-rs/crates/a/src/lib.rs"), "pub fn v() -> i32 { 2 } // tidy\n").unwrap();
+        std::fs::write(
+            r.join("engine-rs/crates/a/tests/sees.rs"),
+            "#[test]\nfn sees_change() { assert_eq!(a::v(), 2); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            r.join("engine-rs/crates/a/tests/blind.rs"),
+            "#[test]\nfn blind() { assert_eq!(1 + 1, 2); }\n",
+        )
+        .unwrap();
+        let files = "engine-rs/crates/a/src/lib.rs\nengine-rs/crates/a/tests/sees.rs\nengine-rs/crates/a/tests/blind.rs";
+        let t = Duration::from_secs(300);
+        let sees = ["cargo test -p a --test sees".to_string()];
+        let blind = ["cargo test -p a --test blind".to_string()];
+
+        let v = red_check(r, files, &sees, &["sees_change".into()], None, t);
+        assert!(matches!(v, RedVerdict::Inconclusive(ref m) if m.contains("auto-checkpoint")), "{v:?}");
+
+        let v = red_check(r, files, &sees, &["sees_change".into()], Some(&base), t);
+        assert!(matches!(v, RedVerdict::Detected(_)), "{v:?}");
+
+        let v = red_check(r, files, &blind, &["blind".into()], Some(&base), t);
+        assert!(
+            matches!(v, RedVerdict::NotDetected(ref m) if m.contains("when the bead was assigned")),
+            "{v:?}"
+        );
+    }
+
+    #[test]
+    fn assignment_base_keeps_the_first_record_for_the_same_worker() {
+        let dir = repo();
+        let r = dir.path();
+        let cache = r.join(".codex/orchestrator");
+        record_assignment_base(r, &cache, "pat-x.1", "Worker");
+        let first = assignment_base(r, &cache, "pat-x.1").unwrap();
+        let sh = |c: &str| {
+            assert!(Command::new("bash").args(["-c", c]).current_dir(r).status().unwrap().success());
+        };
+        sh("git commit -q --allow-empty -m later");
+        // A reprompt to the same worker must not move the baseline forward.
+        record_assignment_base(r, &cache, "pat-x.1", "Worker");
+        assert_eq!(assignment_base(r, &cache, "pat-x.1").unwrap(), first);
+        // A reassignment to another worker starts from the current tree.
+        record_assignment_base(r, &cache, "pat-x.1", "Other");
+        assert_ne!(assignment_base(r, &cache, "pat-x.1").unwrap(), first);
+        assert_eq!(assignment_base(r, &cache, "pat-none"), None);
+        // A record naming a commit that no longer exists is ignored.
+        std::fs::write(cache.join("assign-base/pat-x.1"), "0123456789abcdef0123456789abcdef01234567\tOther\n").unwrap();
+        assert_eq!(assignment_base(r, &cache, "pat-x.1"), None);
+    }
+
+    #[test]
+    fn a_file_vanishing_mid_copy_is_not_an_rsync_failure() {
+        let vanished = "rsync(1): error: /r/.agent-mail-store/p/.archive.lock: open (2) in /r: No such file or directory\n\
+                        rsync(1): error: some files/attrs were not transferred (see previous errors) (code 23) at main.c(1338)\n";
+        assert!(only_vanished_files(Some(23), vanished));
+        assert!(only_vanished_files(Some(24), ""));
+        let denied = "rsync(1): error: /r/x: open: Permission denied\n";
+        assert!(!only_vanished_files(Some(23), denied));
+        assert!(!only_vanished_files(Some(11), ""));
+    }
+
+    #[test]
+    fn snapshot_skips_tracker_state() {
+        let dir = repo();
+        let r = dir.path();
+        std::fs::create_dir_all(r.join(".beads")).unwrap();
+        std::fs::write(r.join(".beads/beads.db-wal"), "x").unwrap();
+        let snap = r.join(".orchestrator/redcheck/tree");
+        sync_snapshot(r, &snap).unwrap();
+        assert!(snap.join("engine-rs/crates/a/src/lib.rs").exists());
+        assert!(!snap.join(".beads").exists());
+    }
+
+    #[test]
+    fn comment_stripping_keeps_string_literals() {
+        let src = "// loads x.tscn\n/* res://a\n /* nested */ still */ let s = \"res://k.tscn\"; \
+                   let r = r#\"a // \"not a comment\" b\"#; let c = '\"'; fn f<'a>(x: &'a str) {}\n\
+                   let u = \"uid://abc\"; MainLoop::new(); // EditorServer\n";
+        let out = strip_rust_comments(src);
+        assert!(!out.contains("x.tscn"), "{out}");
+        assert!(!out.contains("res://a"), "{out}");
+        assert!(!out.contains("EditorServer"), "{out}");
+        assert!(out.contains("\"res://k.tscn\""), "{out}");
+        assert!(out.contains(r#"a // "not a comment" b"#), "{out}");
+        assert!(out.contains("\"uid://abc\""), "{out}");
+        assert!(out.contains("MainLoop::new()"), "{out}");
+        assert!(out.contains("fn f<'a>(x: &'a str)"), "{out}");
+    }
+
+    /// pat-mgixk.16: a data-layer test whose only "entry point" was a doc
+    /// comment mentioning project.godot passed the rule.
+    #[test]
+    fn entry_point_rule_ignores_markers_in_comments_and_bare_project_files() {
+        let dir = repo();
+        let r = dir.path();
+        let desc = "**Wiring requirement:** served editor";
+        std::fs::write(
+            r.join("engine-rs/crates/a/tests/c.rs"),
+            "//! Round-trips project.godot and x.tscn files.\n#[test]\nfn in_comment() { let _ = a::v(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            r.join("engine-rs/crates/a/tests/p.rs"),
+            "#[test]\nfn writes_project_file() { std::fs::write(\"project.godot\", \"\").ok(); }\n",
+        )
+        .unwrap();
+        for (name, file) in [("in_comment", "c.rs"), ("writes_project_file", "p.rs")] {
+            let v = check_entry_point(r, desc, &[name.into()], &format!("engine-rs/crates/a/tests/{file}"));
+            assert!(matches!(v, EntryPointVerdict::Rejected(_)), "{name}: {v:?}");
+        }
     }
 }

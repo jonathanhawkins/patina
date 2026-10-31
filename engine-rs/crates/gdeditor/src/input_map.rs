@@ -8,15 +8,61 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+// The `project.godot` side of the same data. Aliased rather than re-exported so
+// the two layers stay visibly distinct: this module's `InputEvent` is what the
+// editor UI edits, `ProjectEvent` is what the file holds.
+use gdresource::project::{InputAction as ProjectAction, InputActionEvent as ProjectEvent};
+
 /// An input event that can be bound to an action.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// ⚠️ `Eq` is deliberately NOT derived: [`Self::JoyAxis`] carries an `f32`.
+/// Nothing uses this type as a `HashMap`/`HashSet` key (checked across
+/// `gdeditor/src`), and every comparison here goes through `PartialEq` —
+/// `Vec::contains`, `retain`, `actions_for_event`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum InputEvent {
     /// A keyboard key, by keycode name (e.g. `"Space"`).
+    ///
+    /// The original, lossy form: no modifiers, and no way to say whether the
+    /// binding is logical or physical. Kept because it is what
+    /// `EditorState::input_map` still stores and what the existing UI sends;
+    /// new bindings should use [`Self::KeyEvent`].
     Key(String),
     /// A mouse button, by index.
     MouseButton(u32),
     /// A joypad button, by index.
     JoyButton(u32),
+    /// A keyboard event with modifiers and an explicit logical/physical
+    /// keycode — what Godot's Input Map dialog actually captures
+    /// (pat-mgixk.16).
+    ///
+    /// Godot stores both codes and writes 0 for the one the binding does not
+    /// use; `physical_keycode` is the layout-independent position, which is
+    /// what the dialog's "Physical Keycode" switch selects.
+    KeyEvent {
+        /// Layout-dependent keycode, or 0 when the binding is physical.
+        keycode: u32,
+        /// Layout-independent keycode, or 0 when the binding is logical.
+        physical_keycode: u32,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+        meta: bool,
+    },
+    /// A joypad half-axis (`InputEventJoypadMotion`).
+    ///
+    /// ⚠️ The SIGN of `axis_value` selects the half-axis, so -1.0 and +1.0 on
+    /// one axis are two different bindings. Storing only the magnitude silently
+    /// merges "stick left" and "stick right".
+    JoyAxis { axis: u32, axis_value: f32 },
+    /// An `Object(...)` entry from `project.godot` whose class this type does
+    /// not model, kept verbatim.
+    ///
+    /// Without this, loading a project and saving it back from the editor would
+    /// silently DELETE a binding Patina happens not to understand — the same
+    /// guarantee `gdresource::project::InputActionEvent::Other` makes on the
+    /// file side, carried through the editor.
+    Other(String),
 }
 
 /// A single input action: its deadzone and bound events.
@@ -31,7 +77,11 @@ pub struct Action {
 impl Default for Action {
     fn default() -> Self {
         Self {
-            deadzone: 0.5,
+            // ⚠️ Godot 4's `InputMap::DEFAULT_DEADZONE` is 0.2
+            // (`core/input/input_map.h:55`). This was 0.5, which is the Godot 3
+            // value — so every action the editor created started with a
+            // deadzone no Godot 4 project would have (pat-mgixk.16).
+            deadzone: gdresource::project::DEFAULT_DEADZONE,
             events: Vec::new(),
         }
     }
@@ -138,6 +188,130 @@ impl InputMap {
             .collect()
     }
 
+    /// Converts one editor event into the `project.godot` form (pat-mgixk.16).
+    ///
+    /// `None` only for a [`InputEvent::Key`] whose name `gdplatform` does not
+    /// recognise — the lossy legacy variant is the one shape that can fail,
+    /// which is itself an argument for [`InputEvent::KeyEvent`].
+    pub fn to_project_event(event: &InputEvent) -> Option<ProjectEvent> {
+        Some(match event {
+            // A name has to be resolved to Godot's numeric keycode, and a
+            // name-only binding has no modifiers and is logical, not physical.
+            InputEvent::Key(name) => {
+                let key = gdplatform::input::Key::from_name(name)?;
+                ProjectEvent::Key {
+                    keycode: key.to_godot_keycode() as u32,
+                    physical_keycode: 0,
+                    ctrl: false,
+                    shift: false,
+                    alt: false,
+                    meta: false,
+                }
+            }
+            InputEvent::KeyEvent {
+                keycode,
+                physical_keycode,
+                ctrl,
+                shift,
+                alt,
+                meta,
+            } => ProjectEvent::Key {
+                keycode: *keycode,
+                physical_keycode: *physical_keycode,
+                ctrl: *ctrl,
+                shift: *shift,
+                alt: *alt,
+                meta: *meta,
+            },
+            InputEvent::MouseButton(index) => ProjectEvent::MouseButton {
+                button_index: *index,
+            },
+            InputEvent::JoyButton(index) => ProjectEvent::JoypadButton {
+                button_index: *index,
+            },
+            InputEvent::JoyAxis { axis, axis_value } => ProjectEvent::JoypadMotion {
+                axis: *axis,
+                axis_value: *axis_value,
+            },
+            InputEvent::Other(raw) => ProjectEvent::Other(raw.clone()),
+        })
+    }
+
+    /// Converts a `project.godot` event into the editor form.
+    ///
+    /// Lossless in both directions: a key event keeps its modifiers and its
+    /// logical/physical split, and an unmodelled class stays verbatim.
+    pub fn from_project_event(event: &ProjectEvent) -> InputEvent {
+        match event {
+            ProjectEvent::Key {
+                keycode,
+                physical_keycode,
+                ctrl,
+                shift,
+                alt,
+                meta,
+            } => InputEvent::KeyEvent {
+                keycode: *keycode,
+                physical_keycode: *physical_keycode,
+                ctrl: *ctrl,
+                shift: *shift,
+                alt: *alt,
+                meta: *meta,
+            },
+            ProjectEvent::MouseButton { button_index } => InputEvent::MouseButton(*button_index),
+            ProjectEvent::JoypadButton { button_index } => InputEvent::JoyButton(*button_index),
+            ProjectEvent::JoypadMotion { axis, axis_value } => InputEvent::JoyAxis {
+                axis: *axis,
+                axis_value: *axis_value,
+            },
+            ProjectEvent::Other(raw) => InputEvent::Other(raw.clone()),
+        }
+    }
+
+    /// The whole map as `project.godot` `[input]` actions, ready for
+    /// [`gdresource::project::GodotProjectFile::set_input_action`].
+    ///
+    /// This is the save direction the editor never had: `api_set_input_map`
+    /// only ever wrote back into an in-memory `HashMap<String, Vec<String>>`.
+    pub fn to_project_actions(&self) -> BTreeMap<String, ProjectAction> {
+        self.actions
+            .iter()
+            .map(|(name, action)| {
+                (
+                    name.clone(),
+                    ProjectAction {
+                        deadzone: action.deadzone,
+                        events: action
+                            .events
+                            .iter()
+                            .filter_map(Self::to_project_event)
+                            .collect(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// Builds the map from `project.godot` `[input]` actions, as
+    /// [`gdresource::project::ProjectLoader::get_input_actions`] returns them.
+    ///
+    /// This is the load direction the editor never had: it opened every project
+    /// with `default_input_map()` and never consulted the project's own
+    /// `[input]` section at all.
+    pub fn from_project_actions(actions: &BTreeMap<String, ProjectAction>) -> Self {
+        let mut map = Self::new();
+        for (name, action) in actions {
+            map.actions.insert(
+                name.clone(),
+                Action {
+                    deadzone: action.deadzone.clamp(0.0, 1.0),
+                    events: action.events.iter().map(Self::from_project_event).collect(),
+                },
+            );
+        }
+        map
+    }
+
     /// Serializes the map to project-settings JSON.
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("InputMap serializes")
@@ -199,7 +373,9 @@ mod tests {
         assert!(map.add_action("jump"));
         assert!(!map.add_action("jump"));
         assert!(map.has_action("jump"));
-        assert_eq!(map.deadzone("jump"), Some(0.5));
+        // 0.2, not 0.5: Godot 4's DEFAULT_DEADZONE (input_map.h:55). This
+        // assertion previously pinned Godot 3's value (pat-mgixk.16).
+        assert_eq!(map.deadzone("jump"), Some(0.2));
 
         // Bind key and joypad events.
         assert!(map.bind("jump", InputEvent::Key("Space".to_string())));

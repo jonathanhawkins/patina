@@ -941,6 +941,19 @@ impl KeyCombo {
     }
 }
 
+/// Godot's `InputMap::DEFAULT_DEADZONE` — the deadzone an action gets when it
+/// does not declare one.
+///
+/// Ground truth: `core/input/input_map.h:55`
+/// (`static constexpr float DEFAULT_DEADZONE = 0.2f`), applied by
+/// `load_from_project_settings` at `input_map.cpp:320`.
+///
+/// Named rather than spelled 0.2 at each site because it is now read in two
+/// crates — here, for an action a `project.godot` declares without one, and in
+/// the editor, for an action the editor itself contributes to a Play session
+/// (pat-mgixk.24).
+pub const DEFAULT_DEADZONE: f32 = 0.2;
+
 /// What physical input is bound to an action.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ActionBinding {
@@ -2608,9 +2621,17 @@ impl InputMap {
     /// Parses a single action's value block and populates the map.
     fn parse_action_block(map: &mut InputMap, action: &str, block: &str) {
         // Extract deadzone.
+        //
+        // ⚠️ The default is 0.2, not 0.5. Godot's `InputMap::DEFAULT_DEADZONE`
+        // is `0.2f` (`core/input/input_map.h:55`) and
+        // `load_from_project_settings` applies it for an action with no
+        // `deadzone` key (`input_map.cpp:320`). 0.5 made every stick-bound
+        // action in such a project need more than twice the deflection before
+        // it registered — a control that feels broken rather than one that
+        // obviously is (pat-mgixk.24).
         let deadzone = Self::extract_float(block, "\"deadzone\"")
             .or_else(|| Self::extract_float(block, "deadzone"))
-            .unwrap_or(0.5);
+            .unwrap_or(DEFAULT_DEADZONE);
 
         map.add_action(action, deadzone);
         // A declared action replaces any built-in default bindings (Godot
@@ -4535,6 +4556,44 @@ ui_accept={
         assert!(
             map2.event_matches_action(&tab, "ui_focus_next"),
             "undeclared ui_focus_next must keep its default Tab binding"
+        );
+    }
+
+    /// pat-mgixk.24 — an action with no `deadzone` key takes Godot's
+    /// `DEFAULT_DEADZONE`, which is **0.2**.
+    ///
+    /// Ground truth: `core/input/input_map.h:55`
+    /// (`static constexpr float DEFAULT_DEADZONE = 0.2f`) and
+    /// `input_map.cpp:320`
+    /// (`action.has("deadzone") ? (float)action["deadzone"] : DEFAULT_DEADZONE`).
+    ///
+    /// 🔑 The parser defaulted to 0.5, so every stick-bound action in a project
+    /// that omits the key needed more than TWICE the deflection before it
+    /// registered. The declared case is asserted beside it, so a fix that
+    /// simply hard-coded 0.2 for everything would fail too.
+    #[test]
+    fn project_action_without_a_deadzone_takes_godots_default() {
+        let content = r#"
+[input]
+fire={
+"events": [Object(InputEventJoypadButton,"resource_local_to_scene":false,"resource_name":"","device":-1,"button_index":0,"pressure":0.0,"pressed":false)]
+}
+aim={
+"deadzone": 0.75,
+"events": [Object(InputEventJoypadMotion,"resource_local_to_scene":false,"resource_name":"","device":-1,"axis":0,"axis_value":1.0)]
+}
+"#;
+        let map = InputMap::load_from_project_godot(content);
+        assert_eq!(
+            map.get_deadzone("fire"),
+            0.2,
+            "an action that omits `deadzone` must take DEFAULT_DEADZONE (0.2), \
+             not 0.5 — half the stick travel is the difference"
+        );
+        assert_eq!(
+            map.get_deadzone("aim"),
+            0.75,
+            "a declared deadzone is still honoured"
         );
     }
 

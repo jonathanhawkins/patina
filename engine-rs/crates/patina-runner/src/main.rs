@@ -9,10 +9,18 @@
 //! ```text
 //! patina-runner <scene.tscn> [--frames N] [--delta D]
 //! patina-runner <project.godot> --trace-out <file> [--frames N]
+//! patina-runner <scene.tscn> --frames N --frame-out <file.png|file.ppm>
 //! ```
 //!
 //! `--trace-out` writes the conformance trace envelope the conformance gate
 //! diffs against headless Godot, instead of the tree dump (pat-mgixk.403).
+//!
+//! `--frame-out` writes the last frame's 2D canvas as a PNG or a binary PPM
+//! (pat-mgixk.28). Before this the runner emitted tree JSON and nothing else:
+//! the only node-to-draw-command producer in the engine lived in `gdeditor`,
+//! so a 2D game run outside the editor's Play tab drew no pixels at all. The
+//! builder now lives in `gdscene::canvas_render` and this is one of its two
+//! runtime drivers.
 
 #![warn(clippy::all)]
 
@@ -30,7 +38,6 @@ use gdscene::scripting::GDScriptNodeInstance;
 use gdscene::trace::TraceEventType;
 use gdscene::{add_packed_scene_to_tree, LifecycleManager, MainLoop, PackedScene};
 use gdvariant::serialize::to_json;
-use gdvariant::Variant;
 use patina_runner::project_boot;
 use serde_json::{json, Value};
 
@@ -60,6 +67,12 @@ struct Args {
     trace_out: Option<PathBuf>,
     /// The `--debug-*` overlays the editor's Debug menu launched us with.
     debug: patina_runner::debug_flags::DebugFlags,
+    /// Where to write the last frame's 2D canvas as a binary PPM, when asked
+    /// for (pat-mgixk.28).
+    frame_out: Option<PathBuf>,
+    /// Framebuffer size for `--frame-out`, defaulting to Godot's own default
+    /// viewport (1152x648).
+    frame_size: (u32, u32),
 }
 
 /// Parses command-line arguments manually (no extra dependency).
@@ -69,7 +82,9 @@ fn parse_args() -> Result<Args, String> {
     if args.len() < 2 {
         return Err(format!(
             "Usage: {} <scene.tscn|project.godot|game.pck> [--main-pack PACK] \
-             [--frames N] [--delta D] [--trace-out FILE]",
+             [--frames N] [--delta D] [--trace-out FILE] \
+             [--frame-out FILE.png|FILE.ppm] \
+             [--frame-size WxH]",
             args[0]
         ));
     }
@@ -90,6 +105,10 @@ fn parse_args() -> Result<Args, String> {
     let mut trace_frames = false;
     let mut event_trace = false;
     let mut trace_out: Option<PathBuf> = None;
+    let mut frame_out: Option<PathBuf> = None;
+    // Godot's default viewport, so a frame dumped without `--frame-size`
+    // matches what the project would open at.
+    let mut frame_size: (u32, u32) = (1152, 648);
     let mut debug = patina_runner::debug_flags::DebugFlags::default();
 
     let mut i = if starts_with_flag { 1 } else { 2 };
@@ -123,6 +142,30 @@ fn parse_args() -> Result<Args, String> {
                 trace_out = Some(PathBuf::from(
                     args.get(i).ok_or("--trace-out requires a path")?,
                 ));
+            }
+            "--frame-out" => {
+                i += 1;
+                frame_out = Some(PathBuf::from(
+                    args.get(i).ok_or("--frame-out requires a path")?,
+                ));
+            }
+            "--frame-size" => {
+                i += 1;
+                let spec = args.get(i).ok_or("--frame-size requires WxH")?;
+                let (w, h) = spec
+                    .split_once(['x', 'X'])
+                    .ok_or("--frame-size must look like 320x200")?;
+                frame_size = (
+                    w.trim()
+                        .parse()
+                        .map_err(|e| format!("invalid --frame-size width: {e}"))?,
+                    h.trim()
+                        .parse()
+                        .map_err(|e| format!("invalid --frame-size height: {e}"))?,
+                );
+                if frame_size.0 == 0 || frame_size.1 == 0 {
+                    return Err("--frame-size must be non-zero in both axes".to_string());
+                }
             }
             "--main-pack" => {
                 i += 1;
@@ -159,7 +202,76 @@ fn parse_args() -> Result<Args, String> {
         event_trace,
         trace_out,
         debug,
+        frame_out,
+        frame_size,
     })
+}
+
+/// Writes the tree's 2D canvas to `path`, as PNG or binary PPM by extension
+/// (pat-mgixk.28; PNG added by pat-mgixk.46).
+///
+/// 🔑 This is the whole runtime 2D path in four calls, and all four live below
+/// `gdeditor`: walk the tree into a draw list, move it into the current
+/// `Camera2D`'s view, rasterize, encode. The editor composes the SAME four with
+/// its own overlays on top — there is one builder now, not an editor one and a
+/// missing runtime one.
+///
+/// ⚠️ The camera transform is applied to the list, not folded into the
+/// rasterizer: `apply_camera2d_view` is what honours a `CanvasLayer`'s
+/// `follow_viewport` and a `Fixed` layer's exemption, so a HUD stays put while
+/// the world scrolls. Skipping it would put every item at its world position
+/// and look correct only while the camera sits at the origin.
+fn write_frame_out(
+    main_loop: &MainLoop,
+    project_dir: &Path,
+    path: &Path,
+    size: (u32, u32),
+) -> Result<(), String> {
+    use gdcore::math::{Color, Vector2};
+
+    let (width, height) = size;
+    let tree = main_loop.tree();
+    let mut items = gdscene::canvas_render::collect_canvas_items(tree);
+    if let Some(view) = gdscene::canvas_render::camera2d_view_transform(
+        tree,
+        Vector2::new(width as f32, height as f32),
+        None,
+        0.0,
+    ) {
+        gdscene::canvas_render::apply_camera2d_view(&mut items, view);
+    }
+    // `res://` textures resolve against the project directory, exactly as the
+    // audio base dir above does.
+    let mut textures =
+        gdscene::texture_cache::TextureCache::new(project_dir.to_string_lossy().to_string());
+    let frame = gdscene::canvas_render::rasterize_render_list(
+        &items,
+        width,
+        height,
+        // Godot's default clear is opaque black; a transparent clear would make
+        // "the sprite drew" indistinguishable from "nothing drew" in a PPM,
+        // which has no alpha channel.
+        Color::new(0.0, 0.0, 0.0, 1.0),
+        Some(&mut textures),
+    );
+    // PNG or PPM by extension (pat-mgixk.46). PPM was the original format and
+    // stays the default for an unrecognised extension, so every existing
+    // `--frame-out out.ppm` caller is untouched; PNG is what a test can decode
+    // back into pixels with `gdrender2d::texture::load_png`, and what anything
+    // outside this repo can open.
+    let is_png = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("png"));
+    let target = path.to_string_lossy();
+    if is_png {
+        frame
+            .save_png(&target)
+            .map_err(|e| format!("could not write {}: {e}", path.display()))
+    } else {
+        gdrender2d::export::save_ppm(&frame, &target)
+            .map_err(|e| format!("could not write {}: {e}", path.display()))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -237,77 +349,21 @@ fn dump_node_json(tree: &SceneTree, id: NodeId) -> Value {
 // Script attachment
 // ---------------------------------------------------------------------------
 
-/// Finds nodes with `_script_path` property, resolves `res://` to the
-/// project directory, loads the `.gd` source, and attaches a
-/// [`GDScriptNodeInstance`] to each node in the scene tree.
+/// Attaches each node's `_script_path` GDScript.
+///
+/// Delegates to [`project_boot::attach_scripts`], the single implementation
+/// (pat-mgixk.414). This path used to carry its own copy while the
+/// project-directory boot carried none at all, which is how a booted project
+/// ran every main-scene node with no script attached.
 fn attach_scripts(tree: &mut SceneTree, project_dir: &Path) {
-    // Collect (node_id, script_path) pairs first to avoid borrow issues.
-    let mut scripts_to_load: Vec<(NodeId, PathBuf)> = Vec::new();
-
-    for node_id in tree.all_nodes_in_tree_order() {
-        // Skip nodes that already have a script attached (e.g. autoload
-        // singletons instantiated during the autoload boot step) so we don't
-        // re-parse and clobber their already-run _ready state.
-        if tree.get_script(node_id).is_some() {
-            continue;
-        }
-        if let Some(node) = tree.get_node(node_id) {
-            if let Variant::String(res_path) = node.get_property("_script_path") {
-                let abs_path = resolve_res_path(project_dir, &res_path);
-                scripts_to_load.push((node_id, abs_path));
-            }
-        }
-    }
-
-    for (node_id, path) in scripts_to_load {
-        match fs::read_to_string(&path) {
-            Ok(source) => match GDScriptNodeInstance::from_source(&source, node_id) {
-                Ok(instance) => {
-                    tree.attach_script(node_id, Box::new(instance));
-                    tracing::info!(
-                        path = %path.display(),
-                        "attached GDScript to node"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = format!("{e:?}"),
-                        "failed to parse GDScript"
-                    );
-                }
-            },
-            Err(e) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "failed to read GDScript file"
-                );
-            }
-        }
-    }
+    project_boot::attach_scripts(tree, project_dir);
 }
 
 /// Resolves a `res://` path to an absolute filesystem path.
+///
+/// Delegates to [`project_boot::resolve_res_path`]; see the note above.
 fn resolve_res_path(project_dir: &Path, res_path: &str) -> PathBuf {
-    let relative = res_path.strip_prefix("res://").unwrap_or(res_path);
-    for ancestor in project_dir.ancestors() {
-        let candidate = ancestor.join(relative);
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-
-    if let Ok(cwd) = env::current_dir() {
-        for ancestor in cwd.ancestors() {
-            let candidate = ancestor.join(relative);
-            if candidate.exists() {
-                return candidate;
-            }
-        }
-    }
-
-    project_dir.join(relative)
+    project_boot::resolve_res_path(project_dir, res_path)
 }
 
 /// Serializes the EventTrace events into a JSON array.
@@ -492,6 +548,12 @@ fn run_booted_project(booted: project_boot::BootedProject, project_dir: &Path, a
     // honored gravity (2D bodies are not auto-registered by `step`).
     main_loop.register_physics_bodies();
     let frame_trace = run_main_loop(&mut main_loop, args.frames, args.delta, args.trace_frames);
+    if let Some(ref path) = args.frame_out {
+        if let Err(e) = write_frame_out(&main_loop, &project_dir, path, args.frame_size) {
+            eprintln!("Error writing frame: {e}");
+            process::exit(1);
+        }
+    }
 
     let mut output = json!({
         "project_dir": project_dir.display().to_string(),
@@ -655,6 +717,12 @@ fn main() {
         .audio_bridge_mut()
         .set_base_dir(project_dir.clone());
     let frame_trace = run_main_loop(&mut main_loop, args.frames, args.delta, args.trace_frames);
+    if let Some(ref path) = args.frame_out {
+        if let Err(e) = write_frame_out(&main_loop, &project_dir, path, args.frame_size) {
+            eprintln!("Error writing frame: {e}");
+            process::exit(1);
+        }
+    }
 
     tracing::info!(
         frame_count = main_loop.frame_count(),

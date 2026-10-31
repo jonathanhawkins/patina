@@ -21,6 +21,7 @@ use gdobject::physics_direct_body_state::{
 use gdvariant::Variant;
 
 use crate::node::NodeId;
+use crate::physics_server::PhysicsServer;
 use crate::SceneTree;
 
 fn float_of(v: &Variant, default: f32) -> f32 {
@@ -56,7 +57,12 @@ fn int_of(v: &Variant, default: i64) -> i64 {
 /// Runs `_integrate_forces` for every `RigidBody2D` that opted in.
 ///
 /// `gravity` is the space's gravity before the body's own `gravity_scale`.
-pub fn run_integrate_forces_2d(tree: &mut SceneTree, gravity: Vector2, dt: f32) {
+pub fn run_integrate_forces_2d(
+    tree: &mut SceneTree,
+    physics: &PhysicsServer,
+    gravity: Vector2,
+    dt: f32,
+) {
     // Collected up front: the callback runs script that can add or free nodes,
     // and walking the tree while that happens would be a borrow of a structure
     // the script is allowed to mutate.
@@ -64,19 +70,34 @@ pub fn run_integrate_forces_2d(tree: &mut SceneTree, gravity: Vector2, dt: f32) 
         .all_nodes_in_tree_order()
         .into_iter()
         .filter(|id| {
-            tree.get_node(*id).is_some_and(|n| {
-                n.class_name() == "RigidBody2D"
-                    // ⚠️ `custom_integrator` GATES the callback. Godot only
-                    // calls `_integrate_forces` when it is on, so a body that
-                    // merely defines the method must not receive it — that is
-                    // acceptance criterion 2's negative half.
-                    && matches!(n.get_property("custom_integrator"), Variant::Bool(true))
-            })
+            tree.get_node(*id)
+                .is_some_and(|n| n.class_name() == "RigidBody2D")
+                // ⚠️ The gate is "does the script OVERRIDE the method", not
+                // `custom_integrator`.
+                //
+                // This used to require `custom_integrator == true`, with a
+                // comment asserting Godot does the same. It does not:
+                // `RigidBody2D::_body_state_changed` (rigid_body_2d.cpp:163)
+                // calls `_integrate_forces` whenever `GDVIRTUAL_IS_OVERRIDDEN`
+                // and never consults `custom_integrator` to decide. The flag
+                // means something else entirely — it tells the SERVER to omit
+                // its own gravity and damping
+                // (`GodotBody2D::integrate_forces`, via
+                // `body_set_omit_force_integration`).
+                //
+                // Conflating the two broke the single most common idiom there
+                // is: a script that overrides `_integrate_forces` to write
+                // state, leaving `custom_integrator` at its default `false`,
+                // was never called at all. Nothing reported an error, because
+                // from here the body simply was not a target.
+                && tree
+                    .get_script(*id)
+                    .is_some_and(|s| s.has_method("_integrate_forces"))
         })
         .collect();
 
     for id in targets {
-        let Some(state) = build_state(tree, id, gravity, dt) else {
+        let Some(state) = build_state(tree, physics, id, gravity, dt) else {
             continue;
         };
         let handle = new_direct_body_state_2d_handle(state);
@@ -93,6 +114,7 @@ pub fn run_integrate_forces_2d(tree: &mut SceneTree, gravity: Vector2, dt: f32) 
 /// Snapshots the body into a state the script can read.
 fn build_state(
     tree: &SceneTree,
+    physics: &PhysicsServer,
     id: NodeId,
     gravity: Vector2,
     dt: f32,
@@ -102,11 +124,34 @@ fn build_state(
     // Godot stores inverse mass; an explicitly zero or negative mass is treated
     // as infinite rather than producing an infinity here.
     let inverse_mass = if mass > 0.0 { 1.0 / mass } else { 0.0 };
-    let inertia = float_of(&node.get_property("inertia"), 0.0);
-    // `inertia = 0` is Godot's "compute it from the shapes" sentinel, not a
-    // body that cannot rotate, so it maps to an unconstrained inverse rather
-    // than to zero.
-    let inverse_inertia = if inertia > 0.0 { 1.0 / inertia } else { 1.0 };
+    // Godot's `PhysicsDirectBodyState2D.inverse_inertia` is the SOLVER's own
+    // value, so it is read from the registered body rather than recomputed
+    // here. The body already knows both cases: the authored `inertia` when the
+    // scene set one, and the shape-derived moment when it did not
+    // (`PhysicsBody2D::moment_of_inertia`).
+    //
+    // ⚠️ This used to be `if inertia > 0.0 { 1.0 / inertia } else { 1.0 }`,
+    // and `inertia = 0` is the DEFAULT — so every body that left the property
+    // alone reported a unit inverse inertia, which is neither Godot's answer
+    // nor the solver's. A script reading `get_inverse_inertia()` to size a
+    // torque got a number unrelated to the body it was steering.
+    let inverse_inertia = physics
+        .body_for_node(id)
+        .and_then(|body_id| physics.world().get_body(body_id))
+        .map(|body| body.inverse_inertia())
+        .unwrap_or_else(|| {
+            // Not registered yet — `sync_to_physics` adds the body AFTER this
+            // callback, so the very first tick of a freshly added body lands
+            // here. The authored value is the best answer available without a
+            // shape; 0 (infinite inertia, no angular response) is the
+            // conservative choice when the scene named none.
+            let inertia = float_of(&node.get_property("inertia"), 0.0);
+            if inertia > 0.0 {
+                1.0 / inertia
+            } else {
+                0.0
+            }
+        });
     let gravity_scale = float_of(&node.get_property("gravity_scale"), 1.0);
     let position = vec2_of(&node.get_property("position"));
     let rotation = float_of(&node.get_property("rotation"), 0.0);

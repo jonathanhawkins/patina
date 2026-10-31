@@ -88,17 +88,17 @@ var flag = false
 var second_tick_saw_flag = -1
 
 func _physics_process(_delta):
-    ticks += 1
+    self.ticks += 1
     if ticks == 1:
         call_deferred("mark")
     if ticks == 2:
         if flag:
-            second_tick_saw_flag = 1
+            self.second_tick_saw_flag = 1
         else:
-            second_tick_saw_flag = 0
+            self.second_tick_saw_flag = 0
 
 func mark():
-    flag = true
+    self.flag = true
 "#;
 
 fn write_project(dir: &Path, tscn: &str, gd: &str) {
@@ -220,7 +220,7 @@ var deferred = false
 
 func _ready():
     $Doomed.call_deferred("queue_free")
-    deferred = true
+    self.deferred = true
 "#;
 
 /// `$Doomed.call_deferred("queue_free")` actually frees the node.
@@ -294,14 +294,11 @@ var queued = false
 func _ready():
     var n = Node2D.new()
     $Holder.call_deferred("add_child", n)
-    queued = true
+    self.queued = true
 "#;
 
 fn child_count(tree: &gdscene::SceneTree, node: gdscene::node::NodeId) -> usize {
-    tree.get_node(node)
-        .expect("node exists")
-        .children()
-        .len()
+    tree.get_node(node).expect("node exists").children().len()
 }
 
 /// `$Holder.call_deferred("add_child", Node2D.new())` actually parents the node.
@@ -350,5 +347,199 @@ fn call_deferred_add_child_parents_the_node() {
         child_count(boot.main_loop().unwrap().tree(), holder_id),
         1,
         "a deferred `add_child` must actually parent the node — a count of 0          means the deferred call reached `call_node_method` and found no          `add_child` arm, so it returned the silent Nil placeholder",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The Callable form: `Callable(node, "method").call_deferred()`.
+// ---------------------------------------------------------------------------
+
+const CALLABLE_TSCN: &str = r#"[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://main.gd" id="1_main"]
+
+[node name="Main" type="Node2D"]
+script = ExtResource("1_main")
+
+[node name="Target" type="Node2D" parent="."]
+"#;
+
+/// ⚠️ The bead's acceptance writes this as `$Label.hide.call_deferred()`. That
+/// spelling is NOT implementable today and this test deliberately does not use
+/// it: `$Label.hide` is `Expr::MemberAccess` on an `ObjectId`, which falls
+/// through to `get_property_with_virtual` and yields `Nil`, because there is no
+/// implicit method-reference Callable for a native method on another object.
+/// `Callable(node, "method")` is the explicit form of the same thing
+/// (interpreter.rs:7558) and drives the identical queue path, so it is what the
+/// acceptance's intent reduces to. Raised with the coordinator separately.
+///
+/// `Target` is a `Node2D` rather than a `Label` for the same reason — `hide` is
+/// a `CanvasItem` method and the dispatch arm is shared, so the node class is
+/// incidental and `Node2D` keeps the fixture on well-trodden ground.
+const CALLABLE_GD: &str = r#"extends Node2D
+
+var queued = false
+
+func _ready():
+    var cb = Callable($Target, "hide")
+    cb.call_deferred()
+    self.queued = true
+"#;
+
+/// Reads a node's `visible` the way the engine does: Godot's default is
+/// visible, so an UNSET property means visible and only an explicit `false`
+/// hides (mirrors the `"is_visible"` arm in `SceneAccess::call_node_method`).
+fn is_visible(tree: &gdscene::SceneTree, node: gdscene::node::NodeId) -> bool {
+    !matches!(
+        tree.get_node(node)
+            .expect("node exists")
+            .get_property("visible"),
+        Variant::Bool(false)
+    )
+}
+
+/// `Callable(node, "method").call_deferred()` queues and then runs the native
+/// method.
+///
+/// This covers the `Callable` RECEIVER path into the queue — `call_method_on`'s
+/// `Variant::Callable` arm — which is distinct from the bare
+/// `call_deferred("m")` and `$X.call_deferred("m")` forms the other tests use.
+/// It exercises the `CallableRef::Method` branch of that arm, so what remains
+/// unimplemented for pat-mgixk.10 is narrowed to exactly the argument handling:
+/// `.bind()` args and lambdas.
+#[test]
+fn callable_form_call_deferred_runs_a_native_method() {
+    let _guard = BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = unique_project_dir("callable_form");
+    write_project(&dir, CALLABLE_TSCN, CALLABLE_GD);
+
+    let mut boot = boot(&dir);
+    let (main_id, target_id) = {
+        let tree = boot.main_loop().expect("main loop").tree();
+        (
+            tree.get_node_by_path("/root/Main").expect("Main"),
+            tree.get_node_by_path("/root/Main/Target").expect("Target"),
+        )
+    };
+
+    // Premise: the Callable was built and queued WITHOUT raising, and nothing
+    // has run yet. If `Callable(...)` had failed, `_ready` would have aborted
+    // and `queued` would still be false.
+    {
+        let tree = boot.main_loop().unwrap().tree();
+        assert!(
+            as_bool(script_var(tree, main_id, "queued")),
+            "_ready must have built the Callable and queued it without raising",
+        );
+        assert!(
+            is_visible(tree, target_id),
+            "Target must still be visible before the queue is flushed —              otherwise the call ran immediately and this proves nothing about              DEFERRAL",
+        );
+    }
+
+    boot.main_loop_mut().unwrap().step(1.0 / 60.0);
+
+    assert!(
+        !is_visible(boot.main_loop().unwrap().tree(), target_id),
+        "a deferred Callable naming a native method must run it — Target is          still visible, so the queued Callable never reached `hide`",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Argument handling: `.bind()` args survive, and a lambda can be queued.
+// ---------------------------------------------------------------------------
+
+const ARGS_TSCN: &str = r#"[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://main.gd" id="1_main"]
+
+[node name="Main" type="Node2D"]
+script = ExtResource("1_main")
+"#;
+
+/// `_on_tick` is a bareword naming a method on the RUNNING script, which is the
+/// one path that yields a Callable for a script method (interpreter.rs:3571).
+///
+/// ⚠️ **The lambda body is a method CALL, not an assignment, and the parser
+/// forces that.** A single-line lambda body is parsed as one *expression* with
+/// an implicit return, so `func(): self.counter += 1` does not parse at all —
+/// assignment is a statement in GDScript. An earlier draft of this test used
+/// exactly that and the script therefore never attached, which surfaced as
+/// `get_script` returning `None` rather than as a parse error. The
+/// `func(): self._bump()` shape is the one `gds_lambda_capture.rs` proves, and
+/// it keeps the claim intact: the lambda still reaches `self`.
+const ARGS_GD: &str = r#"extends Node2D
+
+var got = -1
+var counter = 0
+var queued = false
+
+func _bump():
+    self.counter += 1
+
+func _ready():
+    _on_tick.bind(7).call_deferred()
+    var inc = func(): self._bump()
+    inc.call_deferred()
+    self.queued = true
+
+func _on_tick(v):
+    self.got = v
+"#;
+
+/// A bound argument survives `Callable.call_deferred()`, and a lambda queues.
+///
+/// ⚠️ These two are the asymmetric halves of the same fix, and a test that only
+/// bound ONE value could not see a double-apply. `got` is asserted to be
+/// exactly `7`: if the bound argument were appended twice, `_on_tick` would be
+/// called with two arguments and the call would not land as a clean `7`.
+///
+/// Before the fix: `inner_callable()` unwrapped the `Bound` layer and passed the
+/// raw call-site args, so the `7` was silently dropped; and a lambda was
+/// refused outright with "a lambda cannot be queued on the deferred list yet".
+#[test]
+fn call_deferred_keeps_bound_args_and_queues_lambdas() {
+    let _guard = BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = unique_project_dir("bind_and_lambda");
+    write_project(&dir, ARGS_TSCN, ARGS_GD);
+
+    let mut boot = boot(&dir);
+    let main_id = boot
+        .main_loop()
+        .expect("main loop")
+        .tree()
+        .get_node_by_path("/root/Main")
+        .expect("Main");
+
+    // Premise: `_ready` ran to completion. Both `.bind()` and the lambda had to
+    // construct AND queue without raising to get here — before the fix the
+    // lambda arm returned a RuntimeError, which would abort `_ready` and leave
+    // `queued` false.
+    {
+        let tree = boot.main_loop().unwrap().tree();
+        assert!(
+            as_bool(script_var(tree, main_id, "queued")),
+            "_ready must have queued both the bound Callable and the lambda              without raising",
+        );
+        assert_eq!(
+            as_int(script_var(tree, main_id, "got")),
+            -1,
+            "nothing may have run yet — these are DEFERRED calls",
+        );
+        assert_eq!(as_int(script_var(tree, main_id, "counter")), 0);
+    }
+
+    boot.main_loop_mut().unwrap().step(1.0 / 60.0);
+
+    let tree = boot.main_loop().unwrap().tree();
+    assert_eq!(
+        as_int(script_var(tree, main_id, "got")),
+        7,
+        "the `.bind(7)` argument must survive into the deferred call — `-1`          means the Bound layer was unwrapped and the argument dropped",
+    );
+    assert_eq!(
+        as_int(script_var(tree, main_id, "counter")),
+        1,
+        "a lambda must be queueable and run exactly once — `0` means it was          refused or never dispatched, `2` means it ran twice",
     );
 }

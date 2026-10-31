@@ -1,0 +1,40 @@
+[gd_scene load_steps=5 format=3]
+
+; pat-mgixk.28 fixture: the smallest scene that proves the runtime 2D path.
+;
+; A Sprite2D with a REAL texture on disk, offset from the origin, and a
+; TileMapLayer with one painted cell at the origin — both under a Camera2D that
+; is offset the other way, so a framebuffer that ignored the camera would place
+; them somewhere else than one that honoured it.
+;
+; The two colours are what make "the right thing drew in the right place"
+; checkable: `sprite_fixture.png` is solid RED, and the painted cell samples the
+; atlas's RIGHT half, which is GREEN. A single-colour fixture could not tell a
+; sprite drawn at the tile's position from a tile drawn at the sprite's.
+
+[ext_resource type="Texture2D" path="res://sprite_fixture.png" id="1_tex"]
+[ext_resource type="Texture2D" path="res://tiles.png" id="2_tiles"]
+
+[sub_resource type="TileSetAtlasSource" id="TileSetAtlasSource_a"]
+texture = ExtResource("2_tiles")
+texture_region_size = Vector2i(16, 16)
+0:0/0 = 0
+1:0/0 = 0
+
+[sub_resource type="TileSet" id="TileSet_b"]
+tile_size = Vector2i(16, 16)
+sources/0 = SubResource("TileSetAtlasSource_a")
+
+[node name="World" type="Node2D"]
+
+[node name="Cam" type="Camera2D" parent="."]
+position = Vector2(40, 30)
+
+[node name="Ground" type="TileMapLayer" parent="."]
+tile_map_data = PackedByteArray("AAAAAAAAAAABAAAAAAA=")
+tile_set = SubResource("TileSet_b")
+
+[node name="Spr" type="Sprite2D" parent="."]
+position = Vector2(60, 50)
+texture = ExtResource("1_tex")
+centered = false

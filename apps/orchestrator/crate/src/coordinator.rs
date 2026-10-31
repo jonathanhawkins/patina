@@ -1893,6 +1893,14 @@ impl Coordinator {
             thread_id: bead.id.clone(),
         };
 
+        // Red-check baseline: the tree as it was before this worker touched
+        // the bead (see wiring::record_assignment_base).
+        crate::wiring::record_assignment_base(
+            &self.config.project_root,
+            &self.config.cache_dir(),
+            &bead.id,
+            worker_name,
+        );
         self.mail.send_message_best_effort(&msg)
     }
 
@@ -2894,6 +2902,12 @@ fn process_one_verification(
             &request.files_changed,
             &request.commands,
             &request.acceptance_tests,
+            crate::wiring::assignment_base(
+                project_root,
+                &project_root.join(".codex/orchestrator"),
+                &request.bead_id,
+            )
+            .as_deref(),
             timeout,
         );
         verifier_log_append(verifier_log_path, &format!("RED-CHECK bead={bead_id} {red:?}"));
@@ -5670,6 +5684,18 @@ mod tests {
         assert!(red > verify, "red check runs after the green verify");
         assert!(body.contains("RedVerdict::NotDetected(why) = red"));
         assert!(body.contains("!request.is_stale_recovery"));
+    }
+
+    /// The red check reverts to the tree from assignment time, so the
+    /// assignment path must record it and the verify lane must read it back.
+    #[test]
+    fn test_assignment_records_the_red_check_baseline() {
+        let source = include_str!("coordinator.rs");
+        let f = source.find("fn send_assignment_mail(").unwrap();
+        let end = source[f..].find("fn send_reopen_message(").unwrap();
+        assert!(source[f..f + end].contains("crate::wiring::record_assignment_base("));
+        let f = source.find("fn process_one_verification(").unwrap();
+        assert!(source[f..f + 3500].contains("crate::wiring::assignment_base("));
     }
 
     /// The entry-point rule runs on the completion path, before enqueueing a

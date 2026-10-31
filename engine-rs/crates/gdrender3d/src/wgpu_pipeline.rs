@@ -83,6 +83,28 @@ struct ModelUniforms {
 @group(1) @binding(0)
 var<uniform> model: ModelUniforms;
 
+// `BaseMaterial3D.albedo_texture`, sampled per fragment (pat-mgixk.52).
+//
+// ⚠️ Deliberately in group 1 rather than a new group: group 3 is already taken
+// by the ShaderMaterial custom samplers, and the model bind group is the only
+// one of 0-2 that is rebuilt PER DRAW — which is exactly the granularity a
+// per-material texture needs. Groups 0 and 2 are built once per frame.
+//
+// The base, cull-variant and custom pipelines all share `model_layout`, so
+// adding entries here reaches every draw at once. A shader that does not
+// reference a binding its layout declares is valid in wgpu, so this cannot
+// break a pipeline that ignores it.
+//
+// Uploaded as `Rgba8UnormSrgb`, which makes the sampler perform the same
+// sRGB->linear decode the software path applies per texel
+// (`shader.rs:218`: `map.sample_bilinear(u, v).srgb_to_linear()`) — same
+// piecewise curve, and both leave alpha untouched. `FilterMode::Linear`
+// matches `sample_bilinear`; hardware decodes before filtering where software
+// filters before decoding, which differs only between texel centres and
+// agrees exactly at them.
+@group(1) @binding(1) var t_albedo: texture_2d<f32>;
+@group(1) @binding(2) var s_material: sampler;
+
 // ── Bind group 2: light array ───────────────────────────────────────
 
 struct LightData {
@@ -438,6 +460,18 @@ fn directional_shadow_fade(light: LightData, world_position: vec3<f32>, shadow: 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let albedo = model.albedo;
+    // ⚠️ The line ABOVE is the splice marker `custom_spatial_wgsl` matches on
+    // (see the `marker` literal below in this file). It must stay
+    // byte-identical or that function bails and every custom spatial shader
+    // silently falls back to flat albedo (pat-s3rrv.122). So the texture
+    // multiply lands here under a NEW name and the uses below are renamed,
+    // rather than changing the binding itself.
+    //
+    // An untextured material binds a 1x1 WHITE texel, so this multiply is an
+    // exact no-op and such draws stay bit-identical to before. A custom shader
+    // also binds white (its entry carries no albedo texture), so `albedo_tex`
+    // is `custom_albedo(in)` unchanged.
+    let albedo_tex = albedo * textureSample(t_albedo, s_material, in.uv);
     let emission = model.emission;
 
     // Unlit mode. Scene-referred linear HDR: no clamp, so emissive values > 1
@@ -445,18 +479,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // tonemaps and clamps at the end) — same as the software shaders.
     if (model.shading_mode == 0u) {
         return vec4<f32>(
-            albedo.r + emission.r,
-            albedo.g + emission.g,
-            albedo.b + emission.b,
-            albedo.a,
+            albedo_tex.r + emission.r,
+            albedo_tex.g + emission.g,
+            albedo_tex.b + emission.b,
+            albedo_tex.a,
         );
     }
 
     let normal = normalize(in.world_normal);
     var color = vec3<f32>(
-        camera.ambient.r * albedo.r,
-        camera.ambient.g * albedo.g,
-        camera.ambient.b * albedo.b,
+        camera.ambient.r * albedo_tex.r,
+        camera.ambient.g * albedo_tex.g,
+        camera.ambient.b * albedo_tex.b,
     );
 
     let num_lights = min(model.num_lights, 16u);
@@ -485,9 +519,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Lambert diffuse (mode == 1).
         if (model.shading_mode == 1u) {
             color += vec3<f32>(
-                albedo.r * light.color.r * contrib,
-                albedo.g * light.color.g * contrib,
-                albedo.b * light.color.b * contrib,
+                albedo_tex.r * light.color.r * contrib,
+                albedo_tex.g * light.color.g * contrib,
+                albedo_tex.b * light.color.b * contrib,
             );
         }
 
@@ -502,8 +536,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let metallic = clamp(model.metallic, 0.0, 1.0);
             let alpha = max(roughness * roughness, 1e-4);
             let f0_d = 0.04;
-            let f0 = mix(vec3<f32>(f0_d), albedo.rgb, metallic);
-            let albedo_lin = albedo.rgb * (1.0 - metallic);
+            let f0 = mix(vec3<f32>(f0_d), albedo_tex.rgb, metallic);
+            let albedo_lin = albedo_tex.rgb * (1.0 - metallic);
 
             // Burley diffuse.
             let fd90 = 0.5 + 2.0 * l_dot_h * l_dot_h * roughness;
@@ -542,7 +576,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         color.r + emission.r,
         color.g + emission.g,
         color.b + emission.b,
-        albedo.a,
+        albedo_tex.a,
     );
 }
 "#;
@@ -3427,7 +3461,17 @@ impl GpuRenderer3D {
         // Allocated per frame rather than cached on `EditorTargets`: this path
         // already reallocates on resize, and depth readback only happens when
         // the scene actually has env effects (see the early-out below).
-        let wants_depth = !self.decals.is_empty() || !self.fog_volumes.is_empty();
+        // ⚠️ SSAO needs this depth too, and asks for it here or it silently
+        // gets none: `depth` is only populated inside the `if let
+        // Some(depth_readback_buf)` below (pat-mgixk.52). The condition mirrors
+        // `apply_ssao_env`'s own early-out so a scene whose SSAO is disabled or
+        // zero-intensity still pays nothing for the readback.
+        let wants_depth = !self.decals.is_empty()
+            || !self.fog_volumes.is_empty()
+            || viewport
+                .environment
+                .as_ref()
+                .map_or(false, |e| e.ssao_enabled && e.ssao_intensity > 0.0);
         let depth_align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let depth_padded_row = (w * 4 + depth_align - 1) / depth_align * depth_align;
         let depth_readback_buf = if wants_depth {
@@ -3568,6 +3612,18 @@ impl GpuRenderer3D {
                 &fx_inv_proj,
                 &viewport.camera_transform,
             );
+            // SSAO runs BEFORE tonemapping, in the software path's exact order
+            // (`renderer.rs:683`): decals and fog modulate scene-space colour
+            // first, then ambient occlusion darkens creases, and only then does
+            // `apply_camera_post` collapse HDR to display sRGB. Swapping the last
+            // two would occlude already-tonemapped pixels and the two backends
+            // would stop matching, which is the contract this path is held to
+            // (pat-mgixk.52).
+            //
+            // Called unconditionally: `apply_ssao_env` self-gates on
+            // `ssao_enabled && ssao_intensity > 0.0` and returns immediately
+            // otherwise, so a scene without SSAO stays bit-identical to before.
+            crate::postprocess::apply_ssao_env(&mut pixels, &depth, w, h, env);
         }
 
         crate::postprocess::apply_camera_post(&mut pixels, w, h, env);
@@ -4171,6 +4227,18 @@ impl GpuRenderer3D {
             &fog_inv_proj,
             &viewport.camera_transform,
         );
+        // SSAO runs BEFORE tonemapping, in the software path's exact order
+        // (`renderer.rs:683`): decals and fog modulate scene-space colour
+        // first, then ambient occlusion darkens creases, and only then does
+        // `apply_camera_post` collapse HDR to display sRGB. Swapping the last
+        // two would occlude already-tonemapped pixels and the two backends
+        // would stop matching, which is the contract this path is held to
+        // (pat-mgixk.52).
+        //
+        // Called unconditionally: `apply_ssao_env` self-gates on
+        // `ssao_enabled && ssao_intensity > 0.0` and returns immediately
+        // otherwise, so a scene without SSAO stays bit-identical to before.
+        crate::postprocess::apply_ssao_env(&mut pixels, &depth, w, h, env);
         crate::postprocess::apply_camera_post(&mut pixels, w, h, env);
 
         FrameData3D {

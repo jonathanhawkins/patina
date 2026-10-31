@@ -226,6 +226,10 @@ pub fn render_html_shell(
             },
         )
         .replace("{{PATINA_FOCUS_CANVAS}}", &config.focus_canvas.to_string())
+        // Gates the service-worker registration in the shell. Registering
+        // unconditionally would 404 on `sw.js` for a non-PWA export, which
+        // shows up in the console of every ordinary build.
+        .replace("{{PATINA_PWA_ENABLED}}", &config.pwa_enabled.to_string())
         .replace(
             "{{PATINA_REQUIRE_ISOLATION}}",
             &config.threads_enabled.to_string(),
@@ -289,6 +293,14 @@ self.addEventListener("activate", (event) => {{
       Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))
     )
   );
+}});
+
+// ⚠️ Without this, `JavaScriptBridge.pwa_update()` is a no-op that LOOKS
+// like it works: the shell posts skip-waiting, nothing listens, the waiting
+// worker stays waiting, and the reload serves the very same version again
+// (pat-mgixk.41).
+self.addEventListener("message", (event) => {{
+  if (event.data && event.data.type === "SKIP_WAITING") self.skipWaiting();
 }});
 
 self.addEventListener("fetch", (event) => {{
@@ -529,6 +541,66 @@ pub const DEFAULT_SHELL: &str = r#"<!DOCTYPE html>
     // Persistence runs on the same cadence as the frame loop: the engine's
     // writes are already in memory, this is only the IndexedDB catch-up.
     setInterval(() => { store.drainPendingWrites(db, vfs).catch(console.warn); }, 1000);
+
+    // -- JavaScriptBridge shell hooks (pat-mgixk.41) --
+    //
+    // `gdplatform::js_bridge` looks these up on `globalThis` BY NAME:
+    // `__patina_fs_sync` and `__patina_pwa_update` as zero-argument functions,
+    // `__patina_pwa_update_pending` as a boolean. Nothing defined them, so
+    // `JavaScriptBridge.force_fs_sync()`, `.pwa_needs_update()` and
+    // `.pwa_update()` were all silent no-ops in an exported game.
+    //
+    // Installed here, inside main(), because the fs-sync hook needs the `store`,
+    // `db` and `vfs` locals created above.
+
+    // Godot's `force_fs_sync` flushes IDBFS; the equivalent here is to run the
+    // write-back now instead of waiting for the 1s interval above.
+    globalThis.__patina_fs_sync = () => {
+      store.drainPendingWrites(db, vfs).catch(console.warn);
+    };
+
+    // Explicitly false rather than left undefined: `pwa_needs_update()` treats
+    // absent as "no update", so this only documents the starting state — but it
+    // also means a non-PWA export answers the same as Godot does.
+    globalThis.__patina_pwa_update_pending = false;
+
+    if ({{PATINA_PWA_ENABLED}} && "serviceWorker" in navigator) {
+      try {
+        const reg = await navigator.serviceWorker.register("./sw.js");
+        const markPending = () => { globalThis.__patina_pwa_update_pending = true; };
+
+        // ⚠️ An ALREADY-waiting worker counts as an available update.
+        // `updatefound` fired before this page loaded and will not fire again,
+        // so an implementation that only listened for the event would miss the
+        // most common real case: reloading after the worker updated in the
+        // background.
+        if (reg.waiting) markPending();
+
+        reg.addEventListener("updatefound", () => {
+          const installing = reg.installing;
+          if (!installing) { markPending(); return; }
+          // ⚠️ Only once it is actually installed. Flagging on `updatefound`
+          // alone would leave the flag stuck true for an update that FAILED to
+          // install, and `pwa_update()` would then reload into the same
+          // version on every call. `controller` distinguishes an update from
+          // this page's very first install, which is not an "update".
+          installing.addEventListener("statechange", () => {
+            if (installing.state === "installed" && navigator.serviceWorker.controller) {
+              markPending();
+            }
+          });
+        });
+
+        globalThis.__patina_pwa_update = () => {
+          // The worker only steps aside if it is listening for this; the
+          // generated sw.js has a `message` handler calling skipWaiting().
+          if (reg.waiting) reg.waiting.postMessage({ type: "SKIP_WAITING" });
+          globalThis.__patina_pwa_update_pending = false;
+          location.reload();
+        };
+      } catch (err) { console.warn("service worker unavailable:", err); }
+    }
+
     void renderer;
     void engine;
   }

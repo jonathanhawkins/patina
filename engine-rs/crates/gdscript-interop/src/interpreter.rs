@@ -162,6 +162,35 @@ fn resource_fs_path(path: &str) -> std::path::PathBuf {
         .unwrap_or_else(|_| std::path::PathBuf::from(path.strip_prefix("res://").unwrap_or(path)))
 }
 
+/// Whether `class_def`, or any base in its `extends` chain, declares `name`
+/// (pat-mgixk.21).
+///
+/// Public because the scene layer's `has_method` has to answer for inherited
+/// methods too, and a second copy of the walk there would be a second thing to
+/// keep in step. `has_method` lying about an inherited method is not a cosmetic
+/// bug: `SceneTree::call_script_method` SKIPS any method this reports as
+/// undefined, so the call silently does nothing.
+pub fn class_chain_has_method(class_def: &ClassDef, name: &str) -> bool {
+    let mut cursor = Some(class_def);
+    while let Some(def) = cursor {
+        if def.methods.contains_key(name) {
+            return true;
+        }
+        cursor = def.base.as_deref();
+    }
+    false
+}
+
+/// How deep an `extends "res://…"` chain may go before [`Interpreter::
+/// load_base_class`] stops following it (pat-mgixk.21). Real inheritance is
+/// nowhere near this; anything past it is a cycle.
+const MAX_BASE_LOAD_DEPTH: usize = 16;
+
+thread_local! {
+    /// Current depth inside [`Interpreter::load_base_class`]'s recursion.
+    static BASE_LOAD_DEPTH: std::cell::Cell<usize> = std::cell::Cell::new(0);
+}
+
 /// Reads a resource's text, consulting mounted `.pck` packs before disk
 /// (pat-s3rrv.34).
 ///
@@ -614,6 +643,35 @@ pub struct Interpreter {
     /// `park_coroutine` as it parks the frame, and bound in `resume_one` on
     /// resume. `None` for a bare `await` whose result is discarded (pat-nzgdu.6).
     pending_await_bind: Option<String>,
+    /// The `res://` path of the script this interpreter is running, when the
+    /// loader knows it (pat-mgixk.14).
+    ///
+    /// The debugger matches a breakpoint on `(script, line)`, and `line` alone
+    /// stops the wrong file the moment a project has two scripts.
+    /// `from_source` cannot know the path — the source arrives as a string — so
+    /// the loading path sets it afterwards, exactly as
+    /// `GDScriptNodeInstance::script_file_path` does one layer up.
+    script_path: Option<String>,
+    /// Source line of each statement a debugger-parked frame still owes,
+    /// index-aligned with the resumed coroutine's `remaining` (pat-mgixk.14).
+    ///
+    /// 🔑 Without this a Step Over would behave like Continue. The `await`
+    /// machinery carries no line information — it never needed any — so the
+    /// resumed statements could be executed but not REPORTED, and nothing
+    /// would stop on the next line. Set by `pump_debug_resume` from the pause
+    /// the editor just consumed, and TAKEN by `resume_one`, so a later
+    /// unrelated `await` resume cannot inherit a stale alignment.
+    debug_resume_lines: Vec<usize>,
+    /// Last observed value of the browser's PWA "update waiting" flag, so the
+    /// `pwa_update_available` signal fires on the false->true EDGE rather than
+    /// every frame the flag is true (pat-mgixk.41).
+    ///
+    /// ⚠️ Per-interpreter on purpose. The flag itself is one JS global, so a
+    /// single shared `last` would let only the FIRST interpreter to poll see
+    /// the transition and every other script's handler would never fire. One
+    /// copy each means every script sees the edge exactly once, which is what
+    /// one signal reaching all its handlers looks like.
+    last_pwa_pending: bool,
 }
 
 impl fmt::Debug for Interpreter {
@@ -646,6 +704,15 @@ impl Clone for Interpreter {
             current_node_id: self.current_node_id,
             coroutine_host: crate::coroutine::CoroutineHost::new(),
             pending_await_bind: None,
+            // The script identity travels with the clone: a cloned interpreter
+            // runs the same file, so a breakpoint in it must still match.
+            script_path: self.script_path.clone(),
+            debug_resume_lines: Vec::new(),
+            // ⚠️ `false`, NOT copied. A clone has not observed the flag yet;
+            // inheriting `true` would make it skip the false->true edge and
+            // never emit, which is the silent failure this field exists to
+            // prevent.
+            last_pwa_pending: false,
             // Both are strictly in-flight suspension bookkeeping, valid only
             // between a Suspend unwinding and the matching `park_coroutine`.
             // A clone starts with a fresh (empty) CoroutineHost above, so
@@ -662,6 +729,15 @@ impl Clone for Interpreter {
 pub struct FuncDef {
     /// Parameter names.
     pub params: Vec<String>,
+    /// Declared type hint per parameter, index-aligned with
+    /// [`params`](Self::params); `None` where the parameter is untyped
+    /// (pat-mgixk.19).
+    ///
+    /// ⚠️ The parser has always kept these on `FuncParam`, but `FuncDef`
+    /// flattened `params` to bare names, so the hint died at this boundary and
+    /// a typed parameter was never enforced. Same shape as
+    /// [`defaults`](Self::defaults), which is index-aligned for the same reason.
+    pub param_hints: Vec<Option<String>>,
     /// Default value expressions for each parameter (None = required).
     pub defaults: Vec<Option<Expr>>,
     /// Function body statements.
@@ -704,6 +780,7 @@ impl FuncDef {
     ) -> Self {
         Self {
             params: params.iter().map(|p| p.name.clone()).collect(),
+            param_hints: params.iter().map(|p| p.type_hint.clone()).collect(),
             defaults: params.iter().map(|p| p.default.clone()).collect(),
             body: body.to_vec(),
             body_lines: body_lines.to_vec(),
@@ -812,8 +889,18 @@ pub struct VarDecl {
 pub struct ClassDef {
     /// The class name (from `class_name`).
     pub name: Option<String>,
-    /// Parent class name (from `extends`).
+    /// Parent class name (from `extends`). For `extends "res://base.gd"` this
+    /// is the PATH with its quotes already stripped by the lexer
+    /// (`Token::StringLit`), not a class name.
     pub parent_class: Option<String>,
+    /// The parsed base SCRIPT, when `parent_class` named another `.gd` rather
+    /// than an engine class (pat-mgixk.21).
+    ///
+    /// Boxed because `ClassDef` would otherwise be infinitely sized. Carried on
+    /// the `ClassDef` itself rather than looked up in `class_registry` so an
+    /// instance keeps its whole chain: `ClassInstance` holds a *clone* of its
+    /// `ClassDef`, and every node gets a fresh `Interpreter`.
+    pub base: Option<Box<ClassDef>>,
     /// Declared signals.
     pub signals: Vec<String>,
     /// Declared enums: name → { variant_name → value }.
@@ -918,6 +1005,9 @@ impl Interpreter {
             current_node_id: None,
             coroutine_host: crate::coroutine::CoroutineHost::new(),
             pending_await_bind: None,
+            script_path: None,
+            debug_resume_lines: Vec::new(),
+            last_pwa_pending: false,
         }
     }
 
@@ -930,6 +1020,182 @@ impl Interpreter {
     /// Clears scene-tree access after a method call.
     pub fn clear_scene_access(&mut self) {
         self.scene_access = None;
+    }
+
+    /// Tells the interpreter which script file it is running, so the debugger
+    /// can match breakpoints against it (pat-mgixk.14).
+    pub fn set_script_path(&mut self, path: impl Into<String>) {
+        self.script_path = Some(path.into());
+    }
+
+    /// The script file this interpreter is running, when the loader named one.
+    pub fn script_path(&self) -> Option<&str> {
+        self.script_path.as_deref()
+    }
+
+    /// The debugger's per-statement check: should execution stop BEFORE the
+    /// statement on `line`? (pat-mgixk.14)
+    ///
+    /// Returns the [`AwaitTarget`](crate::coroutine::AwaitTarget) to park the
+    /// frame on, or `None` to run the statement. The pause is a SUSPENSION
+    /// through the `await` machinery, not a blocked thread — see
+    /// [`crate::debug_session`] for why a condvar deadlocks the editor.
+    ///
+    /// ⚠️ Decide-then-act, for the reason [`with_engine_debugger`]'s own docs
+    /// give: the thread-local debugger stays mutably borrowed for the whole
+    /// closure, so nothing that could re-enter the interpreter may run inside
+    /// it.
+    fn debug_break_before(&mut self, line: usize) -> Option<crate::coroutine::AwaitTarget> {
+        // One relaxed atomic load on the path every project takes: no debugger.
+        // This hook runs before EVERY statement of EVERY script, so the
+        // not-debugging case has to cost essentially nothing.
+        if !crate::debug_session::is_active() {
+            return None;
+        }
+        // A script the loader never named cannot be matched against a
+        // breakpoint's `(script, line)` pair, and guessing would stop the wrong
+        // file. Declining is the honest answer.
+        let script = self.script_path.clone()?;
+        let depth = self.call_depth;
+        let hit = with_engine_debugger(|d| {
+            // The interpreter keeps its depth in `call_depth`; the debugger's
+            // own frame list is empty because nothing pushes to it, which would
+            // make StepOver behave like StepIn.
+            d.set_runtime_depth(depth);
+            d.should_break(&script, line)
+        });
+        if !hit {
+            return None;
+        }
+        Some(crate::coroutine::AwaitTarget::Signal {
+            name: crate::debug_session::BREAK_SIGNAL.to_string(),
+            object_id: None,
+        })
+    }
+
+    /// Publishes what the editor should SEE about a pause (pat-mgixk.14).
+    ///
+    /// ⚠️ Must be called while the paused frame's scopes are still live: the
+    /// locals are read off `self.environment`, and the parked coroutine id off
+    /// `last_call_suspended`, which `park_coroutine` has just set.
+    fn publish_debug_pause(&mut self, function: &str, line: usize, remaining_lines: Vec<usize>) {
+        let script = self.script_path.clone().unwrap_or_default();
+        // Sorted, because a panel whose rows reshuffle on every step is
+        // unusable and `HashMap` iteration order is arbitrary.
+        let mut values: Vec<(String, Variant)> = self.snapshot_locals().into_iter().collect();
+        values.sort_by(|a, b| a.0.cmp(&b.0));
+        let locals = values
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.clone(),
+                    value.variant_type().to_string(),
+                    value.to_string(),
+                )
+            })
+            .collect();
+        let mut members: Vec<(String, Variant)> = self
+            .self_instance
+            .as_ref()
+            .map(|inst| inst.properties.clone().into_iter().collect())
+            .unwrap_or_default();
+        members.sort_by(|a, b| a.0.cmp(&b.0));
+        // Innermost frame FIRST, the order a debugger panel lists. The top
+        // frame's line is the statement about to run; a caller keeps the
+        // location recorded when it made the call.
+        let top = self.call_stack_frames.len();
+        let mut frames: Vec<crate::debug_session::PausedFrame> = self
+            .call_stack_frames
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(depth, frame)| crate::debug_session::PausedFrame {
+                // ⚠️ The innermost frame is named for the function that
+                // is actually PAUSED, not for the frame record on top of the
+                // stack. `call_instance_method_impl` pushes no `StackFrame`, so
+                // a method pause sitting above a function frame would otherwise
+                // be labelled with its CALLER's name — the same wrong-name bug
+                // as the `<main>` fallback below, one level in (pat-mgixk.14).
+                function: if depth + 1 == top {
+                    function.to_string()
+                } else {
+                    frame.function_name.clone()
+                },
+                script: script.clone(),
+                line: if depth + 1 == top {
+                    line
+                } else {
+                    frame.source_location.as_ref().map(|l| l.line).unwrap_or(0)
+                },
+            })
+            .collect();
+        if frames.is_empty() {
+            // A body that runs outside any recorded frame still has a location,
+            // and an empty stack reads to the editor as "not really paused" —
+            // which is the fabricated-frame problem this bead removes, in
+            // reverse.
+            frames.push(crate::debug_session::PausedFrame {
+                // ⚠️ The name is PASSED IN, never recovered from interpreter
+                // state. `self.current_function` and `self.call_stack_frames`
+                // are both set only by `call_user_func_impl`;
+                // `call_instance_method_impl` sets neither. So for an instance
+                // method — `_ready`, `_process`, every signal handler a user
+                // actually breaks in — both were empty and this took the
+                // `<main>` fallback. The debugger reported `<main>` for EVERY
+                // method pause (pat-mgixk.14).
+                //
+                // Relaxing the test's expectation instead would have shipped
+                // exactly that.
+                function: function.to_string(),
+                script: script.clone(),
+                line,
+            });
+        }
+        crate::debug_session::publish_pause(crate::debug_session::PauseSnapshot {
+            script,
+            line,
+            frames,
+            locals,
+            values,
+            members,
+            coroutine: self.last_call_suspended.map(|id| id.0),
+            remaining_lines,
+        });
+    }
+
+    /// Picks up a Step/Continue the editor issued and wakes the frame that
+    /// broke (pat-mgixk.14).
+    ///
+    /// ⚠️ Gated on THIS host actually holding the parked coroutine. The pause is
+    /// a process global while a `CoroutineHost` is per script instance, so an
+    /// ungated `take_resume` would let the first interpreter polled consume a
+    /// pause belonging to a different script: the editor would be told the step
+    /// happened and the broken frame would stay parked forever.
+    fn pump_debug_resume(&mut self) {
+        if !crate::debug_session::is_active() {
+            return;
+        }
+        let Some(pending) = crate::debug_session::pause() else {
+            return;
+        };
+        let Some(id) = pending.coroutine else {
+            return;
+        };
+        if !self.coroutine_host.suspended.iter().any(|co| co.id.0 == id) {
+            return;
+        }
+        let Some((command, snapshot)) = crate::debug_session::take_resume() else {
+            return;
+        };
+        // Hand the resumed frame its line alignment; `resume_one` takes it.
+        self.debug_resume_lines = snapshot.remaining_lines;
+        // `arm_step`, not `step`: the editor host re-`attach()`es every frame,
+        // which leaves the debugger `Running`, and `step` only transitions out
+        // of `Paused`. See `gdcore::debugger::Debugger::arm_step`.
+        let depth = self.call_depth;
+        with_engine_debugger(|d| d.arm_step(command.step_mode(), depth));
+        self.coroutine_host
+            .notify_signal(crate::debug_session::BREAK_SIGNAL, Variant::Nil);
     }
 
     pub fn warnings(&self) -> &[ScriptWarning] {
@@ -1025,19 +1291,30 @@ impl Interpreter {
                 value,
                 ..
             } => {
-                let v = match value {
-                    Some(expr) => self.eval_expr(expr)?,
-                    None => Variant::Nil,
-                };
                 // `var a: Array[int] = []` binds a *typed* array, and an
                 // element that does not fit is a runtime error rather than a
                 // silently untyped container (pat-s3rrv.265). Godot does this
                 // by building a new typed array and copying into it
                 // (`OPCODE_ASSIGN_TYPED_ARRAY`), which is what the helper does.
-                let v = match type_hint {
-                    Some(hint) => crate::container_typing::coerce_to_declared_type(v, hint)
-                        .map_err(container_error)?,
-                    None => v,
+                //
+                // A *scalar* hint is handled the same way as of pat-mgixk.19:
+                // `var speed: float = 200` converts to 200.0 and
+                // `var n: int = "x"` raises, instead of storing whatever the
+                // initialiser evaluated to.
+                //
+                // ⚠️ The no-initialiser case takes the type's default rather
+                // than evaluating to `Nil` and then coercing: `Nil` is not
+                // convertible to a builtin, so coercing it would turn every
+                // `var count: int` into an error.
+                let v = match (value, type_hint) {
+                    (Some(expr), Some(hint)) => {
+                        let v = self.eval_expr(expr)?;
+                        crate::container_typing::coerce_for_declared_slot(v, hint)
+                            .map_err(container_error)?
+                    }
+                    (Some(expr), None) => self.eval_expr(expr)?,
+                    (None, Some(hint)) => crate::container_typing::typed_default(hint),
+                    (None, None) => Variant::Nil,
                 };
                 self.environment.define(name.clone(), v);
                 Ok(None)
@@ -1355,6 +1632,12 @@ impl Interpreter {
     /// Advance timer-based awaits by `delta` seconds, then resume any ready
     /// coroutines. Returns print-lines emitted by resumed bodies this tick.
     pub fn poll_coroutines(&mut self, delta: f32) -> Result<Vec<String>, RuntimeError> {
+        // pat-mgixk.14: a Step/Continue the editor pressed on an HTTP thread is
+        // picked up HERE, on the thread that actually runs scripts. It has to
+        // come first: the resume notifies the break signal, and
+        // `resume_ready_coroutines` at the bottom is what then runs the
+        // statements the paused frame still owes.
+        self.pump_debug_resume();
         // SceneTree timers (pat-z35r2.3): fire timeout signals then resume awaiters.
         if let Some(ref mut access) = self.scene_access {
             let fired = access.process_timers(delta as f64);
@@ -1369,6 +1652,14 @@ impl Interpreter {
 
     /// Advance frame-based awaits by one frame, then resume ready coroutines.
     pub fn tick_coroutine_frames(&mut self) -> Result<Vec<String>, RuntimeError> {
+        // pat-mgixk.14: ⚠️ the pump belongs on BOTH coroutine entry points.
+        // A script attached to a node reaches coroutines through
+        // `GDScriptNodeInstance::poll_coroutines` →
+        // `tick_instance_coroutine_frames` → here, and never through
+        // `Interpreter::poll_coroutines`. Wiring only that one would have left
+        // the debugger resumable from nothing a scene actually runs — a
+        // feature that passes a unit test and does nothing in the editor.
+        self.pump_debug_resume();
         self.coroutine_host.tick_frame();
         self.resume_ready_coroutines()
     }
@@ -1459,9 +1750,16 @@ impl Interpreter {
     ) -> Result<R, RuntimeError> {
         let prev_self = self.self_instance.take();
         self.self_instance = Some(instance.clone());
-        for (name, func_def) in &instance.class_def.methods {
-            self.function_registry
-                .insert(name.clone(), func_def.clone());
+        // ROOT-FIRST, so a derived override replaces the inherited entry
+        // rather than the other way round. This registry is what lets a bare
+        // `hit()` inside a body resolve, so without the base's methods here an
+        // inherited sibling call raised even though the method existed
+        // (pat-mgixk.21).
+        for def in Self::class_chain_root_first(&instance.class_def) {
+            for (name, func_def) in &def.methods {
+                self.function_registry
+                    .insert(name.clone(), func_def.clone());
+            }
         }
         let result = f(self);
         if let Some(ref updated) = self.self_instance {
@@ -1553,8 +1851,28 @@ impl Interpreter {
         }
 
         let mut return_val = Variant::Nil;
+        // pat-mgixk.14: TAKEN, not borrowed. A stale alignment left behind
+        // would mis-report the lines of the next unrelated `await` resume.
+        let debug_lines = std::mem::take(&mut self.debug_resume_lines);
         let mut i = 0;
         while i < co.remaining.len() {
+            // pat-mgixk.14: the resumed statements get the same per-statement
+            // debugger check the function body does. Without it a Step Over
+            // would resume the frame and then run it to the end — the button
+            // would appear to work and behave as Continue.
+            let stmt_line = debug_lines.get(i).copied().unwrap_or(0);
+            if stmt_line != 0 {
+                self.current_line = stmt_line;
+                if let Some(target) = self.debug_break_before(stmt_line) {
+                    let rest = co.remaining[i..].to_vec();
+                    let rest_lines = debug_lines.get(i..).map(|s| s.to_vec()).unwrap_or_default();
+                    self.park_coroutine(rest, target, &co.function_name, co.is_instance_method);
+                    let paused_in = co.function_name.clone();
+                    self.publish_debug_pause(&paused_in, stmt_line, rest_lines);
+                    self.environment.pop_scope();
+                    return Ok(Variant::Nil);
+                }
+            }
             match self.exec_stmt(&co.remaining[i])? {
                 Some(ControlFlow::Return(v)) => {
                     return_val = v.unwrap_or(Variant::Nil);
@@ -1851,6 +2169,32 @@ impl Interpreter {
                         self.environment.get(name)?
                     };
                     self.apply_assign_op(op, &cur, &rhs)?
+                };
+
+                // A typed member enforces its declared type on EVERY
+                // assignment, not only at the declaration: Godot compiles
+                // `count = x` on `var count: int` to
+                // `OPCODE_ASSIGN_TYPED_BUILTIN`, which converts a float and
+                // raises on a String (pat-mgixk.19). Applied after the
+                // compound-assign op so `count += 0.5` lands as an int, the way
+                // the typed slot demands.
+                let final_val = if is_instance_prop {
+                    let hint = self.self_instance.as_ref().and_then(|inst| {
+                        inst.class_def
+                            .instance_vars
+                            .iter()
+                            .find(|v| &v.name == name)
+                            .and_then(|v| v.type_hint.clone())
+                    });
+                    match hint {
+                        Some(hint) => {
+                            crate::container_typing::coerce_for_declared_slot(final_val, &hint)
+                                .map_err(container_error)?
+                        }
+                        None => final_val,
+                    }
+                } else {
+                    final_val
                 };
 
                 if is_instance_prop {
@@ -2381,9 +2725,9 @@ impl Interpreter {
             v
         }) | SCRIPT_BACKTRACE_HANDLE_TAG;
         crate::script_backtrace::insert(raw, backtrace);
-        Ok(Variant::Array(vec![Variant::ObjectId(
-            gdcore::id::ObjectId::from_raw(raw),
-        )].into()))
+        Ok(Variant::Array(
+            vec![Variant::ObjectId(gdcore::id::ObjectId::from_raw(raw))].into(),
+        ))
     }
 
     fn call_xr_server_static(
@@ -3941,7 +4285,11 @@ impl Interpreter {
                         // JavaScriptBridge singleton (pat-nzgdu.66) — headless
                         // recorder; the web-sys binding is wired in gdplatform (wasm32).
                         if matches!(object.as_ref(), Expr::Ident(n) if n == "JavaScriptBridge") {
-                            return call_javascriptbridge_static(member, &evaluated_args);
+                            return call_javascriptbridge_static(
+                                member,
+                                &evaluated_args,
+                                self.current_node_id,
+                            );
                         }
                         // JavaClassWrapper singleton (pat-s3rrv.243) — the
                         // non-Android dummy.
@@ -4590,10 +4938,19 @@ impl Interpreter {
                                 return Ok(result);
                             }
                         }
+                        // `super.method()` — the parent's implementation, named
+                        // explicitly. Intercepted BEFORE `object` is evaluated,
+                        // because `Expr::SuperRef` evaluates to `Nil` (it is
+                        // only a marker), so this used to dispatch on Nil and
+                        // the call silently did nothing (pat-mgixk.21).
+                        if matches!(object.as_ref(), Expr::SuperRef) {
+                            return self.call_super_method(member, &evaluated_args);
+                        }
                         let obj = self.eval_expr(object)?;
                         self.call_method_on(&obj, member, &evaluated_args, object)
                     }
-                    // super() — call parent class method with same name
+                    // super() — the parent's implementation of whichever method
+                    // this call is written inside.
                     Expr::SuperRef => self.call_super(&evaluated_args),
                     _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "not callable".into(),
@@ -4831,9 +5188,9 @@ impl Interpreter {
                 }
                 // Fallback: return ClassInstance properties as Dictionary
                 if let Some(ref inst) = self.self_instance {
-                    Ok(Variant::Dictionary(Dictionary::from(
-                        inst.properties.clone(),
-                    ).into()))
+                    Ok(Variant::Dictionary(
+                        Dictionary::from(inst.properties.clone()).into(),
+                    ))
                 } else {
                     Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "'self' used outside of a class instance".into(),
@@ -6890,13 +7247,25 @@ impl Interpreter {
                         "randomize() takes 0 arguments".into(),
                     )));
                 }
-                // Godot seeds from the system clock; the point is only that two
-                // runs differ, so nanosecond resolution is enough.
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as i64)
-                    .unwrap_or(0);
-                set_random_seed(now & i64::MAX);
+                // Godot's `randomize()` reseeds the global generator from
+                // entropy; the contract is only that successive calls differ.
+                //
+                // ⚠️ Reads entropy through `gdcore::rng`, NOT the system clock:
+                // `SystemTime::now()` panics on `wasm32-unknown-unknown`, and
+                // `gdcore::rng::randomize_entropy` is already cfg-gated for that
+                // target (a monotonic stride on wasm, which cannot repeat within
+                // a tick the way a clock read can). See gdcore/src/rng.rs
+                // (pat-mgixk.40).
+                //
+                // 🔑 The returned seed is fed to `set_random_seed` deliberately.
+                // `gdcore::rng` and this interpreter keep SEPARATE generators —
+                // GDScript's `randi()` runs off `RNG_STATE` here — so calling
+                // `gdcore::rng::randomize()` for its side effect alone would
+                // reseed the wrong one and leave the script-visible stream
+                // unchanged, which is the whole observable behaviour of
+                // `randomize()`.
+                let seed = gdcore::rng::randomize();
+                set_random_seed((seed & i64::MAX as u64) as i64);
                 Ok(Some(Variant::Nil))
             }
             "rand_from_seed" => {
@@ -8541,6 +8910,11 @@ impl Interpreter {
         name: &str,
         args: &[Variant],
     ) -> Result<Variant, RuntimeError> {
+        // pat-mgixk.14: times this call for the editor's Profiler tab. `None`
+        // when profiling is off, which costs one relaxed atomic load. Bound to
+        // a NAMED local on purpose — `let _ = ` would drop it here and time
+        // nothing.
+        let _profile = ScriptCallTimer::start(name);
         self.call_stack_frames.push(StackFrame {
             function_name: name.to_string(),
             source_location: Some(self.make_location()),
@@ -8577,6 +8951,12 @@ impl Interpreter {
             } else {
                 Variant::Nil
             };
+            // A declared parameter type is enforced at the binding, not just
+            // documented (pat-mgixk.19).
+            //
+            // `&func`: this `func` is an owned clone out of the registry /
+            // method table, unlike `call_super`'s borrow from `methods.get`.
+            let val = coerce_param_value(&func, i, val)?;
             self.environment.define(param.clone(), val);
         }
 
@@ -8590,6 +8970,29 @@ impl Interpreter {
         while i < body.len() {
             if let Some(&line) = body_lines.get(i) {
                 self.current_line = line;
+            }
+            // pat-mgixk.14: the debugger stops BEFORE the statement runs, which
+            // is what makes a breakpoint on `x += 1` report `x` as 41 and not
+            // 42.
+            //
+            // ⚠️ `remaining` starts AT `i`, not `i + 1` as the Suspend arm
+            // below does. An `await` parks AFTER its statement has run; a
+            // breakpoint parks BEFORE. Off by one here and the statement the
+            // user is looking at is skipped on resume — the step would appear
+            // to work and quietly execute nothing.
+            let stmt_line = self.current_line;
+            if let Some(target) = self.debug_break_before(stmt_line) {
+                let remaining = body[i..].to_vec();
+                let remaining_lines = body_lines.get(i..).map(|s| s.to_vec()).unwrap_or_default();
+                self.park_coroutine(remaining, target, name, false);
+                // Published while the scopes below are still live — the locals
+                // the panel shows come off the live environment.
+                self.publish_debug_pause(name, stmt_line, remaining_lines);
+                self.environment.pop_scope();
+                self.call_depth -= 1;
+                self.current_function = prev_function;
+                self.call_stack_frames.pop();
+                return Ok(Variant::Nil);
             }
             // pat-s3rrv.19: a raise must tear down like every other exit from
             // this loop. `?` here returned without popping the scope,
@@ -8686,7 +9089,8 @@ impl Interpreter {
                 // A plain Array of Vector2 is what an untyped GDScript literal
                 // (`[Vector2(0,0), …]`) evaluates to.
                 Some(Variant::Array(items)) => items
-                    .to_vec().iter()
+                    .to_vec()
+                    .iter()
                     .filter_map(|i| match i {
                         Variant::Vector2(v) => Some(*v),
                         _ => None,
@@ -8817,7 +9221,8 @@ impl Interpreter {
                 let color = match args.get(2) {
                     Some(Variant::PackedColorArray(c)) if !c.is_empty() => c[0],
                     Some(Variant::Array(items)) => items
-                        .to_vec().iter()
+                        .to_vec()
+                        .iter()
                         .find_map(|i| match i {
                             Variant::Color(c) => Some(*c),
                             _ => None,
@@ -10554,14 +10959,13 @@ impl Interpreter {
         let event_arg = |index: usize| -> Result<InputEventSpec, RuntimeError> {
             match args.get(index) {
                 Some(Variant::Int(code)) => Ok(InputEventSpec::key(*code)),
-                Some(Variant::Dictionary(d)) => {
-                    InputEventSpec::from_dictionary(&d.to_dict()).ok_or_else(|| {
+                Some(Variant::Dictionary(d)) => InputEventSpec::from_dictionary(&d.to_dict())
+                    .ok_or_else(|| {
                         type_err(format!(
                             "InputMap.{method}() event dictionary needs a keycode, \
                          button_index or axis entry"
                         ))
-                    })
-                }
+                    }),
                 _ => Err(type_err(format!(
                     "InputMap.{method}() takes an event (a keycode int or an \
                      event dictionary) as argument {}",
@@ -14310,25 +14714,55 @@ impl Interpreter {
                 // pattern cannot match through the Box — `inner_callable()` is
                 // the idiom the neighbouring arms use, and it also unwraps
                 // Bound/Unbound to find the underlying Method.
-                "call_deferred" => match callable_ref.inner_callable() {
-                    CallableRef::Method { target_id, method } => {
-                        match self.scene_access.as_mut() {
-                            Some(access) => {
-                                access.call_deferred(*target_id, method, args);
-                                Ok(Variant::Nil)
-                            }
-                            None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                                "Callable.call_deferred() requires scene access".into(),
-                            ))),
+                // Godot pushes the Callable ITSELF onto the MessageQueue
+                // (core/object/message_queue.cpp), so a `.bind()`ed callable and
+                // a lambda both queue fine. Patina's queue stores
+                // (node, method name, args), so the Callable is reduced to that
+                // triple by the same `callable_target` the signal `connect` path
+                // uses: it already resolves `target_id == 0` to "self", and it
+                // already parks a lambda in a side registry under a synthetic
+                // name that `call_instance_method` resolves back at dispatch
+                // (interpreter.rs:16181). That is why no new `DeferredCall`
+                // shape is needed (pat-mgixk.10).
+                "call_deferred" => {
+                    let self_node = self.current_node_id;
+                    let Some((target, queued_method)) =
+                        callable_ref_target(callable_ref, self_node)
+                    else {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "Callable.call_deferred() needs a Callable naming an \
+                             object method or a lambda written inside a script"
+                                .into(),
+                        )));
+                    };
+                    // ⚠️ ASYMMETRIC ON PURPOSE — both halves are load-bearing.
+                    //
+                    // For a LAMBDA, `callable_ref_target` registers the OUTER
+                    // callable, so a `Bound` layer survives into the registry and
+                    // `invoke_callable_impl` applies `resolve_args` AGAIN when the
+                    // queue dispatches it (interpreter.rs:15848). Resolving here
+                    // as well would append the bound arguments TWICE.
+                    //
+                    // For a METHOD the reduction to (node, name) DISCARDS the
+                    // `Bound` layer — nothing downstream can recover it — so it
+                    // must be resolved here or `_on_tick.bind(7).call_deferred()`
+                    // silently drops the 7, which was the original defect.
+                    let queued_args: Vec<Variant> =
+                        if matches!(callable_ref.inner_callable(), CallableRef::Lambda { .. }) {
+                            args.to_vec()
+                        } else {
+                            callable_ref.resolve_args(args)
+                        };
+                    match self.scene_access.as_mut() {
+                        Some(access) => {
+                            access.call_deferred(target, &queued_method, &queued_args);
+                            Ok(Variant::Nil)
                         }
+                        None => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "Callable.call_deferred() requires scene access".into(),
+                        ))),
                     }
-                    _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                        "Callable.call_deferred() is only supported for a \
-                         Callable(object, \"method\") — a lambda cannot be \
-                         queued on the deferred list yet"
-                            .into(),
-                    ))),
-                },
+                }
                 "callv" => {
                     // callv takes a single Array argument
                     if args.len() != 1 {
@@ -15560,18 +15994,135 @@ impl Interpreter {
     /// raises, is dropped rather than propagated: a browser event must not be
     /// able to abort the frame that happened to pump it.
     pub fn pump_javascript_callbacks(&mut self) -> usize {
-        let pending = gdplatform::js_bridge::take_callback_invocations();
+        self.pump_javascript_callbacks_impl(None)
+    }
+
+    /// As [`Self::pump_javascript_callbacks`], but runs each `Callable` with
+    /// `instance` bound as `self` (pat-mgixk.41).
+    ///
+    /// 🔑 This is the one a scripted node must use. Godot's
+    /// `create_callback` wraps a `Callable` on an OBJECT, so the callback body
+    /// is entitled to touch its own members — and the plain pump binds no
+    /// instance, so `self.anything` inside it raises and
+    /// `pump_javascript_callbacks` swallows the error (`.is_ok()`). The effect
+    /// is a callback that silently does nothing, which is the same class of
+    /// bug this bead set out to fix.
+    ///
+    /// ⚠️ The pre-existing `javascript_bridge_wasm.rs` tests never caught this:
+    /// their lambda body is `JavaScriptBridge.eval(v)`, deliberately chosen
+    /// because it is "the one effect observable from outside the interpreter"
+    /// — and it is also the one that needs no `self`.
+    pub fn pump_javascript_callbacks_for_instance(
+        &mut self,
+        instance: &mut ClassInstance,
+    ) -> usize {
+        self.pump_javascript_callbacks_impl(Some(instance))
+    }
+
+    fn pump_javascript_callbacks_impl(
+        &mut self,
+        mut instance: Option<&mut ClassInstance>,
+    ) -> usize {
+        // 🔑 Only this interpreter's own callbacks, leaving the rest queued for
+        // the sibling script that owns them (pat-mgixk.41). An id with NO
+        // registry entry is still TAKEN here so it is dropped rather than
+        // accumulating forever — which is the behaviour
+        // `unregistered_callback_invocation_is_dropped` pins.
+        let mine = self.current_node_id;
+        let pending = gdplatform::js_bridge::take_callback_invocations_where(|id| {
+            JS_CALLBACKS.with(|m| match m.borrow().get(&id) {
+                Some(entry) => entry.owner == mine,
+                None => true,
+            })
+        });
         let mut ran = 0usize;
         for (id, js_args) in pending {
-            let Some(callable) = JS_CALLBACKS.with(|m| m.borrow().get(&id).cloned()) else {
+            let Some(callable) =
+                JS_CALLBACKS.with(|m| m.borrow().get(&id).map(|e| e.callable.clone()))
+            else {
                 continue;
             };
             let args: Vec<Variant> = js_args.into_iter().map(js_to_variant).collect();
-            if self.invoke_callable(&callable, &args).is_ok() {
+            let outcome = match instance.as_mut() {
+                // `&mut **inst` spelled out rather than relying on deref
+                // coercion through the `&mut &mut _` that `as_mut` yields.
+                Some(inst) => {
+                    let inst: &mut ClassInstance = &mut **inst;
+                    self.with_script_call_stack(|interp| {
+                        interp.resume_with_instance_self(inst, |i| {
+                            i.invoke_callable(&callable, &args)
+                        })
+                    })
+                }
+                None => self.invoke_callable(&callable, &args),
+            };
+            if outcome.is_ok() {
                 ran += 1;
             }
         }
+
+        // -- PWA update edge (pat-mgixk.41) --
+        //
+        // Godot's service worker drives `OS_Web::update_pwa_state_callback`,
+        // which emits `JavaScriptBridge.pwa_update_available`
+        // (`platform/web/os_web.cpp:258`). Patina has no such callback, so the
+        // flag is polled here: the same frame boundary the callbacks use, and
+        // already the one place that runs once per frame per interpreter.
+        //
+        // ⚠️ The flag is read and `with_backend` RELEASED before any handler
+        // runs. `with_backend` is explicitly non-re-entrant and ASSERTS if a
+        // backend call nests — and a `pwa_update_available` handler calling
+        // `JavaScriptBridge.pwa_update()` straight back is the expected use,
+        // so emitting inside the closure would panic in the ordinary case.
+        let pwa_pending = gdplatform::js_bridge::with_backend(|b| b.pwa_needs_update());
+        // Edge, not level: emitting while the flag is merely true would re-fire
+        // the signal every frame.
+        if pwa_pending && !self.last_pwa_pending {
+            // Same binding requirement as the callbacks above: a handler
+            // connected from a script is a method on that script's instance.
+            self.emit_js_bridge_signal("pwa_update_available", &[], instance.as_mut());
+        }
+        self.last_pwa_pending = pwa_pending;
+
         ran
+    }
+
+    /// Emits a `JavaScriptBridge` singleton signal to THIS interpreter's own
+    /// connected handlers (pat-mgixk.41).
+    ///
+    /// Mirrors `emit_camera_server_signal`, with the owner filter that one
+    /// lacks. The targets are collected before any invocation so the registry
+    /// borrow is released first — a handler that calls `connect` or
+    /// `disconnect` would otherwise panic on a double borrow.
+    fn emit_js_bridge_signal(
+        &mut self,
+        signal: &str,
+        args: &[Variant],
+        mut instance: Option<&mut &mut ClassInstance>,
+    ) {
+        let mine = self.current_node_id;
+        let targets: Vec<CallableRef> = JS_BRIDGE_CONNECTIONS.with(|c| {
+            c.borrow()
+                .iter()
+                .filter(|conn| conn.signal == signal && conn.owner == mine)
+                .map(|conn| conn.callable.clone())
+                .collect()
+        });
+        for cb in targets {
+            // A raising handler must not abort the frame that polled the flag;
+            // Godot's `emit_signal` does not propagate a callee error.
+            match instance.as_mut() {
+                Some(inst) => {
+                    let inst: &mut ClassInstance = &mut ***inst;
+                    let _ = self.with_script_call_stack(|interp| {
+                        interp.resume_with_instance_self(inst, |i| i.invoke_callable(&cb, args))
+                    });
+                }
+                None => {
+                    let _ = self.invoke_callable(&cb, args);
+                }
+            }
+        }
     }
 
     /// Invokes a Callable (lambda or method reference).
@@ -15997,6 +16548,7 @@ impl Interpreter {
         let mut class_def = ClassDef {
             name: None,
             parent_class: None,
+            base: None,
             signals: Vec::new(),
             enums: HashMap::new(),
             methods: HashMap::new(),
@@ -16031,7 +16583,11 @@ impl Interpreter {
                     let mut next: i64 = 0;
                     for (variant_name, explicit) in variants {
                         let val = match explicit {
-                            Some(v) => *v,
+                            // Godot allows any constant expression for an enum
+                            // value, so `RUN = 1 << 2` folds here rather than in
+                            // the parser — this is the first point with an
+                            // expression evaluator (pat-mgixk.18).
+                            Some(expr) => to_int(&self.eval_expr(expr)?)?,
                             None => next,
                         };
                         pairs.push((variant_name.clone(), val));
@@ -16114,6 +16670,9 @@ impl Interpreter {
                             fname.clone(),
                             FuncDef {
                                 params: vec![param.clone()],
+                                // A property setter's value parameter carries
+                                // no declared hint of its own.
+                                param_hints: vec![None],
                                 defaults: vec![None],
                                 body: body.clone(),
                                 // Property accessors are parsed as a bare
@@ -16134,6 +16693,7 @@ impl Interpreter {
                             fname.clone(),
                             FuncDef {
                                 params: vec![],
+                                param_hints: vec![],
                                 defaults: vec![],
                                 body: body.clone(),
                                 // Property accessors are parsed as a bare
@@ -16165,10 +16725,14 @@ impl Interpreter {
                         class_def.is_tool = true;
                     }
                 }
-                Stmt::InnerClass { name, body } => {
+                Stmt::InnerClass { name, parent, body } => {
                     let mut inner = ClassDef {
                         name: Some(name.clone()),
-                        parent_class: None,
+                        // Carries the inner class's `extends Base` through
+                        // instead of the hardcoded `None` this used to pass,
+                        // which silently discarded the base (pat-mgixk.18).
+                        parent_class: parent.clone(),
+                        base: None,
                         signals: Vec::new(),
                         enums: HashMap::new(),
                         methods: HashMap::new(),
@@ -16235,11 +16799,82 @@ impl Interpreter {
             }
         }
 
+        // `extends "res://base.gd"` names another SCRIPT, so load it and hang
+        // it off this definition; member and method lookup then walk the chain
+        // (pat-mgixk.21). An `extends Node2D` names an engine class and has no
+        // `.gd` to read, so `load_base_class` declines it.
+        if let Some(parent) = class_def.parent_class.clone() {
+            class_def.base = self.load_base_class(&parent)?.map(Box::new);
+        }
+
         if let Some(ref name) = class_def.name {
             self.class_registry.insert(name.clone(), class_def.clone());
         }
 
         Ok(class_def)
+    }
+
+    /// Parses the base script `parent` names, or `None` when it names an engine
+    /// class rather than a `.gd` (pat-mgixk.21).
+    ///
+    /// ⚠️ Depth-guarded. `a.gd extends "res://b.gd"` and `b.gd extends
+    /// "res://a.gd"` is a cycle, and this recurses through `run_class`, so
+    /// without the guard a malformed project overflows the stack instead of
+    /// reporting anything. Hitting the cap yields `None` — the chain simply
+    /// stops — which degrades to today's behaviour rather than failing a load.
+    fn load_base_class(&mut self, parent: &str) -> Result<Option<ClassDef>, RuntimeError> {
+        // Godot writes a script base as a path; an engine class is a bare
+        // identifier. `parent_class` already has its quotes stripped.
+        if !(parent.starts_with("res://") || parent.ends_with(".gd")) {
+            return Ok(None);
+        }
+        if BASE_LOAD_DEPTH.with(|d| d.get()) >= MAX_BASE_LOAD_DEPTH {
+            return Ok(None);
+        }
+        let Some(source) = read_resource_source(parent) else {
+            // An unreadable base is not a parse error: a project may ship a
+            // script whose base lives in a pack this host has not mounted.
+            return Ok(None);
+        };
+        BASE_LOAD_DEPTH.with(|d| d.set(d.get() + 1));
+        let parsed = self.run_class(&source);
+        BASE_LOAD_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+        parsed.map(Some)
+    }
+
+    /// `method_name` as declared on `class_def`, or on the nearest base that
+    /// declares it (pat-mgixk.21).
+    ///
+    /// Walks LEAF-FIRST, which is what makes a derived `func` override the
+    /// inherited one: the first match wins.
+    fn lookup_method_in_chain<'a>(
+        class_def: &'a ClassDef,
+        method_name: &str,
+    ) -> Option<&'a FuncDef> {
+        let mut cursor = Some(class_def);
+        while let Some(def) = cursor {
+            if let Some(func) = def.methods.get(method_name) {
+                return Some(func);
+            }
+            cursor = def.base.as_deref();
+        }
+        None
+    }
+
+    /// The `extends` chain from the ROOT base down to `leaf`.
+    ///
+    /// Root-first is what makes a derived declaration shadow the base's: the
+    /// caller walks this in order and overwrites as it goes, which is Godot's
+    /// member-shadowing direction.
+    fn class_chain_root_first<'a>(leaf: &'a ClassDef) -> Vec<&'a ClassDef> {
+        let mut chain = Vec::new();
+        let mut cursor = Some(leaf);
+        while let Some(def) = cursor {
+            chain.push(def);
+            cursor = def.base.as_deref();
+        }
+        chain.reverse();
+        chain
     }
 
     /// Creates a new instance of a class, initializing instance variables.
@@ -16248,18 +16883,37 @@ impl Interpreter {
         class_def: &ClassDef,
     ) -> Result<ClassInstance, RuntimeError> {
         let mut properties = HashMap::new();
-        for var in &class_def.instance_vars {
-            let is_onready = var.annotations.iter().any(|a| a.name == "onready");
-            let val = if is_onready {
-                // @onready vars are deferred until _ready; start as Nil.
-                Variant::Nil
-            } else {
-                match &var.default {
-                    Some(expr) => self.eval_expr(expr)?,
-                    None => Variant::Nil,
-                }
-            };
-            properties.insert(var.name.clone(), val);
+        // Base first, so a derived `var` of the same name overwrites the
+        // inherited one (pat-mgixk.21). Before this, a script extending another
+        // script started with ONLY its own vars, so a base's `var hp = 10` did
+        // not exist on the instance at all and every inherited method touching
+        // it operated on Nil.
+        for def in Self::class_chain_root_first(class_def) {
+            for var in &def.instance_vars {
+                let is_onready = var.annotations.iter().any(|a| a.name == "onready");
+                let val = if is_onready {
+                    // @onready vars are deferred until _ready; start as Nil.
+                    Variant::Nil
+                } else {
+                    match (&var.default, &var.type_hint) {
+                        // `var speed: float = 200` holds 200.0, not 200: Godot's
+                        // typed assign converts (pat-mgixk.19). Without this,
+                        // `speed / 3` integer-divided.
+                        (Some(expr), Some(hint)) => {
+                            let v = self.eval_expr(expr)?;
+                            crate::container_typing::coerce_for_declared_slot(v, hint)
+                                .map_err(container_error)?
+                        }
+                        (Some(expr), None) => self.eval_expr(expr)?,
+                        // `var count: int` with no initialiser is 0, not null.
+                        // GDScript's analyzer default-initialises a typed member,
+                        // so `count += 1` works; it used to operate on Nil.
+                        (None, Some(hint)) => crate::container_typing::typed_default(hint),
+                        (None, None) => Variant::Nil,
+                    }
+                };
+                properties.insert(var.name.clone(), val);
+            }
         }
         Ok(ClassInstance {
             class_def: class_def.clone(),
@@ -16269,21 +16923,68 @@ impl Interpreter {
 
     /// Resolves `@onready` variables by evaluating their default expressions.
     ///
-    /// Call this after the `_ready` lifecycle callback fires to populate
-    /// deferred variables that were initialized to `Nil`.
+    /// Runs immediately BEFORE the `_ready` callback, with the node already
+    /// inside the tree — Godot evaluates these from
+    /// `GDScriptInstance::notification`'s `NOTIFICATION_READY` handler
+    /// (`implicit_ready`), which is what makes `@onready var s = $Sprite2D` the
+    /// canonical form. The caller must therefore have scene access installed;
+    /// without it `$Child` evaluates to `Err("get_node() requires scene
+    /// access")`.
+    ///
+    /// ⚠️ The doc here used to say "call this AFTER `_ready` fires", which is
+    /// backwards and is how the scene tree ended up resolving these with no
+    /// accessor at all (pat-mgixk.20).
+    ///
+    /// Every `@onready` var is attempted even after one fails, and the FIRST
+    /// error is returned at the end rather than short-circuiting. The old `?`
+    /// inside the loop meant one unresolvable initializer left every LATER
+    /// `@onready` var `Nil` — so a single bad path silently emptied the rest of
+    /// the script's deferred state, and the caller discarded the error anyway.
     pub fn resolve_onready_vars(
         &mut self,
         instance: &mut ClassInstance,
     ) -> Result<(), RuntimeError> {
-        for var in &instance.class_def.instance_vars {
-            if var.annotations.iter().any(|a| a.name == "onready") {
-                if let Some(expr) = &var.default {
-                    let val = self.eval_expr(expr)?;
-                    instance.properties.insert(var.name.clone(), val);
+        // Collected up front, and the expression cloned, so the loop can hold a
+        // `&mut` on both the interpreter (for `eval_expr`) and
+        // `instance.properties` without borrowing `instance.class_def` across
+        // the call.
+        let pending: Vec<(String, Expr)> = instance
+            .class_def
+            .instance_vars
+            .iter()
+            .filter(|var| var.annotations.iter().any(|a| a.name == "onready"))
+            .filter_map(|var| {
+                var.default
+                    .as_ref()
+                    .map(|expr| (var.name.clone(), expr.clone()))
+            })
+            .collect();
+
+        let mut first_error: Option<RuntimeError> = None;
+        for (name, expr) in pending {
+            match self.eval_expr(&expr) {
+                Ok(value) => {
+                    instance.properties.insert(name, value);
+                }
+                Err(err) => {
+                    // Surfaced rather than swallowed: an `@onready` that cannot
+                    // resolve leaves the var `Nil`, and every later use reads as
+                    // "the node is missing" instead of "the initializer failed".
+                    tracing::error!(
+                        var = %name,
+                        error = %err,
+                        "@onready initializer failed to resolve"
+                    );
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
                 }
             }
         }
-        Ok(())
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     /// Calls a method on a class instance.
@@ -16534,10 +17235,14 @@ impl Interpreter {
         method_name: &str,
         args: &[Variant],
     ) -> Result<Variant, RuntimeError> {
-        let func = instance
-            .class_def
-            .methods
-            .get(method_name)
+        // pat-mgixk.14: the method half. `_process` and every method it calls
+        // come through here, which is what gives the Profiler tab its rows.
+        let _profile = ScriptCallTimer::start(method_name);
+        // Walks the `extends` chain, so a method declared only in a base
+        // script is callable on a derived instance (pat-mgixk.21). This used to
+        // read `instance.class_def.methods` alone and raise UndefinedFunction
+        // for anything inherited.
+        let func = Self::lookup_method_in_chain(&instance.class_def, method_name)
             .cloned()
             .ok_or_else(|| {
                 RuntimeError::new(RuntimeErrorKind::UndefinedFunction(method_name.to_string()))
@@ -16561,10 +17266,23 @@ impl Interpreter {
 
         let prev_self = self.self_instance.take();
         self.self_instance = Some(instance.clone());
+        // `super()` has to know WHICH method it is inside, and this is the only
+        // place that knows. `call_user_func_impl` records this for script-level
+        // functions, but instance methods never did — so `call_super` could
+        // only ever guess `_init` (pat-mgixk.21). Restored at every exit below,
+        // paired with `prev_self` so the two cannot drift apart.
+        let prev_function = self.current_function.replace(method_name.to_string());
 
-        for (name, func_def) in &instance.class_def.methods {
-            self.function_registry
-                .insert(name.clone(), func_def.clone());
+        // ROOT-FIRST, so a derived override replaces the inherited entry
+        // rather than the other way round. This registry is what lets a bare
+        // `hit()` inside a body resolve, so without the base's methods here an
+        // inherited sibling call raised even though the method existed
+        // (pat-mgixk.21).
+        for def in Self::class_chain_root_first(&instance.class_def) {
+            for (name, func_def) in &def.methods {
+                self.function_registry
+                    .insert(name.clone(), func_def.clone());
+            }
         }
 
         self.environment.push_scope();
@@ -16576,6 +17294,12 @@ impl Interpreter {
             } else {
                 Variant::Nil
             };
+            // A declared parameter type is enforced at the binding, not just
+            // documented (pat-mgixk.19).
+            //
+            // `&func`: this `func` is an owned clone out of the registry /
+            // method table, unlike `call_super`'s borrow from `methods.get`.
+            let val = coerce_param_value(&func, i, val)?;
             self.environment.define(param.clone(), val);
         }
         for (name, val) in &instance.properties {
@@ -16633,6 +17357,27 @@ impl Interpreter {
             if let Some(&line) = body_lines.get(i) {
                 self.current_line = line;
             }
+            // pat-mgixk.14: the method half of the same hook. The teardown
+            // mirrors the Suspend arm below, property write-back included — a
+            // breakpoint must leave `self` exactly as the statements that have
+            // already run left it, or the locals panel and the scene would
+            // disagree about the same object.
+            let stmt_line = self.current_line;
+            if let Some(target) = self.debug_break_before(stmt_line) {
+                let remaining = body[i..].to_vec();
+                let remaining_lines = body_lines.get(i..).map(|s| s.to_vec()).unwrap_or_default();
+                self.park_coroutine(remaining, target, method_name, true);
+                self.publish_debug_pause(method_name, stmt_line, remaining_lines);
+                if let Some(ref updated) = self.self_instance {
+                    instance.properties = updated.properties.clone();
+                }
+                self.environment.pop_scope();
+                self.environment.pop_scope();
+                self.self_instance = prev_self;
+                self.current_function = prev_function;
+                self.call_depth -= 1;
+                return Ok(Variant::Nil);
+            }
             // pat-s3rrv.19: a raise must tear down exactly like the normal
             // exit below. `?` here returned before ANY of it:
             //
@@ -16659,6 +17404,7 @@ impl Interpreter {
                     }
                     self.environment.pop_scope();
                     self.self_instance = prev_self;
+                    self.current_function = prev_function;
                     self.call_depth -= 1;
                     return Err(err);
                 }
@@ -16678,6 +17424,7 @@ impl Interpreter {
                     self.environment.pop_scope();
                     self.environment.pop_scope();
                     self.self_instance = prev_self;
+                    self.current_function = prev_function;
                     self.call_depth -= 1;
                     return Ok(Variant::Nil);
                 }
@@ -16694,33 +17441,71 @@ impl Interpreter {
 
         self.environment.pop_scope();
         self.self_instance = prev_self;
+        self.current_function = prev_function;
         self.call_depth -= 1;
         Ok(return_val)
     }
 
     /// Calls the parent class method (for `super()` calls).
+    /// Bare `super(...)`: the PARENT's implementation of the method currently
+    /// executing.
+    ///
+    /// ⚠️ This used to call the parent's `_init` whatever method it was written
+    /// in, so `super()` inside `_ready` ran the constructor (pat-mgixk.21).
+    /// `_init` survives only as the fallback for when nothing recorded the
+    /// executing method, which is the constructor path itself.
     fn call_super(&mut self, args: &[Variant]) -> Result<Variant, RuntimeError> {
-        let parent_name = self
-            .self_instance
-            .as_ref()
-            .and_then(|inst| inst.class_def.parent_class.clone())
-            .ok_or_else(|| {
-                RuntimeError::new(RuntimeErrorKind::TypeError(
-                    "super() called but no parent class".into(),
-                ))
-            })?;
+        let method = self
+            .current_function
+            .clone()
+            .unwrap_or_else(|| "_init".to_string());
+        self.call_super_method(&method, args)
+    }
 
-        let parent_def = self
-            .class_registry
+    /// The parent script's definition, for `super`.
+    ///
+    /// Prefers the parsed base `run_class` attached. A parent named by
+    /// `extends "res://base.gd"` is NEVER in `class_registry` — that map is
+    /// keyed by `class_name` — so the registry lookup alone could not see a
+    /// script base at all. The registry remains the path for
+    /// `extends SomeGlobalClass`.
+    fn resolve_super_class_def(&self) -> Result<ClassDef, RuntimeError> {
+        let inst = self.self_instance.as_ref().ok_or_else(|| {
+            RuntimeError::new(RuntimeErrorKind::TypeError(
+                "super() called outside a class instance".into(),
+            ))
+        })?;
+        if let Some(base) = inst.class_def.base.as_deref() {
+            return Ok(base.clone());
+        }
+        let parent_name = inst.class_def.parent_class.clone().ok_or_else(|| {
+            RuntimeError::new(RuntimeErrorKind::TypeError(
+                "super() called but no parent class".into(),
+            ))
+        })?;
+        self.class_registry
             .get(&parent_name)
             .cloned()
             .ok_or_else(|| {
                 RuntimeError::new(RuntimeErrorKind::UndefinedFunction(format!(
                     "parent class '{parent_name}'"
                 )))
-            })?;
+            })
+    }
 
-        if let Some(func) = parent_def.methods.get("_init") {
+    /// Runs `method_name` as the PARENT defines it — the shared body of
+    /// `super(...)` and `super.method(...)` (pat-mgixk.21).
+    fn call_super_method(
+        &mut self,
+        method_name: &str,
+        args: &[Variant],
+    ) -> Result<Variant, RuntimeError> {
+        let parent_def = self.resolve_super_class_def()?;
+
+        // Walks the parent's OWN chain too, so `super.m()` reaches a
+        // grandparent's `m` when the direct parent does not define it.
+        let found = Self::lookup_method_in_chain(&parent_def, method_name).cloned();
+        if let Some(ref func) = found {
             if args.len() < func.min_args() || args.len() > func.params.len() {
                 return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                     "super() takes {} arguments, got {}",
@@ -16737,6 +17522,9 @@ impl Interpreter {
                 } else {
                     Variant::Nil
                 };
+                // A declared parameter type is enforced at the binding, not
+                // just documented (pat-mgixk.19).
+                let val = coerce_param_value(func, i, val)?;
                 self.environment.define(param.clone(), val);
             }
             let mut return_val = Variant::Nil;
@@ -16749,6 +17537,8 @@ impl Interpreter {
             self.environment.pop_scope();
             Ok(return_val)
         } else {
+            // Godot is quiet here: `super()` inside `_ready` on a base that
+            // declares no `_ready` is legal and simply does nothing.
             Ok(Variant::Nil)
         }
     }
@@ -16829,7 +17619,6 @@ fn index_into(container: &Variant, idx: &Variant) -> Result<Variant, RuntimeErro
                 *i as usize
             };
             a.get(index)
-                
                 .ok_or(RuntimeError::new(RuntimeErrorKind::IndexOutOfBounds {
                     index: *i,
                     length: a.len(),
@@ -18313,7 +19102,8 @@ fn variant_to_gd_string(v: &Variant) -> String {
                 // string-like keys that dominate, and a stable order for the
                 // rest.
                 let mut items: Vec<(String, String)> = d
-                    .to_dict().iter()
+                    .to_dict()
+                    .iter()
                     .map(|(k, val)| (variant_to_gd_string(k), variant_to_gd_string(val)))
                     .collect();
                 items.sort_by(|a, b| a.0.cmp(&b.0));
@@ -18746,7 +19536,8 @@ fn variant_contains_object(v: &Variant) -> bool {
         Variant::ObjectId(_) => true,
         Variant::Array(items) => items.to_vec().iter().any(variant_contains_object),
         Variant::Dictionary(d) => d
-            .to_dict().iter()
+            .to_dict()
+            .iter()
             .any(|(k, val)| variant_contains_object(k) || variant_contains_object(val)),
         _ => false,
     }
@@ -19527,6 +20318,24 @@ fn arg_as_string(args: &[Variant], idx: usize, ctx: &str) -> Result<String, Runt
     }
 }
 
+thread_local! {
+    /// Why the last `FileAccess.open` failed, for `FileAccess.get_open_error()`.
+    ///
+    /// Thread-local rather than a global because the interpreter's other
+    /// script-visible singletons are (see `PROJECT_SETTINGS`), and a script only
+    /// ever reads this back on the thread that attempted the open.
+    static FILE_OPEN_ERROR: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn set_file_open_error(msg: Option<String>) {
+    FILE_OPEN_ERROR.with(|e| *e.borrow_mut() = msg);
+}
+
+fn file_open_error() -> Option<String> {
+    FILE_OPEN_ERROR.with(|e| e.borrow().clone())
+}
+
 fn call_file_access_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
     use gdcore::{FileAccess, FileMode};
     match method {
@@ -19551,8 +20360,37 @@ fn call_file_access_static(method: &str, args: &[Variant]) -> Result<Variant, Ru
                     "FileAccess.open() invalid mode flags {mode_flags}"
                 )))
             })?;
-            let id = FileAccess::open_handle(&path, mode).map_err(engine_err_to_runtime)?;
-            Ok(Variant::ObjectId(id))
+            // Godot's `FileAccess.open` returns **null** on failure and records the
+            // reason for `get_open_error()`; it does not raise
+            // (`core/io/file_access.cpp`). Raising here meant the idiom every save
+            // system is written around —
+            // `var f = FileAccess.open(p, READ); if f == null: ...` — could not be
+            // expressed: the script died before it could test the result
+            // (pat-mgixk.54).
+            match FileAccess::open_handle(&path, mode) {
+                Ok(id) => {
+                    set_file_open_error(None);
+                    Ok(Variant::ObjectId(id))
+                }
+                Err(e) => {
+                    set_file_open_error(Some(e.to_string()));
+                    Ok(Variant::Nil)
+                }
+            }
+        }
+        // Pairs with the `open` arm above: a script that gets `null` back asks this
+        // why. Shaped like the instance `get_error`: `Int(0)` for OK (Godot's
+        // `Error::OK`), the message otherwise.
+        "get_open_error" => {
+            if !args.is_empty() {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "FileAccess.get_open_error() takes 0 arguments".into(),
+                )));
+            }
+            Ok(match file_open_error() {
+                Some(msg) => Variant::String(msg),
+                None => Variant::Int(0),
+            })
         }
         "file_exists" => {
             if args.len() != 1 {
@@ -19607,10 +20445,16 @@ fn call_file_access_instance(
                     )))
                 }
             };
+            // A real `PackedByteArray`, not an `Array` of `Int` (pat-mgixk.54).
+            // Godot's `get_buffer` is typed, and the untyped Array leaked: a script
+            // could not hand the result to anything expecting bytes, and
+            // `var b: PackedByteArray = f.get_buffer(n)` failed its type check.
+            //
+            // ⚠️ `store_buffer` below gained a `PackedByteArray` arm in the same
+            // change, or this would have broken the obvious round trip
+            // `dst.store_buffer(src.get_buffer(n))`.
             FileAccess::with_handle_mut(id, |fa| {
-                fa.get_buffer(len).map(|b| {
-                    Variant::Array(b.into_iter().map(|x| Variant::Int(x as i64)).collect())
-                })
+                fa.get_buffer(len).map(Variant::PackedByteArray)
             })
             .map_err(engine_err_to_runtime)
         }
@@ -19629,8 +20473,11 @@ fn call_file_access_instance(
                 )));
             }
             let bytes: Vec<u8> = match &args[0] {
+                // The shape `get_buffer` hands back; see its note above.
+                Variant::PackedByteArray(b) => b.clone(),
                 Variant::Array(items) => items
-                    .to_vec().iter()
+                    .to_vec()
+                    .iter()
                     .map(|v| match v {
                         Variant::Int(i) => Ok(*i as u8),
                         _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -19655,6 +20502,158 @@ fn call_file_access_instance(
             FileAccess::close_handle(id);
             Ok(Variant::Nil)
         }
+        // -- the typed read/write surface (pat-mgixk.54) ---------------------
+        //
+        // 🔑 Every method below was ALREADY implemented in `gdcore::FileAccess`
+        // and simply had no script dispatch, so `f.store_32(x)` raised
+        // UndefinedFunction while the engine function sat two lines away. Save-game
+        // and binary-format code is written entirely in these calls.
+        //
+        // Grouped with macros because the arms are mechanically identical: the
+        // interesting part is the (name, engine method) pairing, and spelling out
+        // twelve near-copies invites one of them to drift.
+        "store_8" | "store_16" | "store_32" | "store_64" => {
+            let v = arg_as_int(args, 0, method)?;
+            FileAccess::with_handle_mut(id, |fa| {
+                match method {
+                    "store_8" => fa.store_8(v as u8)?,
+                    "store_16" => fa.store_16(v as u16)?,
+                    "store_32" => fa.store_32(v as u32)?,
+                    _ => fa.store_64(v as u64)?,
+                }
+                Ok(Variant::Nil)
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "store_float" | "store_double" | "store_real" => {
+            let v = match args.first() {
+                Some(Variant::Float(f)) => *f,
+                Some(Variant::Int(i)) => *i as f64,
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "{method}() expects a number"
+                    ))))
+                }
+            };
+            FileAccess::with_handle_mut(id, |fa| {
+                // `store_real` is Godot's alias for the engine's real_t width,
+                // which is a double in Patina as in a default Godot build.
+                if method == "store_float" {
+                    fa.store_float(v as f32)?;
+                } else {
+                    fa.store_double(v)?;
+                }
+                Ok(Variant::Nil)
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "get_8" | "get_16" | "get_32" | "get_64" => {
+            FileAccess::with_handle_mut(id, |fa| {
+                Ok(Variant::Int(match method {
+                    "get_8" => fa.get_8()? as i64,
+                    "get_16" => fa.get_16()? as i64,
+                    "get_32" => fa.get_32()? as i64,
+                    // Godot's `get_64` returns a signed int, and Variant::Int is
+                    // i64, so the cast is the documented reinterpretation rather
+                    // than a lossy narrowing.
+                    _ => fa.get_64()? as i64,
+                }))
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "get_float" | "get_double" | "get_real" => FileAccess::with_handle_mut(id, |fa| {
+            Ok(Variant::Float(if method == "get_float" {
+                fa.get_float()? as f64
+            } else {
+                fa.get_double()?
+            }))
+        })
+        .map_err(engine_err_to_runtime),
+        "store_line" => {
+            let text = arg_as_string(args, 0, "store_line")?;
+            FileAccess::with_handle_mut(id, |fa| {
+                // Godot appends exactly "\n" (`file_access.cpp store_line`), not the
+                // platform separator — a file written on Windows must read back
+                // identically everywhere.
+                fa.store_string(&format!("{text}\n"))?;
+                Ok(Variant::Nil)
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "get_line" => FileAccess::with_handle_mut(id, |fa| {
+            // Byte at a time rather than a buffered read, because the cursor must
+            // end up immediately after the newline: a script interleaving
+            // `get_line` with `get_32` depends on that, and over-reading into a
+            // buffer would silently consume the next value.
+            let mut out = Vec::new();
+            while !fa.eof_reached() {
+                match fa.get_8() {
+                    Ok(b'\n') => break,
+                    Ok(b) => out.push(b),
+                    // EOF mid-line returns what was read, as Godot does.
+                    Err(_) => break,
+                }
+            }
+            // A CRLF file leaves the \r behind; Godot strips it.
+            if out.last() == Some(&b'\r') {
+                out.pop();
+            }
+            Ok(Variant::String(String::from_utf8_lossy(&out).into_owned()))
+        })
+        .map_err(engine_err_to_runtime),
+        "seek" => {
+            let pos = arg_as_int(args, 0, "seek")?;
+            FileAccess::with_handle_mut(id, |fa| {
+                fa.seek(pos.max(0) as u64)?;
+                Ok(Variant::Nil)
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "seek_end" => {
+            // Godot's `seek_end(position = 0)` counts BACK from the end.
+            let back = args.first().map_or(Ok(0), |_| arg_as_int(args, 0, "seek_end"))?;
+            FileAccess::with_handle_mut(id, |fa| {
+                let len = fa.get_length()? as i64;
+                fa.seek((len + back).clamp(0, len) as u64)?;
+                Ok(Variant::Nil)
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "get_position" => FileAccess::with_handle_mut(id, |fa| {
+            Ok(Variant::Int(fa.get_position()? as i64))
+        })
+        .map_err(engine_err_to_runtime),
+        "get_length" => {
+            FileAccess::with_handle_mut(id, |fa| Ok(Variant::Int(fa.get_length()? as i64)))
+                .map_err(engine_err_to_runtime)
+        }
+        "eof_reached" => {
+            FileAccess::with_handle_mut(id, |fa| Ok(Variant::Bool(fa.eof_reached())))
+                .map_err(engine_err_to_runtime)
+        }
+        "set_big_endian" => {
+            let on = matches!(args.first(), Some(Variant::Bool(true)));
+            FileAccess::with_handle_mut(id, |fa| {
+                fa.set_big_endian(on);
+                Ok(Variant::Nil)
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "is_big_endian" => {
+            FileAccess::with_handle_mut(id, |fa| Ok(Variant::Bool(fa.is_big_endian())))
+                .map_err(engine_err_to_runtime)
+        }
+        // ⚠️ `path()` returns `&Path`, which does NOT implement `Display`, so
+        // `.to_string()` does not compile. `to_string_lossy` is the conversion.
+        "get_path" => FileAccess::with_handle_mut(id, |fa| {
+            Ok(Variant::String(
+                fa.path().to_string_lossy().into_owned(),
+            ))
+        })
+        .map_err(engine_err_to_runtime),
+        // The handle exists, so the file is open; a closed handle is no longer a
+        // FileAccess object at all and never reaches this dispatch.
+        "is_open" => Ok(Variant::Bool(true)),
         "get_error" => FileAccess::with_handle_mut(id, |fa| {
             Ok(match fa.get_error() {
                 Some(e) => Variant::String(e.to_string()),
@@ -19774,9 +20773,7 @@ fn call_dir_access_instance(
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-static PROCESS_EPOCH: OnceLock<Instant> = OnceLock::new();
 static ENGINE_EDITOR_HINT: AtomicBool = AtomicBool::new(false);
 static ENGINE_FPS_MILLI: AtomicU64 = AtomicU64::new(60_000); // fps * 1000
 
@@ -19883,12 +20880,22 @@ fn engine_singletons() -> &'static Mutex<HashMap<String, Variant>> {
     ENGINE_SINGLETONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn process_epoch() -> &'static Instant {
-    PROCESS_EPOCH.get_or_init(Instant::now)
-}
+// ⚠️ These forward to `gdplatform::os`, which is `web_time`-backed, instead of
+// keeping a private `std::time::Instant` epoch here. `std::time::Instant::now()`
+// panics on `wasm32-unknown-unknown`, and `patina-web` reaches this module
+// through `gdscene -> gdscript-interop`, so `OS.get_ticks_msec()` from a script
+// was a live crash in the browser that native tests could never see
+// (pat-mgixk.40).
+//
+// Sharing the engine's one epoch is also the more faithful answer: Godot's ticks
+// are measured from engine start, not from whichever subsystem asked first.
 
 fn ticks_msec() -> i64 {
-    process_epoch().elapsed().as_millis() as i64
+    gdplatform::os::get_ticks_msec() as i64
+}
+
+fn ticks_usec() -> i64 {
+    gdplatform::os::get_ticks_usec() as i64
 }
 
 /// Test/runtime hook: set whether `Engine.is_editor_hint()` returns true.
@@ -20165,7 +21172,7 @@ fn call_os_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeErro
                     "OS.get_ticks_usec() takes 0 arguments".into(),
                 )));
             }
-            Ok(Variant::Int(process_epoch().elapsed().as_micros() as i64))
+            Ok(Variant::Int(ticks_usec()))
         }
         "is_debug_build" => {
             if !args.is_empty() {
@@ -20235,7 +21242,8 @@ fn call_os_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeErro
             let arguments = match args.get(1) {
                 Some(Variant::PackedStringArray(v)) => v.clone(),
                 Some(Variant::Array(items)) => items
-                    .to_vec().iter()
+                    .to_vec()
+                    .iter()
                     .map(|v| match v {
                         Variant::String(s) => s.clone(),
                         other => other.to_string(),
@@ -20881,6 +21889,17 @@ thread_local! {
         std::cell::RefCell::new(Vec::new());
     /// Absolute path of the `project.godot` the settings were seeded from, so
     /// `ProjectSettings.save()` can write back where it read from.
+    /// The keys the PROJECT declared (plus anything a script `set_setting`s),
+    /// as opposed to the engine defaults also seeded into the store.
+    ///
+    /// 🔑 Exists because `ProjectSettings.save()` writes the store back to
+    /// `project.godot`. Once engine defaults are seeded for
+    /// `get_setting`/`has_setting` to answer them (pat-mgixk.42), saving the
+    /// whole store would persist ~230 engine defaults into the user's project —
+    /// something Godot never does; it writes only overrides. So the store
+    /// answers reads and this set decides what is written back.
+    static PROJECT_SETTINGS_DECLARED: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
     static PROJECT_SETTINGS_PATH: std::cell::RefCell<Option<String>> =
         std::cell::RefCell::new(None);
 }
@@ -20902,9 +21921,40 @@ where
     K: Into<String>,
 {
     PROJECT_SETTINGS.with(|s| {
+        PROJECT_SETTINGS_DECLARED.with(|d| {
+            let mut store = s.borrow_mut();
+            let mut declared = d.borrow_mut();
+            for (key, value) in settings {
+                let key = key.into();
+                declared.insert(key.clone());
+                store.insert(key, value);
+            }
+        });
+    });
+}
+
+/// Seeds the engine's registered DEFAULTS into the same store, without marking
+/// them as project-declared.
+///
+/// Godot's `GLOBAL_DEF` puts every default into `ProjectSettings::props`, so
+/// `get_setting("physics/2d/default_gravity")` answers `980.0` in a project
+/// whose `project.godot` never mentions it — the classic `CharacterBody2D`
+/// idiom, which returned `Nil` here before (pat-mgixk.42).
+///
+/// ⚠️ Insert-if-absent, and ORDER-INDEPENDENT because of it: a declared value or
+/// a script's `set_setting` is never clobbered by a default, whichever is seeded
+/// first. The keys are not added to the declared set, so
+/// [`ProjectSettings.save()`](save_project_settings_to) still writes back only
+/// what the project or a script actually set.
+pub fn seed_project_settings_defaults<I, K>(defaults: I)
+where
+    I: IntoIterator<Item = (K, Variant)>,
+    K: Into<String>,
+{
+    PROJECT_SETTINGS.with(|s| {
         let mut store = s.borrow_mut();
-        for (key, value) in settings {
-            store.insert(key.into(), value);
+        for (key, value) in defaults {
+            store.entry(key.into()).or_insert(value);
         }
     });
 }
@@ -20936,6 +21986,7 @@ pub fn set_project_settings_path(path: impl Into<String>) {
 /// thread, and for a host switching projects.
 pub fn reset_project_settings() {
     PROJECT_SETTINGS.with(|s| s.borrow_mut().clear());
+    PROJECT_SETTINGS_DECLARED.with(|d| d.borrow_mut().clear());
     PROJECT_FEATURE_TAGS.with(|t| t.borrow_mut().clear());
     PROJECT_SETTINGS_PATH.with(|p| *p.borrow_mut() = None);
 }
@@ -20976,16 +22027,26 @@ fn save_project_settings_to(path: &str) -> i64 {
         return ERR_FILE_CANT_OPEN;
     };
     PROJECT_SETTINGS.with(|s| {
-        for (key, value) in s.borrow().iter() {
-            // `to_godot_format` splits each key at its first `/` into
-            // section + key, so a key with no section cannot be represented.
-            if !key.contains('/') {
-                continue;
+        PROJECT_SETTINGS_DECLARED.with(|d| {
+            let declared = d.borrow();
+            for (key, value) in s.borrow().iter() {
+                // ⚠️ Overrides only. The store also holds every seeded engine
+                // default so `get_setting` can answer it; writing those back
+                // would stamp ~230 defaults into the user's `project.godot`,
+                // which Godot never does (pat-mgixk.42).
+                if !declared.contains(key) {
+                    continue;
+                }
+                // `to_godot_format` splits each key at its first `/` into
+                // section + key, so a key with no section cannot be represented.
+                if !key.contains('/') {
+                    continue;
+                }
+                if let Some(sv) = variant_to_settings_value(value) {
+                    ps.set(key, sv);
+                }
             }
-            if let Some(sv) = variant_to_settings_value(value) {
-                ps.set(key, sv);
-            }
-        }
+        });
     });
     match std::fs::write(path, ps.to_godot_format()) {
         Ok(()) => OK,
@@ -21098,6 +22159,12 @@ fn call_projectsettings_static(method: &str, args: &[Variant]) -> Result<Variant
         "set_setting" => {
             let name = setting_name(args, "ProjectSettings.set_setting()")?;
             let value = args.get(1).cloned().unwrap_or(Variant::Nil);
+            // Marked declared: a value a script sets at runtime IS an override,
+            // so `save()` must write it back. Only the seeded engine defaults
+            // stay unmarked (pat-mgixk.42).
+            PROJECT_SETTINGS_DECLARED.with(|d| {
+                d.borrow_mut().insert(name.clone());
+            });
             PROJECT_SETTINGS.with(|s| {
                 s.borrow_mut().insert(name, value);
             });
@@ -21111,6 +22178,15 @@ fn call_projectsettings_static(method: &str, args: &[Variant]) -> Result<Variant
         }
         "clear" => {
             let name = setting_name(args, "ProjectSettings.clear()")?;
+            // Godot's `clear` drops the property outright, default included, so
+            // a later `get_setting` falls back to the caller's default. Dropped
+            // from the declared set too, to keep the two in step — the save loop
+            // walks the store, so a stale entry here could not mis-write
+            // anything, but a resurrected key should come back as a default
+            // rather than as an override (pat-mgixk.42).
+            PROJECT_SETTINGS_DECLARED.with(|d| {
+                d.borrow_mut().remove(&name);
+            });
             PROJECT_SETTINGS.with(|s| {
                 s.borrow_mut().remove(&name);
             });
@@ -21494,9 +22570,65 @@ thread_local! {
     /// `Callable`s registered through `JavaScriptBridge.create_callback`, keyed
     /// by the id handed to the backend. JavaScript invoking the function queues
     /// that id; [`Interpreter::pump_javascript_callbacks`] runs the `Callable`.
-    static JS_CALLBACKS: std::cell::RefCell<HashMap<u64, CallableRef>> =
+    ///
+    /// ⚠️ thread_local, so EVERY interpreter on the thread can resolve every
+    /// id. That is why the entry records which node registered it — without the
+    /// owner, the first interpreter to pump runs other scripts' callbacks
+    /// against its own instance (pat-mgixk.41).
+    static JS_CALLBACKS: std::cell::RefCell<HashMap<u64, JsCallbackEntry>> =
         std::cell::RefCell::new(HashMap::new());
     static NEXT_JS_CALLBACK: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    /// `JavaScriptBridge` signal connections (pat-mgixk.41).
+    ///
+    /// The singleton is dispatched by NAME and has no object id, so the scene
+    /// tree's node-keyed `connect_signal` cannot represent it as a signal
+    /// SOURCE — hence a registry of its own, as `CAMERA_SERVER_CONNECTIONS`
+    /// does for CameraServer.
+    static JS_BRIDGE_CONNECTIONS: std::cell::RefCell<Vec<JsBridgeConnection>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
+/// A `Callable` parked by `JavaScriptBridge.create_callback`, with the node
+/// whose script registered it (pat-mgixk.41).
+///
+/// A named struct rather than a tuple deliberately: the two fields are both
+/// opaque-ish, and a positional swap at either of the registry's use sites
+/// would compile and then misroute every callback.
+/// A `JavaScriptBridge` singleton signal connection (pat-mgixk.41).
+///
+/// ⚠️ Carries an `owner`, which `CAMERA_SERVER_CONNECTIONS` — the registry this
+/// mirrors — does not. A `CallableRef::Method { target_id: 0, .. }` means
+/// "self", so without the owner a handler connected by script B and emitted by
+/// script A's interpreter runs against A's instance. Recorded so each
+/// interpreter emits only to its own handlers.
+#[derive(Clone)]
+struct JsBridgeConnection {
+    signal: String,
+    callable: CallableRef,
+    owner: Option<u64>,
+}
+
+/// Validates a `JavaScriptBridge.connect`/`disconnect`/`is_connected` signal
+/// argument, accepting both `String` and `StringName` as every other arm does.
+fn js_bridge_signal_name(args: &[Variant], who: &str) -> Result<String, RuntimeError> {
+    match args.first() {
+        Some(Variant::String(s)) => Ok(s.clone()),
+        // `as_str().to_string()`, not `to_string()` — StringName has no Display.
+        Some(Variant::StringName(s)) => Ok(s.as_str().to_string()),
+        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "JavaScriptBridge.{who}() takes a signal name"
+        )))),
+    }
+}
+
+#[derive(Clone)]
+struct JsCallbackEntry {
+    callable: CallableRef,
+    /// The registering interpreter's `current_node_id`, or `None` for an
+    /// interpreter with no scene access (a bare `Interpreter`, as the
+    /// gdscript-interop tests use). `None` owner + `None` pumper match, so the
+    /// standalone path keeps working unchanged.
+    owner: Option<u64>,
 }
 
 /// Returns `true` when `id` names a `JavaScriptObject`.
@@ -21563,7 +22695,16 @@ fn variant_to_js(value: &Variant) -> BridgeValue {
 /// — defined, inert values rather than `UndefinedFunction`. The headless return
 /// values are therefore unchanged from before this bead; what changed is that a
 /// web build now reaches real JavaScript instead of the same stub.
-fn call_javascriptbridge_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
+/// `owner` is the registering interpreter's `current_node_id`, passed in
+/// because this is a FREE function: it reached for `self.current_node_id`
+/// directly, which is E0424 and broke the whole crate (fixed by EmeraldCreek
+/// for pat-mgixk.41; see mail 90128/90134 — revert freely if you wanted this as
+/// an `Interpreter` method instead).
+fn call_javascriptbridge_static(
+    method: &str,
+    args: &[Variant],
+    owner: Option<u64>,
+) -> Result<Variant, RuntimeError> {
     use gdplatform::js_bridge as bridge;
     match method {
         "eval" => {
@@ -21639,11 +22780,63 @@ fn call_javascriptbridge_static(method: &str, args: &[Variant]) -> Result<Varian
                 n.set(v + 1);
                 v
             });
-            JS_CALLBACKS.with(|m| m.borrow_mut().insert(id, (**callable).clone()));
+            // The owner is the node this interpreter runs for. `current_node_id`
+            // is set by `set_scene_access` and deliberately NOT reset by
+            // `clear_scene_access`, so it is still the right node at pump time,
+            // long after the call that registered the callback returned.
+            let entry = JsCallbackEntry {
+                callable: (**callable).clone(),
+                owner,
+            };
+            JS_CALLBACKS.with(|m| m.borrow_mut().insert(id, entry));
             JS_BRIDGE_LOG.with(|l| l.borrow_mut().push(format!("create_callback:{id}")));
             Ok(bridge::with_backend(|b| b.create_callback(id))
                 .map(js_to_variant)
                 .unwrap_or(Variant::Nil))
+        }
+        // -- signals (pat-mgixk.41) --
+        //
+        // Only the registry lives here: emission needs the interpreter to
+        // invoke a `Callable`, so it is `Interpreter::emit_js_bridge_signal`.
+        // This is a FREE function, so the registering script's identity arrives
+        // as `owner` rather than through `self`.
+        "connect" => {
+            let signal = js_bridge_signal_name(args, "connect")?;
+            let callable = match args.get(1) {
+                Some(Variant::Callable(c)) => (**c).clone(),
+                _ => {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "JavaScriptBridge.connect() takes (signal, Callable)".into(),
+                    )))
+                }
+            };
+            JS_BRIDGE_CONNECTIONS.with(|c| {
+                c.borrow_mut().push(JsBridgeConnection {
+                    signal,
+                    callable,
+                    owner,
+                })
+            });
+            // Godot's `Object.connect` returns an Error; OK is 0.
+            Ok(Variant::Int(0))
+        }
+        "disconnect" => {
+            let signal = js_bridge_signal_name(args, "disconnect")?;
+            // ⚠️ Scoped to the CALLER's own connections. Another node's handler
+            // for the same signal is not this script's to drop.
+            JS_BRIDGE_CONNECTIONS.with(|c| {
+                c.borrow_mut()
+                    .retain(|conn| !(conn.signal == signal && conn.owner == owner))
+            });
+            Ok(Variant::Nil)
+        }
+        "is_connected" => {
+            let signal = js_bridge_signal_name(args, "is_connected")?;
+            Ok(Variant::Bool(JS_BRIDGE_CONNECTIONS.with(|c| {
+                c.borrow()
+                    .iter()
+                    .any(|conn| conn.signal == signal && conn.owner == owner)
+            })))
         }
         "force_fs_sync" => {
             bridge::with_backend(|b| b.force_fs_sync());
@@ -21915,6 +23108,146 @@ pub fn with_engine_debugger<R>(f: impl FnOnce(&mut gdcore::debugger::Debugger) -
     ENGINE_DEBUGGER.with(|d| f(&mut d.borrow_mut()))
 }
 
+// ---------------------------------------------------------------------------
+// Per-function script profiling (pat-mgixk.14)
+// ---------------------------------------------------------------------------
+
+/// Whether per-function script timing is being collected.
+///
+/// ⚠️ Checked on EVERY script call, so it is an atomic and not a lock. The
+/// editor's Profiler tab is off by default and most projects never turn it on,
+/// so the idle cost has to be one relaxed load — two `Instant::now()` calls and
+/// a map update per call is not something to charge every project for.
+static SCRIPT_PROFILING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+thread_local! {
+    /// This frame's accumulated timings: name → (inclusive ms, self ms, calls).
+    static SCRIPT_PROFILE: std::cell::RefCell<HashMap<String, (f64, f64, u64)>> =
+        std::cell::RefCell::new(HashMap::new());
+    /// The in-flight call stack: `(entered at, inclusive ms already spent in
+    /// callees)`.
+    ///
+    /// 🔑 This is what makes SELF time real rather than a duplicate of
+    /// inclusive time. On exit a frame reports `inclusive - children` and then
+    /// charges its own inclusive time to its parent's `children`, so a
+    /// `_process` that spends all its time inside `busy()` reports ~0 self and
+    /// `busy()` reports it all — which is the entire point of the Self column.
+    ///
+    /// ⚠️ Stores the entry time as `u64` MICROSECONDS from
+    /// `gdplatform::os::get_ticks_usec()` rather than a `std::time::Instant`,
+    /// for the same wasm reason as `ticks_msec` above: an `Instant::now()` here
+    /// panicked in the browser the moment the profiler was switched on
+    /// (pat-mgixk.40).
+    static SCRIPT_PROFILE_STACK: std::cell::RefCell<Vec<(u64, f64)>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
+/// Turns per-function script timing on or off — the editor's Profiler
+/// Start/Stop.
+pub fn set_script_profiling(enabled: bool) {
+    SCRIPT_PROFILING.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    if !enabled {
+        // Drop any half-collected frame, so a later Start does not report
+        // timings from before it was pressed.
+        let _ = SCRIPT_PROFILE.try_with(|p| p.borrow_mut().clear());
+        let _ = SCRIPT_PROFILE_STACK.try_with(|s| s.borrow_mut().clear());
+    }
+}
+
+/// Whether per-function script timing is on.
+pub fn is_script_profiling() -> bool {
+    SCRIPT_PROFILING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Takes this frame's timings, leaving the table empty:
+/// `(function, inclusive ms, self ms, calls)`, worst inclusive time first so a
+/// caller can show the offender at the top without re-sorting.
+///
+/// ⚠️ Must be drained on the thread that RAN the scripts — the table is
+/// thread-local, for the same reason `DEBUG_MESSAGES` is, and the editor runs
+/// `_ready` and `_process` on different threads.
+pub fn drain_script_profile() -> Vec<(String, f64, f64, u64)> {
+    let mut rows: Vec<(String, f64, f64, u64)> = SCRIPT_PROFILE
+        .try_with(|p| {
+            std::mem::take(&mut *p.borrow_mut())
+                .into_iter()
+                .map(|(name, (incl, own, calls))| (name, incl, own, calls))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    rows.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    rows
+}
+
+/// Times one script call for as long as it is alive.
+///
+/// 🔑 A `Drop` guard rather than an accumulate at each exit:
+/// `call_user_func_impl` and `call_instance_method_impl` each return from five
+/// places — the normal end, a `return`, a raised error, an `await` park and a
+/// debugger park — and an accumulate bolted onto some of them would
+/// under-count exactly the functions that error or suspend, which are the ones
+/// a profiler is opened to find. Drop runs on all five.
+///
+/// ⚠️ A frame that PARKS is charged only up to the park. The resumed half runs
+/// under `resume_one`, which creates no timer, so a coroutine's post-`await`
+/// time is not attributed to it. Stated rather than guessed at: inventing a
+/// span across a suspension would report wall-clock sleep as script time.
+struct ScriptCallTimer {
+    name: String,
+}
+
+impl ScriptCallTimer {
+    /// Starts timing, or returns `None` when profiling is off.
+    fn start(name: &str) -> Option<Self> {
+        if !is_script_profiling() {
+            return None;
+        }
+        SCRIPT_PROFILE_STACK
+            .try_with(|s| s.borrow_mut().push((gdplatform::os::get_ticks_usec(), 0.0)))
+            .ok()?;
+        Some(Self {
+            name: name.to_string(),
+        })
+    }
+}
+
+impl Drop for ScriptCallTimer {
+    fn drop(&mut self) {
+        // ⚠️ `try_with` throughout: a thread-local may already be destroyed
+        // while this runs during thread teardown, and `with` panics there —
+        // turning a profiling session into a crash on shutdown.
+        let Ok(Some((start, children))) = SCRIPT_PROFILE_STACK.try_with(|s| s.borrow_mut().pop())
+        else {
+            return;
+        };
+        // ⚠️ `saturating_sub`, not `-`: these are unsigned microseconds now, so a
+        // clock that steps backwards between the two reads would UNDERFLOW
+        // (panic in debug, wrap to a colossal duration in release) where the old
+        // `Instant` subtraction merely went negative and got clamped below.
+        let inclusive = gdplatform::os::get_ticks_usec().saturating_sub(start) as f64 / 1000.0;
+        // Clamped at 0: a clock that is not perfectly monotonic across the two
+        // reads must not publish a negative self time.
+        let own = (inclusive - children).max(0.0);
+        let _ = SCRIPT_PROFILE.try_with(|p| {
+            let mut table = p.borrow_mut();
+            let entry = table.entry(self.name.clone()).or_insert((0.0, 0.0, 0));
+            entry.0 += inclusive;
+            entry.1 += own;
+            entry.2 += 1;
+        });
+        // Charge my whole inclusive time to my caller's children total.
+        let _ = SCRIPT_PROFILE_STACK.try_with(|s| {
+            if let Some(parent) = s.borrow_mut().last_mut() {
+                parent.1 += inclusive;
+            }
+        });
+    }
+}
+
 /// Runtime hook: set whether the debugger ignores breakpoints without removing
 /// them. Godot exposes only the `is_skipping_breakpoints()` getter to scripts —
 /// the editor sets this over the debug protocol, so this is the transport's
@@ -22123,7 +23456,11 @@ fn call_enginedebugger_static(method: &str, args: &[Variant]) -> Result<Variant,
                 }
             };
             DEBUG_PROFILERS.with(|p| {
-                p.borrow_mut().entry(name).or_default().frames.push(data.to_vec());
+                p.borrow_mut()
+                    .entry(name)
+                    .or_default()
+                    .frames
+                    .push(data.to_vec());
             });
             Ok(Variant::Nil)
         }
@@ -22466,17 +23803,15 @@ fn call_stream_peer_instance(
         }
         "put_partial_data" => {
             let (err, written) = b.put_partial_data(&bytes_arg(0));
-            Some(Variant::Array((vec![
-                Variant::Int(err),
-                Variant::Int(written as i64),
-            ]).into()))
+            Some(Variant::Array(
+                (vec![Variant::Int(err), Variant::Int(written as i64)]).into(),
+            ))
         }
         "get_data" | "get_partial_data" => {
             let (err, data) = b.get_partial_data(int_arg(0).max(0) as usize);
-            Some(Variant::Array(vec![
-                Variant::Int(err),
-                Variant::PackedByteArray(data),
-            ].into()))
+            Some(Variant::Array(
+                vec![Variant::Int(err), Variant::PackedByteArray(data)].into(),
+            ))
         }
 
         "put_8" => {
@@ -23065,6 +24400,44 @@ fn call_direct_body_state_2d_instance(
                     ),
             )
         }
+        // The accessors Godot exposes as METHODS as well as properties.
+        //
+        // The property forms already worked (`direct_body_state_2d_property`),
+        // so `state.inverse_inertia` answered the number while
+        // `state.get_inverse_inertia()` fell through to `Nil` — one value
+        // reachable two ways, one of them silently wrong. ClassDB registers
+        // these names (class_db.rs:2571/2680/2741), which makes it worse than
+        // a missing feature: `has_method` says yes and the call returns Nil.
+        "get_step" => Variant::Float(s.step as f64),
+        "get_total_gravity" => Variant::Vector2(s.total_gravity),
+        "get_total_linear_damp" => Variant::Float(s.total_linear_damp as f64),
+        "get_total_angular_damp" => Variant::Float(s.total_angular_damp as f64),
+        "get_inverse_mass" => Variant::Float(s.inverse_mass as f64),
+        "get_inverse_inertia" => Variant::Float(s.inverse_inertia as f64),
+        "get_center_of_mass" => Variant::Vector2(s.center_of_mass),
+        "get_center_of_mass_local" => Variant::Vector2(s.center_of_mass_local),
+        // Godot's `set_sleep_state(enabled)`. A missing or non-bool argument
+        // reads as `false`, which is what an untyped GDScript call to a bool
+        // parameter does anyway.
+        "set_sleep_state" => {
+            s.sleeping = matches!(args.first(), Some(Variant::Bool(true)));
+            Variant::Nil
+        }
+        // Godot answers the collider's Object, or null when the other body has
+        // no node attached. `collider_id` is 0 in exactly that case, and an
+        // ObjectId of 0 is a handle to nothing, so Nil is the honest answer
+        // rather than a reference a script would then call methods on.
+        "get_contact_collider_object" => s
+            .contact(dbs_idx(args, 0))
+            .filter(|c| c.collider_id != 0)
+            .map(|c| Variant::ObjectId(gdcore::id::ObjectId::from_raw(c.collider_id as u64)))
+            .unwrap_or(Variant::Nil),
+        // ⚠️ `get_space_state` is deliberately NOT implemented here. It returns
+        // a `PhysicsDirectSpaceState2D`, and no such object exists anywhere in
+        // the engine yet (`grep '"get_direct_space_state"'` finds no dispatch
+        // at all). Handing back a fabricated handle would be worse than this
+        // `Nil`: `has_method` would say yes, and every query called on it —
+        // `intersect_ray`, `intersect_point` — would answer Nil silently.
         // Godot re-runs the built-in integrator on demand. Patina integrates in
         // the solver after this callback returns, so the request is already
         // satisfied by the time the script could observe it.
@@ -23475,9 +24848,13 @@ fn new_encoded_object_as_id_handle(target: u64) -> gdcore::id::ObjectId {
 fn wrap_decoded_object_ids(v: Variant) -> Variant {
     match v {
         Variant::ObjectId(id) => Variant::ObjectId(new_encoded_object_as_id_handle(id.raw())),
-        Variant::Array(items) => {
-            Variant::Array(items.to_vec().into_iter().map(wrap_decoded_object_ids).collect())
-        }
+        Variant::Array(items) => Variant::Array(
+            items
+                .to_vec()
+                .into_iter()
+                .map(wrap_decoded_object_ids)
+                .collect(),
+        ),
         Variant::Dictionary(d) => {
             let mut out = gdvariant::dictionary::Dictionary::new();
             for (k, val) in d.to_dict().iter() {
@@ -26275,7 +27652,9 @@ fn call_websocket_peer_instance(
             // `PackedStringArray` already holds `String`s; a plain `Array` holds
             // Variants that still need rendering.
             Some(Variant::PackedStringArray(items)) => items.clone(),
-            Some(Variant::Array(items)) => items.to_vec().iter().map(|i| i.to_string_lossy()).collect(),
+            Some(Variant::Array(items)) => {
+                items.to_vec().iter().map(|i| i.to_string_lossy()).collect()
+            }
             _ => Vec::new(),
         }
     }
@@ -26591,18 +27970,20 @@ fn call_stream_peer_tcp_instance(
                 if method == "put_data" {
                     Ok(Variant::Int(code))
                 } else {
-                    Ok(Variant::Array(vec![
-                        Variant::Int(code),
-                        Variant::Int(if code == OK { written } else { 0 }),
-                    ].into()))
+                    Ok(Variant::Array(
+                        vec![
+                            Variant::Int(code),
+                            Variant::Int(if code == OK { written } else { 0 }),
+                        ]
+                        .into(),
+                    ))
                 }
             }
             "get_data" | "get_partial_data" => {
                 let data = peer.get_data(int_arg(0).max(0) as usize);
-                Ok(Variant::Array(vec![
-                    Variant::Int(OK),
-                    Variant::PackedByteArray(data),
-                ].into()))
+                Ok(Variant::Array(
+                    vec![Variant::Int(OK), Variant::PackedByteArray(data)].into(),
+                ))
             }
             "get_available_bytes" => Ok(Variant::Int(peer.get_available_bytes() as i64)),
             // Documented on the class but not backed by this transport. An
@@ -27082,7 +28463,9 @@ fn call_http_client_instance(
                 // reader would silently drop every header.
                 let headers: Vec<String> = match args.get(2) {
                     Some(Variant::PackedStringArray(h)) => h.clone(),
-                    Some(Variant::Array(a)) => a.to_vec().iter().map(|v| v.to_string_lossy()).collect(),
+                    Some(Variant::Array(a)) => {
+                        a.to_vec().iter().map(|v| v.to_string_lossy()).collect()
+                    }
                     _ => Vec::new(),
                 };
                 let body: Vec<u8> = match args.get(3) {
@@ -27376,8 +28759,10 @@ fn call_camera_feed_instance(
             }
             "disconnect" => {
                 let signal = camera_feed_signal_name(args, "disconnect")?;
-                CAMERA_FEED_CONNECTIONS
-                    .with(|c| c.borrow_mut().retain(|(r, s, _)| !(*r == raw && *s == signal)));
+                CAMERA_FEED_CONNECTIONS.with(|c| {
+                    c.borrow_mut()
+                        .retain(|(r, s, _)| !(*r == raw && *s == signal))
+                });
                 Ok(Variant::Nil)
             }
             "is_connected" => {
@@ -28197,7 +29582,8 @@ fn call_geometry_2d_static(method: &str, args: &[Variant]) -> Result<Variant, Ru
     ) -> Result<Vec<gdcore::math::Vector2>, RuntimeError> {
         match args.get(i) {
             Some(Variant::Array(a)) => Ok(a
-                .to_vec().iter()
+                .to_vec()
+                .iter()
                 .filter_map(|v| match v {
                     Variant::Vector2(p) => Some(*p),
                     _ => None,
@@ -29418,7 +30804,8 @@ fn navmesh_vertices(v: Option<&Variant>) -> Vec<gdcore::math::Vector3> {
     match v {
         Some(Variant::PackedVector3Array(vs)) => vs.clone(),
         Some(Variant::Array(items)) => items
-            .to_vec().iter()
+            .to_vec()
+            .iter()
             .filter_map(|item| match item {
                 Variant::Vector3(p) => Some(*p),
                 _ => None,
@@ -29453,9 +30840,11 @@ fn call_navigationmeshgenerator_static(
                         Some(Variant::PackedInt32Array(ix)) => {
                             ix.iter().map(|i| *i as i64).collect()
                         }
-                        Some(Variant::Array(items)) => {
-                            items.to_vec().iter().filter_map(|i| to_int(i).ok()).collect()
-                        }
+                        Some(Variant::Array(items)) => items
+                            .to_vec()
+                            .iter()
+                            .filter_map(|i| to_int(i).ok())
+                            .collect(),
                         _ => Vec::new(),
                     },
                 ),
@@ -29487,7 +30876,10 @@ fn call_navigationmeshgenerator_static(
                 Variant::String("vertices".into()),
                 Variant::PackedVector3Array(vertices),
             );
-            out.insert(Variant::String("polygons".into()), Variant::Array(polygons.into()));
+            out.insert(
+                Variant::String("polygons".into()),
+                Variant::Array(polygons.into()),
+            );
             Ok(Variant::Dictionary(out.into()))
         }
         // Godot `clear(navigation_mesh)` empties the mesh and returns void.
@@ -29936,7 +31328,7 @@ fn call_time_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeEr
                     "Time.get_ticks_usec() takes 0 arguments".into(),
                 )));
             }
-            Ok(Variant::Int(process_epoch().elapsed().as_micros() as i64))
+            Ok(Variant::Int(ticks_usec()))
         }
         "get_unix_time_from_system" => {
             if !args.is_empty() {
@@ -29944,11 +31336,7 @@ fn call_time_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeEr
                     "Time.get_unix_time_from_system() takes 0 arguments".into(),
                 )));
             }
-            let secs = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0);
-            Ok(Variant::Float(secs))
+            Ok(Variant::Float(gdplatform::os::unix_time_secs_f64()))
         }
         // -- `*_from_system`: current instant, local unless `utc` is true -----
         //
@@ -30075,7 +31463,9 @@ fn call_time_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeEr
             if dict.is_empty() {
                 return Ok(Variant::Int(0));
             }
-            Ok(Variant::Int(compose_unix(&parts_from_dict(&dict.to_dict()))))
+            Ok(Variant::Int(compose_unix(&parts_from_dict(
+                &dict.to_dict(),
+            ))))
         }
         "get_unix_time_from_datetime_string" => {
             let Some(Variant::String(s)) = args.first() else {
@@ -30347,10 +31737,10 @@ fn offset_string(offset_minutes: i64) -> String {
 
 /// Current Unix time in seconds.
 fn system_unix_seconds() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    // Truncates toward zero exactly as `Duration::as_secs()` did: a Unix second
+    // count is ~1.8e9, far inside f64's 53-bit exact integer range, so the
+    // detour through f64 loses nothing (pat-mgixk.40).
+    gdplatform::os::unix_time_secs_f64() as i64
 }
 
 /// Reads a trailing `bool` argument, defaulting when absent.
@@ -30527,7 +31917,9 @@ fn json_from_native(v: &Variant) -> Variant {
                 Variant::Float(c.a as f64),
             ],
         ),
-        Variant::Array(items) => Variant::Array(items.to_vec().iter().map(json_from_native).collect()),
+        Variant::Array(items) => {
+            Variant::Array(items.to_vec().iter().map(json_from_native).collect())
+        }
         Variant::Dictionary(d) => {
             let mut out = gdvariant::Dictionary::new();
             for (k, val) in d.to_dict().iter() {
@@ -30584,7 +31976,9 @@ fn json_to_native(v: &Variant) -> Variant {
             }
             Variant::Dictionary(out.into())
         }
-        Variant::Array(items) => Variant::Array(items.to_vec().iter().map(json_to_native).collect()),
+        Variant::Array(items) => {
+            Variant::Array(items.to_vec().iter().map(json_to_native).collect())
+        }
         other => other.clone(),
     }
 }
@@ -30705,7 +32099,8 @@ fn json_stringify_variant(value: &Variant, indent: &str, sort_keys: bool, depth:
                 return "[]".to_string();
             }
             let body = items
-                .to_vec().iter()
+                .to_vec()
+                .iter()
                 .map(|v| json_stringify_variant(v, indent, sort_keys, depth + 1))
                 .collect::<Vec<_>>()
                 .join(&comma);
@@ -31478,36 +32873,43 @@ fn lambda_connection(method_name: &str) -> Option<CallableRef> {
 /// object-level `connect` arm.
 fn callable_target(v: &Variant, self_node: Option<u64>) -> Option<(u64, String)> {
     match v {
-        Variant::Callable(c) => match c.inner_callable() {
-            CallableRef::Method { target_id, method } => {
-                let target = if *target_id == 0 {
-                    self_node?
-                } else {
-                    *target_id
-                };
-                Some((target, method.clone()))
-            }
-            // A lambda has no method NAME, and a `SignalStore` `Connection`
-            // stores a name rather than a `Callable` — so it is parked in a
-            // side registry and connected under a generated one that
-            // `call_instance_method` resolves back at dispatch time
-            // (pat-s3rrv.67).
-            //
-            // ⚠️ The target is the CONNECTING script's own node. That is not an
-            // arbitrary choice: it is what makes `self` inside the lambda body
-            // resolve to the instance that wrote the lambda, because the
-            // dispatch goes through that node's script and installs it as
-            // `self_instance`. A lambda has no target of its own to name.
-            //
-            // ⚠️ Registers the OUTER callable, not the `inner_callable()` this
-            // match ran on: `func(): ...` .bind(x) arrives here as
-            // `Bound { inner: Lambda, .. }`, and registering the unwrapped
-            // Lambda would drop the bound arguments.
-            CallableRef::Lambda { .. } => Some((self_node?, lambda_connection_name(&**c))),
-            _ => None,
-        },
+        Variant::Callable(c) => callable_ref_target(&**c, self_node),
         Variant::String(s) => Some((self_node?, s.clone())),
         Variant::StringName(s) => Some((self_node?, s.as_str().to_string())),
+        _ => None,
+    }
+}
+
+/// The `(target_object, method_name)` a `CallableRef` reduces to — the half of
+/// [`callable_target`] that needs no `Variant` wrapper, so the deferred-call
+/// path can reach it too (pat-mgixk.10).
+fn callable_ref_target(c: &CallableRef, self_node: Option<u64>) -> Option<(u64, String)> {
+    match c.inner_callable() {
+        CallableRef::Method { target_id, method } => {
+            let target = if *target_id == 0 {
+                self_node?
+            } else {
+                *target_id
+            };
+            Some((target, method.clone()))
+        }
+        // A lambda has no method NAME, and a `SignalStore` `Connection`
+        // stores a name rather than a `Callable` — so it is parked in a
+        // side registry and connected under a generated one that
+        // `call_instance_method` resolves back at dispatch time
+        // (pat-s3rrv.67).
+        //
+        // ⚠️ The target is the CONNECTING script's own node. That is not an
+        // arbitrary choice: it is what makes `self` inside the lambda body
+        // resolve to the instance that wrote the lambda, because the
+        // dispatch goes through that node's script and installs it as
+        // `self_instance`. A lambda has no target of its own to name.
+        //
+        // ⚠️ Registers the OUTER callable, not the `inner_callable()` this
+        // match ran on: `func(): ...` .bind(x) arrives here as
+        // `Bound { inner: Lambda, .. }`, and registering the unwrapped
+        // Lambda would drop the bound arguments.
+        CallableRef::Lambda { .. } => Some((self_node?, lambda_connection_name(c))),
         _ => None,
     }
 }
@@ -31971,6 +33373,26 @@ fn ie_binding_matches(
         return want == ie_modifiers_mask(event);
     }
     true
+}
+
+/// Converts an argument for a typed parameter, Godot's call-time enforcement
+/// (pat-mgixk.19).
+///
+/// A typed parameter is the same typed slot as a typed member: Godot's compiler
+/// emits the same typed-assign opcode for the binding, so `func hit(n: int)`
+/// called with `2.7` binds `2` and called with `"x"` raises. Untyped
+/// parameters, and indices past the hint table, pass through.
+fn coerce_param_value(
+    func: &FuncDef,
+    index: usize,
+    value: Variant,
+) -> Result<Variant, RuntimeError> {
+    match func.param_hints.get(index).and_then(|h| h.as_ref()) {
+        Some(hint) => {
+            crate::container_typing::coerce_for_declared_slot(value, hint).map_err(container_error)
+        }
+        None => Ok(value),
+    }
 }
 
 fn variant_eq(a: &Variant, b: &Variant) -> bool {
@@ -32492,12 +33914,15 @@ return out
 ";
         assert_eq!(
             run_val(seq),
-            Variant::Array(vec![
-                Variant::Int(0),
-                Variant::Int(1),
-                Variant::Int(2),
-                Variant::Int(3),
-            ].into())
+            Variant::Array(
+                vec![
+                    Variant::Int(0),
+                    Variant::Int(1),
+                    Variant::Int(2),
+                    Variant::Int(3),
+                ]
+                .into()
+            )
         );
 
         // Non-positive int -> empty iteration (body never runs).
@@ -32838,11 +34263,14 @@ return d[\"b\"]
             Variant::Bool(false),
             Variant::Nil,
             Variant::Vector2(Vector2::new(1.0, 2.0)),
-            Variant::Array(vec![
-                Variant::Int(1),
-                Variant::String("x".into()),
-                Variant::Bool(false),
-            ].into()),
+            Variant::Array(
+                vec![
+                    Variant::Int(1),
+                    Variant::String("x".into()),
+                    Variant::Bool(false),
+                ]
+                .into(),
+            ),
             Variant::Dictionary(d.into()),
         ];
         for v in cases {
@@ -33850,11 +35278,14 @@ var speed = 10
     fn str_split_join() {
         assert_eq!(
             run_val("return \"a,b,c\".split(\",\")\n"),
-            Variant::Array(vec![
-                Variant::String("a".into()),
-                Variant::String("b".into()),
-                Variant::String("c".into())
-            ].into())
+            Variant::Array(
+                vec![
+                    Variant::String("a".into()),
+                    Variant::String("b".into()),
+                    Variant::String("c".into())
+                ]
+                .into()
+            )
         );
         assert_eq!(
             run_val("return \"-\".join([\"a\", \"b\", \"c\"])\n"),
@@ -35620,7 +37051,9 @@ func fade(alpha):
             .unwrap();
         assert_eq!(
             r.return_value,
-            Some(Variant::Array(vec![Variant::Int(0), Variant::Int(2)].into()))
+            Some(Variant::Array(
+                vec![Variant::Int(0), Variant::Int(2)].into()
+            ))
         );
     }
 
@@ -37066,11 +38499,9 @@ match x:
         assert_eq!(r, Variant::Int(7));
         assert_eq!(
             inst.properties.get("grid"),
-            Some(&Variant::Array(vec![
-                Variant::Int(0),
-                Variant::Int(7),
-                Variant::Int(0)
-            ].into()))
+            Some(&Variant::Array(
+                vec![Variant::Int(0), Variant::Int(7), Variant::Int(0)].into()
+            ))
         );
     }
 
@@ -37087,7 +38518,9 @@ match x:
         assert_eq!(r, Variant::Int(2));
         assert_eq!(
             inst.properties.get("items"),
-            Some(&Variant::Array(vec![Variant::Int(5), Variant::Int(6)].into()))
+            Some(&Variant::Array(
+                vec![Variant::Int(5), Variant::Int(6)].into()
+            ))
         );
     }
 
@@ -37130,12 +38563,9 @@ match x:
         );
         assert_eq!(
             run_val("var a = [1, 2]\na.resize(4)\nreturn a\n"),
-            Variant::Array(vec![
-                Variant::Int(1),
-                Variant::Int(2),
-                Variant::Nil,
-                Variant::Nil
-            ].into())
+            Variant::Array(
+                vec![Variant::Int(1), Variant::Int(2), Variant::Nil, Variant::Nil].into()
+            )
         );
         assert_eq!(
             run_val("var a = [1, 2, 3]\na.fill(0)\nreturn a\n"),
@@ -38081,7 +39511,9 @@ match x:
 
         // Endpoints pin the sweep direction and the radius at once; a
         // transposed sin/cos or a half-open range would move one of them.
-        let (Variant::Vector2(first), Variant::Vector2(last)) = (&arr.to_vec()[0], &arr.to_vec()[2]) else {
+        let (Variant::Vector2(first), Variant::Vector2(last)) =
+            (&arr.to_vec()[0], &arr.to_vec()[2])
+        else {
             panic!("every point must be a Vector2, got {arr:?}");
         };
         assert!(

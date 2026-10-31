@@ -12,7 +12,7 @@ use std::sync::{Mutex, OnceLock};
 // cost), and on wasm32 it is backed by the browser's `performance.now()`
 // monotonic clock. This keeps `get_ticks_*` working in the web runtime
 // (pat-u3l8c.109).
-use web_time::Instant;
+use web_time::{Instant, SystemTime, UNIX_EPOCH};
 
 static EPOCH: OnceLock<Instant> = OnceLock::new();
 
@@ -227,6 +227,28 @@ pub fn get_ticks_msec() -> u64 {
 /// Returns elapsed time in microseconds since the first call to any tick function.
 pub fn get_ticks_usec() -> u64 {
     epoch().elapsed().as_micros() as u64
+}
+
+/// Seconds since the Unix epoch, as Godot's `Time.get_unix_time_from_system()`
+/// reports it.
+///
+/// ⚠️ The wall clock needs the same treatment as the monotonic clock above:
+/// `std::time::SystemTime::now()` panics on `wasm32-unknown-unknown`, which has
+/// no wall clock. `web_time::SystemTime` re-exports `std::time::SystemTime` on
+/// native targets and is backed by the browser's `Date.now()` on wasm32, so one
+/// body serves both (pat-mgixk.40).
+///
+/// Lives here rather than in each caller because `gdscript-interop` had its own
+/// private `std::time` copies for `Time.*` and `randomize()`, which is how the
+/// browser script path kept a panic that native tests could never see.
+///
+/// Returns 0.0 if the system clock is before the epoch, matching the callers'
+/// previous `unwrap_or(0.0)` rather than panicking on a misconfigured clock.
+pub fn unix_time_secs_f64() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 // ---------------------------------------------------------------------------

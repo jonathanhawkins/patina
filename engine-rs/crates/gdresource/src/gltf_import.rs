@@ -125,7 +125,18 @@ fn build_document(
 ) -> EngineResult<Arc<Resource>> {
     let buffers = load_buffers(json, path, glb_bin)?;
 
-    let mut doc = Resource::new("GltfDocument");
+    // Godot imports a .glb/.gltf through ResourceImporterScene, whose
+    // `get_resource_type()` is "PackedScene" — so `load("res://m.glb")` hands a
+    // script a PackedScene and `s is PackedScene` is true. Reporting
+    // "GltfDocument" made `can_instantiate` false and `instantiate()` raise
+    // "cannot instantiate a GltfDocument resource" (pat-mgixk.23).
+    //
+    // ⚠️ The class is the only thing that changes. The parsed document — nodes,
+    // per-primitive subresources, animations — still lives on this same
+    // resource, and `gltf_document` marks it as that kind of PackedScene so a
+    // consumer can still tell the two apart rather than inferring from the path.
+    let mut doc = Resource::new("PackedScene");
+    doc.set_property("gltf_document", Variant::Bool(true));
     doc.path = path
         .to_str()
         .map(|s| s.to_string())
@@ -465,6 +476,23 @@ fn build_document(
                     .filter_map(|n| n.as_u64().map(|u| Variant::Int(u as i64)))
                     .collect();
                 doc.set_property("scene_roots", Variant::Array(root_ids.into()));
+            }
+            // The default scene's NAME, which this handler used to read past
+            // while taking only its `nodes` (pat-mgixk.23). Godot names the
+            // imported scene's root after the glTF scene
+            // (`GLTFDocument::_generate_scene_node` /
+            // `ResourceImporterScene::import`), and `gltf_scene`'s
+            // `build_gltf_subtree` already PREFERS this property over the file
+            // stem — it just always read `None`, so every instanced glTF root
+            // was named after the file instead of the asset's own scene.
+            //
+            // Skipped when absent or empty rather than publishing `""`, because
+            // the builder's `!s.is_empty()` guard is what hands it back to the
+            // file-stem fallback; a glTF is allowed to omit `scenes[i].name`.
+            if let Some(name) = sc.get("name").and_then(|v| v.as_str()) {
+                if !name.is_empty() {
+                    doc.set_property("scene_name", Variant::String(name.to_string()));
+                }
             }
         }
     }
@@ -1829,7 +1857,14 @@ mod tests {
         std::fs::write(&path, make_triangle_glb()).unwrap();
 
         let res = import_gltf(&path).expect("import_gltf must succeed");
-        assert_eq!(res.class_name, "GltfDocument");
+        // Godot's scene importer reports PackedScene, which is what makes
+        // `load(..) is PackedScene` and `instantiate()` work (pat-mgixk.23).
+        assert_eq!(res.class_name, "PackedScene");
+        assert_eq!(
+            res.get_property("gltf_document"),
+            Some(&Variant::Bool(true)),
+            "still marked as the glTF flavour of PackedScene",
+        );
         assert_eq!(res.get_property("mesh_count"), Some(&Variant::Int(1)));
         assert_eq!(res.get_property("node_count"), Some(&Variant::Int(1)));
 

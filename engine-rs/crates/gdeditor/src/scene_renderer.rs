@@ -6,9 +6,9 @@
 //!
 //! Designed to visually approximate Godot 4's 2D viewport appearance.
 
-use gdcore::math::{Color, Rect2, Vector2};
+use gdcore::math::{Color, Rect2, Transform2D, Vector2};
 use gdrender2d::draw;
-use gdrender2d::renderer::FrameBuffer;
+use gdrender2d::renderer::{Bgra8Image, FrameBuffer, Raster};
 use gdscene::node::NodeId;
 use gdscene::SceneTree;
 use gdscene::{canvas_order, node2d};
@@ -162,14 +162,30 @@ pub fn render_runtime_frame(
     // discarded here alongside them, which made a scrolling game impossible to
     // see in the Game view (pat-0q2kx.40).
     let _ = (zoom, pan);
-    if scene_is_3d(tree) {
+    // Godot's viewport draws its World3D and THEN composites every CanvasItem /
+    // CanvasLayer over it in the same viewport (`scene/main/viewport.cpp`). It
+    // never picks one renderer, which is what Patina used to do here: a 3D game
+    // with a large UI took the `count_2d > count_3d` branch and its 3D world was
+    // never drawn at all, and a 3D-dominant scene drew the world with no HUD
+    // (pat-mgixk.36).
+    //
+    // ⚠️ `scene_is_3d` is NOT the predicate for this. That function answers a
+    // different question — which main screen the EDITOR opens a scene in, by
+    // Godot's main-plugin rule — and it is deliberately left alone. Whether a 3D
+    // PASS is needed is just "is there any 3D content", and the canvas pass runs
+    // either way.
+    let base_3d = if scene_has_3d_content(tree) {
         let mut vp = viewport_3d.clone();
         vp.width = width.max(1);
         vp.height = height.max(1);
-        crate::viewport_3d_render::render_editor_3d_frame(&vp, tree)
+        Some(crate::viewport_3d_render::render_editor_3d_frame(&vp, tree))
     } else {
-        // 2D running scene: draw the real CanvasItem pixels the game would show
-        // (pat-u3l8c.23) — no editor grid/rulers/gizmos. This branch is
+        None
+    };
+    {
+        // The canvas pass, which now runs for EVERY running scene rather than
+        // only a 2D one: the real CanvasItem pixels the game would show
+        // (pat-u3l8c.23) — no editor grid/rulers/gizmos. This pass is
         // texture-less; the texture-cached Play path lives in `examples/editor.rs`,
         // so sprites here fall back to placeholder squares.
         // Inlines `render_runtime_canvas` so the Camera2D view can be folded in
@@ -195,13 +211,124 @@ pub fn render_runtime_frame(
         let mut window = *tree.root_window();
         window.size = viewport_size;
         crate::viewport_2d_render::apply_stretch_transform(&mut items, window.stretch_transform());
-        crate::viewport_2d_render::rasterize_render_list(
+        // ⚠️ The clear colour is what makes this composable. Over a 3D frame the
+        // canvas must clear TRANSPARENT so the world shows through wherever no
+        // CanvasItem drew; with no 3D frame it keeps the opaque runtime clear, so
+        // a pure-2D scene's pixels are byte-identical to before
+        // (`runtime_2d_scene_uses_canvas_rasterizer` asserts exactly that).
+        let clear = if base_3d.is_some() {
+            CANVAS_OVERLAY_CLEAR
+        } else {
+            crate::viewport_2d_render::RUNTIME_CLEAR_COLOR
+        };
+        // Shares the one canvas core (pat-mgixk.45) instead of calling the bare
+        // rasterizer, so this path stops being a THIRD pipeline that silently
+        // skipped CanvasGroup compositing, the NoiseTexture2D bake,
+        // normal/specular surfaces and the light pass.
+        //
+        // ⚠️ Pixel-neutral for a scene without those features: the groups entry
+        // delegates straight to the rasterizer when no CanvasGroup exists, the
+        // bake is skipped with no cache, and `shade_runtime_canvas_with_surfaces`
+        // early-outs unless the scene has a Light2D or a CanvasModulate. Still
+        // `None` for the cache and default quality, keeping this path's
+        // texture-less, editor-framing contract
+        // (`runtime_2d_scene_uses_canvas_rasterizer` pins the byte identity).
+        let canvas = crate::viewport_2d_render::render_canvas_from_list(
+            tree,
             &items,
             width,
             height,
-            crate::viewport_2d_render::RUNTIME_CLEAR_COLOR,
+            clear,
             None,
-        )
+            &crate::viewport_2d_render::CanvasQuality::default(),
+        );
+        match base_3d {
+            // A 3D scene with no CanvasItems composites a fully transparent
+            // canvas, which `composite_canvas_over` skips pixel by pixel — so
+            // that frame stays bit-identical to the plain 3D render too.
+            Some(mut base) => {
+                composite_canvas_over(&mut base, &canvas);
+                base
+            }
+            None => canvas,
+        }
+    }
+}
+
+/// The transparent clear a canvas pass uses when it will be composited over a
+/// 3D frame: alpha 0 means "nothing drawn here", which is what
+/// [`composite_canvas_over`] tests.
+///
+/// `pub` because the Play loop in `examples/editor.rs` rasterizes its own canvas
+/// pass for the GPU path and must clear it the same way — two different clear
+/// colours would make the editor's Play tab and this module disagree about what
+/// "untouched" means.
+pub const CANVAS_OVERLAY_CLEAR: Color = Color::new(0.0, 0.0, 0.0, 0.0);
+
+/// Whether `tree` holds any 3D content at all, and therefore needs a 3D pass
+/// before the canvas is composited over it.
+///
+/// ⚠️ Deliberately NOT [`scene_is_3d`]. That one implements Godot's
+/// main-plugin/main-screen choice (root type wins, then a descendant count) and
+/// is the right answer for "which editor tab does this scene open in". Using it
+/// to decide what to RENDER is the bug this replaces: it is exclusive by
+/// construction, so one of the two worlds always lost (pat-mgixk.36).
+pub fn scene_has_3d_content(tree: &SceneTree) -> bool {
+    tree.all_nodes_in_tree_order()
+        .into_iter()
+        .filter_map(|nid| tree.get_node(nid))
+        .any(|node| node.is_class("Node3D"))
+}
+
+/// Alpha-composites a canvas pass over an already-rendered frame, source-over,
+/// the way Godot's viewport puts its canvas layers over the 3D world.
+///
+/// `canvas` must have been rasterized with a TRANSPARENT clear
+/// ([`CANVAS_OVERLAY_CLEAR`]); its alpha is the only record of which pixels a
+/// CanvasItem actually touched.
+///
+/// ⚠️ Uses the canvas rasterizer's own [`BlendMode::Mix`] rather than a
+/// hand-rolled lerp, so an overlaid HUD blends exactly the way it would have
+/// inside `rasterize_render_list`. Note `blend`'s argument order is
+/// `(src, dst, mode)`.
+pub fn composite_canvas_over(base: &mut FrameBuffer, canvas: &FrameBuffer) {
+    for (dst, src) in base.pixels.iter_mut().zip(canvas.pixels.iter()) {
+        // Skip fully transparent source pixels. Not just an optimisation: it is
+        // what keeps a 3D-only scene's frame bit-identical, since `Mix` with
+        // a == 0 is the identity on `dst` but still rewrites the pixel.
+        if src.a <= 0.0 {
+            continue;
+        }
+        *dst = gdrender2d::canvas_material::blend(
+            *src,
+            *dst,
+            gdrender2d::canvas_material::BlendMode::Mix,
+        );
+    }
+}
+
+/// [`composite_canvas_over`] for the GPU Play path, whose frame is a byte-native
+/// [`Bgra8Image`] rather than a float [`FrameBuffer`].
+///
+/// ⚠️ Lives here rather than in `examples/editor.rs` so both Play paths composite
+/// through reviewed library code, and so this loop is reachable from tests —
+/// the example binary is not.
+///
+/// Uses the shared [`Raster::blend`] impl, which already writes a fully opaque
+/// alpha; a published frame has no transparency left to carry.
+pub fn composite_canvas_over_bgra(base: &mut Bgra8Image, canvas: &FrameBuffer) {
+    let w = canvas.width.min(base.width);
+    let h = canvas.height.min(base.height);
+    for y in 0..h {
+        for x in 0..w {
+            let src = canvas.get_pixel(x, y);
+            // Same skip as the float path, and for the same reason: a 3D scene
+            // with no CanvasItems must publish the untouched 3D frame.
+            if src.a <= 0.0 {
+                continue;
+            }
+            base.blend(x as i32, y as i32, src, src.a);
+        }
     }
 }
 
@@ -290,6 +417,76 @@ fn render_scene_inner(
     // Draw origin crosshair (X=red horizontal, Y=green vertical).
     draw_origin_crosshair(&mut fb, offset_x, offset_y);
 
+    // -- the edited scene itself, through the runtime canvas list (pat-mgixk.47)
+    //
+    // Before this, edit mode drew class icons from the hand-written match
+    // below and nothing else: only Sprite2D and ColorRect showed real content,
+    // Label/Button were placeholder rects, and Polygon2D, Line2D,
+    // TileMapLayer, AnimatedSprite2D, NinePatchRect and the rest all fell to a
+    // 2px dot. Worse, nodes were placed by global *position* alone, so
+    // rotation, scale and modulate were ignored — the edit view and Play
+    // disagreed about the same scene.
+    //
+    // ⚠️ Routed through `render_canvas_from_list`, NOT a fresh rasterizer call.
+    // There were THREE runtime canvas pipelines and no two agreed on which
+    // steps they ran — pat-mgixk.45 consolidated them, and the table in
+    // `play_frame_uses_runtime_canvas_pipeline` lists what each one silently
+    // skipped. A fourth would be that bug again, so this shares the one core
+    // and inherits CanvasGroup compositing, the NoiseTexture2D bake,
+    // normal/specular surfaces and the light pass rather than reimplementing
+    // any of them.
+    //
+    // ⚠️ Node2D-side CanvasItems only — NOT the themed Control pass that
+    // `render_play_frame` adds. `build_control_render_items` takes
+    // `&mut SceneTree` because it lays containers out before measuring them,
+    // and `render_scene_inner` holds `&SceneTree`. Threading `&mut` down here
+    // would change every public wrapper plus their callers in
+    // `editor_server.rs`, so Label/Button TEXT stays unrendered in edit mode
+    // for now and is tracked as remaining scope.
+    //
+    // `ColorRect` is unaffected: it has its own arm in the canvas-item resolver
+    // (`canvas_render.rs:1741`), so it comes through this immutable path along
+    // with Polygon2D, Line2D and Sprite2D.
+    let mut items = crate::viewport_2d_render::build_runtime_render_list(tree);
+    // The editor's view stands in for Play's Camera2D + window stretch.
+    //
+    // ⚠️ It MUST reuse the same `z` and `offset_*` the grid was drawn with
+    // above. A separately derived transform would put the scene a few pixels
+    // off the grid, the selection outline and every gizmo — all of which are
+    // placed with these exact values. `apply_camera2d_view` also honours
+    // `CanvasFollow::Fixed`, so a CanvasLayer stays pinned here exactly as it
+    // does in Play.
+    crate::viewport_2d_render::apply_camera2d_view(
+        &mut items,
+        Transform2D {
+            x: Vector2::new(z, 0.0),
+            y: Vector2::new(0.0, z),
+            origin: Vector2::new(offset_x, offset_y),
+        },
+    );
+    // Transparent clear, then composite, so the grid and crosshair stay visible
+    // underneath and a translucent CanvasItem blends over them instead of
+    // replacing them. This is the documented path for a caller that supplies
+    // its own background: `render_play_frame`'s doc says a compositing caller
+    // goes through `render_canvas_from_list` with its own clear.
+    let canvas = crate::viewport_2d_render::render_canvas_from_list(
+        tree,
+        &items,
+        width,
+        height,
+        CANVAS_OVERLAY_CLEAR,
+        texture_cache.as_deref_mut(),
+        &crate::viewport_2d_render::CanvasQuality::default(),
+    );
+    composite_canvas_over(&mut fb, &canvas);
+    // Which nodes the canvas pass actually painted. Anything in here must not
+    // then get a placeholder icon drawn over its real pixels; everything else —
+    // a bare Node2D, a Camera2D, a physics body — draws nothing as a CanvasItem,
+    // so it is absent from the list and keeps its glyph, which is how the
+    // editor shows where an otherwise invisible node sits.
+    let canvas_drawn: std::collections::HashSet<u64> =
+        items.iter().map(|item| item.node_id).collect();
+
     // Walk all nodes in draw order and draw them (pat-0q2kx.102).
     //
     // Godot's 2D editor draws each CanvasItem at its composed GLOBAL transform,
@@ -322,6 +519,17 @@ fn render_scene_inner(
 
         // Draw node representation based on class.
         match class {
+            // Already painted by the canvas pass above, at its full transform
+            // with modulate — a placeholder icon here would cover the real
+            // pixels. The selection highlight, move gizmo and node label still
+            // draw below, so a selected Sprite2D keeps its outline and name.
+            //
+            // ⚠️ Safe as a FIRST arm specifically: when the guard is false the
+            // match falls through to the class arms that follow, not to the `_`
+            // catch-all. (Gating an individual arm with a guard is the mistake
+            // the CollisionShape2D comment below warns about — a failed guard
+            // there lands on `_` and draws a stray dot.)
+            _ if canvas_drawn.contains(&node_id.raw()) => {}
             "Node2D" => draw_node2d_diamond(&mut fb, pos, COLOR_NODE2D),
             "Sprite2D" => {
                 draw_sprite2d_with_texture(&mut fb, node, pos, z, &mut texture_cache);

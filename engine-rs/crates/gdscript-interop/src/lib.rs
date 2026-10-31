@@ -15,6 +15,7 @@ pub mod canvas_server;
 /// and read-only `const` containers (pat-s3rrv.265).
 pub mod container_typing;
 pub mod coroutine;
+pub mod debug_session;
 pub mod editor_commands;
 pub mod fuzz_gdscript;
 pub mod global_constants;

@@ -4,6 +4,7 @@
 //! allocation) and provides operations for building, querying, and
 //! traversing the node hierarchy.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use gdcore::error::{EngineError, EngineResult};
@@ -23,6 +24,116 @@ use crate::lifecycle::LifecycleManager;
 use crate::node::{Node, NodeId};
 use crate::sprite_frames::{AnimatedSpritePlayback, SpriteFrames};
 use crate::trace::{EventTrace, TraceEvent, TraceEventType};
+
+// -- re-entrant script dispatch (pat-mgixk.9 part 2) -------------------------
+
+thread_local! {
+    /// Scripts checked out of [`SceneTree::scripts`] and **currently
+    /// executing**, as `(node, pointer into the owning frame's local)`,
+    /// innermost last.
+    ///
+    /// ⚠️ This is what makes script dispatch re-entrant.
+    /// [`SceneTree::call_script_method`] takes the script out of the arena for
+    /// the duration of its call so a nested call cannot alias it — but that
+    /// left a window in which any dispatch back to a running script found
+    /// nothing: `emit_signal` dropped the handler, and `node_has_method`
+    /// answered `false`, which made `Interpreter::call_object_method` raise
+    /// `UndefinedFunction`. Godot has no such window (`Object::callp` and
+    /// `emit_signalp` are fully re-entrant), so the canonical idiom — `Player`
+    /// calls `enemy.take_damage()`, `Enemy` emits `died`, `Player`'s handler
+    /// runs in the same frame — silently did nothing.
+    ///
+    /// Thread-local rather than a `SceneTree` field because `ScriptInstance` is
+    /// not `Send`, so a tree never crosses threads and no other thread can
+    /// observe this stack.
+    ///
+    /// SAFETY: every pointer is pushed immediately before the owning
+    /// `call_script_method` frame calls into the script and popped immediately
+    /// after (by `ActiveScriptGuard`, so a panic unwinds it too). It is
+    /// therefore only ever dereferenced while that frame — and the `Box` it
+    /// points into — is alive. This is the discipline
+    /// `SceneTreeAccessor::new(self as *mut SceneTree)` already relies on
+    /// throughout this file.
+    static ACTIVE_SCRIPTS: RefCell<Vec<(NodeId, *mut dyn ScriptInstance)>> =
+        RefCell::new(Vec::new());
+}
+
+/// Publishes a checked-out script for the duration of its call, and removes it
+/// again on the way out — including on an unwind, which a bare `pop()` after
+/// the call would miss.
+struct ActiveScriptGuard;
+
+impl ActiveScriptGuard {
+    fn push(node_id: NodeId, script: *mut dyn ScriptInstance) -> Self {
+        ACTIVE_SCRIPTS.with(|stack| stack.borrow_mut().push((node_id, script)));
+        Self
+    }
+}
+
+impl Drop for ActiveScriptGuard {
+    fn drop(&mut self) {
+        ACTIVE_SCRIPTS.with(|stack| {
+            stack.borrow_mut().pop();
+        });
+    }
+}
+
+/// Runs `f` against `node_id`'s executing script, or `None` if it is not one.
+///
+/// ⚠️ The `RefCell` borrow is released **before** `f` runs. `f` re-enters the
+/// interpreter, which can push another frame onto this very stack, and holding
+/// the borrow across that would panic with `BorrowMutError`.
+///
+/// Searches from the innermost frame out, so a script that re-enters itself
+/// resolves to the frame that is actually running.
+fn with_active_script<R>(
+    node_id: NodeId,
+    f: impl FnOnce(&mut dyn ScriptInstance) -> R,
+) -> Option<R> {
+    let script = ACTIVE_SCRIPTS.with(|stack| {
+        stack
+            .borrow()
+            .iter()
+            .rev()
+            .find(|(id, _)| *id == node_id)
+            .map(|(_, script)| *script)
+    })?;
+    // SAFETY: see `ACTIVE_SCRIPTS`.
+    Some(f(unsafe { &mut *script }))
+}
+
+/// `method` on `node_id`'s **currently executing** script.
+///
+/// ⚠️ Deliberately does NOT install scene access. The script is mid-call, so
+/// the outer frame's accessor is still installed; setting another here and
+/// clearing it on return would leave that OUTER frame running without access
+/// for the rest of its body, so every `$Node` lookup after a re-entrant
+/// dispatch would start failing. The interpreter's own self-call shortcut
+/// (`current_node_id == Some(id)` -> `call_self_func_or_native`) reuses the
+/// installed access for the same reason.
+///
+/// `None` when the node is not executing, or its script does not declare
+/// `method`, so the caller's native fallback still runs.
+fn call_running_script_method(node_id: NodeId, method: &str, args: &[Variant]) -> Option<Variant> {
+    with_active_script(node_id, |script| {
+        if !script.has_method(method) {
+            return None;
+        }
+        match script.call_method(method, args) {
+            Ok(value) => Some(value),
+            Err(err) => {
+                tracing::debug!("re-entrant script call {method} on node {node_id} failed: {err}");
+                None
+            }
+        }
+    })
+    .flatten()
+}
+
+/// Whether `node_id`'s executing script declares `method`.
+fn running_script_has_method(node_id: NodeId, method: &str) -> bool {
+    with_active_script(node_id, |script| script.has_method(method)).unwrap_or(false)
+}
 use crate::tween::{Tween, TweenId, TweenProcessMode};
 
 /// Stable FNV-1a hash of a node path, used as the RPC `node_path` key on the
@@ -506,6 +617,18 @@ pub struct SceneTree {
     /// pointer is only ever installed for the duration of a script phase by
     /// [`SceneTree::set_script_physics_server`].
     script_physics: usize,
+    /// The physics timestep the current physics phase is running at, so a
+    /// script-phase `move_and_slide()` can do its slide immediately
+    /// (pat-mgixk.37).
+    ///
+    /// Godot's `move_and_slide()` always uses `get_physics_process_delta_time()`
+    /// whatever callback calls it, so this is the TICK delta, not a per-call
+    /// one. Kept beside [`script_physics`](Self::script_physics) and set by the
+    /// same caller, so the two can never describe different ticks.
+    script_physics_delta: f64,
+    /// The idle-frame timestep of the phase about to run, for
+    /// `Node.get_process_delta_time()` (pat-mgixk.57).
+    script_process_delta: f64,
     /// The 3D twin of [`script_physics`](Self::script_physics) (pat-s3rrv.107).
     ///
     /// Separate address rather than an enum: the two servers are different
@@ -739,6 +862,8 @@ impl SceneTree {
             scripts: HashMap::new(),
             input_snapshot: None,
             script_physics: 0,
+            script_physics_delta: 0.0,
+            script_process_delta: 0.0,
             script_physics_3d: 0,
             script_audio: 0,
             multiplayer_auth_callback: Variant::Nil,
@@ -2033,6 +2158,53 @@ impl SceneTree {
         let inbound = self.multiplayer.take_inbound_rpcs();
         for rpc in inbound {
             if let Some(node_id) = self.node_for_rpc_hash(rpc.node_path) {
+                // ⚠️ Godot's `_process_rpc` CHECKS the call before running it
+                // (`scene_rpc_interface.cpp`), and Patina ran every inbound
+                // packet unconditionally — so any connected peer could invoke
+                // ANY script method on ANY node, `@rpc` or not. That is not a
+                // parity gap so much as a remote-code-execution hole in a
+                // shipped multiplayer game (pat-mgixk.26).
+                //
+                // Two gates, in Godot's order:
+                //
+                // 1. The method must have an `@rpc` config at all. A method
+                //    nobody annotated is not callable remotely, however
+                //    reachable it is locally.
+                // 2. For the default `RPCMode::Authority`, the sender must BE
+                //    the node's multiplayer authority. `@rpc("any_peer")` is
+                //    the opt-in that relaxes this, which is why a bare `@rpc`
+                //    registers as `Authority` (:2061).
+                //
+                // A dropped call is reported, not silently ignored: a silent
+                // drop is indistinguishable from a lost packet, and that is
+                // the single most expensive thing to debug in a networked
+                // game.
+                let Some(config) = self.multiplayer.get_rpc_config(&rpc.method_name) else {
+                    tracing::error!(
+                        method = %rpc.method_name,
+                        sender = rpc.sender_id.0,
+                        "dropped an inbound RPC for a method with no @rpc config; \
+                         annotate it with @rpc to make it remotely callable"
+                    );
+                    continue;
+                };
+                if config.mode == gdplatform::network::RPCMode::Authority {
+                    let authority = self.get_multiplayer_authority(node_id);
+                    // `PeerId` wraps a `u32` and `get_multiplayer_authority`
+                    // answers `i64`, so the widening is explicit — `From` is
+                    // lossless here, unlike an `as` cast.
+                    if i64::from(rpc.sender_id.0) != authority {
+                        tracing::error!(
+                            method = %rpc.method_name,
+                            sender = rpc.sender_id.0,
+                            authority,
+                            "dropped an inbound RPC: the method is @rpc(\"authority\") \
+                             and the sender is not this node's multiplayer authority. \
+                             Use @rpc(\"any_peer\") to allow any peer to call it"
+                        );
+                        continue;
+                    }
+                }
                 // Godot's `get_remote_sender_id()` answers for the duration of
                 // the handler, which is the only window in which "who called
                 // me?" has an answer.
@@ -2415,6 +2587,45 @@ impl SceneTree {
     /// bound server moves or drops.
     pub fn clear_script_physics_server(&mut self) {
         self.script_physics = 0;
+    }
+
+    /// Records the physics timestep for the phase about to run, so a
+    /// script-phase `move_and_slide()` knows how far to move (pat-mgixk.37).
+    pub fn set_script_physics_delta(&mut self, delta: f64) {
+        self.script_physics_delta = delta;
+    }
+
+    /// The physics timestep for the current phase.
+    ///
+    /// Falls back to a 60 Hz tick rather than zero: a zero delta would make
+    /// `move_and_slide()` a silent no-op, which looks exactly like the staleness
+    /// bug this replaced. A caller that forgets to record the delta gets a body
+    /// that moves at a plausible rate, not one that never moves.
+    pub(crate) fn script_physics_delta(&self) -> f64 {
+        if self.script_physics_delta > 0.0 {
+            self.script_physics_delta
+        } else {
+            1.0 / 60.0
+        }
+    }
+
+    /// The idle-frame timestep for the current phase, for
+    /// `Node.get_process_delta_time()` (pat-mgixk.57).
+    ///
+    /// Falls back to a 60 Hz frame for the same reason its physics twin does: a
+    /// script dividing by the delta must not hit a zero outside a frame.
+    pub fn script_process_delta(&self) -> f64 {
+        if self.script_process_delta > 0.0 {
+            self.script_process_delta
+        } else {
+            1.0 / 60.0
+        }
+    }
+
+    /// The physics timestep for the current phase, for
+    /// `Node.get_physics_process_delta_time()` (pat-mgixk.57).
+    pub fn script_physics_delta_time(&self) -> f64 {
+        self.script_physics_delta()
     }
 
     /// The bound script-facing physics server address, or 0 when none is bound.
@@ -4922,22 +5133,23 @@ impl SceneTree {
                         None => owner,
                     };
                     if let Some(node) = self.nodes.get_mut(&target_id) {
-                        // `"position:x"` addresses the X of a Vector2, not a
-                        // property literally named `position:x` — the property
-                        // bag is flat, so decompose before writing.
-                        match crate::tween::split_property_path(&path) {
-                            (prop, Some(sub)) => {
-                                let base = node.get_property(prop);
-                                if let Some(updated) =
-                                    crate::tween::write_subname(&base, sub, &value)
-                                {
-                                    node.set_property(prop, updated);
-                                }
-                            }
-                            (prop, None) => {
-                                node.set_property(prop, value);
-                            }
-                        }
+                        // Shares `set_animated_property_path` with the animation
+                        // player rather than repeating its logic. That function
+                        // handles `"position:x"` decomposition — the property bag
+                        // is flat, so a sub-path must be recomposed before
+                        // writing — AND routes a Node3D transform property
+                        // through the canonical local transform, which is what a
+                        // tween on a `.tscn` node's `position` needs to show up
+                        // on screen at all (pat-mgixk.29).
+                        //
+                        // ⚠️ One behaviour change beyond the transform fix: the
+                        // shared path falls back to the ClassDB revert default
+                        // when a sub-path's base property is Nil, which the
+                        // inlined version here did not. That makes
+                        // `tween_property(node, "position:x", ..)` on a node
+                        // that has never been positioned start from the class
+                        // default instead of silently doing nothing.
+                        set_animated_property_path(node, &path, value);
                     }
                 }
 
@@ -5495,12 +5707,20 @@ impl SceneTree {
                 unsafe { crate::scripting::SceneTreeAccessor::new(self as *mut SceneTree) }
             };
             script.set_scene_access(Box::new(accessor), node_id.raw());
+            // Published while the call runs so a dispatch that comes back to
+            // this node — a signal handler on itself, or a callback from a
+            // script it called — can reach it (pat-mgixk.9 part 2). The raw
+            // pointer is taken before `call_method` borrows `script`, so the
+            // two never hold overlapping borrows.
+            let published =
+                ActiveScriptGuard::push(node_id, &mut *script as *mut dyn ScriptInstance);
             match script.call_method(method, args) {
                 Ok(value) => result = Some(value),
                 Err(err) => {
                     tracing::debug!("script call {method} on node {node_id} failed: {err}")
                 }
             }
+            drop(published);
             script.clear_scene_access();
 
             self.trace_record(node_id, TraceEventType::ScriptReturn, method);
@@ -5520,6 +5740,13 @@ impl SceneTree {
             }
 
             self.scripts.insert(node_id, script);
+        } else {
+            // Not in the arena: either the node has no script, or it has one
+            // that is checked out and running. The latter is a legitimate
+            // re-entrant dispatch and must land (pat-mgixk.9 part 2);
+            // `call_running_script_method` answers `None` for the former, so
+            // the caller's native fallback is unaffected.
+            result = call_running_script_method(node_id, method, args);
         }
         result
     }
@@ -5532,6 +5759,12 @@ impl SceneTree {
             if script.has_method(method) {
                 return true;
             }
+        } else if running_script_has_method(node_id, method) {
+            // A script that is mid-call is absent from the arena but its
+            // methods are still its methods. Answering `false` here is what
+            // made `Interpreter::call_object_method` raise `UndefinedFunction`
+            // on a legitimate callback into a running script (pat-mgixk.9).
+            return true;
         }
         match self.nodes.get(&node_id) {
             Some(node) => gdobject::class_db::class_has_method(node.class_name(), method),
@@ -5660,14 +5893,83 @@ impl SceneTree {
 
     /// Calls `_ready()` on the node's script, if present.
     ///
-    /// Before `_ready` executes, any `@onready` variables are resolved
-    /// by evaluating their default expressions.
+    /// Before `_ready` executes, any `@onready` variables are resolved by
+    /// evaluating their default expressions — with the node already inside the
+    /// tree and with scene access installed, which is what Godot's
+    /// `GDScriptInstance::notification(NOTIFICATION_READY)` does through
+    /// `implicit_ready`.
     pub fn process_script_ready(&mut self, node_id: NodeId) {
         // Resolve @onready vars before _ready (even if _ready is not defined).
-        if let Some(script) = self.scripts.get_mut(&node_id) {
-            let _ = script.resolve_onready();
-        }
+        self.resolve_script_onready_with_access(node_id);
         self.call_script_with_access(node_id, "_ready", &[]);
+    }
+
+    /// Resolves a node's `@onready` initializers inside a scene-access window.
+    ///
+    /// ⚠️ This has to open its own window rather than riding on `_ready`'s, for
+    /// two independent reasons (pat-mgixk.20):
+    ///
+    /// * The old code called `script.resolve_onready()` on a borrow from
+    ///   `self.scripts` with **no accessor installed at all**, and discarded the
+    ///   `Result`. `$Sprite2D` evaluates through `Expr::GetNode`, which returns
+    ///   `Err("get_node() requires scene access")` without one — so the
+    ///   canonical `@onready var sprite = $Sprite2D` resolved to `Nil`, silently.
+    /// * [`call_script_method`](Self::call_script_method) **returns early when
+    ///   the script does not define the method**, so folding the resolution into
+    ///   the `_ready` call would leave a script that has `@onready` vars but no
+    ///   `_ready` with no window ever opened.
+    ///
+    /// Mirrors `call_script_method`'s borrow dance exactly: the script is taken
+    /// out of the arena for the duration, so an initializer that calls back into
+    /// the tree cannot alias it.
+    fn resolve_script_onready_with_access(&mut self, node_id: NodeId) {
+        let mut script = match self.scripts.remove(&node_id) {
+            Some(script) => script,
+            None => return,
+        };
+
+        let snapshot_clone = self.input_snapshot.clone();
+        // SAFETY: `self` is handed to the accessor as a raw pointer. The
+        // accessor is created here, used only within this call frame, and
+        // dropped via `clear_scene_access` before this method returns, so no
+        // dangling pointer can escape — the same invariant
+        // `call_script_method` relies on.
+        let accessor = if let Some(snapshot) = snapshot_clone {
+            unsafe {
+                crate::scripting::SceneTreeAccessor::with_input(self as *mut SceneTree, snapshot)
+            }
+        } else {
+            // SAFETY: Same invariant as the branch above.
+            unsafe { crate::scripting::SceneTreeAccessor::new(self as *mut SceneTree) }
+        };
+        script.set_scene_access(Box::new(accessor), node_id.raw());
+        if let Err(err) = script.resolve_onready() {
+            // Logged rather than swallowed. `resolve_onready_vars` now attempts
+            // every var and reports the FIRST failure, so this is "at least one
+            // initializer could not resolve", not "resolution stopped here".
+            tracing::error!(
+                node = %node_id,
+                error = %err,
+                "@onready initializers failed to resolve"
+            );
+        }
+        script.clear_scene_access();
+
+        // Publish the resolved values as node properties, exactly as a script
+        // call does, so an `@onready` var is visible through the node the same
+        // way every other script var is.
+        let prop_values: Vec<(String, Variant)> = script
+            .list_properties()
+            .into_iter()
+            .filter_map(|info| script.get_property(&info.name).map(|v| (info.name, v)))
+            .collect();
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            for (name, val) in prop_values {
+                node.set_property(&name, val);
+            }
+        }
+
+        self.scripts.insert(node_id, script);
     }
 
     /// Calls `_process(delta)` on the node's script, if present.
@@ -5902,13 +6204,25 @@ impl SceneTree {
             }
             // `should_process_node` answers the *pause* question
             // (`process_mode`); this answers whether the node wants input at
-            // all. Godot's `_call_input_pause` checks `is_processing_input()`
-            // too, so a node that called `set_process_input(false)` receives
-            // nothing even while the tree runs normally (pat-0q2kx.138).
-            if !self
-                .get_node(node_id)
-                .is_some_and(|n| n.is_processing_input())
-            {
+            // all. Godot's `_call_input_pause` checks the stage's own
+            // `is_processing_*` flag, so a node that called
+            // `set_process_input(false)` receives nothing even while the tree
+            // runs normally (pat-0q2kx.138).
+            //
+            // ⚠️ The flag is chosen BY STAGE (pat-mgixk.57). This read
+            // `is_processing_input()` for all four stages, so
+            // `set_process_input(false)` — a node saying "I only want
+            // *unhandled* input" — silenced `_unhandled_input`,
+            // `_unhandled_key_input` and `_shortcut_input` as well, which is
+            // the opposite of what the call means in Godot.
+            let wants = self.get_node(node_id).is_some_and(|n| match stage {
+                "_unhandled_input" => n.is_processing_unhandled_input(),
+                "_unhandled_key_input" => n.is_processing_unhandled_key_input(),
+                "_shortcut_input" => n.is_processing_shortcut_input(),
+                // `_input`, and any future stage, keeps the general flag.
+                _ => n.is_processing_input(),
+            });
+            if !wants {
                 continue;
             }
             self.call_script_with_access(node_id, stage, std::slice::from_ref(payload));
@@ -7836,6 +8150,102 @@ impl SceneTree {
             .is_some_and(|n| n.is_processing_input())
     }
 
+    // -- per-stage input toggles (pat-mgixk.57) ------------------------------
+
+    /// Enables/disables `_unhandled_input` on `node_id`
+    /// (`Node.set_process_unhandled_input`). Returns whether the node exists.
+    pub fn set_node_process_unhandled_input(&mut self, node_id: NodeId, enabled: bool) -> bool {
+        match self.nodes.get_mut(&node_id) {
+            Some(n) => {
+                n.set_process_unhandled_input(enabled);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether `_unhandled_input` reaches `node_id`.
+    pub fn is_node_processing_unhandled_input(&self, node_id: NodeId) -> bool {
+        self.nodes
+            .get(&node_id)
+            .is_some_and(|n| n.is_processing_unhandled_input())
+    }
+
+    /// Enables/disables `_unhandled_key_input` on `node_id`
+    /// (`Node.set_process_unhandled_key_input`).
+    pub fn set_node_process_unhandled_key_input(&mut self, node_id: NodeId, enabled: bool) -> bool {
+        match self.nodes.get_mut(&node_id) {
+            Some(n) => {
+                n.set_process_unhandled_key_input(enabled);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether `_unhandled_key_input` reaches `node_id`.
+    pub fn is_node_processing_unhandled_key_input(&self, node_id: NodeId) -> bool {
+        self.nodes
+            .get(&node_id)
+            .is_some_and(|n| n.is_processing_unhandled_key_input())
+    }
+
+    /// Enables/disables `_shortcut_input` on `node_id`
+    /// (`Node.set_process_shortcut_input`).
+    pub fn set_node_process_shortcut_input(&mut self, node_id: NodeId, enabled: bool) -> bool {
+        match self.nodes.get_mut(&node_id) {
+            Some(n) => {
+                n.set_process_shortcut_input(enabled);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether `_shortcut_input` reaches `node_id`.
+    pub fn is_node_processing_shortcut_input(&self, node_id: NodeId) -> bool {
+        self.nodes
+            .get(&node_id)
+            .is_some_and(|n| n.is_processing_shortcut_input())
+    }
+
+    /// Sets `node_id`'s idle process priority (`Node.set_process_priority`).
+    /// Returns whether the node exists.
+    pub fn set_node_process_priority(&mut self, node_id: NodeId, priority: i32) -> bool {
+        match self.nodes.get_mut(&node_id) {
+            Some(n) => {
+                n.set_process_priority(priority);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `node_id`'s idle process priority (`Node.get_process_priority`).
+    pub fn node_process_priority(&self, node_id: NodeId) -> i32 {
+        self.nodes.get(&node_id).map_or(0, |n| n.process_priority())
+    }
+
+    /// Sets `node_id`'s physics process priority
+    /// (`Node.set_physics_process_priority`).
+    pub fn set_node_physics_process_priority(&mut self, node_id: NodeId, priority: i32) -> bool {
+        match self.nodes.get_mut(&node_id) {
+            Some(n) => {
+                n.set_process_physics_priority(priority);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// `node_id`'s physics process priority
+    /// (`Node.get_physics_process_priority`).
+    pub fn node_physics_process_priority(&self, node_id: NodeId) -> i32 {
+        self.nodes
+            .get(&node_id)
+            .map_or(0, |n| n.process_physics_priority())
+    }
+
     pub fn set_node_process(&mut self, node_id: NodeId, enabled: bool) -> bool {
         match self.nodes.get_mut(&node_id) {
             Some(n) => {
@@ -7960,6 +8370,9 @@ impl SceneTree {
         // `await create_timer(1.0).timeout` fired after ~0.5 s. The coroutine
         // pass is the single owner because it is the one that then drains
         // `take_timeout_signals` to wake the parked awaits.
+        // `get_process_delta_time()` answers out of this (pat-mgixk.57): the
+        // frame's delta is a parameter here and nowhere else a script can see.
+        self.script_process_delta = delta;
         let ids: Vec<NodeId> = self
             .all_nodes_in_process_order()
             .into_iter()
@@ -7999,7 +8412,16 @@ impl SceneTree {
     /// This matches Godot's per-node dispatch for physics processing.
     pub fn process_physics_frame_with_scripts(&mut self, delta: f64) {
         let ids: Vec<NodeId> = self
-            .all_nodes_in_process_order()
+            // ⚠️ The PHYSICS ordering, not the idle one (pat-mgixk.57).
+            //
+            // `all_nodes_in_physics_process_order` has existed since
+            // pat-0q2kx.221 — but only `process_all_scripts_physics_process`
+            // used it, and that has no production caller. `MainLoop::step`
+            // drives THIS function, which sorted by `process_priority`, so
+            // `process_physics_priority` was inert at runtime: the whole point
+            // of Godot having two properties is that a node can run late in
+            // `_process` and early in `_physics_process`.
+            .all_nodes_in_physics_process_order()
             .into_iter()
             .filter(|id| self.should_process_node(*id))
             // The physics half of the same gap (pat-mgixk.6): `MainLoop::step`
@@ -8515,6 +8937,24 @@ fn audio_keys_in_range(
 /// collapsing it to 0. An unregistered class or property yields `None` from
 /// `property_get_revert` and simply leaves the base to `write_subname`.
 fn set_animated_property_path(node: &mut Node, path: &str, value: Variant) {
+    // On a Node3D every transform property is a view of ONE local transform, so
+    // an animated `position` / `rotation` / `quaternion` / `position:x` has to be
+    // written through the canonical setter. Writing the raw property instead let
+    // `local_transform_of` keep returning the explicit `transform` a `.tscn`
+    // node carries, so the animation changed nothing on screen; and `quaternion`
+    // — what a glTF Rotation3D track emits — was never read at all
+    // (pat-mgixk.29).
+    //
+    // Declines anything that is not a transform property, so every other
+    // animated property still takes the path below unchanged.
+    //
+    // ⚠️ Deliberately NOT gated on `is_class("Node3D")` here. ClassDB is not
+    // guaranteed to be populated in every runtime or test context, so a ClassDB
+    // miss would silently disable the fix. `set_transform_component` decides
+    // from the value's own type and the node's stored property types instead.
+    if crate::node3d::set_transform_component(node, path, &value) {
+        return;
+    }
     match crate::tween::split_property_path(path) {
         (prop, Some(sub)) => {
             let mut base = node.get_property(prop);
@@ -8536,24 +8976,31 @@ fn set_animated_property_path(node: &mut Node, path: &str, value: Variant) {
 }
 
 fn apply_root_motion_delta(node: &mut Node, delta: &crate::animation::RootMotionDelta) {
+    // ⚠️ Root motion is a READ-MODIFY-WRITE, so BOTH halves had to move onto the
+    // canonical transform (pat-mgixk.29). Reading the raw `position` was the
+    // subtler bug of the two: on a `.tscn` Node3D that property can be absent
+    // or stale, so the delta accumulated onto `Vector3::ZERO` — teleporting the
+    // character to near the origin — and was then written where nothing reads.
+    let current = crate::node3d::local_transform_of(node);
     if delta.position != gdcore::math::Vector3::ZERO {
-        let cur = match node.get_property("position") {
-            Variant::Vector3(v) => v,
-            _ => gdcore::math::Vector3::ZERO,
-        };
-        node.set_property("position", Variant::Vector3(cur + delta.position));
+        crate::node3d::set_transform_component(
+            node,
+            "position",
+            &Variant::Vector3(current.origin + delta.position),
+        );
     }
     if delta.rotation_y != 0.0 {
-        let cur = match node.get_property("rotation") {
-            Variant::Vector3(v) => v,
-            _ => gdcore::math::Vector3::ZERO,
-        };
-        node.set_property(
+        // Re-read: the position write above restored every component view, and
+        // composing from a transform this function already replaced would undo
+        // it.
+        let euler = crate::node3d::local_rotation_of(node);
+        crate::node3d::set_transform_component(
+            node,
             "rotation",
-            Variant::Vector3(gdcore::math::Vector3::new(
-                cur.x,
-                cur.y + delta.rotation_y,
-                cur.z,
+            &Variant::Vector3(gdcore::math::Vector3::new(
+                euler.x,
+                euler.y + delta.rotation_y,
+                euler.z,
             )),
         );
     }

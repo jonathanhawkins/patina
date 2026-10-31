@@ -134,6 +134,23 @@ impl GodotProjectFile {
     /// ⚠️ This is a re-render, not an edit-in-place: comments and blank-line
     /// layout in the original file are NOT preserved, because the parsed form
     /// never captured them.
+    /// Writes one `[input]` action in Godot's own format (pat-mgixk.16).
+    ///
+    /// Goes through [`set`](Self::set), so the value lands in the `[input]`
+    /// section and [`to_text`](Self::to_text) emits it like any other key —
+    /// this is the write-back the editor never had.
+    pub fn set_input_action(&mut self, name: &str, action: &InputAction) {
+        self.set("input", name, &serialize_input_action(action));
+    }
+
+    /// Removes an `[input]` action. Returns whether it was there.
+    pub fn remove_input_action(&mut self, name: &str) -> bool {
+        self.sections
+            .get_mut("input")
+            .and_then(|sec| sec.remove(name))
+            .is_some()
+    }
+
     pub fn to_text(&self) -> String {
         use std::fmt::Write;
         let mut out = String::new();
@@ -433,6 +450,221 @@ pub struct InputMapEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Typed `[input]` actions (pat-mgixk.16)
+// ---------------------------------------------------------------------------
+//
+// Godot stores each input action in `project.godot` as
+//
+//     jump={
+//     "deadzone": 0.2,
+//     "events": [Object(InputEventKey,"resource_local_to_scene":false,…,"keycode":32,…)]
+//     }
+//
+// and `InputMap::load_from_project_settings` reads it back
+// (`core/input/input_map.cpp:320`). Patina had **no** reader or writer for this
+// at all: `grep '\[input\]|InputEventKey'` over `gdeditor` found nothing, so
+// the editor never loaded a project's own actions and never wrote an edit back.
+// [`InputMapEntry`] / [`parse_input_events`] above only ever produced display
+// strings like `"InputEventKey:keycode=65"`, which cannot be round-tripped.
+//
+// ⚠️ The key is `"deadzone"`, one word. Godot 3 spelled it `"dead_zone"` and the
+// doc comment on [`parse_input_events`] still says so; Godot 4 reads
+// `action["deadzone"]` (input_map.cpp:320) and that is what the editor writes
+// (action_map_editor.cpp:148). A reader matching only the old spelling silently
+// gets the default deadzone for every action.
+
+/// Godot 4's `InputMap::DEFAULT_DEADZONE` (`core/input/input_map.h:55`).
+///
+/// ⚠️ 0.2, **not** 0.5 — Godot 3 used 0.5 and the value changed in 4.x. An
+/// action written without a `"deadzone"` key takes this.
+pub const DEFAULT_DEADZONE: f32 = 0.2;
+
+/// One typed event bound to an action in the `[input]` section.
+///
+/// Only the four `InputEvent` subclasses Godot's Input Map editor can produce
+/// are modelled; anything else in the file is preserved as [`Self::Other`] so a
+/// read/write cycle cannot silently drop it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InputActionEvent {
+    /// `InputEventKey`. Godot stores both a `keycode` (the character the layout
+    /// produces) and a `physical_keycode` (the position on the board), and
+    /// writes 0 for whichever the binding does not use — "Physical Keycode" in
+    /// the editor's dialog picks between them.
+    Key {
+        /// Layout-dependent keycode, or 0 when the binding is physical.
+        keycode: u32,
+        /// Layout-independent keycode, or 0 when the binding is logical.
+        physical_keycode: u32,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+        meta: bool,
+    },
+    /// `InputEventMouseButton`.
+    MouseButton { button_index: u32 },
+    /// `InputEventJoypadButton`.
+    JoypadButton { button_index: u32 },
+    /// `InputEventJoypadMotion`. `axis_value`'s SIGN selects the half-axis, so
+    /// -1.0 and +1.0 on one axis are two different bindings.
+    JoypadMotion { axis: u32, axis_value: f32 },
+    /// An `Object(...)` entry of a class this type does not model, kept
+    /// verbatim so re-serialising preserves it.
+    Other(String),
+}
+
+/// A parsed `[input]` action.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InputAction {
+    /// Analog deadzone; [`DEFAULT_DEADZONE`] when the file omits it.
+    pub deadzone: f32,
+    /// The events bound to the action, in file order.
+    pub events: Vec<InputActionEvent>,
+}
+
+impl Default for InputAction {
+    fn default() -> Self {
+        Self {
+            deadzone: DEFAULT_DEADZONE,
+            events: Vec::new(),
+        }
+    }
+}
+
+/// Parses one `[input]` action value into its deadzone and typed events.
+///
+/// Lenient on purpose: an unparseable or absent field falls back to a default
+/// rather than failing the whole project load, because a malformed action
+/// should not stop a project from opening. Unknown `Object(...)` classes are
+/// kept as [`InputActionEvent::Other`].
+pub fn parse_input_action(raw: &str) -> InputAction {
+    let deadzone = extract_field(raw, "deadzone")
+        .and_then(|v| v.parse::<f32>().ok())
+        .map(|d| d.clamp(0.0, 1.0))
+        .unwrap_or(DEFAULT_DEADZONE);
+
+    let mut events = Vec::new();
+    let mut search = raw;
+    while let Some(obj_start) = search.find("Object(") {
+        let rest = &search[obj_start + "Object(".len()..];
+        // ⚠️ `find_balanced_paren` returns the first `)` that takes the depth
+        // BELOW zero, so it must be given the text AFTER the opening paren —
+        // its doc comment says "matches the first `(` in the string", but
+        // handing it a leading `(` makes the depth return to 0 instead of going
+        // negative and it answers `None`. Called exactly as
+        // `parse_input_events` above calls it.
+        let Some(obj_end) = find_balanced_paren(rest) else {
+            break;
+        };
+        let body = &rest[..obj_end];
+        let class_end = body.find(',').unwrap_or(body.len());
+        let class = body[..class_end].trim().trim_matches('"');
+
+        let field_u32 = |name: &str| -> u32 {
+            extract_field(body, name)
+                .and_then(|v| v.parse::<f32>().ok())
+                .map(|v| v as u32)
+                .unwrap_or(0)
+        };
+        let field_bool = |name: &str| extract_field(body, name) == Some("true");
+
+        events.push(match class {
+            "InputEventKey" => InputActionEvent::Key {
+                keycode: field_u32("keycode"),
+                physical_keycode: field_u32("physical_keycode"),
+                ctrl: field_bool("ctrl_pressed"),
+                shift: field_bool("shift_pressed"),
+                alt: field_bool("alt_pressed"),
+                meta: field_bool("meta_pressed"),
+            },
+            "InputEventMouseButton" => InputActionEvent::MouseButton {
+                button_index: field_u32("button_index"),
+            },
+            "InputEventJoypadButton" => InputActionEvent::JoypadButton {
+                button_index: field_u32("button_index"),
+            },
+            "InputEventJoypadMotion" => InputActionEvent::JoypadMotion {
+                axis: field_u32("axis"),
+                // Signed, so it cannot go through `field_u32`: the sign is what
+                // distinguishes the two halves of a stick axis.
+                axis_value: extract_field(body, "axis_value")
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .unwrap_or(0.0),
+            },
+            _ => InputActionEvent::Other(format!("Object({body})")),
+        });
+
+        search = &rest[obj_end..];
+    }
+
+    InputAction { deadzone, events }
+}
+
+/// Serialises one action into the exact shape Godot writes, so a project the
+/// editor saves still opens in Godot.
+///
+/// ⚠️ Every field Godot emits is emitted here, including the ones Patina does
+/// not interpret (`resource_local_to_scene`, `window_id`, `location`, `echo`,
+/// `script`). Writing a shortened `Object(InputEventKey,"keycode":32)` parses
+/// fine in Patina and is what a reader-only implementation tempts you into, but
+/// Godot's `VariantParser` fills missing properties with defaults silently, so
+/// the difference only shows up as a binding that behaves subtly differently
+/// after a round trip through the editor.
+pub fn serialize_input_action(action: &InputAction) -> String {
+    let events: Vec<String> = action.events.iter().map(serialize_input_event).collect();
+    format!(
+        "{{\n\"deadzone\": {},\n\"events\": [{}]\n}}",
+        format_f32(action.deadzone),
+        events.join(", ")
+    )
+}
+
+fn serialize_input_event(event: &InputActionEvent) -> String {
+    const KEY_HEAD: &str =
+        "\"resource_local_to_scene\":false,\"resource_name\":\"\",\"device\":-1,\"window_id\":0";
+    match event {
+        InputActionEvent::Key {
+            keycode,
+            physical_keycode,
+            ctrl,
+            shift,
+            alt,
+            meta,
+        } => format!(
+            "Object(InputEventKey,{KEY_HEAD},\"alt_pressed\":{alt},\"shift_pressed\":{shift},\
+             \"ctrl_pressed\":{ctrl},\"meta_pressed\":{meta},\"pressed\":false,\"keycode\":{keycode},\
+             \"physical_keycode\":{physical_keycode},\"key_label\":0,\"unicode\":0,\"location\":0,\
+             \"echo\":false,\"script\":null)"
+        ),
+        InputActionEvent::MouseButton { button_index } => format!(
+            "Object(InputEventMouseButton,{KEY_HEAD},\"alt_pressed\":false,\"shift_pressed\":false,\
+             \"ctrl_pressed\":false,\"meta_pressed\":false,\"button_mask\":0,\"position\":Vector2(0, 0),\
+             \"global_position\":Vector2(0, 0),\"factor\":1.0,\"button_index\":{button_index},\
+             \"canceled\":false,\"pressed\":false,\"double_click\":false,\"script\":null)"
+        ),
+        InputActionEvent::JoypadButton { button_index } => format!(
+            "Object(InputEventJoypadButton,\"resource_local_to_scene\":false,\"resource_name\":\"\",\
+             \"device\":-1,\"button_index\":{button_index},\"pressure\":0.0,\"pressed\":false,\"script\":null)"
+        ),
+        InputActionEvent::JoypadMotion { axis, axis_value } => format!(
+            "Object(InputEventJoypadMotion,\"resource_local_to_scene\":false,\"resource_name\":\"\",\
+             \"device\":-1,\"axis\":{axis},\"axis_value\":{},\"script\":null)",
+            format_f32(*axis_value)
+        ),
+        InputActionEvent::Other(raw) => raw.clone(),
+    }
+}
+
+/// Formats a float the way Godot's writer does: a trailing `.0` so the value
+/// round-trips as a float rather than being re-read as an int.
+fn format_f32(v: f32) -> String {
+    if v == v.trunc() && v.is_finite() {
+        format!("{v:.1}")
+    } else {
+        format!("{v}")
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ProjectLoader
 // ---------------------------------------------------------------------------
 
@@ -550,6 +782,24 @@ impl ProjectLoader {
 
         entries.sort_by(|a, b| a.action_name.cmp(&b.action_name));
         entries
+    }
+
+    /// The project's `[input]` actions, typed, keyed by action name
+    /// (pat-mgixk.16).
+    ///
+    /// Unlike [`get_input_map`](Self::get_input_map), which yields display
+    /// strings like `"InputEventKey:keycode=65"`, these round-trip: the editor
+    /// can load a project's real actions, edit them, and write them back with
+    /// [`GodotProjectFile::set_input_action`] without flattening a mouse or
+    /// joypad binding into a key.
+    pub fn get_input_actions(&self) -> std::collections::BTreeMap<String, InputAction> {
+        let Some(section) = self.project_file.sections.get("input") else {
+            return std::collections::BTreeMap::new();
+        };
+        section
+            .iter()
+            .map(|(name, raw)| (name.clone(), parse_input_action(raw)))
+            .collect()
     }
 }
 

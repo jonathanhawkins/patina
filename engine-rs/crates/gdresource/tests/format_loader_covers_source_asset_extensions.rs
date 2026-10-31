@@ -175,8 +175,9 @@ fn format_loader_covers_source_asset_extensions() {
     // through a direct `gltf_import::import_gltf` call.
     let glb = loader.load("res://d.glb").expect("glb load");
     assert_eq!(
-        glb.class_name, "GltfDocument",
-        "a .glb must load as the parser's document resource",
+        glb.class_name, "PackedScene",
+        "a .glb must load as a PackedScene, as Godot's scene importer reports \
+         (pat-mgixk.23) — the parsed document rides along on the same resource",
     );
     assert_eq!(
         int_prop(&glb, "mesh_count"),

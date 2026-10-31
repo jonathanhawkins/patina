@@ -365,6 +365,15 @@ pub struct EditorState {
     /// Set by `POST /api/project/open`; used to resolve a loaded scene's res://
     /// path so the inspector can emit SubResource `resource_path`s (pat-ghfv0.40).
     pub project_root: Option<String>,
+    /// The project's parsed settings, captured when Play starts (pat-mgixk.44).
+    ///
+    /// ⚠️ Kept on the state rather than applied once and dropped, because the
+    /// script-visible `ProjectSettings` store is a THREAD-LOCAL and the editor
+    /// advances the runtime on whichever connection thread served the request
+    /// (or on the driver thread). Seeding only at Play time would leave a
+    /// script's `get_setting` answering `Nil`; `advance_running_main_loop`
+    /// seeds from here instead, on the thread that runs the frame.
+    pub run_project_settings: Option<gdcore::ProjectSettings>,
     /// Whether the scene has unsaved modifications.
     pub scene_modified: bool,
     /// pat-m6rbm: undo-stack depth recorded at the last save/load point. The
@@ -588,6 +597,21 @@ pub struct EditorState {
     /// `input_devices/pointing/emulate_touch_from_mouse` — OFF by default; it
     /// exists so a desktop mouse can drive touch code during testing.
     pub project_emulate_touch_from_mouse: bool,
+    /// The open project's `project.godot`, parsed as Godot's `ProjectSettings`
+    /// singleton (pat-mgixk.43).
+    ///
+    /// 🔑 This is what the Project Settings dialog was missing. The
+    /// `project_*` scalars below it are editor-local: nothing ever loaded them
+    /// from `project.godot` and nothing wrote them back, so every edit died
+    /// with the server and Play never saw it. Real Godot 4.x setting paths
+    /// (`physics/common/physics_ticks_per_second`, not Godot 3's
+    /// `physics/fps`) live here instead, and `persist_project_setting` writes
+    /// them through to disk.
+    ///
+    /// Replaced wholesale by `api_open_project`; before a project is open this
+    /// is the default table, which is what lets GET answer for a key no
+    /// project has overridden.
+    pub project_settings: gdcore::ProjectSettings,
     /// Project physics FPS.
     pub project_physics_fps: u32,
     /// Project default gravity.
@@ -907,6 +931,7 @@ impl EditorState {
             log_entries: VecDeque::new(),
             scene_file: None,
             project_root: None,
+            run_project_settings: None,
             scene_modified: false,
             // pat-m6rbm: fresh state has an empty undo stack, so depth 0 is the
             // clean save point.
@@ -995,6 +1020,7 @@ impl EditorState {
             project_vsync: true,
             project_emulate_mouse_from_touch: true,
             project_emulate_touch_from_mouse: false,
+            project_settings: gdcore::ProjectSettings::new(),
             project_physics_fps: 60,
             project_gravity: 980.0,
             project_linear_damp: 0.1,
@@ -1044,17 +1070,22 @@ impl EditorState {
     /// Returns the default input action map (Godot-style).
     pub fn default_input_map() -> HashMap<String, Vec<String>> {
         let mut map = HashMap::new();
-        map.insert("ui_left".into(), vec!["ArrowLeft".into(), "a".into()]);
-        map.insert("ui_right".into(), vec!["ArrowRight".into(), "d".into()]);
-        map.insert("ui_up".into(), vec!["ArrowUp".into(), "w".into()]);
-        map.insert("ui_down".into(), vec!["ArrowDown".into(), "s".into()]);
+        // ⚠️ The builtin `ui_*` actions ONLY, with the bindings Godot actually
+        // gives them (`core/input/input_map.cpp` `load_default`).
+        //
+        // This used to add `a`/`d`/`w`/`s` to `ui_left`/`right`/`up`/`down` and
+        // to invent two actions — `shoot` and `jump` — that no Godot project
+        // has unless it declares them. Both are wrong in a way that is worse
+        // than missing: a game testing `ui_left` responded to A in Play and not
+        // in an export, and `Input.is_action_pressed("jump")` answered for a
+        // project that never bound it, so the bug only appeared once the game
+        // left the editor (pat-mgixk.24).
+        map.insert("ui_left".into(), vec!["ArrowLeft".into()]);
+        map.insert("ui_right".into(), vec!["ArrowRight".into()]);
+        map.insert("ui_up".into(), vec!["ArrowUp".into()]);
+        map.insert("ui_down".into(), vec!["ArrowDown".into()]);
         map.insert("ui_accept".into(), vec!["Enter".into(), " ".into()]);
         map.insert("ui_cancel".into(), vec!["Escape".into()]);
-        map.insert("shoot".into(), vec![" ".into(), "x".into()]);
-        map.insert(
-            "jump".into(),
-            vec![" ".into(), "ArrowUp".into(), "w".into()],
-        );
         map
     }
 
@@ -1107,6 +1138,133 @@ impl EditorState {
             }
         }
         map
+    }
+
+    /// The [`gdplatform::InputMap`] a Play session runs with (pat-mgixk.24).
+    ///
+    /// 🔑 **The project's `[input]` section is the source of truth.** Godot's
+    /// running game gets the builtin `ui_*` actions overridden by the project's
+    /// own declarations, each with its own event list and deadzone
+    /// (`core/input/input_map.cpp` `load_from_project_settings`). The editor
+    /// never read that section at all: Play used
+    /// [`build_engine_input_map`](Self::build_engine_input_map), built from the
+    /// editor's string map, so a project's gamepad, mouse and modifier
+    /// bindings did nothing in Play and only started working after an export.
+    /// `InputMap::load_from_project_godot` — the real parser, with the joypad
+    /// button, joypad motion, mouse and modifier cases — existed and had
+    /// exactly one caller, in `patina-runner`.
+    ///
+    /// The editor's own map is then layered on top for the actions the project
+    /// does NOT declare. That is what keeps a `POST /api/input_map` rebind live
+    /// in Play — a local addition — while leaving an action the project
+    /// declares to the project, so a project override is not silently
+    /// re-extended with the editor's defaults (Godot's override REPLACES an
+    /// action's events; `parse_action_block` clears the list before adding).
+    ///
+    /// With no project open, or no readable `project.godot`, the editor's map
+    /// is all there is and this is exactly the old behaviour.
+    pub fn build_play_input_map(&self) -> gdplatform::InputMap {
+        let Some(content) = self.read_project_godot() else {
+            return self.build_engine_input_map();
+        };
+        let mut map = gdplatform::InputMap::load_from_project_godot(&content);
+        for (action, keys) in &self.input_map {
+            if map.get_bindings(action).is_some() {
+                // Declared by the project (or a builtin it kept): leave it be.
+                continue;
+            }
+            map.add_action(action, gdplatform::input::DEFAULT_DEADZONE);
+            for key_name in keys {
+                if let Some(typed_key) = gdplatform::input::Key::from_name(key_name) {
+                    map.action_add_event(action, gdplatform::ActionBinding::KeyBinding(typed_key));
+                }
+            }
+        }
+        map
+    }
+
+    /// The typed input map as `project.godot` declares it, when a project is
+    /// open and its `[input]` section is non-empty (pat-mgixk.16).
+    ///
+    /// `[input]` is the same source of truth `build_play_input_map` already
+    /// treats it as, so reading it here is what makes `GET /api/input_map`
+    /// agree with what Play will actually run — and with what a second editor
+    /// booted on the same directory sees.
+    fn project_input_map(&self) -> Option<crate::input_map::InputMap> {
+        let root = self.project_root.as_ref()?;
+        let content = self.read_project_godot()?;
+        let loader =
+            gdresource::project::ProjectLoader::from_text(std::path::Path::new(root), &content)
+                .ok()?;
+        let actions = loader.get_input_actions();
+        if actions.is_empty() {
+            return None;
+        }
+        Some(crate::input_map::InputMap::from_project_actions(&actions))
+    }
+
+    /// The project's declarations, with the editor's own actions layered under
+    /// them for anything the project does not declare (pat-mgixk.16).
+    ///
+    /// ⚠️ The layering direction matters and mirrors `build_play_input_map`:
+    /// the project WINS. Returning the project's map alone would drop the
+    /// builtin `ui_*` actions the editor seeds and that no `project.godot`
+    /// necessarily lists; starting from the editor's map and letting it win
+    /// would hide the very typed events this bead persists.
+    fn merged_input_map(&self) -> crate::input_map::InputMap {
+        let runtime = crate::input_map::InputMap::from_runtime_map(&self.input_map);
+        let Some(mut merged) = self.project_input_map() else {
+            return runtime;
+        };
+        let names: Vec<String> = runtime.actions().iter().map(|n| n.to_string()).collect();
+        for name in names {
+            if merged.has_action(&name) {
+                continue;
+            }
+            merged.add_action(name.clone());
+            if let Some(deadzone) = runtime.deadzone(&name) {
+                merged.set_deadzone(&name, deadzone);
+            }
+            if let Some(events) = runtime.events(&name) {
+                for event in events.to_vec() {
+                    merged.bind(&name, event);
+                }
+            }
+        }
+        merged
+    }
+
+    /// Writes one `[input]` action through to the open project's
+    /// `project.godot`, or removes it when `action` is `None` (pat-mgixk.16).
+    ///
+    /// 🔑 This is the step the editor never had. `POST /api/input_map` stopped
+    /// at `EditorState::input_map`, an in-memory `HashMap<String, Vec<String>>`
+    /// — so a rebind was invisible to a second editor on the same directory and
+    /// invisible to Play, which reads the project's own `[input]`. It also
+    /// could not represent a deadzone or a physical keycode at all.
+    ///
+    /// Only the edited action is touched, never the whole section: the editor
+    /// must not delete `[input]` entries it does not model.
+    fn persist_input_action(
+        &self,
+        name: &str,
+        action: Option<&gdresource::project::InputAction>,
+    ) -> bool {
+        let Some(root) = self.project_root.clone() else {
+            return false;
+        };
+        match action {
+            Some(action) => update_project_file(&root, |pf| pf.set_input_action(name, action)),
+            None => update_project_file(&root, |pf| {
+                pf.remove_input_action(name);
+            }),
+        }
+    }
+
+    /// The open project's `project.godot` text, when there is one.
+    fn read_project_godot(&self) -> Option<String> {
+        let root = self.project_root.as_ref()?;
+        std::fs::read_to_string(std::path::Path::new(root).join("project.godot")).ok()
     }
 
     /// Clears per-frame input state (just_pressed and just_released).
@@ -1193,7 +1351,17 @@ pub fn clone_scene_tree(source: &SceneTree) -> SceneTree {
         None => return dest,
     };
     let children: Vec<NodeId> = source_root_node.children().to_vec();
-    fn copy_subtree(source: &SceneTree, dest: &mut SceneTree, src_id: NodeId, dest_parent: NodeId) {
+    // Source raw id -> the id the copy was given. The clone allocates FRESH
+    // `NodeId`s through `add_child`, so nothing that stores an id can be copied
+    // verbatim — see the signal pass below (pat-mgixk.13).
+    let mut id_map: HashMap<u64, NodeId> = HashMap::new();
+    fn copy_subtree(
+        source: &SceneTree,
+        dest: &mut SceneTree,
+        src_id: NodeId,
+        dest_parent: NodeId,
+        id_map: &mut HashMap<u64, NodeId>,
+    ) {
         let src_node = match source.get_node(src_id) {
             Some(n) => n,
             None => return,
@@ -1209,13 +1377,59 @@ pub fn clone_scene_tree(source: &SceneTree) -> SceneTree {
             Ok(id) => id,
             Err(_) => return,
         };
+        id_map.insert(src_id.raw(), new_id);
         let children: Vec<NodeId> = src_node.children().to_vec();
         for child_id in children {
-            copy_subtree(source, dest, child_id, new_id);
+            copy_subtree(source, dest, child_id, new_id, id_map);
         }
     }
     for child_id in children {
-        copy_subtree(source, &mut dest, child_id, dest_root);
+        copy_subtree(source, &mut dest, child_id, dest_root, &mut id_map);
+    }
+
+    // 🔑 Carry the signal connections across. Properties, groups and children
+    // were copied above; the signal stores were NOT, and `build_play_tree`
+    // clones through here — so every connection made in the editor was DROPPED
+    // the moment Play started. A `[connection]` saved to the `.tscn` and listed
+    // in the Node dock still never fired, which is the whole symptom
+    // pat-mgixk.13 is about.
+    //
+    // ⚠️ Targets MUST be remapped. `Connection.target_id` is an `ObjectId`
+    // naming a node in the SOURCE tree, and the copy above minted new ids;
+    // copying a connection verbatim would point it at a node this tree does not
+    // have, which fails as a signal that silently never arrives.
+    for (src_owner, store) in source.signal_stores() {
+        let Some(&dest_owner) = id_map.get(&src_owner.raw()) else {
+            continue;
+        };
+        for signal_name in store.signal_names() {
+            let Some(signal) = store.get_signal(signal_name) else {
+                continue;
+            };
+            for conn in signal.connections() {
+                // A target outside the copied subtree has no counterpart here.
+                // The root `Window` is deliberately not copied (the clone starts
+                // from its children), so a connection pointing at it is dropped
+                // rather than mis-pointed.
+                let Some(&dest_target) = id_map.get(&conn.target_id.raw()) else {
+                    continue;
+                };
+                // ⚠️ Rebuilt field by field, not cloned: `Connection` holds an
+                // optional callback closure and so is not `Clone`. Only the
+                // data half can cross, which is exactly right here — a closure
+                // registered against the editor's tree must not fire in Play.
+                // A `.tscn`-style connection has no callback anyway, and
+                // `emit_signal` dispatches those by looking the method up on the
+                // target's script.
+                let mut copied =
+                    gdobject::signal::Connection::new(dest_target.object_id(), conn.method.clone());
+                copied.deferred = conn.deferred;
+                copied.one_shot = conn.one_shot;
+                copied.binds = conn.binds.clone();
+                copied.unbinds = conn.unbinds;
+                dest.connect_signal(dest_owner, signal_name, copied);
+            }
+        }
     }
     dest
 }
@@ -1882,7 +2096,18 @@ fn run_runtime_driver(state: Arc<Mutex<EditorState>>, running: Arc<AtomicBool>) 
     while running.load(Ordering::Relaxed) {
         let frame_secs = {
             let mut st = state.lock().unwrap();
-            if st.is_running && !st.is_paused && !st.runtime_suspended && st.run_main_loop.is_some()
+            // pat-mgixk.14: a live debug pause freezes the game exactly as the
+            // Pause button does. Without this a breakpoint inside `_process`
+            // would be hit again on the very next frame, parking a second
+            // suspended frame and publishing a second pause — stepping would
+            // never converge. The step routes drive the single frame a resume
+            // needs themselves (as `/api/runtime/step` already does), so
+            // stopping here does not strand the resume.
+            if st.is_running
+                && !st.is_paused
+                && !st.runtime_suspended
+                && !gdscript_interop::debug_session::is_paused()
+                && st.run_main_loop.is_some()
             {
                 advance_running_main_loop(&mut st);
             } else if !st.tool_scripts.is_empty() {
@@ -3514,8 +3739,10 @@ fn node_to_json_tree_with_warnings(
 
     // Godot's row triangle: present when the node reports at least one
     // configuration warning, and its tooltip lists them.
-    let configuration_warnings: Vec<String> =
-        node_warnings.get(&node_id.raw()).cloned().unwrap_or_default();
+    let configuration_warnings: Vec<String> = node_warnings
+        .get(&node_id.raw())
+        .cloned()
+        .unwrap_or_default();
 
     let visible = match node.get_property("visible") {
         Variant::Bool(b) => b,
@@ -5451,7 +5678,8 @@ fn plugin_breakpoint_lines(state: &mut EditorState, path: &str) -> Vec<u32> {
         let entries: Vec<String> = match value {
             Variant::PackedStringArray(v) => v,
             Variant::Array(items) => items
-                .to_vec().iter()
+                .to_vec()
+                .iter()
                 .filter_map(|i| match i {
                     Variant::String(s) => Some(s.clone()),
                     _ => None,
@@ -8188,29 +8416,32 @@ fn tilemap_node_of(cmd: &EditorCommand) -> Option<NodeId> {
 /// `POST /api/undo` — undoes the last command.
 fn api_undo(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let mut state = state.lock().unwrap();
-    let mut cmd = match state.undo_stack.pop() {
-        Some(c) => c,
-        None => {
+    // Delegates to `undo_one` rather than repeating it (pat-mgixk.15).
+    //
+    // ⚠️ This used to be a second, hand-copied implementation, and the copies
+    // had drifted: `undo_one` reverses the animation map (`undo_animation`) and
+    // this one did not. So the History dock's "go to version" undid an
+    // animation edit while Ctrl+Z — the thing a user actually presses — left
+    // the clip exactly as it was. Any future per-store half (`undo_tilemap`,
+    // `undo_animation`, the next one) is now wired in one place instead of two.
+    //
+    // The tilemap node has to be read BEFORE the undo, because `undo_one`
+    // consumes the command onto the redo stack.
+    let tile_node = state.undo_stack.last().and_then(tilemap_node_of);
+    match undo_one(&mut state) {
+        Ok(true) => {}
+        Ok(false) => {
             send_error(stream, 400, "nothing to undo");
             return;
         }
-    };
-
-    if let Err(e) = cmd.undo(&mut state.scene_tree) {
-        // Push it back if undo failed.
-        state.undo_stack.push(cmd);
-        send_error(stream, 500, &e.to_string());
-        return;
+        Err(e) => {
+            send_error(stream, 500, &e);
+            return;
+        }
     }
-
-    let _ = cmd.undo_tilemap(&mut state.tile_grid_store);
-    if let Some(nid) = tilemap_node_of(&cmd) {
+    if let Some(nid) = tile_node {
         writeback_tile_grid(&mut state, nid);
     }
-    state.redo_stack.push(cmd);
-    // Undo may have removed nodes (e.g. undoing an add/duplicate); drop any
-    // selected ids that no longer exist so the selection can't dangle.
-    state.prune_selection();
     // pat-m6rbm: recompute the dirty flag against the saved revision so undoing
     // back to the save point clears `modified` (Godot semantics) rather than
     // leaving it latched true.
@@ -8222,27 +8453,22 @@ fn api_undo(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
 /// `POST /api/redo` — redoes the last undone command.
 fn api_redo(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let mut state = state.lock().unwrap();
-    let mut cmd = match state.redo_stack.pop() {
-        Some(c) => c,
-        None => {
+    // Mirror of `api_undo`: one implementation, in `redo_one` (pat-mgixk.15).
+    let tile_node = state.redo_stack.last().and_then(tilemap_node_of);
+    match redo_one(&mut state) {
+        Ok(true) => {}
+        Ok(false) => {
             send_error(stream, 400, "nothing to redo");
             return;
         }
-    };
-
-    if let Err(e) = cmd.execute(&mut state.scene_tree) {
-        state.redo_stack.push(cmd);
-        send_error(stream, 500, &e.to_string());
-        return;
+        Err(e) => {
+            send_error(stream, 500, &e);
+            return;
+        }
     }
-
-    let _ = cmd.execute_tilemap(&mut state.tile_grid_store);
-    if let Some(nid) = tilemap_node_of(&cmd) {
+    if let Some(nid) = tile_node {
         writeback_tile_grid(&mut state, nid);
     }
-    state.undo_stack.push(cmd);
-    // Redo may also remove nodes (e.g. redoing a delete); keep selection sane.
-    state.prune_selection();
     // pat-m6rbm: recompute the dirty flag against the saved revision so redoing
     // past the save point re-marks the scene modified.
     state.scene_modified = state.undo_stack.len() != state.saved_undo_depth;
@@ -8266,6 +8492,13 @@ fn undo_one(state: &mut EditorState) -> Result<bool, String> {
     let _ = cmd.undo_tilemap(&mut state.tile_grid_store);
     // Animation edits live in a second store, like tilemaps (pat-0q2kx.12).
     let _ = cmd.undo_animation(&mut state.animations);
+    // ...and that store is not what a save reads. Undo has to put the clip back
+    // on the AnimationPlayer too, or Ctrl+Z updates the panel while the `.tscn`
+    // keeps the undone edit (pat-mgixk.15).
+    if let EditorCommand::AnimationEdit { animation, .. } = &cmd {
+        let name = animation.clone();
+        sync_animation_to_player(state, &name);
+    }
     state.redo_stack.push(cmd);
     state.prune_selection();
     Ok(true)
@@ -8284,6 +8517,11 @@ fn redo_one(state: &mut EditorState) -> Result<bool, String> {
     }
     let _ = cmd.execute_tilemap(&mut state.tile_grid_store);
     let _ = cmd.execute_animation(&mut state.animations);
+    // Mirror of `undo_one`: redo re-applies to the player as well as the map.
+    if let EditorCommand::AnimationEdit { animation, .. } = &cmd {
+        let name = animation.clone();
+        sync_animation_to_player(state, &name);
+    }
     state.undo_stack.push(cmd);
     state.prune_selection();
     Ok(true)
@@ -8593,6 +8831,25 @@ fn api_save_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
     // file. Calling it after the save would be useless — the .tscn is already
     // written by then. Broadcast, not first-claim: every plugin must get it.
     dispatch_plugin_virtual(&mut state, "_apply_changes", &[], false);
+
+    // pat-mgixk.15: the animation panel edits `state.animations`, but
+    // `TscnSaver` serialises what the AnimationPlayer holds
+    // (`scene_saver.rs::collect_animation_tables`). Every mutating handler now
+    // flushes through `push_animation_edit`, and this is the backstop for
+    // anything that reached the map another way — a scene load that seeded it,
+    // auto-key mid-drag, or a future handler that forgets. Placed AFTER
+    // `_apply_changes` so a plugin's own edits are in the tree first, and
+    // BEFORE `save_tree` because a flush after the write would be useless.
+    //
+    // Skipped entirely when the scene has no AnimationPlayer: there is nowhere
+    // to put the clips, and `write_animation_through` would log one warning per
+    // clip for a scene that simply does not animate.
+    if scene_animation_player(&state).is_some() {
+        let clip_names: Vec<String> = state.animations.keys().cloned().collect();
+        for name in clip_names {
+            write_animation_through(&mut state, &name);
+        }
+    }
 
     let tscn = TscnSaver::save_tree(&state.scene_tree, save_root);
 
@@ -12433,6 +12690,20 @@ fn api_open_project(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         // per-project settings dir.
         s.create_node_dialog
             .set_persist_dir(Some(dir.join(".patina").join("editor")));
+        // pat-mgixk.43: load the project's real settings. Without this the
+        // Project Settings dialog showed editor-local defaults for a project
+        // that had its own `project.godot` values, so opening a project and
+        // looking at its settings reported the wrong numbers.
+        //
+        // A parse failure leaves the previous table in place rather than
+        // clearing it: the manifest is known to exist (checked above), so a
+        // failure here means malformed content, and answering GET with an
+        // empty table would read as "this project sets nothing".
+        match gdcore::ProjectSettings::load_godot_project(&dir.join("project.godot")) {
+            Ok(ps) => s.project_settings = ps,
+            Err(e) => s.add_log("error", format!("project.godot settings: {e}")),
+        }
+        sync_project_scalars_from_settings(&mut s);
         // pat-0q2kx.76: fill the plugin list from addons/*/plugin.cfg and start
         // whatever `project.godot` says is already enabled, so an enabled addon
         // survives a server restart.
@@ -13457,10 +13728,24 @@ fn api_get_node_signals(state: &Arc<Mutex<EditorState>>, query: &str, stream: &m
                                 // to `None` when it is some other object.
                                 let target = gdscene::node::NodeId::from_object_id(conn.target_id);
                                 let options = ConnectOptions::from_connection(conn);
+                                // The receiver's script, so "Go to Method" can
+                                // open the right file without a second round
+                                // trip. It is the TARGET's script, not the
+                                // emitter's — those differ for every
+                                // connection that is worth making.
+                                let target_script = state
+                                    .scene_tree
+                                    .get_node(target)
+                                    .map(|n| n.get_property("_script_path"))
+                                    .and_then(|v| match v {
+                                        Variant::String(path) if !path.is_empty() => Some(path),
+                                        _ => None,
+                                    });
                                 serde_json::json!({
                                     "method": conn.method,
                                     "target_id": conn.target_id.raw(),
                                     "target_path": state.scene_tree.node_path(target),
+                                    "target_script": target_script,
                                     "flags": options.godot_flags(),
                                     "deferred": conn.deferred,
                                     "one_shot": conn.one_shot,
@@ -13557,6 +13842,20 @@ fn api_connect_signal(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
     };
     // Godot's ConnectDialog defaults the receiver to the scene root — the node
     // that owns the script — which is what `to="."` means in a `.tscn`.
+    //
+    // ⚠️ That is the SCENE root, i.e. the first child of `/root`, not `/root`
+    // itself. `/root` is the editor's own Window and is not part of the saved
+    // subtree, so `TscnSaver` could not resolve it to a path and would fall
+    // back to `"."` — the right answer by accident, and the wrong one for a
+    // reload, since the connection would no longer name a real target.
+    let scene_root = {
+        let root = state.scene_tree.root_id();
+        state
+            .scene_tree
+            .get_node(root)
+            .and_then(|n| n.children().first().copied())
+            .unwrap_or(root)
+    };
     let target_id = match target_raw {
         Some(raw) => match find_node_by_raw_id(&state.scene_tree, raw) {
             Some(id) => id,
@@ -13565,7 +13864,7 @@ fn api_connect_signal(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
                 return;
             }
         },
-        None => state.scene_tree.root_id(),
+        None => scene_root,
     };
 
     // A REAL connection in the tree's signal store, not a string in a property.
@@ -14486,6 +14785,68 @@ fn write_animation_through(s: &mut EditorState, name: &str) -> bool {
     false
 }
 
+/// Mirrors one clip from `state.animations` onto the scene's AnimationPlayer —
+/// including the case where it is GONE from the map (pat-mgixk.15).
+///
+/// `write_animation_through` only ever adds. That is enough for a keyframe edit
+/// but not for a delete: `TscnSaver` serialises `player.animations`
+/// (`scene_saver.rs` `collect_animation_tables`), so a clip the editor removed
+/// would still be written to the `.tscn` until something else rewrote the
+/// player. Routing every animation mutation through this one function is what
+/// makes "the editor's animation map" and "what a save produces" the same
+/// thing.
+fn sync_animation_to_player(s: &mut EditorState, name: &str) -> bool {
+    if s.animations.contains_key(name) {
+        return write_animation_through(s, name);
+    }
+    let Some(player_node) = scene_animation_player(s) else {
+        return false;
+    };
+    let Some(player) = s.scene_tree.get_animation_player_mut(player_node) else {
+        return false;
+    };
+    let removed = player.animations.remove(name).is_some();
+    // A deleted clip must not stay named as the autoplay, or the save writes an
+    // `autoplay` that names nothing and the next load starts by failing to find
+    // it. Godot's AnimationLibrary removal clears the reference the same way.
+    if player.autoplay.as_deref() == Some(name) {
+        player.autoplay = None;
+        player.playing = false;
+    }
+    removed
+}
+
+/// Records one animation mutation as an undo step and flushes it to the scene.
+///
+/// Every mutating animation handler ends with this call, which is the point:
+/// before pat-mgixk.15 only keyframe-add and auto-key wrote through, so create,
+/// delete, track add/delete/reorder, key remove, transition and paste were all
+/// lost on save and invisible to Play. Godot has no such split — the track
+/// editor mutates the `Animation` resource the player owns, through `undo_redo`,
+/// so a save always serialises the current clips
+/// (`editor/animation/animation_track_editor.cpp`).
+///
+/// `before` is the clip as it was *before* the mutation (`None` if it did not
+/// exist); `after` is read back out of the map here, so a handler that deleted
+/// the clip gets `after: None` without having to say so.
+fn push_animation_edit(
+    s: &mut EditorState,
+    name: &str,
+    before: Option<gdscene::animation::Animation>,
+    label: String,
+) {
+    let after = s.animations.get(name).cloned();
+    s.undo_stack.push(EditorCommand::AnimationEdit {
+        animation: name.to_string(),
+        before: before.map(Box::new),
+        after: after.map(Box::new),
+        label,
+    });
+    s.redo_stack.clear();
+    s.scene_modified = true;
+    sync_animation_to_player(s, name);
+}
+
 /// Samples the playing clip at `animation_playback.current_time` and writes the
 /// values onto the live scene-tree nodes, which is what makes the editor
 /// viewport preview the motion.
@@ -14694,6 +15055,13 @@ fn api_create_animation(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
     let mut anim = Animation::new(name.clone(), length.max(0.1));
     anim.loop_mode = loop_mode;
     state.animations.insert(name.clone(), anim);
+    // `before: None` — the clip did not exist, so undo removes it again.
+    push_animation_edit(
+        &mut state,
+        &name,
+        None,
+        format!("Create animation '{name}'"),
+    );
     state.add_log("info", format!("Created animation '{}'", name));
     send_json(stream, r#"{"ok":true}"#);
 }
@@ -14715,10 +15083,21 @@ fn api_delete_animation(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
         }
     };
     let mut state = state.lock().unwrap();
-    if state.animations.remove(&name).is_none() {
-        send_error(stream, 404, "animation not found");
-        return;
-    }
+    let before = match state.animations.remove(&name) {
+        Some(prev) => prev,
+        None => {
+            send_error(stream, 404, "animation not found");
+            return;
+        }
+    };
+    // `after` reads back as `None` because the clip is already out of the map,
+    // which is what takes it off the AnimationPlayer and out of the next save.
+    push_animation_edit(
+        &mut state,
+        &name,
+        Some(before),
+        format!("Delete animation '{name}'"),
+    );
     if state.animation_playback.animation_name.as_deref() == Some(&name) {
         state.animation_playback.playing = false;
         state.animation_playback.animation_name = None;
@@ -14808,18 +15187,15 @@ fn api_add_keyframe(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     anim.tracks[track_idx].add_keyframe(KeyFrame::linear(time, value));
 
     // Adding a keyframe (and any track it implicitly created) is one undo step.
-    let after = anim.clone();
-    state.undo_stack.push(EditorCommand::AnimationEdit {
-        animation: anim_name.clone(),
-        before: before.map(Box::new),
-        after: Box::new(after),
-        label: format!("Add keyframe to '{anim_name}'"),
-    });
-    state.redo_stack.clear();
-    state.scene_modified = true;
-    // Push the edited clip onto the scene's AnimationPlayer so saving the scene
-    // persists it (pat-0q2kx.54).
-    write_animation_through(&mut state, &anim_name);
+    // Through the shared helper so this handler cannot drift from the other
+    // seven (pat-mgixk.15); it also does the write-through that persists the
+    // clip to the scene's AnimationPlayer (pat-0q2kx.54).
+    push_animation_edit(
+        &mut state,
+        &anim_name,
+        before,
+        format!("Add keyframe to '{anim_name}'"),
+    );
 
     send_json(
         stream,
@@ -14876,6 +15252,7 @@ fn api_add_track(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpSt
         None => TrackType::Property,
     };
     let mut state = state.lock().unwrap();
+    let before = state.animations.get(&anim_name).cloned();
     let anim = match state.animations.get_mut(&anim_name) {
         Some(a) => a,
         None => {
@@ -14894,6 +15271,12 @@ fn api_add_track(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpSt
     let track = AnimationTrack::with_type(&node_path, &property, track_type);
     anim.tracks.push(track);
     let idx = anim.tracks.len() - 1;
+    push_animation_edit(
+        &mut state,
+        &anim_name,
+        before,
+        format!("Add track '{node_path}:{property}' to '{anim_name}'"),
+    );
     send_json(
         stream,
         &format!(
@@ -14928,6 +15311,7 @@ fn api_delete_track(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         }
     };
     let mut state = state.lock().unwrap();
+    let before = state.animations.get(&anim_name).cloned();
     let anim = match state.animations.get_mut(&anim_name) {
         Some(a) => a,
         None => {
@@ -14940,6 +15324,12 @@ fn api_delete_track(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         return;
     }
     anim.tracks.remove(track_index);
+    push_animation_edit(
+        &mut state,
+        &anim_name,
+        before,
+        format!("Delete track {track_index} from '{anim_name}'"),
+    );
     send_json(stream, r#"{"ok":true}"#);
 }
 
@@ -14974,6 +15364,7 @@ fn api_remove_keyframe(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
         }
     };
     let mut state = state.lock().unwrap();
+    let before = state.animations.get(&anim_name).cloned();
     let anim = match state.animations.get_mut(&anim_name) {
         Some(a) => a,
         None => {
@@ -14992,6 +15383,12 @@ fn api_remove_keyframe(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
     if anim.tracks[track_index].keyframe_count() == 0 {
         anim.tracks.remove(track_index);
     }
+    push_animation_edit(
+        &mut state,
+        &anim_name,
+        before,
+        format!("Remove keyframe {keyframe_index} from '{anim_name}'"),
+    );
     send_json(stream, r#"{"ok":true}"#);
 }
 
@@ -15973,7 +16370,41 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     state.debug_attached = true;
     state.debug_state = "running".to_string();
     state.debug_messages.clear();
+    // pat-mgixk.14: the session STARTS here, so this is the one place that may
+    // use `attach` — it clears any pause and pending command left over from the
+    // previous run, which `ensure_attached` in the per-frame hook deliberately
+    // does not. The gutter's breakpoints survive, as Godot's do, and
+    // `bind_engine_debugger` below pushes them into the interpreter's
+    // thread-local debugger before the first script runs.
+    gdscript_interop::debug_session::attach();
     bind_engine_debugger(&state);
+
+    // pat-mgixk.44: the project's settings have to be live BEFORE the tree is
+    // built, for exactly the reason the debugger above does — `build_play_tree`
+    // dispatches `_ready` inline on this thread, so a script reading
+    // `Engine.physics_ticks_per_second` or
+    // `ProjectSettings.get_setting("application/config/name")` in `_ready` is
+    // answered DURING that call.
+    //
+    // ⚠️ `apply_project_settings` below is not enough on its own, and that was
+    // the bug: it needs the `MainLoop`, which does not exist until after the
+    // tree is built, so the first scripts to run saw the ENGINE defaults — 60
+    // ticks for a project declaring 30. Godot has no such window; `Main::setup`
+    // reads its settings before the scene is instantiated.
+    //
+    // Parsed with the same `from_godot_format` the runner uses
+    // (`patina-runner/src/project_boot.rs`), so the two entry points cannot
+    // disagree about what the project says.
+    let project_settings = state
+        .read_project_godot()
+        .and_then(|text| gdcore::ProjectSettings::from_godot_format(&text).ok());
+    if let Some(settings) = &project_settings {
+        let root = state.project_root.clone().unwrap_or_default();
+        gdscene::project_runtime::seed_script_visible_settings(
+            settings,
+            std::path::Path::new(&root),
+        );
+    }
 
     let cloned = build_play_tree(&mut state);
     // `_ready` has now run on THIS thread, so its `send_message` captures are in
@@ -15982,7 +16413,12 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     drain_engine_debugger_into(&mut state);
 
     let mut main_loop = MainLoop::new(cloned);
-    main_loop.set_input_map(state.build_engine_input_map());
+    // pat-mgixk.24: the project's own `[input]` actions, not the editor's
+    // hard-coded map. `set_input_map` also snapshots this as the baseline
+    // `InputMap.load_from_project_settings()` restores, which is what makes
+    // that script call mean "back to the project's declarations" rather than
+    // "back to the editor's defaults".
+    main_loop.set_input_map(state.build_play_input_map());
     // pat-s3rrv.77: the pointer-emulation settings were declared and read by
     // nobody, so `InputState` kept its hard-coded values whatever project.godot
     // said. Applied here, at the same point as the input map, because both are
@@ -15993,6 +16429,21 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     main_loop
         .input_state_mut()
         .set_emulate_touch_from_mouse(state.project_emulate_touch_from_mouse);
+    // pat-mgixk.44: Godot's Play boots the game exactly as an export would,
+    // reading every setting from `project.godot` (`Main::setup` / `Main::start`
+    // and their `GLOBAL_GET`s). This path applied only the input map and the two
+    // pointer-emulation flags, so a project's physics tick rate and gravity were
+    // silently the ENGINE defaults in the editor — the one place a developer
+    // actually tests the game — and only came right after an export.
+    //
+    //
+    // Reuses the table parsed above rather than re-reading `project.godot`: two
+    // reads could disagree if the file changed mid-launch, and this half must
+    // describe the same project the scripts were already seeded from.
+    if let Some(settings) = &project_settings {
+        gdscene::project_runtime::apply_project_settings(&mut main_loop, settings);
+    }
+    state.run_project_settings = project_settings;
     state.run_main_loop = Some(main_loop);
     state.is_running = true;
     state.is_paused = false;
@@ -16079,22 +16530,38 @@ pub fn build_play_tree(state: &mut EditorState) -> SceneTree {
 /// the path relative to `project_root`, loads the `.gd` file, parses it,
 /// and attaches a `GDScriptNodeInstance` to the node.
 fn attach_scripts_to_tree(tree: &mut SceneTree, project_root: &str, state: &mut EditorState) {
-    let mut scripts_to_load: Vec<(NodeId, std::path::PathBuf)> = Vec::new();
+    // pat-mgixk.14: the `res://` spelling is carried alongside the filesystem
+    // path, because the two identify the script to DIFFERENT layers. The
+    // editor's breakpoints, the script-editor gutter and `get_script()
+    // .resource_path` all speak `res://`; only `fs::read_to_string` wants the
+    // absolute path. Keeping just the latter — as this did — is why a
+    // breakpoint could be set, drawn and listed and still never be matched
+    // against a running statement.
+    let mut scripts_to_load: Vec<(NodeId, std::path::PathBuf, String)> = Vec::new();
 
     for node_id in tree.all_nodes_in_tree_order() {
         if let Some(node) = tree.get_node(node_id) {
             if let Variant::String(res_path) = node.get_property("_script_path") {
                 let relative = res_path.strip_prefix("res://").unwrap_or(&res_path);
                 let abs_path = std::path::Path::new(project_root).join(relative);
-                scripts_to_load.push((node_id, abs_path));
+                scripts_to_load.push((node_id, abs_path, res_path.clone()));
             }
         }
     }
 
-    for (node_id, path) in scripts_to_load {
+    for (node_id, path, res_path) in scripts_to_load {
         match std::fs::read_to_string(&path) {
             Ok(source) => match GDScriptNodeInstance::from_source(&source, node_id) {
-                Ok(instance) => {
+                Ok(mut instance) => {
+                    // ⚠️ `set_script_file_path` had exactly ONE caller before
+                    // this — `instantiate_script`, the `load("x.gd").new()`
+                    // path — so a scene-attached script knew its own source
+                    // file nowhere. It forwards the path to the interpreter,
+                    // which is what lets `(script, line)` breakpoint matching
+                    // work at all, and it also fills in the
+                    // `get_script().resource_path` a scene script used to
+                    // report as empty.
+                    instance.set_script_file_path(&res_path);
                     tree.attach_script(node_id, Box::new(instance));
                     state.add_log("info", format!("Script loaded: {}", path.display()));
                 }
@@ -16140,6 +16607,13 @@ fn stop_running_instance(state: &mut EditorState) {
     state.debug_attached = false;
     state.debug_state = "detached".to_string();
     gdscript_interop::interpreter::engine_debugger_detach();
+    // pat-mgixk.14: the live pause dies with the run — the frame it referred to
+    // is gone with the tree, and a pause left behind would freeze the NEXT
+    // Play before its first statement (the driver gate consults it). Keeps the
+    // breakpoints.
+    gdscript_interop::debug_session::detach();
+    state.debug_frames.clear();
+    state.debug_locals.clear();
     // pat-nzgdu.171: stop recording, but keep `movie_frames` so the finished
     // run's sequence can still be downloaded until the next Play clears it.
     state.movie_mode = false;
@@ -16216,6 +16690,103 @@ fn bind_engine_debugger(state: &EditorState) {
         gdscript_interop::interpreter::engine_debugger_set_skipping_breakpoints(
             state.debug_skip_breakpoints,
         );
+        // pat-mgixk.14: the breakpoints the editor holds have to reach the
+        // THREAD-LOCAL debugger the interpreter consults, and this is the only
+        // per-frame hook that runs on the stepping thread. `Debugger::attach`
+        // above keeps breakpoints, so re-adding is idempotent.
+        // ⚠️ `ensure_attached`, NOT `attach`: this runs every frame, and the
+        // step routes drive a frame of their own. `attach` clears the live
+        // pause and the pending command, so using it here would eat exactly
+        // the handshake the next few lines are about to read.
+        gdscript_interop::debug_session::ensure_attached();
+        gdscript_interop::interpreter::with_engine_debugger(|dbg| {
+            for bp in gdscript_interop::debug_session::breakpoints() {
+                dbg.add_breakpoint(bp);
+            }
+            // The Break button cannot arm a step mode from its own HTTP
+            // thread, so it parks a request that is honoured here: stop at the
+            // next statement, wherever the game happens to be.
+            if gdscript_interop::debug_session::take_break_request() {
+                dbg.arm_step(gdcore::debugger::StepMode::StepIn, 0);
+            }
+        });
+    }
+}
+
+/// Records one [`ProfilerFrame`] from the frame that just ran (pat-mgixk.14).
+///
+/// ⚠️ Must be called on the thread that ran the scripts:
+/// `drain_script_profile` reads a thread-local accumulator.
+///
+/// The per-function rows come from the interpreter's own timing of
+/// `call_user_func_impl` / `call_instance_method_impl`, so a row is a
+/// measurement of a real call and not a subsystem label.
+fn record_profiler_frame(state: &mut EditorState, elapsed: std::time::Duration) {
+    let total_ms = elapsed.as_secs_f64() * 1000.0;
+    let functions: Vec<ProfilerFuncEntry> = gdscript_interop::interpreter::drain_script_profile()
+        .into_iter()
+        .map(|(name, time_ms, self_ms, calls)| ProfilerFuncEntry {
+            name,
+            time_ms,
+            self_ms,
+            calls,
+        })
+        .collect();
+    // Same bounded window `api_profiler_record` keeps, so a long session cannot
+    // grow the ring without limit.
+    if state.profiler_frames.len() >= 120 {
+        state.profiler_frames.pop_front();
+    }
+    state.profiler_frames.push_back(ProfilerFrame {
+        frame_number: state.runtime_frame_count,
+        total_ms,
+        // The whole frame runs on this thread, so the measured wall time IS the
+        // CPU time; there is no separate GPU submission to subtract.
+        cpu_ms: total_ms,
+        // ⚠️ Both left at 0 rather than estimated. There is no GPU timer in
+        // this renderer, and `MainLoop::step` carries no per-phase
+        // instrumentation, so a split would be a MADE-UP number in the one
+        // panel whose entire job is to say where the time went. A reader can
+        // tell "not measured" from "measured as zero" by the total being
+        // non-zero beside them.
+        gpu_ms: 0.0,
+        physics_ms: 0.0,
+        functions,
+    });
+}
+
+/// Copies the running game's LIVE pause into the fields the debugger panel
+/// reads (pat-mgixk.14).
+///
+/// ⚠️ Called at the top of every `/api/debug/*` route rather than once per
+/// frame. The pause is published by the thread that runs scripts and a route
+/// lands on a connection thread, so a per-frame copy would serve data up to a
+/// frame stale — and worse, once the game has broken the driver STOPS stepping,
+/// so there would be no next frame to refresh it with.
+///
+/// This is also what replaces the fabricated frame `api_debug_break` used to
+/// push: `debug_frames` and `debug_locals` now carry what the interpreter
+/// actually had on its stack.
+fn sync_debug_pause_into(state: &mut EditorState) {
+    match gdscript_interop::debug_session::pause() {
+        Some(paused) => {
+            state.debug_state = "paused".to_string();
+            state.debug_frames = paused
+                .frames
+                .iter()
+                .map(|f| (f.function.clone(), f.script.clone(), f.line))
+                .collect();
+            state.debug_locals = paused.locals.clone();
+        }
+        None if state.debug_state == "paused" => {
+            // Running again. The frames and locals are dropped rather than
+            // left on screen: a panel still showing the last pause is how a
+            // resumed game reads as paused forever.
+            state.debug_state = "running".to_string();
+            state.debug_frames.clear();
+            state.debug_locals.clear();
+        }
+        None => {}
     }
 }
 
@@ -16257,6 +16828,19 @@ fn drain_engine_debugger_into(state: &mut EditorState) {
 }
 
 fn advance_running_main_loop(state: &mut EditorState) -> u64 {
+    // pat-mgixk.44: seed the script-visible `ProjectSettings` for THIS thread.
+    //
+    // ⚠️ It has to happen here, not at Play time: the store is a thread-local
+    // and this function runs on whichever connection thread served
+    // `/api/runtime/step`, or on the driver thread for an unpaused runtime. The
+    // helper is guarded to seed a given thread exactly once, so a script's own
+    // `ProjectSettings.set_setting` is never clobbered by a later frame.
+    if let (Some(settings), Some(root)) = (&state.run_project_settings, &state.project_root) {
+        gdscene::project_runtime::seed_script_settings_for_this_thread(
+            settings,
+            std::path::Path::new(root),
+        );
+    }
     // pat-nzgdu.171: Movie Maker records at a stable, fixed timestep. time_scale
     // must not change how much game time each captured frame advances, or the
     // recording would speed up/stutter, so movie mode uses the raw fixed delta.
@@ -16310,6 +16894,12 @@ fn advance_running_main_loop(state: &mut EditorState) -> u64 {
     // `size_changed` only on a real resize. Doing it in the `play` handler
     // instead would capture the size once at boot and never see the browser
     // resize the canvas, which is the state this bead is about.
+    // pat-mgixk.14: the Profiler tab's only producer used to be the test-only
+    // `POST /api/profiler/record`, which no client calls — so `profiler_frames`
+    // was empty through every Play and the tab showed nothing. The frame is
+    // timed here, around the one call that runs the whole game frame.
+    let profiling = state.profiler_capturing;
+    let step_started = std::time::Instant::now();
     let (view_w, view_h) = (state.render_width, state.render_height);
     if let Some(ref mut main_loop) = state.run_main_loop {
         main_loop.set_viewport_size(view_w, view_h);
@@ -16326,6 +16916,12 @@ fn advance_running_main_loop(state: &mut EditorState) -> u64 {
                 time: output.frame_count as f64 * dt,
             });
         }
+    }
+    // pat-mgixk.14: recorded after the `run_main_loop` borrow ends, and on the
+    // SAME thread that just ran the scripts — `drain_script_profile` reads a
+    // thread-local, for the same reason the debugger drain below does.
+    if profiling {
+        record_profiler_frame(state, step_started.elapsed());
     }
     // pat-s3rrv.27: drain what this frame's scripts told the debugger, on the
     // same thread that just ran them.
@@ -16952,7 +17548,8 @@ fn read_point_list(tree: &SceneTree, node_id: NodeId, property: &str) -> Vec<Vec
     match tree.get_node(node_id).map(|n| n.get_property(property)) {
         Some(Variant::PackedVector2Array(v)) => v,
         Some(Variant::Array(items)) => items
-            .to_vec().into_iter()
+            .to_vec()
+            .into_iter()
             .filter_map(|v| match v {
                 Variant::Vector2(p) => Some(p),
                 _ => None,
@@ -18867,7 +19464,8 @@ fn tileset_custom_data_layers(node: &Node) -> Vec<String> {
     match node.get_property(tilemap::TILE_CUSTOM_DATA_LAYERS) {
         Variant::PackedStringArray(v) => v,
         Variant::Array(items) => items
-            .to_vec().iter()
+            .to_vec()
+            .iter()
             .filter_map(|v| match v {
                 Variant::String(s) => Some(s.clone()),
                 _ => None,
@@ -20171,6 +20769,15 @@ pub fn toggle_breakpoint_in_state(s: &mut EditorState, path: &str, line: u32) ->
         s.debug_breakpoints
             .retain(|(sc, ln)| !(sc == path && *ln == line as usize));
     }
+    // pat-mgixk.14: and a THIRD store — the running game's. The two editor
+    // lists above are what the gutter and the panel draw; neither is what the
+    // interpreter checks before a statement. A breakpoint that reached only
+    // these two is drawn, listed, and never hit.
+    if added {
+        gdscript_interop::debug_session::add_breakpoint(path, line as usize);
+    } else {
+        gdscript_interop::debug_session::remove_breakpoint(path, line as usize);
+    }
     added
 }
 
@@ -20308,6 +20915,7 @@ fn api_reorder_track(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
         }
     };
     let mut s = state.lock().unwrap();
+    let before = s.animations.get(&anim_name).cloned();
     let anim = match s.animations.get_mut(&anim_name) {
         Some(a) => a,
         None => {
@@ -20321,6 +20929,12 @@ fn api_reorder_track(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
     }
     let track = anim.tracks.remove(from);
     anim.tracks.insert(to, track);
+    push_animation_edit(
+        &mut s,
+        &anim_name,
+        before,
+        format!("Reorder track {from} -> {to} in '{anim_name}'"),
+    );
     send_json(stream, r#"{"ok":true}"#);
 }
 
@@ -20415,6 +21029,7 @@ fn api_paste_keyframes(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
         send_error(stream, 400, "keyframe clipboard is empty");
         return;
     }
+    let before = s.animations.get(&anim_name).cloned();
     let anim = match s.animations.get_mut(&anim_name) {
         Some(a) => a,
         None => {
@@ -20433,6 +21048,12 @@ fn api_paste_keyframes(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
         anim.tracks[track_index].add_keyframe(new_kf);
         pasted += 1;
     }
+    push_animation_edit(
+        &mut s,
+        &anim_name,
+        before,
+        format!("Paste {pasted} keyframe(s) into '{anim_name}'"),
+    );
     send_json(stream, &format!(r#"{{"ok":true,"pasted":{}}}"#, pasted));
 }
 
@@ -20506,6 +21127,7 @@ fn api_set_keyframe_transition(
     };
 
     let mut s = state.lock().unwrap();
+    let before = s.animations.get(&anim_name).cloned();
     let anim = match s.animations.get_mut(&anim_name) {
         Some(a) => a,
         None => {
@@ -20530,6 +21152,12 @@ fn api_set_keyframe_transition(
     kf.transition = transition;
     track.remove_keyframe(keyframe_index);
     track.add_keyframe(kf);
+    push_animation_edit(
+        &mut s,
+        &anim_name,
+        before,
+        format!("Set transition on keyframe {keyframe_index} of '{anim_name}'"),
+    );
     send_json(stream, r#"{"ok":true}"#);
 }
 
@@ -20613,7 +21241,8 @@ fn api_get_stack_trace(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) 
 
 /// `GET /api/debug/state` -- get full debugger state (stack, breakpoints, variables).
 fn api_get_debug_state(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
-    let s = state.lock().unwrap();
+    let mut s = state.lock().unwrap();
+    sync_debug_pause_into(&mut s);
     let frames: Vec<String> = s
         .debug_frames
         .iter()
@@ -20689,7 +21318,8 @@ fn format_var_list(vars: &[(String, String, String)]) -> String {
 
 /// `GET /api/debug/locals` -- get local variables for a specific stack frame.
 fn api_get_debug_locals(state: &Arc<Mutex<EditorState>>, _query: &str, stream: &mut TcpStream) {
-    let s = state.lock().unwrap();
+    let mut s = state.lock().unwrap();
+    sync_debug_pause_into(&mut s);
     let locals = format_var_list(&s.debug_locals);
     send_json(stream, &format!(r#"{{"locals":[{}]}}"#, locals));
 }
@@ -20754,7 +21384,13 @@ fn api_debug_evaluate(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
         send_error(stream, 400, "missing expression");
         return;
     }
-    let s = state.lock().unwrap();
+    let mut s = state.lock().unwrap();
+    // pat-mgixk.14: evaluate against the LIVE frame. The expression evaluator
+    // below already reads `debug_locals`; what it never had was a
+    // `debug_locals` anybody wrote, so every lookup missed and `x * 2` reduced
+    // to 0 * 2.
+    sync_debug_pause_into(&mut s);
+    let s = &*s;
     // Variable lookup (locals then globals).
     let lookup = |name: &str| -> Option<String> {
         s.debug_locals
@@ -20808,14 +21444,29 @@ fn parse_binop(expr: &str) -> Option<(String, char, String)> {
     None
 }
 
-/// `POST /api/debug/break` — break into the session (pause + synthesize a frame).
+/// `POST /api/debug/break` — ask the running game to stop at its next
+/// statement (Godot's Break button).
+///
+/// ⚠️ This used to PUSH A FABRICATED FRAME — `("_process", "res://main.gd", 1)`
+/// — whenever the stack was empty, so the panel showed a plausible-looking
+/// location for a game that had not stopped and might not even have a
+/// `main.gd`. The request is now real: it is parked for the stepping thread,
+/// which arms a step at the top of its next frame, and the frame the panel
+/// shows afterwards is the one the interpreter actually had (pat-mgixk.14).
 fn api_debug_break(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let mut s = state.lock().unwrap();
     s.debug_state = "break".to_string();
-    if s.debug_frames.is_empty() {
-        s.debug_frames
-            .push(("_process".to_string(), "res://main.gd".to_string(), 1));
-    }
+    // Parked for the stepping thread, which arms a step at the top of its next
+    // frame. The game is frozen only once the break actually LANDS, so the
+    // driver keeps stepping until then — that is what reaches the next
+    // statement.
+    //
+    // ⚠️ Deliberately NOT gated on `is_running`. Godot's Break is a session
+    // intent, the request is a one-shot that only `bind_engine_debugger`
+    // consumes (and only while attached), and `attach`/`detach` clear it — so
+    // pressing it with nothing running costs nothing and stays an `ok`
+    // response, which `editor_debugger_subtabs_test` depends on.
+    gdscript_interop::debug_session::request_break();
     send_json(stream, r#"{"ok":true,"state":"break"}"#);
 }
 
@@ -20840,11 +21491,50 @@ fn api_debug_skip_breakpoints(state: &Arc<Mutex<EditorState>>, body: &str, strea
 /// `GET /api/debug/info` — Video RAM / Misc / Network sub-tab data.
 fn api_get_debug_info(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let s = state.lock().unwrap();
-    // Video RAM by resource (synthesized from the loaded textures + a couple of
-    // engine buffers — the runtime would report real usage).
-    let vram = r#"[{"resource":"icon.svg","type":"Texture2D","format":"RGBA8","usage_bytes":262144},{"resource":"font_default","type":"FontFile","format":"R8","usage_bytes":65536},{"resource":"viewport","type":"Viewport","format":"RGBA8","usage_bytes":3686400}]"#;
-    let total_vram = 262144 + 65536 + 3686400;
-    let vram: serde_json::Value = serde_json::from_str(vram).unwrap_or(serde_json::Value::Null);
+    // Video RAM by resource, from what is ACTUALLY resident (pat-mgixk.14).
+    //
+    // ⚠️ This was a string literal — `icon.svg` 262144, `font_default` 65536,
+    // `viewport` 3686400 — reported identically for every project, whether or
+    // not it owned a file by either name. The rows now come from the texture
+    // cache's resident entries, sized from their real dimensions, plus the
+    // viewport's own colour buffer sized from the live render target.
+    //
+    // A cached FAILED load is skipped by `TextureCache::loaded`: a file the
+    // editor could not read occupies no video memory.
+    let mut vram_rows: Vec<serde_json::Value> = s
+        .texture_cache
+        .loaded()
+        .map(|(path, tex)| {
+            // RGBA8: four bytes a pixel, which is what `Texture2D` stores.
+            let bytes = u64::from(tex.width) * u64::from(tex.height) * 4;
+            serde_json::json!({
+                "resource": path,
+                "type": "Texture2D",
+                "format": "RGBA8",
+                "usage_bytes": bytes,
+            })
+        })
+        .collect();
+    // Sorted by path so the panel does not reshuffle its rows between polls —
+    // `HashMap` iteration order is arbitrary.
+    vram_rows.sort_by(|a, b| {
+        a["resource"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["resource"].as_str().unwrap_or(""))
+    });
+    let viewport_bytes = u64::from(s.render_width) * u64::from(s.render_height) * 4;
+    vram_rows.push(serde_json::json!({
+        "resource": "viewport",
+        "type": "Viewport",
+        "format": "RGBA8",
+        "usage_bytes": viewport_bytes,
+    }));
+    let total_vram: u64 = vram_rows
+        .iter()
+        .filter_map(|r| r["usage_bytes"].as_u64())
+        .sum();
+    let vram = serde_json::Value::Array(vram_rows);
     // Misc tab mirrors Godot's ScriptEditorDebugger fields: the clicked-control
     // read-outs are populated from the running game (empty until a control is
     // clicked, like Godot's empty LineEdits) and the Live Edit Root persists.
@@ -20943,40 +21633,64 @@ fn api_set_live_edit_root(state: &Arc<Mutex<EditorState>>, body: &str, stream: &
 
 /// `POST /api/debug/continue` -- resume execution.
 fn api_debug_continue(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
-    let mut s = state.lock().unwrap();
-    if s.debug_state == "paused" {
-        s.debug_state = "running".to_string();
-        s.debug_locals.clear();
-        s.debug_globals.clear();
-    }
-    send_json(stream, r#"{"ok":true}"#);
+    resume_paused_game(state, "continue", stream);
 }
 
 /// `POST /api/debug/step_in` -- step into next statement.
 fn api_debug_step_in(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
-    let mut s = state.lock().unwrap();
-    if s.debug_state == "paused" {
-        s.debug_state = "running".to_string();
-    }
-    send_json(stream, r#"{"ok":true,"step":"in"}"#);
+    resume_paused_game(state, "step_in", stream);
 }
 
 /// `POST /api/debug/step_over` -- step over next statement.
 fn api_debug_step_over(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
-    let mut s = state.lock().unwrap();
-    if s.debug_state == "paused" {
-        s.debug_state = "running".to_string();
-    }
-    send_json(stream, r#"{"ok":true,"step":"over"}"#);
+    resume_paused_game(state, "step_over", stream);
 }
 
 /// `POST /api/debug/step_out` -- step out of current function.
 fn api_debug_step_out(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    resume_paused_game(state, "step_out", stream);
+}
+
+/// The body all four resume routes share (pat-mgixk.14).
+///
+/// Each of them used to do one thing: set `debug_state` from "paused" to
+/// "running". Nothing was resumed, nothing stepped, and the three Step buttons
+/// were indistinguishable from each other and from Continue.
+///
+/// 🔑 It drives ONE frame itself. The runtime driver stops stepping while a
+/// debug pause is live (otherwise a breakpoint in `_process` re-breaks every
+/// frame), so something has to turn the crank once for the resume to be picked
+/// up and the next break to be reported. `/api/runtime/step` already
+/// establishes that a connection thread may advance the loop while holding the
+/// lock, and doing it here is what makes the response describe the state the
+/// user is now looking at rather than the one they just left.
+fn resume_paused_game(state: &Arc<Mutex<EditorState>>, command_name: &str, stream: &mut TcpStream) {
+    let Some(command) = gdscript_interop::debug_session::ResumeCommand::from_name(command_name)
+    else {
+        send_error(stream, 400, "unknown step command");
+        return;
+    };
     let mut s = state.lock().unwrap();
-    if s.debug_state == "paused" {
-        s.debug_state = "running".to_string();
+    if !gdscript_interop::debug_session::request_resume(command) {
+        // Reported, not swallowed: a Step with nothing paused used to answer
+        // `{"ok":true}` and do nothing, which is the exact shape of a wired
+        // button with no implementation behind it.
+        send_error(stream, 409, "not paused");
+        return;
     }
-    send_json(stream, r#"{"ok":true,"step":"out"}"#);
+    s.debug_globals.clear();
+    if s.is_running && s.run_main_loop.is_some() {
+        advance_running_main_loop(&mut s);
+    }
+    // The frame above either broke again (a step) or ran on (a continue); the
+    // response reports whichever it was.
+    sync_debug_pause_into(&mut s);
+    let paused = s.debug_state == "paused";
+    let line = s.debug_frames.first().map(|(_, _, l)| *l).unwrap_or(0);
+    send_json(
+        stream,
+        &format!(r#"{{"ok":true,"step":"{command_name}","paused":{paused},"line":{line}}}"#),
+    );
 }
 
 /// `POST /api/debug/remove_breakpoint` -- remove a breakpoint by script:line.
@@ -21215,12 +21929,17 @@ fn api_get_profiler(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
 /// `POST /api/profiler/start` — begin live profiler capture (pat-wykfm).
 fn api_profiler_start(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     state.lock().unwrap().profiler_capturing = true;
+    // pat-mgixk.14: and arm the interpreter's per-function timing, which is
+    // what fills `ProfilerFrame::functions`. Off by default so no project pays
+    // two `Instant::now()` calls per script call for a tab nobody opened.
+    gdscript_interop::interpreter::set_script_profiling(true);
     send_json(stream, r#"{"ok":true,"capturing":true}"#);
 }
 
 /// `POST /api/profiler/stop` — stop live profiler capture (pat-wykfm).
 fn api_profiler_stop(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     state.lock().unwrap().profiler_capturing = false;
+    gdscript_interop::interpreter::set_script_profiling(false);
     send_json(stream, r#"{"ok":true,"capturing":false}"#);
 }
 
@@ -22604,6 +23323,234 @@ fn api_post_autoloads(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
     send_json(stream, &autoloads_json(&mgr));
 }
 
+// ---------------------------------------------------------------------------
+// Project Settings backed by project.godot (pat-mgixk.43)
+// ---------------------------------------------------------------------------
+
+/// The Project Settings dialog's short field names mapped onto the **real Godot
+/// 4.x setting paths**.
+///
+/// 🔑 This table is the point of the bead. The dialog used to POST short names
+/// like `physics_fps` into `EditorState` scalars that nothing loaded from
+/// `project.godot` and nothing wrote back, so an edit died with the server and
+/// Play never saw it. The dead `project_settings_dialog.rs` had a richer list but
+/// used **Godot 3** keys (`physics/fps`, `display/resolution_w`), which a Godot 4
+/// project does not read.
+///
+/// ⚠️ Every path here is one Godot 4.6 actually registers, and each is present in
+/// `gdcore`'s default table — that is what lets `get_default` answer a revert.
+/// Lossy pairings are deliberately ABSENT rather than guessed: Godot 4 has no
+/// `fullscreen` bool (it is the `display/window/size/mode` enum) and no
+/// `anti_aliasing` string (it is the numeric `msaa_2d`/`msaa_3d` quality enums),
+/// so inventing a mapping would persist values a real Godot would misread. Those
+/// fields stay editor-local until someone models the enums.
+const PROJECT_SETTING_MAP: &[(&str, &str)] = &[
+    ("project_name", "application/config/name"),
+    ("description", "application/config/description"),
+    ("main_scene", "application/run/main_scene"),
+    ("resolution_w", "display/window/size/viewport_width"),
+    ("resolution_h", "display/window/size/viewport_height"),
+    ("stretch_mode", "display/window/stretch/mode"),
+    ("stretch_aspect", "display/window/stretch/aspect"),
+    (
+        "emulate_mouse_from_touch",
+        "input_devices/pointing/emulate_mouse_from_touch",
+    ),
+    (
+        "emulate_touch_from_mouse",
+        "input_devices/pointing/emulate_touch_from_mouse",
+    ),
+    ("physics_fps", "physics/common/physics_ticks_per_second"),
+    ("gravity", "physics/2d/default_gravity"),
+    ("linear_damp", "physics/2d/default_linear_damp"),
+    ("angular_damp", "physics/2d/default_angular_damp"),
+    ("bus_layout", "audio/buses/default_bus_layout"),
+    ("renderer", "rendering/renderer/rendering_method"),
+];
+
+/// A JSON value from the dialog, as a [`gdcore::SettingsValue`].
+///
+/// Mirrors what `parse_godot_value` can read back, so a POST round-trips through
+/// disk unchanged. JSON cannot tell `30` from `30.0`, so an integral number
+/// becomes `Int`; [`godot_setting_literal`] is what keeps a float a float on the
+/// way to disk.
+fn settings_value_from_json(v: &serde_json::Value) -> Option<gdcore::SettingsValue> {
+    match v {
+        serde_json::Value::Bool(b) => Some(gdcore::SettingsValue::Bool(*b)),
+        serde_json::Value::String(t) => Some(gdcore::SettingsValue::String(t.clone())),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Some(gdcore::SettingsValue::Int(i))
+            } else {
+                n.as_f64().map(gdcore::SettingsValue::Float)
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The literal text `project.godot` stores for `value`.
+///
+/// ⚠️ Not just `value.to_string()`. `SettingsValue`'s `Display` prints
+/// `Float(980.0)` as `980`, and `parse_godot_value` reads an unsuffixed `980`
+/// back as `Int` — so a round-trip through disk would silently change a float
+/// setting's TYPE. A float that formatted without a `.` or an exponent gets
+/// `.0` appended so it survives re-parsing.
+fn godot_setting_literal(value: &gdcore::SettingsValue) -> String {
+    let text = value.to_string();
+    if matches!(value, gdcore::SettingsValue::Float(_))
+        && !text.contains('.')
+        && !text.contains('e')
+        && !text.contains('E')
+    {
+        return format!("{text}.0");
+    }
+    text
+}
+
+/// Writes one real 4.x setting path through to the project's `project.godot`.
+///
+/// ⚠️ Goes through [`update_project_file`] — a parse/edit/serialize that keeps
+/// every section it does not touch — and NOT through
+/// `ProjectSettings::to_godot_format()`, even though that is the obvious call and
+/// the one the bead suggested. `to_godot_format` re-emits only what
+/// `ProjectSettings` parsed, and `ProjectSettings::from_godot_format` is
+/// line-based: a multi-line Godot dictionary, which is exactly how `[input]`
+/// actions are stored, parses as the single value `{` and loses its events.
+/// Saving settings that way would DELETE the project's input map as a side
+/// effect — `fixtures/conformance/input_action_move/project.godot` and
+/// `gdresource/fixtures/test_project/project.godot` both have such values today.
+/// `GodotProjectFile::parse` accumulates multi-line values by brace depth, so it
+/// round-trips them.
+fn persist_project_setting(project_root: &str, path: &str, value: &gdcore::SettingsValue) -> bool {
+    // `section/rest`: the section is the INI header and the rest stays the key,
+    // which is how `[physics]` + `common/physics_ticks_per_second` is spelled.
+    let Some((section, key)) = path.split_once('/') else {
+        return false;
+    };
+    let literal = godot_setting_literal(value);
+    update_project_file(project_root, |pf| pf.set(section, key, &literal))
+}
+
+/// `SettingsValue` as JSON for the dialog.
+fn settings_value_json(value: &gdcore::SettingsValue) -> serde_json::Value {
+    match value {
+        gdcore::SettingsValue::Bool(b) => serde_json::json!(b),
+        gdcore::SettingsValue::Int(i) => serde_json::json!(i),
+        gdcore::SettingsValue::Float(f) => serde_json::json!(f),
+        gdcore::SettingsValue::String(t) => serde_json::json!(t),
+        other => serde_json::json!(other.to_string()),
+    }
+}
+
+/// The project's settings as real 4.x paths grouped by INI section, each with the
+/// engine default beside it so the dialog can offer Godot's revert arrow.
+///
+/// Lists what the project DECLARES plus every path the dialog can edit, so a
+/// fresh project still shows editable rows instead of an empty dialog.
+/// `overridden` is what separates "this project set it" from "engine default",
+/// which is the distinction Godot's revert arrow is driven by.
+fn project_settings_sections_json(ps: &gdcore::ProjectSettings) -> serde_json::Value {
+    let mut paths: Vec<String> = ps.iter().map(|(k, _)| k.to_string()).collect();
+    for (_, real) in PROJECT_SETTING_MAP {
+        if !paths.iter().any(|p| p.as_str() == *real) {
+            paths.push((*real).to_string());
+        }
+    }
+    paths.sort();
+    paths.dedup();
+
+    let mut sections: Vec<serde_json::Value> = Vec::new();
+    let mut current = String::new();
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    for path in &paths {
+        let section = path.split('/').next().unwrap_or("").to_string();
+        if section != current {
+            if !rows.is_empty() {
+                sections.push(serde_json::json!({ "id": current, "properties": rows }));
+                rows = Vec::new();
+            }
+            current = section;
+        }
+        let declared = ps.iter().any(|(k, _)| k == path.as_str());
+        rows.push(serde_json::json!({
+            "key": path,
+            "value": ps.get(path).map(settings_value_json),
+            "default": ps.get_default(path).map(settings_value_json),
+            "overridden": declared,
+        }));
+    }
+    if !rows.is_empty() {
+        sections.push(serde_json::json!({ "id": current, "properties": rows }));
+    }
+    serde_json::json!(sections)
+}
+
+/// Copies the real settings onto the dialog's editor-local scalars, so a freshly
+/// opened project SHOWS its own values.
+///
+/// This is the other half of the bug: the scalars were initialised from hardcoded
+/// defaults and never read `project.godot`, so opening a project whose manifest
+/// said `physics_ticks_per_second=30` still displayed 60.
+fn sync_project_scalars_from_settings(s: &mut EditorState) {
+    let ps = s.project_settings.clone();
+    let as_i = |path: &str| ps.get(path).and_then(|v| v.as_int());
+    let as_f = |path: &str| {
+        ps.get(path)
+            .and_then(|v| v.as_float().or_else(|| v.as_int().map(|i| i as f64)))
+    };
+    let as_s = |path: &str| {
+        ps.get(path)
+            .and_then(|v| v.as_string().map(|t| t.to_string()))
+    };
+    let as_b = |path: &str| ps.get(path).and_then(|v| v.as_bool());
+
+    if let Some(v) = as_s("application/config/name") {
+        s.project_name = v;
+    }
+    if let Some(v) = as_s("application/config/description") {
+        s.project_description = v;
+    }
+    if let Some(v) = as_s("application/run/main_scene") {
+        s.project_main_scene = v;
+    }
+    if let Some(v) = as_i("display/window/size/viewport_width") {
+        s.project_resolution_w = v.max(1) as u32;
+    }
+    if let Some(v) = as_i("display/window/size/viewport_height") {
+        s.project_resolution_h = v.max(1) as u32;
+    }
+    if let Some(v) = as_s("display/window/stretch/mode") {
+        s.project_stretch_mode = v;
+    }
+    if let Some(v) = as_s("display/window/stretch/aspect") {
+        s.project_stretch_aspect = v;
+    }
+    if let Some(v) = as_b("input_devices/pointing/emulate_mouse_from_touch") {
+        s.project_emulate_mouse_from_touch = v;
+    }
+    if let Some(v) = as_b("input_devices/pointing/emulate_touch_from_mouse") {
+        s.project_emulate_touch_from_mouse = v;
+    }
+    if let Some(v) = as_i("physics/common/physics_ticks_per_second") {
+        s.project_physics_fps = v.max(1) as u32;
+    }
+    if let Some(v) = as_f("physics/2d/default_gravity") {
+        s.project_gravity = v;
+    }
+    if let Some(v) = as_f("physics/2d/default_linear_damp") {
+        s.project_linear_damp = v;
+    }
+    if let Some(v) = as_f("physics/2d/default_angular_damp") {
+        s.project_angular_damp = v;
+    }
+    if let Some(v) = as_s("audio/buses/default_bus_layout") {
+        s.project_bus_layout = v;
+    }
+    if let Some(v) = as_s("rendering/renderer/rendering_method") {
+        s.project_renderer = v;
+    }
+}
 fn api_get_project_settings(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let json = {
         let s = state.lock().unwrap();
@@ -22666,6 +23613,14 @@ fn api_get_project_settings(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStr
             "main_scene": &s.project_main_scene,
             "description": &s.project_description,
             "categories": categories,
+            // The real `project.godot` table, by Godot 4.x setting path
+            // (pat-mgixk.43). ADDED beside `categories` rather than replacing
+            // it: the browser's `setupProjectSettingsDialog` reads that shape,
+            // so swapping it would blank the dialog. `categories` now shows the
+            // project's own values too, because `api_open_project` seeds the
+            // scalars from here.
+            "settings": project_settings_sections_json(&s.project_settings),
+            "project_root": s.project_root.clone(),
         })
         .to_string()
     };
@@ -22755,7 +23710,78 @@ fn api_set_project_settings(state: &Arc<Mutex<EditorState>>, body: &str, stream:
         if let Some(v) = p.get("environment_default").and_then(|v| v.as_str()) {
             s.project_environment_default = v.to_string();
         }
-        serde_json::json!({ "ok": true }).to_string()
+
+        // -- The part that actually reaches disk (pat-mgixk.43) -------------
+        //
+        // Two accepted spellings, because two callers exist. The browser dialog
+        // posts the short names handled above; a real Godot-shaped caller (and
+        // the acceptance test) posts REAL 4.x paths like
+        // `physics/common/physics_ticks_per_second`. Both end up in
+        // `project_settings` and both are written through to `project.godot`,
+        // so the next Play or runner boot reads them.
+        //
+        // Writes are COLLECTED here and performed after the lock is released:
+        // `persist_project_setting` does file IO, and holding the editor mutex
+        // across a disk write stalls every other request.
+        let mut pending: Vec<(String, gdcore::SettingsValue)> = Vec::new();
+        if let Some(obj) = p.as_object() {
+            for (key, raw) in obj {
+                // A real path is recognised by its `/`; anything else is a
+                // short dialog field, mapped through PROJECT_SETTING_MAP.
+                let path = if key.contains('/') {
+                    Some(key.clone())
+                } else {
+                    PROJECT_SETTING_MAP
+                        .iter()
+                        .find(|(short, _)| *short == key.as_str())
+                        .map(|(_, real)| (*real).to_string())
+                };
+                let Some(path) = path else {
+                    continue;
+                };
+                let Some(mut value) = settings_value_from_json(raw) else {
+                    continue;
+                };
+                // Keep a float setting a float. JSON sent `0.1` as `0.1`, but a
+                // whole number like `980` arrives as Int, and writing it
+                // unsuffixed would change the setting's TYPE on reload. If the
+                // engine default (or the current value) is a Float, honour that.
+                if matches!(value, gdcore::SettingsValue::Int(_)) {
+                    let was_float = s
+                        .project_settings
+                        .get(&path)
+                        .map(|v| matches!(v, gdcore::SettingsValue::Float(_)))
+                        .unwrap_or(false);
+                    if was_float {
+                        if let gdcore::SettingsValue::Int(i) = value {
+                            value = gdcore::SettingsValue::Float(i as f64);
+                        }
+                    }
+                }
+                s.project_settings.set(&path, value.clone());
+                pending.push((path, value));
+            }
+        }
+        let root = s.project_root.clone();
+        drop(s);
+
+        let mut saved = 0usize;
+        if let Some(root) = root.as_deref() {
+            for (path, value) in &pending {
+                if persist_project_setting(root, path, value) {
+                    saved += 1;
+                }
+            }
+        }
+        serde_json::json!({
+            "ok": true,
+            // How many keys reached `project.godot`. 0 with a non-empty body
+            // means no project is open, which is the one case where the dialog
+            // can only hold values in memory.
+            "saved": saved,
+            "persisted": root.is_some(),
+        })
+        .to_string()
     };
     send_json(stream, &json);
 }
@@ -23176,7 +24202,11 @@ fn api_audio_load_default(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStrea
 /// model. This is what the Project Settings > Input Map tab loads.
 fn api_get_input_map(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let state = state.lock().unwrap();
-    let map = crate::input_map::InputMap::from_runtime_map(&state.input_map);
+    // Was `from_runtime_map(&state.input_map)`, which rebuilt the typed model
+    // from the LOSSY string map — so a physical keycode, a joypad index or a
+    // deadzone could never come back out, even right after being POSTed
+    // (pat-mgixk.16).
+    let map = state.merged_input_map();
     send_json(stream, &map.to_json());
 }
 
@@ -23207,21 +24237,59 @@ fn api_set_input_map(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
 
     let json = {
         let mut s = state.lock().unwrap();
-        let mut map = crate::input_map::InputMap::from_runtime_map(&s.input_map);
+        // Starts from the MERGED map, not the lossy string map: editing one
+        // action must not silently downgrade every OTHER action's typed events
+        // to bare key names (pat-mgixk.16).
+        let mut map = s.merged_input_map();
         let remove = p.get("remove").and_then(|v| v.as_bool()).unwrap_or(false);
         if remove {
             map.remove_action(&action);
         } else {
-            // Replace this action's bindings with exactly the requested keys.
+            // Replace this action's bindings with exactly what was requested.
             map.remove_action(&action);
             map.add_action(action.clone());
+            // Godot's Input Map dialog captures a deadzone per action; when the
+            // body omits it, `Action::default` applies Godot 4's 0.2.
+            if let Some(deadzone) = p.get("deadzone").and_then(|v| v.as_f64()) {
+                map.set_deadzone(&action, deadzone as f32);
+            }
+            // Typed events, in the SAME encoding `to_json` emits — so a client
+            // can GET, edit and POST the result back without a second format.
+            if let Some(events) = p.get("events").and_then(|v| v.as_array()) {
+                for raw in events {
+                    let Ok(event) =
+                        serde_json::from_value::<crate::input_map::InputEvent>(raw.clone())
+                    else {
+                        // Rejected rather than skipped: silently dropping an
+                        // event the client meant to bind is how a rebind
+                        // appears to succeed and then does nothing.
+                        drop(s);
+                        send_error(stream, 400, "invalid event");
+                        return;
+                    };
+                    map.bind(&action, event);
+                }
+            }
+            // The legacy `{"keys":[...]}` form the existing dialog still sends.
             if let Some(keys) = p.get("keys").and_then(|v| v.as_array()) {
                 for key in keys.iter().filter_map(|k| k.as_str()) {
                     map.bind(&action, crate::input_map::InputEvent::Key(key.to_string()));
                 }
             }
         }
+        // Keep the legacy string map in step, so the runtime readers
+        // (`is_action_pressed`) see the rebind in this session immediately.
         s.input_map = map.to_runtime_map();
+        // 🔑 And write it through to `project.godot [input]`. That is what makes
+        // the edit outlive this process, reach a second editor on the same
+        // directory, and reach Play — which reads the project's own `[input]`
+        // via `build_play_input_map`. Without it the whole edit lived only in
+        // the in-memory string map, which cannot even hold a deadzone.
+        if remove {
+            s.persist_input_action(&action, None);
+        } else if let Some(entry) = map.to_project_actions().get(&action) {
+            s.persist_input_action(&action, Some(entry));
+        }
         map.to_json()
     };
     send_json(stream, &json);
@@ -24378,20 +25446,20 @@ fn api_execute_command(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
     };
 
     match cmd.as_str() {
+        // Through `undo_one`/`redo_one` like `api_undo`/`api_redo`
+        // (pat-mgixk.15). This was the third hand-copied undo in the file and
+        // the thinnest of them: it dropped `undo()`'s Result on the floor and
+        // reversed neither the tilemap store nor the animation map, so the same
+        // menu command behaved differently depending on which route the client
+        // happened to call. The response shape is unchanged.
         "undo" => {
             let mut st = state.lock().unwrap();
-            if let Some(mut action) = st.undo_stack.pop() {
-                action.undo(&mut st.scene_tree);
-                st.redo_stack.push(action);
-            }
+            let _ = undo_one(&mut st);
             send_json(stream, r#"{"ok":true,"executed":"undo"}"#);
         }
         "redo" => {
             let mut st = state.lock().unwrap();
-            if let Some(mut action) = st.redo_stack.pop() {
-                let _ = action.execute(&mut st.scene_tree);
-                st.undo_stack.push(action);
-            }
+            let _ = redo_one(&mut st);
             send_json(stream, r#"{"ok":true,"executed":"redo"}"#);
         }
         "delete_node" => {

@@ -343,6 +343,13 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
     let mut col: usize = 1;
     let mut indent_stack: Vec<usize> = vec![0];
     let mut at_line_start = true;
+    // Open `(`/`[`/`{` nesting. Godot's tokenizer suppresses NEWLINE and all
+    // indentation changes while this is non-zero
+    // (`gdscript_tokenizer.cpp`, paren-depth newline suppression), which is what
+    // makes a multi-line array literal, dictionary or call argument list legal.
+    // Without it `var a = [\n 1,\n 2\n]` emitted a Newline mid-expression and
+    // died in `parse_primary`, which never skips Newline/Indent (pat-mgixk.17).
+    let mut bracket_depth: i32 = 0;
 
     while pos < len {
         // Handle line-start indentation
@@ -385,6 +392,15 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
                 continue;
             }
 
+            // Inside brackets, indentation carries no structure: the line is a
+            // continuation of the expression, so neither Indent/Dedent nor the
+            // indent stack may move. Leaving the stack alone matters as much as
+            // skipping the tokens — a pushed level would desync every Dedent
+            // after the closing bracket.
+            if bracket_depth > 0 {
+                continue;
+            }
+
             let current_indent = *indent_stack.last().unwrap();
             if indent > current_indent {
                 indent_stack.push(indent);
@@ -424,13 +440,38 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
             continue;
         }
 
+        // A trailing backslash joins the next line onto this one, so no Newline
+        // is emitted and the continuation's indentation is not structural.
+        if ch == '\\' {
+            let mut peek = pos + 1;
+            while peek < len && (chars[peek] == ' ' || chars[peek] == '\t') {
+                peek += 1;
+            }
+            if peek < len && (chars[peek] == '\n' || chars[peek] == '\r') {
+                pos = if chars[peek] == '\r' && peek + 1 < len && chars[peek + 1] == '\n' {
+                    peek + 2
+                } else {
+                    peek + 1
+                };
+                line += 1;
+                col = 1;
+                // Deliberately NOT `at_line_start = true`: the joined line must
+                // not produce Indent/Dedent. Leading whitespace on it is eaten
+                // by the mid-line space skip above.
+                continue;
+            }
+        }
+
         // Newlines
         if ch == '\n' || ch == '\r' {
-            tokens.push(TokenSpan {
-                token: Token::Newline,
-                line,
-                col,
-            });
+            // Suppressed inside brackets — see `bracket_depth`.
+            if bracket_depth == 0 {
+                tokens.push(TokenSpan {
+                    token: Token::Newline,
+                    line,
+                    col,
+                });
+            }
             if ch == '\r' && pos + 1 < len && chars[pos + 1] == '\n' {
                 pos += 2;
             } else {
@@ -442,13 +483,28 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
             continue;
         }
 
-        // Strings
-        if ch == '"' || ch == '\'' {
-            let quote = ch;
+        // Strings, in Godot's three forms (`string()`,
+        // `gdscript_tokenizer.cpp`): ordinary, triple-quoted (newlines allowed)
+        // and `r`-prefixed raw (no escape processing).
+        //
+        // ⚠️ The raw check has to happen HERE, before the identifier scanner
+        // below, because `r"..."` begins with an alphabetic char. It fires only
+        // when a quote immediately follows, so a variable actually named `r`
+        // still lexes as an identifier.
+        let raw_prefix =
+            ch == 'r' && pos + 1 < len && (chars[pos + 1] == '"' || chars[pos + 1] == '\'');
+        if ch == '"' || ch == '\'' || raw_prefix {
+            let is_raw = raw_prefix;
+            let qpos = if is_raw { pos + 1 } else { pos };
+            let quote = chars[qpos];
+            // Three identical quotes open a triple-quoted string, inside which
+            // a bare newline is content rather than the error it used to be.
+            let is_triple = qpos + 2 < len && chars[qpos + 1] == quote && chars[qpos + 2] == quote;
             let start_line = line;
             let start_col = col;
-            pos += 1;
-            col += 1;
+            let opener = if is_triple { 3 } else { 1 };
+            col += (qpos - pos) + opener;
+            pos = qpos + opener;
             let mut s = String::new();
             loop {
                 if pos >= len {
@@ -459,11 +515,23 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
                 }
                 let c = chars[pos];
                 if c == quote {
+                    if !is_triple {
+                        pos += 1;
+                        col += 1;
+                        break;
+                    }
+                    if pos + 2 < len && chars[pos + 1] == quote && chars[pos + 2] == quote {
+                        pos += 3;
+                        col += 3;
+                        break;
+                    }
+                    // A lone quote inside a triple is ordinary content.
+                    s.push(c);
                     pos += 1;
                     col += 1;
-                    break;
+                    continue;
                 }
-                if c == '\\' {
+                if c == '\\' && !is_raw {
                     pos += 1;
                     col += 1;
                     if pos >= len {
@@ -477,10 +545,43 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
                         'n' => s.push('\n'),
                         't' => s.push('\t'),
                         'r' => s.push('\r'),
+                        'a' => s.push('\u{07}'),
+                        'b' => s.push('\u{08}'),
+                        'f' => s.push('\u{0C}'),
+                        'v' => s.push('\u{0B}'),
                         '\\' => s.push('\\'),
                         '\'' => s.push('\''),
                         '"' => s.push('"'),
                         '0' => s.push('\0'),
+                        // `\uXXXX` (4 hex) and `\UXXXXXX` (6 hex).
+                        'u' | 'U' => {
+                            let want = if esc == 'u' { 4 } else { 6 };
+                            let mut cp: u32 = 0;
+                            let mut taken = 0;
+                            while taken < want
+                                && pos + 1 + taken < len
+                                && chars[pos + 1 + taken].is_ascii_hexdigit()
+                            {
+                                cp = cp * 16 + chars[pos + 1 + taken].to_digit(16).unwrap_or(0);
+                                taken += 1;
+                            }
+                            if taken == 0 {
+                                return Err(LexError::InvalidEscape { ch: esc, line, col });
+                            }
+                            // A surrogate half or out-of-range value has no
+                            // `char`; U+FFFD keeps the script lexable rather
+                            // than failing it all on one bad escape.
+                            s.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
+                            pos += taken;
+                            col += taken;
+                        }
+                        // A newline right after a backslash is a continuation
+                        // inside the string: contributes nothing, but the line
+                        // counter still has to advance.
+                        '\n' => {
+                            line += 1;
+                            col = 0;
+                        }
                         _ => {
                             return Err(LexError::InvalidEscape { ch: esc, line, col });
                         }
@@ -488,10 +589,18 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
                     pos += 1;
                     col += 1;
                 } else if c == '\n' {
-                    return Err(LexError::UnterminatedString {
-                        line: start_line,
-                        col: start_col,
-                    });
+                    // Legal in a triple-quoted string; still an error in a
+                    // single-quoted one, as in Godot.
+                    if !is_triple {
+                        return Err(LexError::UnterminatedString {
+                            line: start_line,
+                            col: start_col,
+                        });
+                    }
+                    s.push(c);
+                    pos += 1;
+                    line += 1;
+                    col = 1;
                 } else {
                     s.push(c);
                     pos += 1;
@@ -504,6 +613,49 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
                 col: start_col,
             });
             continue;
+        }
+
+        // Radix-prefixed integers: `0xFF`, `0b1010` (Godot's `number()`,
+        // `gdscript_tokenizer.cpp`). Must precede the decimal scanner, which
+        // consumes only digits/`.`/`_` and so lexed `0xFF` as `IntLit(0)`
+        // followed by the identifier `xFF` — a silently wrong value rather than
+        // an error (pat-mgixk.17).
+        if ch == '0' && pos + 1 < len && matches!(chars[pos + 1], 'x' | 'X' | 'b' | 'B') {
+            let radix = if matches!(chars[pos + 1], 'x' | 'X') {
+                16
+            } else {
+                2
+            };
+            let start_col = col;
+            let mut digits = String::new();
+            let mut scan = pos + 2;
+            while scan < len
+                && (chars[scan] == '_'
+                    || if radix == 16 {
+                        chars[scan].is_ascii_hexdigit()
+                    } else {
+                        chars[scan] == '0' || chars[scan] == '1'
+                    })
+            {
+                if chars[scan] != '_' {
+                    digits.push(chars[scan]);
+                }
+                scan += 1;
+            }
+            // A bare `0x` with no digits is not a number; leave it to the
+            // decimal scanner so the `0` still lexes and the stray letter
+            // reports itself, rather than pushing IntLit(0) and swallowing it.
+            if !digits.is_empty() {
+                let val = i64::from_str_radix(&digits, radix).unwrap_or(0);
+                col += scan - pos;
+                pos = scan;
+                tokens.push(TokenSpan {
+                    token: Token::IntLit(val),
+                    line,
+                    col: start_col,
+                });
+                continue;
+            }
         }
 
         // Numbers
@@ -529,6 +681,34 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
                 }
                 pos += 1;
                 col += 1;
+            }
+            // Exponent suffix: `1e3`, `1.5e-3`, `2E+8`. Previously `1e3` lexed
+            // as `IntLit(1)` plus the identifier `e3`.
+            //
+            // ⚠️ Only consumed when at least one digit follows the optional
+            // sign. `1.e` or `1e` alone must leave the `e` to the identifier
+            // scanner, or a member access like `1.0.exp` would be swallowed.
+            if pos < len && matches!(chars[pos], 'e' | 'E') {
+                let mut scan = pos + 1;
+                if scan < len && (chars[scan] == '+' || chars[scan] == '-') {
+                    scan += 1;
+                }
+                if scan < len && chars[scan].is_ascii_digit() {
+                    num_str.push('e');
+                    if chars[pos + 1] == '+' || chars[pos + 1] == '-' {
+                        num_str.push(chars[pos + 1]);
+                    }
+                    while scan < len && (chars[scan].is_ascii_digit() || chars[scan] == '_') {
+                        if chars[scan] != '_' {
+                            num_str.push(chars[scan]);
+                        }
+                        scan += 1;
+                    }
+                    col += scan - pos;
+                    pos = scan;
+                    // An exponent makes it a float even without a '.'.
+                    is_float = true;
+                }
             }
             if is_float {
                 let val: f64 = num_str.parse().unwrap_or(0.0);
@@ -638,6 +818,19 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
                 "<<" => Some(Token::Shl),
                 ">>" => Some(Token::Shr),
                 ".." => Some(Token::DotDot),
+                // Godot emits distinct AMPERSAND_AMPERSAND / PIPE_PIPE tokens,
+                // but its parser maps them to the same precedence rules as the
+                // `and` / `or` keywords (`gdscript_parser.cpp`: PREC_LOGIC_AND /
+                // PREC_LOGIC_OR). Mapping them onto the existing keyword tokens
+                // here reuses the parser and type-checker arms that already
+                // handle `and`/`or`, rather than adding variants every
+                // exhaustive match on `Token` would have to grow.
+                //
+                // ⚠️ Must stay AHEAD of the single-char table, or `a && b`
+                // lexes as two `Amp`s and dies in `parse_primary`'s
+                // `&"StringName"` arm.
+                "&&" => Some(Token::And),
+                "||" => Some(Token::Or),
                 _ => None,
             };
             if let Some(tok) = two_tok {
@@ -736,15 +929,41 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
             '|' => Token::Pipe,
             '^' => Token::Caret,
             '~' => Token::Tilde,
+            // `!=` is consumed by the two-char table above, so a `!` reaching
+            // here is the unary logical not. Mapped onto the `not` keyword's
+            // token for the same reason as `&&`/`||`. Before this it fell
+            // through to `UnexpectedChar`, so `if !ready:` was a lex error.
+            '!' => Token::Not,
             '<' => Token::Lt,
             '>' => Token::Gt,
             '=' => Token::Assign,
-            '(' => Token::LParen,
-            ')' => Token::RParen,
-            '[' => Token::LBracket,
-            ']' => Token::RBracket,
-            '{' => Token::LBrace,
-            '}' => Token::RBrace,
+            // The bracket counters drive the Newline/Indent suppression above.
+            // `)`/`]`/`}` saturate at zero so a stray closer cannot drive the
+            // depth negative and silently re-enable suppression later.
+            '(' => {
+                bracket_depth += 1;
+                Token::LParen
+            }
+            ')' => {
+                bracket_depth = (bracket_depth - 1).max(0);
+                Token::RParen
+            }
+            '[' => {
+                bracket_depth += 1;
+                Token::LBracket
+            }
+            ']' => {
+                bracket_depth = (bracket_depth - 1).max(0);
+                Token::RBracket
+            }
+            '{' => {
+                bracket_depth += 1;
+                Token::LBrace
+            }
+            '}' => {
+                bracket_depth = (bracket_depth - 1).max(0);
+                Token::RBrace
+            }
             ':' => Token::Colon,
             ',' => Token::Comma,
             '.' => Token::Dot,

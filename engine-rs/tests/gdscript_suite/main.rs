@@ -12,5 +12,6 @@ mod gdscript_parity_test;
 mod gdscript_parser_stable_ast_test;
 mod gdscript_singleton_parity_test;
 mod gdscript_v1_features_test;
+mod gdscript_typed_var_defaults_test;
 mod stringname_methods_operators_test;
 mod variant_string_like_equality_test;

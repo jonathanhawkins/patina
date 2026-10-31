@@ -492,7 +492,7 @@ impl RenderServer3DAdapter {
                 continue;
             }
 
-            let visible = node3d::is_visible(tree, nid);
+            let visible = node3d::is_visible_in_tree(tree, nid);
             let inst_id = if let Some(&existing) = self.instance_map.node_to_instance.get(&nid) {
                 existing
             } else {
@@ -539,7 +539,7 @@ impl RenderServer3DAdapter {
                     current_mesh_nodes.insert(nid, ());
 
                     let transform = node3d::get_global_transform(tree, nid);
-                    let visible = node3d::is_visible(tree, nid);
+                    let visible = node3d::is_visible_in_tree(tree, nid);
 
                     let inst_id =
                         if let Some(&existing) = self.instance_map.node_to_instance.get(&nid) {
@@ -824,8 +824,13 @@ impl RenderServer3DAdapter {
                 current_mm_nodes.insert(nid, ());
 
                 let node_transform = node3d::get_global_transform(tree, nid);
-                let node_visible = node3d::is_visible(tree, nid);
-                let instance_count = node3d::get_multimesh_instance_count(tree, nid) as usize;
+                let node_visible = node3d::is_visible_in_tree(tree, nid);
+                // ⚠️ VISIBLE count, not the raw instance count. This loop used
+                // `get_multimesh_instance_count`, so a MultiMesh authored with 3
+                // instances and `visible_instance_count = 2` allocated and drew
+                // all three. Shared with the editor list through
+                // `node3d::multimesh_visible_count` (pat-mgixk.50).
+                let instance_count = node3d::multimesh_visible_count(tree, nid);
 
                 // Resolve shared mesh from multimesh_mesh_type or mesh_type.
                 let mesh = Self::resolve_multimesh_mesh(tree, nid);
@@ -930,7 +935,7 @@ impl RenderServer3DAdapter {
 
             let sprite = Self::sprite3d_from_node(tree, nid);
             let node_transform = node3d::get_global_transform(tree, nid);
-            let visible = node3d::is_visible(tree, nid);
+            let visible = node3d::is_visible_in_tree(tree, nid);
 
             // Billboard modes ignore the node's own rotation and orient the quad
             // toward the camera; disabled billboarding keeps the node basis.
@@ -1010,7 +1015,7 @@ impl RenderServer3DAdapter {
 
             let label = Self::label3d_from_node(tree, nid);
             let node_transform = node3d::get_global_transform(tree, nid);
-            let visible = node3d::is_visible(tree, nid);
+            let visible = node3d::is_visible_in_tree(tree, nid);
 
             let basis = if label.billboard == BillboardMode3D::Disabled {
                 node_transform.basis
@@ -1205,20 +1210,11 @@ impl RenderServer3DAdapter {
     }
 
     /// Resolves the shared mesh for a MultiMeshInstance3D.
+    /// Delegates to [`multimesh_mesh_for_node`], the shared resolver the editor
+    /// list uses too — two copies of this chain is how the two paths drifted
+    /// (pat-mgixk.50).
     fn resolve_multimesh_mesh(tree: &SceneTree, nid: NodeId) -> Mesh3D {
-        if let Some(mesh_type) = node3d::get_multimesh_mesh_type(tree, nid) {
-            if let Some(m) = Self::mesh_from_type_name(&mesh_type) {
-                return m;
-            }
-        }
-        if let Some(node) = tree.get_node(nid) {
-            if let gdvariant::Variant::String(s) = node.get_property("mesh_type") {
-                if let Some(m) = Self::mesh_from_type_name(&s) {
-                    return m;
-                }
-            }
-        }
-        Mesh3D::cube(1.0)
+        multimesh_mesh_for_node(tree, nid)
     }
 
     /// Maps a mesh type name string to its default [`Mesh3D`] geometry.
@@ -1226,7 +1222,7 @@ impl RenderServer3DAdapter {
     /// Delegates to the shared resolver so this list cannot drift from the
     /// editor viewport's again (pat-s3rrv.199); it also gains TorusMesh,
     /// PrismMesh and PointMesh, which had no arm here.
-    fn mesh_from_type_name(name: &str) -> Option<Mesh3D> {
+    pub(crate) fn mesh_from_type_name(name: &str) -> Option<Mesh3D> {
         gdserver3d::primitive_mesh::build_primitive(name, &|_| None)
     }
 
@@ -1354,7 +1350,19 @@ impl RenderServer3DAdapter {
             if lower.ends_with(".glb") || lower.ends_with(".gltf") {
                 let file_path = std::path::Path::new(&path);
                 if let Ok(resource) = gdresource::import_gltf(file_path) {
-                    if let Some(mesh) = mesh3d_from_gltf_resource(&resource) {
+                    // `gltf_mesh_index` says WHICH mesh of the file this node
+                    // uses. A node instantiated from a glTF scene always carries
+                    // it (`gltf_scene::build_gltf_subtree`); without it the only
+                    // honest answer is the whole document, which is what every
+                    // node used to get (pat-mgixk.23).
+                    let wanted = match tree
+                        .get_node(nid)
+                        .map(|n| n.get_property("gltf_mesh_index"))
+                    {
+                        Some(gdvariant::Variant::Int(i)) => Some(i),
+                        _ => None,
+                    };
+                    if let Some(mesh) = mesh3d_from_gltf_resource_for_mesh(&resource, wanted) {
                         return mesh;
                     }
                 }
@@ -1421,12 +1429,34 @@ impl RenderServer3DAdapter {
     /// 5. `albedo` color property — legacy shorthand for a colored material
     /// 6. `Material3D::default()` — white Lambert
     fn resolve_material(&mut self, tree: &SceneTree, nid: NodeId) -> Material3D {
-        // 1. Check material_override (highest priority).
+        // 1. The authored material, flattened onto the node at scene load under
+        //    `__material__*` — the real parameters and texture references.
+        //
+        // ⚠️ THIS NOW RUNS BEFORE the `material_override` check below, and the
+        // order is the fix, not a tidy-up (pat-mgixk.53). A reference-style
+        // `material_override` reaches the node as the RAW STRING the .tscn held
+        // (`ExtResource("1_abc")` / a SubResource ref), and
+        // `get_material_override` returns exactly that string, so the old step 1
+        // fed a reference literal to `material_from_path`, whose filename test
+        // for `red`/`green`/`blue` matched nothing and answered default white —
+        // and returned immediately, so this bag could never be consulted for an
+        // overridden node at all. `packed_scene` has already applied Godot's
+        // mesh-level priority when choosing WHICH material to flatten
+        // (material_override, then surface_material_override/0, then the mesh's
+        // own), so preferring the bag here is Godot's precedence, not a new one.
+        //
+        // `material_from_path` keeps its place below as the fallback for a
+        // genuine path string, the only case it was ever meaningful for.
+        if let Some(mat) = material3d_for_node(tree, nid, &mut self.texture_cache) {
+            return mat;
+        }
+
+        // 2. A path-style `material_override` with no flattened bag.
         if let Some(override_path) = node3d::get_material_override(tree, nid) {
             return Self::material_from_path(&override_path);
         }
 
-        // 2. The authored StandardMaterial3D, flattened onto the node at scene
+        // (was 2.) The authored StandardMaterial3D, flattened onto the node at scene
         //    load under `__material__*`. This is the real sub-resource data —
         //    metallic, roughness, emission, texture references — so it is
         //    strictly better than the filename colour heuristics
@@ -1437,10 +1467,6 @@ impl RenderServer3DAdapter {
         //    chose which material to flatten (surface_material_override/0, then
         //    the mesh's own material), so this sits directly under
         //    `material_override` (pat-0q2kx.42).
-        if let Some(mat) = material3d_for_node(tree, nid, &mut self.texture_cache) {
-            return mat;
-        }
-
         // 3. Check per-surface override for surface 0.
         if let Some(surface_path) = node3d::get_surface_override_material(tree, nid, 0) {
             return Self::material_from_path(&surface_path);
@@ -1574,7 +1600,12 @@ impl RenderServer3DAdapter {
         }
     }
 
-    fn resolve_shader_material(tree: &SceneTree, nid: NodeId) -> Option<ShaderMaterial3D> {
+    /// `pub` so the editor/Play draw list can carry a ShaderMaterial too, not
+    /// just this adapter (pat-mgixk.50). The data is already on the node:
+    /// `packed_scene` flattens a `ShaderMaterial` sub-resource to `shader_code`
+    /// / `shader_parameter/*` rather than into the `__material__*` bag, and this
+    /// reads those.
+    pub fn resolve_shader_material(tree: &SceneTree, nid: NodeId) -> Option<ShaderMaterial3D> {
         let node = tree.get_node(nid)?;
 
         // Resolve shader source + type hint from an inline `shader_code` prop,
@@ -1846,12 +1877,57 @@ impl std::fmt::Debug for RenderServer3DAdapter {
 /// Returns `None` if the resource has no mesh sub-resources or if the vertex
 /// data cannot be extracted.
 pub fn mesh3d_from_gltf_resource(resource: &gdresource::Resource) -> Option<Mesh3D> {
-    let mut subs: Vec<_> = resource.subresources.iter().collect();
+    mesh3d_from_gltf_resource_for_mesh(resource, None)
+}
+
+/// [`mesh3d_from_gltf_resource`] restricted to ONE glTF mesh.
+///
+/// ⚠️ The unfiltered form takes every sub-resource in the document, which is
+/// every primitive of every mesh in the file. That is correct for a
+/// single-mesh asset and wrong for any other: each node in a multi-mesh `.glb`
+/// resolved to the same combined mesh, so two differently-shaped objects drew
+/// identically (pat-mgixk.23). `mesh_index` selects just the primitives the
+/// node's glTF mesh declares.
+///
+/// Passing `None` reproduces the old behaviour exactly, key-sort included, so
+/// existing callers are unaffected.
+pub fn mesh3d_from_gltf_resource_for_mesh(
+    resource: &gdresource::Resource,
+    mesh_index: Option<i64>,
+) -> Option<Mesh3D> {
+    let subs: Vec<_> = match mesh_index {
+        Some(want) => {
+            let mut matching: Vec<_> = resource
+                .subresources
+                .iter()
+                .filter(|(_, sub)| {
+                    matches!(
+                        sub.get_property("mesh_index"),
+                        Some(gdvariant::Variant::Int(i)) if *i == want
+                    )
+                })
+                .collect();
+            // Ordered by the glTF primitive index, NOT by the key string.
+            // `mesh_0_prim_10` sorts before `mesh_0_prim_2` as text, which would
+            // silently permute the surfaces of any mesh with ten or more
+            // primitives — and surface order is what `surface_materials[i]`
+            // pairs against.
+            matching.sort_by_key(|(_, sub)| match sub.get_property("primitive_index") {
+                Some(gdvariant::Variant::Int(i)) => *i,
+                _ => 0,
+            });
+            matching
+        }
+        None => {
+            let mut all: Vec<_> = resource.subresources.iter().collect();
+            // Sort by key for deterministic ordering (mesh_0, mesh_0_prim_0, etc.).
+            all.sort_by_key(|(k, _)| k.clone());
+            all
+        }
+    };
     if subs.is_empty() {
         return None;
     }
-    // Sort by key for deterministic ordering (mesh_0, mesh_0_prim_0, etc.).
-    subs.sort_by_key(|(k, _)| k.clone());
 
     // First sub-resource becomes the primary surface.
     let (_, first_sub) = &subs[0];
@@ -2240,7 +2316,13 @@ pub fn evaluate_csg_tree(tree: &SceneTree, root: NodeId) -> Option<Mesh3D> {
             Some(n) => n,
             None => continue,
         };
-        if !is_csg_class(node.class_name()) || !node3d::is_visible(tree, nid) {
+        // pat-mgixk.32: visible IN THE TREE. Every collector in this file read
+        // the node's own flag only, so hiding a parent hid nothing — the same
+        // defect the editor's `collect_scene_content` had. The bead names this
+        // CSG site; the five `sync_*` collectors above it are the identical
+        // one-identifier bug on the render-server path, and leaving them would
+        // have fixed "hiding a parent" in the editor and not in the runner.
+        if !is_csg_class(node.class_name()) || !node3d::is_visible_in_tree(tree, nid) {
             continue;
         }
         let mut mesh = match csg_primitive_mesh(node) {
@@ -2857,6 +2939,76 @@ pub fn material_props_from_node(
 ///
 /// Gaps stay `None` rather than collapsing, so a mesh that overrides only its
 /// second extra surface does not shift that material onto the first.
+/// The mesh every instance of a `MultiMeshInstance3D` shares.
+///
+/// ⚠️ KNOWN GAP, deliberately not closed here: a `MultiMesh` whose own `mesh`
+/// is a sub-resource arrives as `__multimesh__mesh = "SubResource:<id>"` — a
+/// string that names an id and carries no class or bind data (see the
+/// `__multimesh__*` copy in `packed_scene.rs`, and its own note that a
+/// `SubResource:` string "carries no bind data at all"). Honouring it needs
+/// `packed_scene` to copy the NESTED mesh's class the way it already copies
+/// `__multimesh__class`. Until then this reads the authored type names and
+/// falls back to a unit cube, which is what the adapter has always done
+/// (pat-mgixk.50).
+pub fn multimesh_mesh_for_node(tree: &SceneTree, nid: NodeId) -> Mesh3D {
+    if let Some(mesh_type) = node3d::get_multimesh_mesh_type(tree, nid) {
+        if let Some(m) = RenderServer3DAdapter::mesh_from_type_name(&mesh_type) {
+            return m;
+        }
+    }
+    if let Some(node) = tree.get_node(nid) {
+        if let gdvariant::Variant::String(s) = node.get_property("mesh_type") {
+            if let Some(m) = RenderServer3DAdapter::mesh_from_type_name(&s) {
+                return m;
+            }
+        }
+    }
+    Mesh3D::cube(1.0)
+}
+
+/// 🔑 THE one expansion of a `MultiMeshInstance3D` into the instances actually
+/// drawn: `(world transform, per-instance colour)` plus the mesh they share.
+///
+/// Returns `None` for a node that is not a `MultiMeshInstance3D`, so a caller
+/// can use it as the "is this a multimesh?" test too.
+///
+/// Exists because the editor and Play 3D list had NO MultiMesh arm at all —
+/// `grep -i multimesh` in `viewport_3d_render.rs` and `viewport_3d.rs` returned
+/// zero, so every MultiMeshInstance3D fell through to a 0.4 marker cube — while
+/// the render-server adapter expanded it correctly and had no production caller.
+/// Both now go through here, so the two cannot disagree about how many blobs a
+/// scene has (pat-mgixk.50).
+///
+/// ⚠️ Honours `visible_instance_count`, which the adapter's own loop did not: it
+/// iterated the full `instance_count`, so a MultiMesh authored with 3 instances
+/// and 2 visible drew 3. The clamp lives in
+/// [`node3d::multimesh_visible_count`], deferring to
+/// `gdserver3d::multimesh::MultiMesh3D::visible_count` for the `-1`-means-all
+/// rule rather than re-deriving it.
+///
+/// The per-instance transform is composed as `node_global * per_instance`, which
+/// is the order Godot uses — the buffer holds model-space transforms.
+pub fn multimesh_instance_draws(
+    tree: &SceneTree,
+    nid: NodeId,
+) -> Option<(Mesh3D, Vec<(Transform3D, Color)>)> {
+    if tree.get_node(nid)?.class_name() != "MultiMeshInstance3D" {
+        return None;
+    }
+    let mesh = multimesh_mesh_for_node(tree, nid);
+    let base = node3d::get_global_transform(tree, nid);
+    let visible = node3d::multimesh_visible_count(tree, nid);
+    let instances = (0..visible)
+        .map(|i| {
+            (
+                base * node3d::get_multimesh_instance_transform(tree, nid, i),
+                node3d::get_multimesh_instance_color(tree, nid, i),
+            )
+        })
+        .collect();
+    Some((mesh, instances))
+}
+
 pub fn surface_materials_for_node(
     tree: &SceneTree,
     node_id: NodeId,

@@ -698,8 +698,14 @@ pub enum EditorCommand {
         /// The animation exactly as it was before the edit. `None` when the
         /// animation did not exist yet, so undo removes it entirely.
         before: Option<Box<gdscene::animation::Animation>>,
-        /// The animation as it is after the edit.
-        after: Box<gdscene::animation::Animation>,
+        /// The animation as it is after the edit. `None` when the edit DELETED
+        /// it, so redo removes it again (pat-mgixk.15).
+        ///
+        /// Symmetric with `before` on purpose: with both sides optional this one
+        /// variant covers create (`before: None`), delete (`after: None`) and
+        /// every in-place mutation, which is what lets `api_delete_animation`
+        /// be undoable without a second command kind.
+        after: Option<Box<gdscene::animation::Animation>>,
         /// Human-readable label for the History dock.
         label: String,
     },
@@ -1227,7 +1233,18 @@ impl EditorCommand {
             animation, after, ..
         } = self
         {
-            animations.insert(animation.clone(), (**after).clone());
+            match after {
+                Some(next) => {
+                    animations.insert(animation.clone(), (**next).clone());
+                }
+                // The edit deleted the animation, so redoing it deletes again.
+                // `as_str()` rather than relying on a `&mut String` ->
+                // `&String` reborrow being inferred at the `Borrow<Q>` call,
+                // matching `undo_animation` below.
+                None => {
+                    animations.remove(animation.as_str());
+                }
+            }
         }
         Ok(())
     }
@@ -1235,7 +1252,9 @@ impl EditorCommand {
     /// Reverses the animation-map half of this command (pat-0q2kx.12).
     ///
     /// A `before` of `None` means the animation did not exist prior to the
-    /// edit, so undoing removes it rather than restoring an empty one.
+    /// edit, so undoing removes it rather than restoring an empty one. The
+    /// mirror case — `after: None`, a deletion — is handled by
+    /// [`execute_animation`](Self::execute_animation).
     pub fn undo_animation(
         &mut self,
         animations: &mut std::collections::HashMap<String, gdscene::animation::Animation>,

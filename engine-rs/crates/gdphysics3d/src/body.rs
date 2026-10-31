@@ -70,7 +70,19 @@ pub struct PhysicsBody3D {
     /// character as a capsule raised by half its height is routine. Defaults to
     /// `ZERO`, which is exactly the old behaviour (pat-s3rrv.104).
     pub shape_offset: Vector3,
-    /// Additional shapes beyond [`Self::shape`], each with its local offset.
+    /// Local-space rotation of [`Self::shape`] about [`Self::shape_offset`].
+    ///
+    /// 🔑 A `CollisionShape3D`'s FULL local transform belongs to the shape
+    /// owner, rotation included (Godot's
+    /// `CollisionObject3D::shape_owner_set_transform`). Only the translation
+    /// was carried before, so a cylinder laid on its side or a wall box turned
+    /// 90 degrees collided bolt upright — the scene looked right and the
+    /// collision was at a right angle to it (pat-mgixk.39).
+    ///
+    /// `IDENTITY` by default, which is exactly the old behaviour.
+    pub shape_rotation: Quaternion,
+    /// Additional shapes beyond [`Self::shape`], each with its local offset
+    /// and local rotation.
     ///
     /// ⚠️ Kept SEPARATE from `shape` rather than folding both into one
     /// `Vec<(Vector3, Shape3D)>`. `shape` has 33 readers across this crate
@@ -78,7 +90,12 @@ pub struct PhysicsBody3D {
     /// body is built through [`Self::new`] — so an additive field changes one
     /// constructor and no call sites, while retyping `shape` would touch all of
     /// them at once. Empty for a single-shape body, which is the common case.
-    pub extra_shapes: Vec<(Vector3, Shape3D)>,
+    ///
+    /// ⚠️ The rotation lives IN the tuple rather than in a parallel
+    /// `Vec<Quaternion>`: it is a per-shape value, and a second vector could
+    /// desync from the shapes it describes — one `push` away from silently
+    /// rotating the wrong collider.
+    pub extra_shapes: Vec<(Vector3, Quaternion, Shape3D)>,
     /// Mass in arbitrary units.
     pub mass: f32,
     /// Friction coefficient in [0, 1].
@@ -180,6 +197,7 @@ impl PhysicsBody3D {
             angular_velocity: Vector3::ZERO,
             shape,
             shape_offset: Vector3::ZERO,
+            shape_rotation: Quaternion::IDENTITY,
             extra_shapes: Vec::new(),
             mass,
             friction: 0.5,
@@ -467,9 +485,26 @@ impl PhysicsBody3D {
         // would have both of them pruned away before the narrow-phase ever ran —
         // the feature would look implemented and collide with nothing.
         let mut out: Option<Aabb> = None;
-        for (world_pos, shape) in self.shapes_world() {
+        for (world_pos, world_rot, shape) in self.shapes_world() {
             let local = shape.bounding_aabb();
-            let one = Aabb::new(local.position + world_pos, local.size);
+            // ⚠️ The box must follow the shape's ROTATION, or this silently
+            // defeats the rotation support it sits next to. The broadphase
+            // PRUNES pairs on this box, so a thin wall box turned 90 degrees
+            // about Z — thin in Y locally, thin in X once placed — would be
+            // tested against its unrotated extent, the falling body's pair
+            // would be discarded before the narrowphase ever ran, and the body
+            // would drop straight through a wall the narrowphase models
+            // perfectly well (pat-mgixk.39).
+            //
+            // Conservative and exact enough: rotate all 8 corners of the local
+            // box and bound them. An axis-aligned box of a rotated shape cannot
+            // be tight, and over-estimating only costs a narrowphase test,
+            // whereas under-estimating loses the collision entirely.
+            let mut rotated = Aabb::new(world_pos + world_rot.xform(local.get_endpoint(0)), Vector3::ZERO);
+            for corner in 1..8u8 {
+                rotated = rotated.expand(world_pos + world_rot.xform(local.get_endpoint(corner)));
+            }
+            let one = rotated;
             out = Some(match out {
                 Some(acc) => acc.merge(one),
                 None => one,
@@ -490,17 +525,31 @@ impl PhysicsBody3D {
     /// offset is rotated by the body's own rotation before being added to its
     /// position, so a tilted body carries its offset shapes around with it.
     ///
+    /// Each shape's WORLD rotation is the body's rotation composed with the
+    /// shape's own local one (pat-mgixk.39). ⚠️ Order matters and is not
+    /// commutative: `body * local` applies the local rotation first and then
+    /// the body's, which is what nesting a rotated `CollisionShape3D` under a
+    /// rotated body means. Writing `local * body` gives a different orientation
+    /// for any case where both are non-identity — and agrees with the correct
+    /// answer whenever either one is identity, so an axis-aligned test cannot
+    /// tell the two apart.
+    ///
     /// Returns owned clones to match how the collision loop already consumes
     /// `shape` — it clones out of the borrow so the borrow ends before the
     /// mutable `bodies.get_mut` calls that follow.
-    pub fn shapes_world(&self) -> Vec<(Vector3, Shape3D)> {
+    pub fn shapes_world(&self) -> Vec<(Vector3, Quaternion, Shape3D)> {
         let mut out = Vec::with_capacity(1 + self.extra_shapes.len());
         out.push((
             self.position + self.rotation.xform(self.shape_offset),
+            self.rotation * self.shape_rotation,
             self.shape.clone(),
         ));
-        for (offset, shape) in &self.extra_shapes {
-            out.push((self.position + self.rotation.xform(*offset), shape.clone()));
+        for (offset, rotation, shape) in &self.extra_shapes {
+            out.push((
+                self.position + self.rotation.xform(*offset),
+                self.rotation * *rotation,
+                shape.clone(),
+            ));
         }
         out
     }

@@ -109,6 +109,35 @@ pub struct Render3DItem {
     /// Resolved at construction for the same reason as `material`: the render
     /// pass downstream only receives items, with no `SceneTree` left to read.
     pub geometry: GeometryInstanceSettings,
+    /// A `ShaderMaterial` on `material_override`, when the node has one.
+    ///
+    /// 🔑 Separate from [`material`](Self::material) because the two are
+    /// different types: `Material3D` is the StandardMaterial3D equivalent
+    /// (albedo/roughness/metallic) with no shader slot, and `ShaderMaterial3D`
+    /// carries code plus parameters. `packed_scene` flattens a ShaderMaterial to
+    /// `shader_code` / `shader_parameter/*` instead of the `__material__*` bag,
+    /// so `material3d_for_node` correctly returns `None` for one — which is why
+    /// this path drew every shader-material mesh flat (pat-mgixk.50).
+    ///
+    /// ⚠️ Carried, NOT collapsed to a constant albedo. `gdrender3d`'s software
+    /// rasterizer evaluates these per fragment
+    /// (`FragmentInstruction3D`/`ColorExpr3D` exist "so the software fallback
+    /// can evaluate them per-fragment"), so flattening it here would discard
+    /// UV math, uniforms, `TIME` and texture sampling the renderer can already
+    /// do.
+    pub shader_material: Option<gdserver3d::shader::ShaderMaterial3D>,
+    /// Per-surface `surface_material_override/N` materials, indexed by surface.
+    ///
+    /// 🔑 A `Vec`, not an `Option<Material3D>`, because Godot overrides surfaces
+    /// INDIVIDUALLY: a two-surface mesh with only `surface_material_override/1`
+    /// set must keep surface 0's own material. [`material`](Self::material) is a
+    /// single whole-mesh material and cannot express that, which is why these go
+    /// to the renderer's separate `set_surface_materials` channel.
+    ///
+    /// `Vec::new()` for the overwhelming majority of nodes, and an empty vec is
+    /// never sent, so a mesh without per-surface overrides is unaffected
+    /// (pat-mgixk.50).
+    pub surface_materials: Vec<Option<Material3D>>,
 }
 
 impl Viewport3D {
@@ -146,6 +175,66 @@ impl Viewport3D {
                 // while the tree is still in scope (pat-nzgdu.76).
                 let geometry =
                     gdscene::render_server_3d::geometry_instance_settings_for_node(tree, nid);
+                // Read while `tree` is in scope, for the same reason `material`
+                // is. `None` for every node without a ShaderMaterial, which is
+                // the overwhelming majority (pat-mgixk.50).
+                let shader_material =
+                    gdscene::render_server_3d::RenderServer3DAdapter::resolve_shader_material(
+                        tree, nid,
+                    );
+                // `surface_material_override/N`, resolved here for the same
+                // reason — and through the SAME `surface_materials_for_node`
+                // the render-server adapter uses, so the two paths cannot
+                // disagree about a surface's material. It had no gdeditor
+                // caller at all (pat-mgixk.50).
+                let surface_materials = gdscene::render_server_3d::surface_materials_for_node(
+                    tree,
+                    nid,
+                    &mut material_textures,
+                );
+                // 🔑 MultiMeshInstance3D expands into one draw per VISIBLE
+                // instance (pat-mgixk.50).
+                //
+                // This arm did not exist at all: `grep -i multimesh` in this
+                // file and `viewport_3d.rs` returned ZERO, so every
+                // MultiMeshInstance3D fell through to the 0.4 marker cube
+                // however many instances it authored — while
+                // `RenderServer3DAdapter` expanded it correctly and had no
+                // production caller. Both now go through
+                // `multimesh_instance_draws`, so the editor list and the render
+                // server cannot disagree about how many blobs a scene has.
+                //
+                // ⚠️ Returns early, BEFORE the CSG and mesh-path arms below: a
+                // multimesh has no single `mesh_path` to resolve, and falling
+                // through is exactly how it became a marker.
+                if let Some((mesh, instances)) =
+                    gdscene::render_server_3d::multimesh_instance_draws(tree, nid)
+                {
+                    return instances
+                        .into_iter()
+                        .map(|(xform, color)| Render3DItem {
+                            node_id: r.node_id,
+                            global_transform: xform,
+                            kind: Render3DKind::Geometry { mesh: mesh.clone() },
+                            // The per-instance colour is the MultiMesh buffer's,
+                            // which Godot multiplies into the instance's albedo.
+                            albedo: Some(color),
+                            material: material.clone(),
+                            // MultiMeshInstance3D is a GeometryInstance3D, so its
+                            // cast_shadow / visibility_range / transparency apply
+                            // to every expanded entry (pat-nzgdu.76).
+                            geometry: geometry.clone(),
+                            // A MultiMeshInstance3D can carry a
+                            // `material_override` too, and it applies to every
+                            // expanded instance.
+                            shader_material: shader_material.clone(),
+                            // A MultiMesh draws ONE mesh resource, so a
+                            // per-surface override on the node applies to every
+                            // expanded instance alike.
+                            surface_materials: surface_materials.clone(),
+                        })
+                        .collect();
+                }
                 // CSG: a root folds its whole boolean subtree into one mesh, and
                 // its descendants draw NOTHING — they are already part of that
                 // mesh. Without the skip a subtracted sphere would still appear
@@ -191,6 +280,34 @@ impl Viewport3D {
                 // is exactly the fall-through that made it a grey marker cube
                 // (pat-s3rrv.92). Built here, while `tree` is still in scope,
                 // for the same reason `material` is.
+                // 🔑 A mesh BUILT IN GDSCRIPT (`ImmediateMesh`, `SurfaceTool`)
+                // arrives as a tagged `ObjectId` handle, never a path — so
+                // `collect_scene_content`, which reads only `Variant::String`
+                // mesh paths, left `mesh_path` empty and the node fell through
+                // to the marker cube. `RenderServer3DAdapter::resolve_mesh`
+                // already decodes those handles and had no caller outside the
+                // adapter (pat-mgixk.50).
+                //
+                // ⚠️ Gated on the handle predicate, NOT called unconditionally:
+                // `resolve_mesh` falls back to `Mesh3D::cube(1.0)` for anything
+                // it cannot resolve, so calling it for every node would bake
+                // every ordinary mesh into inline geometry — losing the
+                // path-based kind and its downstream texture caching, and
+                // turning "could not load" into a silent cube.
+                let script_mesh = tree
+                    .get_node(nid)
+                    .and_then(|n| match n.get_property("mesh") {
+                        gdvariant::Variant::ObjectId(oid)
+                            if gdscript_interop::bindings::is_mesh_builder_handle(oid.raw()) =>
+                        {
+                            Some(
+                                gdscene::render_server_3d::RenderServer3DAdapter::resolve_mesh(
+                                    tree, nid,
+                                ),
+                            )
+                        }
+                        _ => None,
+                    });
                 let (generated_mesh, material) = match crate::sprite3d_render::billboard_geometry(
                     tree,
                     nid,
@@ -199,9 +316,19 @@ impl Viewport3D {
                     Some((mesh, sprite_material)) => (Some(mesh), Some(sprite_material)),
                     // Deformed geometry outranks CSG here only because a node
                     // is never both: CSG roots carry no skin or blend shapes.
-                    None => (deformed.or(csg_mesh), material),
+                    // Order matters only in that a node is never two of these
+                    // at once: a CSG root carries no skin, and a script-built
+                    // mesh is not a file path to deform.
+                    None => (deformed.or(csg_mesh).or(script_mesh), material),
                 };
-                let base = render_item_for(r, material, geometry, generated_mesh);
+                let base = render_item_for(
+                    r,
+                    material,
+                    geometry,
+                    generated_mesh,
+                    shader_material,
+                    surface_materials,
+                );
                 if is_gridmap {
                     return gridmap_items(tree, nid, &base);
                 }
@@ -252,6 +379,8 @@ fn render_item_for(
     material: Option<Material3D>,
     geometry: GeometryInstanceSettings,
     generated_mesh: Option<Mesh3D>,
+    shader_material: Option<gdserver3d::shader::ShaderMaterial3D>,
+    surface_materials: Vec<Option<Material3D>>,
 ) -> Render3DItem {
     // Generated geometry wins over every path-based kind: a CSG root has no mesh
     // resource to load, and a Sprite3D's quad is built from its texture, so
@@ -278,6 +407,8 @@ fn render_item_for(
         albedo: r.albedo,
         material,
         geometry,
+        shader_material,
+        surface_materials,
     }
 }
 
@@ -924,6 +1055,14 @@ fn scene_directional_lights(tree: &SceneTree) -> Vec<SceneLight3D> {
             continue;
         };
         if !node.is_class("DirectionalLight3D") {
+            continue;
+        }
+        // pat-mgixk.32: a hidden light contributes nothing, exactly as the
+        // omni/spot path above already required. This loop had NO visibility
+        // check at all, so hiding the sun left the scene lit — and because the
+        // omni/spot collector did check, the two light families disagreed about
+        // what `visible` means.
+        if !gdscene::node3d::is_visible_in_tree(tree, nid) {
             continue;
         }
         let z = gdscene::node3d::get_global_transform(tree, nid).basis.z;
@@ -2288,6 +2427,25 @@ fn populate_editor_scene_3d(
                 .clone()
                 .unwrap_or_else(|| solid_material_3d(color)),
         );
+        // A ShaderMaterial is a SEPARATE renderer channel from `set_material`,
+        // and both the software rasterizer (gdrender3d/renderer.rs:1102, which
+        // reads `inst.shader_material` per fragment) and the wgpu pipeline
+        // already implement it — the editor path simply never passed one
+        // (pat-mgixk.50).
+        if let Some(shader_mat) = item.shader_material.clone() {
+            renderer.set_shader_material(id, shader_mat);
+        }
+        // `surface_material_override/N`: a THIRD renderer channel, because a
+        // per-surface override cannot be expressed by `set_material`'s single
+        // whole-mesh material. `set_surface_materials` is already implemented by
+        // the software rasterizer; the editor path never called it
+        // (pat-mgixk.50).
+        //
+        // ⚠️ Guarded on non-empty so a mesh with no per-surface overrides sends
+        // nothing and renders byte-identically to before.
+        if !item.surface_materials.is_empty() {
+            renderer.set_surface_materials(id, item.surface_materials.clone());
+        }
         renderer.set_transform(id, item.global_transform);
         renderer.set_visible(id, true);
         // GeometryInstance3D (pat-nzgdu.76): cast_shadow=Off must drop this
@@ -2615,14 +2773,34 @@ pub fn viewport_for_scene_camera(
 ///
 /// A running game shows none of them (pat-0q2kx.30) — Godot's game viewport draws
 /// the scene, not the editor's affordances, and collision shapes appear only behind
-/// the "Visible Collision Shapes" debug toggle, which is off by default. Mesh items
-/// and the generic `Node3D` box markers are kept: those stand in for scene content.
+/// the "Visible Collision Shapes" debug toggle, which is off by default. Only MESH
+/// and generated-geometry items survive into a game frame.
+///
+/// 🔑 **Every `Primitive` is stripped, `Box` included** (pat-mgixk.51). This used to
+/// keep box markers on the reasoning that they "stand in for scene content". They do
+/// not: `primitive_for_class` maps EVERYTHING that is not a Camera or a Light to
+/// `Box`, so a running game drew a grey `Mesh3D::cube(0.4)` at every plain `Node3D`,
+/// `Marker3D`, `Area3D`, `Skeleton3D`, `AudioStreamPlayer3D` and physics body. Godot
+/// draws nothing for any of them — none is a `VisualInstance3D`
+/// (`scene/3d/node_3d.cpp`). The editor viewport, which does not call this, still
+/// draws them.
+///
+/// ⚠️ `Box` is ALSO where a `MeshInstance3D` whose mesh did not resolve lands, and
+/// stripping it is right for that case too: Godot draws nothing for a
+/// `VisualInstance3D` with no geometry either, so the cube was an editor affordance
+/// exactly like the camera gizmo.
+///
+/// That second case is why this change touches two fixtures. Both
+/// `play_uses_scene_camera3d` and `render3d_hidden_parent_top_level` (pat-mgixk.32)
+/// used a mesh-less `MeshInstance3D` as their stand-in for real content, so each was
+/// pinning the PLACEHOLDER. Both now carry `mesh = "primitive:BoxMesh"`, which makes
+/// their assertions mean what they say. pat-mgixk.32's fixture comment justified
+/// going mesh-less with "`is_pivot_only_class` is false so it is never stripped" —
+/// that function no longer exists, so the justification was stale.
 fn is_editor_only_marker(item: &Render3DItem) -> bool {
     matches!(
         item.kind,
-        Render3DKind::Primitive {
-            shape: PrimitiveShape::Camera | PrimitiveShape::Light,
-        } | Render3DKind::Collision { .. }
+        Render3DKind::Primitive { .. } | Render3DKind::Collision { .. }
     )
 }
 

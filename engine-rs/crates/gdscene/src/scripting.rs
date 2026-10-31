@@ -211,7 +211,10 @@ impl GDScriptNodeInstance {
     /// never runs: the connect succeeds, the emit does nothing, and the symptom
     /// looks like broken capture rather than a rejected name.
     pub fn has_method(&self, name: &str) -> bool {
-        self.instance.class_def.methods.contains_key(name)
+        // Chain-aware: a method declared only in a base script must answer
+        // `true` here, or `SceneTree::call_script_method` skips it and an
+        // inherited `_ready` / handler silently never runs (pat-mgixk.21).
+        gdscript_interop::interpreter::class_chain_has_method(&self.instance.class_def, name)
             || gdscript_interop::interpreter::is_lambda_connection_name(name)
     }
 
@@ -275,6 +278,18 @@ impl ScriptInstance for GDScriptNodeInstance {
                 }
                 other => ScriptError::TypeError(other.to_string()),
             })
+    }
+
+    fn pump_js_callbacks(&mut self) -> usize {
+        // ⚠️ The INSTANCE-bound pump. The plain one binds no `self`, so a
+        // callback body touching its own members raises and the pump swallows
+        // it — a callback that silently does nothing (pat-mgixk.41).
+        //
+        // The interpreter still identifies the OWNER itself, via its own
+        // `current_node_id`, so a caller cannot route another node's callbacks
+        // here by passing the wrong instance.
+        self.interpreter
+            .pump_javascript_callbacks_for_instance(&mut self.instance)
     }
 
     fn drain_print_output(&mut self) -> Vec<String> {
@@ -354,6 +369,13 @@ impl ScriptInstance for GDScriptNodeInstance {
 
     fn set_script_file_path(&mut self, path: &str) {
         self.script_file_path = Some(path.to_string());
+        // pat-mgixk.14: the debugger matches a breakpoint on `(script, line)`,
+        // and the interpreter is the layer that checks it before each
+        // statement — but `Interpreter::from_source` never sees a path, so this
+        // is the only place that can tell it which file it is running. Without
+        // the forward, `debug_break_before` declines every statement and a
+        // breakpoint can never be hit.
+        self.interpreter.set_script_path(path);
     }
 
     fn exported_property_names(&self) -> Vec<String> {
@@ -363,7 +385,10 @@ impl ScriptInstance for GDScriptNodeInstance {
     fn has_method(&self, name: &str) -> bool {
         // Same widening as the inherent `has_method` above, and for the same
         // reason — this is the one `call_script_method` actually calls.
-        self.instance.class_def.methods.contains_key(name)
+        // Chain-aware: a method declared only in a base script must answer
+        // `true` here, or `SceneTree::call_script_method` skips it and an
+        // inherited `_ready` / handler silently never runs (pat-mgixk.21).
+        gdscript_interop::interpreter::class_chain_has_method(&self.instance.class_def, name)
             || gdscript_interop::interpreter::is_lambda_connection_name(name)
     }
 
@@ -579,6 +604,36 @@ pub enum InputCommand {
 ///
 /// `None` for a class or code the engine does not model, so an unrecognized
 /// rebind is dropped rather than silently bound to the wrong control.
+/// Runs every script's pending `JavaScriptBridge` callbacks, returning how
+/// many ran across the whole tree (pat-mgixk.41).
+///
+/// 🔑 Called once per frame from [`crate::main_loop::MainLoop::step`]. Before
+/// this existed `Interpreter::pump_javascript_callbacks` had NO runtime caller
+/// — only tests — so a `Callable` handed to JavaScript by
+/// `JavaScriptBridge.create_callback` queued its invocations forever and never
+/// ran. `JavaScriptBridge.create_callback` was documented as working and did
+/// nothing observable.
+///
+/// ⚠️ Every scripted node is pumped, and that is safe only because each
+/// interpreter drains just the callbacks IT registered: the invocation queue
+/// and the callback registry are both process-wide, so a blanket drain would
+/// let the first script run every other script's callbacks against its own
+/// instance. See `gdplatform::js_bridge::take_callback_invocations_where`.
+///
+/// Lives here rather than in `main_loop.rs` deliberately: that file is heavily
+/// contended, and the loop needs nothing from `MainLoop` except the tree.
+pub fn pump_javascript_callbacks(tree: &mut SceneTree) -> usize {
+    let mut ran = 0usize;
+    // Tree order so the dispatch order is deterministic and matches every other
+    // per-frame script walk, rather than depending on HashMap iteration.
+    for node_id in tree.all_nodes_in_tree_order() {
+        if let Some(script) = tree.get_script_mut(node_id) {
+            ran += script.pump_js_callbacks();
+        }
+    }
+    ran
+}
+
 pub fn binding_from_event_spec(
     spec: &gdscript_interop::bindings::InputEventSpec,
 ) -> Option<gdplatform::input::ActionBinding> {
@@ -2189,6 +2244,35 @@ impl SceneAccess for SceneTreeAccessor {
         }
         // Then try node property
         if let Some(n) = self.tree().get_node(nid) {
+            // `Node.name` is a real property in Godot (`StringName name`), but
+            // Patina keeps a node's name in its own field rather than in the
+            // property bag, so `$Child.name` read back `Nil` — which is why the
+            // most ordinary thing a script does with a node reference did not
+            // work (pat-mgixk.20).
+            //
+            // ⚠️ Answered INSIDE the node-exists block on purpose. `print`ing a
+            // name is not the only caller: `is_instance_id_valid` probes
+            // existence by reading `"name"` and treating `Nil` as "no such
+            // node" (interpreter.rs, `is_instance_id_valid`). Since nothing
+            // answered `name`, that predicate was false for EVERY id; answering
+            // it here repairs that, and a missing node still falls through to
+            // `Nil` because `get_node` returned `None`.
+            if prop == "name" {
+                return Variant::String(n.name().to_string());
+            }
+            // Node3D's COMPUTED properties — `global_position`,
+            // `global_transform`, `global_basis`, `global_rotation(_degrees)`,
+            // `basis`, `quaternion`, `rotation_degrees` (pat-mgixk.30).
+            //
+            // Ahead of the raw-bag read below because none of them is stored:
+            // a Node3D keeps `transform`/`position`/`rotation`/`scale`, so
+            // `self.global_position` fell through to `builtin_property_default`
+            // and read back Nil. The reader itself declines any node that is
+            // not a Node3D, so the 2D `global_position` served elsewhere is
+            // untouched.
+            if let Some(value) = crate::node3d::get_derived_property(self.tree(), nid, prop) {
+                return value;
+            }
             let value = n.get_property(prop);
             if !value.is_nil() {
                 return value;
@@ -2493,20 +2577,31 @@ impl SceneAccess for SceneTreeAccessor {
         // avoids consulting ClassDB here, which is not guaranteed to be
         // populated in every runtime/test context and would silently disable
         // this routing when it isn't.
-        match (prop, &value) {
-            ("position", Variant::Vector3(v)) => {
-                crate::node3d::set_position(self.tree_mut(), nid, *v);
+        // One shared funnel with the animation player, the tween apply and root
+        // motion (pat-mgixk.29). It keeps the Vector3-payload discriminator this
+        // comment describes — and widens the surface the three arms here covered:
+        // `quaternion`, `basis`, `rotation_degrees`, `transform` and sub-paths
+        // like `position:x` now route through the canonical transform too, where
+        // before they fell to the raw `set_property` below and were ignored on
+        // read.
+        if let Some(node) = self.tree_mut().get_node_mut(nid) {
+            if crate::node3d::set_transform_component(node, prop, &value) {
                 return;
             }
-            ("rotation", Variant::Vector3(v)) => {
-                crate::node3d::set_rotation(self.tree_mut(), nid, *v);
-                return;
-            }
-            ("scale", Variant::Vector3(v)) => {
-                crate::node3d::set_scale(self.tree_mut(), nid, *v);
-                return;
-            }
-            _ => {}
+        }
+        // Node3D's GLOBAL property writes — `global_position`,
+        // `global_transform`, `global_basis`, `global_rotation(_degrees)`
+        // (pat-mgixk.30). Each is converted into the local transform the node
+        // actually stores by composing against the parent's global.
+        //
+        // ⚠️ Placed AFTER `set_transform_component` on purpose, not before.
+        // That function already owns every LOCAL transform property —
+        // `position`, `rotation`, `rotation_degrees`, `scale`, `quaternion`,
+        // `basis`, `transform` and the `position:x` sub-paths — and running
+        // ahead of it would shadow a tested implementation rather than fill a
+        // gap. Only the `global_*` names reach here, which it does not serve.
+        if crate::node3d::set_derived_property(self.tree_mut(), nid, prop, &value) {
+            return;
         }
         // Try script property first
         if let Some(script) = self.tree_mut().get_script_mut(nid) {
@@ -2789,6 +2884,22 @@ impl SceneAccess for SceneTreeAccessor {
         // UndefinedFunction while `node2d::get_global_position` was computing
         // the right answer one layer down.
         if let Some(value) = crate::node2d::call_node2d_method(self.tree_mut(), nid, method, args) {
+            return Some(value);
+        }
+
+        // Node3D's global/basis/quaternion method surface (pat-mgixk.30);
+        // declines every other node.
+        //
+        // ⚠️ Carries ONLY names with no arm anywhere else, for the same reason
+        // the block below spells out: this runs BEFORE the table, so an
+        // implementation of a name the table already serves would SHADOW it.
+        // `hide` / `show` / `set_visible` / `is_visible` are therefore absent
+        // from it — the table dispatches those already. Before this, only seven
+        // Node3D methods were reachable from script (`look_at`, `translate`,
+        // `rotate`, `rotate_x..z`, `to_global`, `to_local`); ClassDB registered
+        // the rest, so a call returned Nil silently on another node and
+        // UndefinedFunction on `self`.
+        if let Some(value) = crate::node3d::call_node3d_method(self.tree_mut(), nid, method, args) {
             return Some(value);
         }
 
@@ -3142,6 +3253,91 @@ impl SceneAccess for SceneTreeAccessor {
             "is_processing" => Some(Variant::Bool(self.tree().is_node_processing(nid))),
             "is_physics_processing" => {
                 Some(Variant::Bool(self.tree().is_node_physics_processing(nid)))
+            }
+            // -- the rest of Node's process surface (pat-mgixk.57) ----------
+            //
+            // `set_process` / `set_physics_process` / `is_processing` /
+            // `is_physics_processing` above were wired by pat-mgixk.6; the
+            // remaining names in Godot's `Node` process block had no arm in ANY
+            // table, so a script calling `set_process_input(false)` or
+            // `get_process_delta_time()` died on `UndefinedFunction`.
+            //
+            // Wired HERE for the reason the VehicleWheel3D block below states:
+            // `call_self_func_or_native` falls back to this table for a bare
+            // `set_process_input(false)` on self, and `call_object_method` for
+            // `$Child.set_process_input(false)`, so one registration serves
+            // both spellings.
+            "set_process_input"
+            | "set_process_unhandled_input"
+            | "set_process_unhandled_key_input"
+            | "set_process_shortcut_input" => {
+                // A malformed argument is a no-op, not a disable — same reason
+                // `set_process` above refuses to read a missing argument as
+                // `false`.
+                let enabled = match args.first() {
+                    Some(Variant::Bool(b)) => *b,
+                    Some(Variant::Int(i)) => *i != 0,
+                    Some(Variant::Float(f)) => *f != 0.0,
+                    _ => return Some(Variant::Nil),
+                };
+                let tree = self.tree_mut();
+                match method {
+                    "set_process_input" => tree.set_node_process_input(nid, enabled),
+                    "set_process_unhandled_input" => {
+                        tree.set_node_process_unhandled_input(nid, enabled)
+                    }
+                    "set_process_unhandled_key_input" => {
+                        tree.set_node_process_unhandled_key_input(nid, enabled)
+                    }
+                    _ => tree.set_node_process_shortcut_input(nid, enabled),
+                };
+                Some(Variant::Nil)
+            }
+            "is_processing_input" => Some(Variant::Bool(self.tree().is_node_processing_input(nid))),
+            "is_processing_unhandled_input" => Some(Variant::Bool(
+                self.tree().is_node_processing_unhandled_input(nid),
+            )),
+            "is_processing_unhandled_key_input" => Some(Variant::Bool(
+                self.tree().is_node_processing_unhandled_key_input(nid),
+            )),
+            "is_processing_shortcut_input" => Some(Variant::Bool(
+                self.tree().is_node_processing_shortcut_input(nid),
+            )),
+            "set_process_priority" | "set_physics_process_priority" => {
+                // Godot's priorities are ints; a non-numeric argument is a
+                // no-op rather than a reset to 0, which would silently reorder
+                // the node.
+                let priority = match args.first() {
+                    Some(Variant::Int(i)) => *i as i32,
+                    Some(Variant::Float(f)) => *f as i32,
+                    _ => return Some(Variant::Nil),
+                };
+                let tree = self.tree_mut();
+                if method == "set_process_priority" {
+                    tree.set_node_process_priority(nid, priority);
+                } else {
+                    tree.set_node_physics_process_priority(nid, priority);
+                }
+                Some(Variant::Nil)
+            }
+            "get_process_priority" => {
+                Some(Variant::Int(self.tree().node_process_priority(nid) as i64))
+            }
+            "get_physics_process_priority" => Some(Variant::Int(
+                self.tree().node_physics_process_priority(nid) as i64,
+            )),
+            "can_process" => {
+                // Godot's `Node.can_process()` is the pause question only — it
+                // reports whether `process_mode` lets the node run under the
+                // tree's current pause state, NOT whether `set_process(false)`
+                // was called. Folding `is_processing` in here would make
+                // `can_process()` false for a node that still receives input
+                // and physics.
+                Some(Variant::Bool(self.tree().should_process_node(nid)))
+            }
+            "get_process_delta_time" => Some(Variant::Float(self.tree().script_process_delta())),
+            "get_physics_process_delta_time" => {
+                Some(Variant::Float(self.tree().script_physics_delta_time()))
             }
             "notification" => {
                 let what = match args.first() {
@@ -3906,16 +4102,86 @@ impl SceneAccess for SceneTreeAccessor {
                 }
                 Some(Variant::Nil)
             }
+            // `move_and_slide()` — the whole slide happens BEFORE this returns,
+            // as in Godot (`CharacterBody2D::move_and_slide`,
+            // `scene/2d/physics/character_body_2d.cpp`), so the next line of the
+            // same `_physics_process` reads the new position, velocity, flags
+            // and normals (pat-mgixk.37).
+            //
+            // This used to set `_move_and_slide_requested` and let the physics
+            // phase do the real work AFTER every script had run, which made
+            // four things wrong at once: everything read back was one tick
+            // stale, `move_and_slide(); velocity = Vector2.ZERO` moved by the
+            // ZEROED velocity, two calls in a tick moved once, and the return
+            // value was the PREVIOUS tick's flags.
             "move_and_slide" => {
-                if let Some(n) = self.tree_mut().get_node_mut(nid) {
-                    n.set_property("_move_and_slide_requested", Variant::Bool(true));
+                // Try the synchronous slide first. `None` means the 2D server
+                // does not own this node — a scripted CharacterBody3D arrives
+                // here too, because this dispatch table answers the method for
+                // every node — and then the deferred request below is still the
+                // real mechanism, consumed by
+                // `character3d::process_character_movement`.
+                let addr = self.tree().script_physics_addr();
+                let slid = if addr == 0 {
+                    // No server bound for this script phase, so there is
+                    // nothing to slide through at all. A host that drives
+                    // scripts without binding the bridge keeps the old
+                    // behaviour rather than silently refusing to move.
+                    None
+                } else {
+                    // Godot's `move_and_slide()` always moves by the PHYSICS
+                    // tick (`get_physics_process_delta_time()`), whichever
+                    // callback calls it, which is what the tree records.
+                    let dt = self.tree().script_physics_delta() as f32;
+                    // SAFETY: same contract as `physics()` above, with one
+                    // addition. `set_script_physics_server` stored the address
+                    // of a live `PhysicsServer` and `MainLoop` clears it before
+                    // that server can move or drop, so a non-zero address
+                    // points at a live server; the server is a sibling of the
+                    // tree, never inside it, so this cannot alias the `&mut`
+                    // tree borrow passed in.
+                    //
+                    // ⚠️ `&mut` rather than the shared borrow `physics()` hands
+                    // out, because the slide mutates the world body. That makes
+                    // this borrow EXCLUSIVE, so nothing else may call
+                    // `self.physics()` while it is live — and nothing does.
+                    let physics =
+                        unsafe { &mut *(addr as *mut crate::physics_server::PhysicsServer) };
+                    physics.script_move_and_slide(self.tree_mut(), nid, dt)
+                };
+
+                match slid {
+                    Some(collided) => {
+                        // Raised AND consumed inside this call, so the deferred
+                        // pass must not slide the body a second time this tick.
+                        //
+                        // Written as an explicit `false` rather than left
+                        // unset: `process_character_movement`'s gate reads it,
+                        // and `characterbody2d_move_and_slide_script_dispatch`
+                        // link 2 (plus the same assertion in
+                        // `cross_node_and_native_method_dispatch_test`) checks
+                        // this property is `Bool(false)` after the tick that
+                        // raised it. An unset property reads `Nil` and would
+                        // fail those for a reason unrelated to their subject.
+                        if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                            n.set_property("_move_and_slide_requested", Variant::Bool(false));
+                        }
+                        Some(Variant::Bool(collided))
+                    }
+                    None => {
+                        // The pre-pat-mgixk.37 path, kept for the 3D character
+                        // and for an unbound server: raise the one-shot request
+                        // and answer with the flags as they stand.
+                        if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                            n.set_property("_move_and_slide_requested", Variant::Bool(true));
+                        }
+                        let tree = self.tree();
+                        let collided = bool_prop(tree, "is_on_floor")
+                            || bool_prop(tree, "is_on_wall")
+                            || bool_prop(tree, "is_on_ceiling");
+                        Some(Variant::Bool(collided))
+                    }
                 }
-                // Godot returns whether the body collided during the motion.
-                let tree = self.tree();
-                let collided = bool_prop(tree, "is_on_floor")
-                    || bool_prop(tree, "is_on_wall")
-                    || bool_prop(tree, "is_on_ceiling");
-                Some(Variant::Bool(collided))
             }
             // `ResourcePreloader` accessors (pat-0q2kx.218). The preloaded set
             // lives in the node's `resources` Dictionary, which is how a `.tscn`
@@ -4078,6 +4344,66 @@ impl SceneAccess for SceneTreeAccessor {
             // Collision state persisted by `process_character_movement`.
             "is_on_floor" | "is_on_wall" | "is_on_ceiling" => {
                 Some(Variant::Bool(bool_prop(self.tree(), method)))
+            }
+            // The surface normals the slide ran into (pat-mgixk.37). The solver
+            // has tracked both all along (`CharacterBody2D::get_floor_normal`
+            // in gdphysics2d); there was no dispatch arm, so a script asking
+            // for either got Nil and `get_floor_normal().dot(...)` was
+            // unwritable — the standard way to tell a slope from a floor.
+            //
+            // Godot answers the ZERO vector when the body is not on that
+            // surface, which is what `vel_prop` gives before anything is
+            // published, so a script may chain `.dot()`/`.angle()` on the
+            // result without a guard.
+            "get_floor_normal" => Some(vel_prop(self.tree(), "floor_normal")),
+            "get_wall_normal" => Some(vel_prop(self.tree(), "wall_normal")),
+            // `get_floor_angle(up_direction = up_direction)` — the angle between
+            // the floor normal and up, in radians, so a script can compare it
+            // with `floor_max_angle` (`character_body_2d.cpp`). Zero on flat
+            // ground, and zero when not on a floor at all.
+            "get_floor_angle" => {
+                // Handles BOTH dimensions off the shared `floor_normal` key: a
+                // CharacterBody3D publishes a Vector3 there, and reading it
+                // through a Vector2-only helper would answer a confident 0.0
+                // for every 3D body instead of the real slope.
+                let normal = self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.get_property("floor_normal"))
+                    .unwrap_or(Variant::Nil);
+                let up = args.first().cloned().unwrap_or(Variant::Nil);
+                let dot = match (&normal, &up) {
+                    (Variant::Vector2(n), Variant::Vector2(u)) => Some(n.dot(*u)),
+                    (Variant::Vector3(n), Variant::Vector3(u)) => Some(n.dot(*u)),
+                    // Godot defaults the argument to the body's OWN
+                    // `up_direction`, not to a hardcoded axis.
+                    (Variant::Vector2(n), _) => {
+                        let authored = vec2_prop(self.tree(), "up_direction");
+                        let u = if authored.length_squared() < 1e-12 {
+                            Vector2::new(0.0, -1.0)
+                        } else {
+                            authored
+                        };
+                        Some(n.dot(u))
+                    }
+                    (Variant::Vector3(n), _) => {
+                        match self
+                            .tree()
+                            .get_node(nid)
+                            .map(|node| node.get_property("up_direction"))
+                        {
+                            Some(Variant::Vector3(u)) => Some(n.dot(u)),
+                            _ => Some(n.dot(gdcore::math::Vector3::new(0.0, 1.0, 0.0))),
+                        }
+                    }
+                    // Nothing published yet: no slide has run, so there is no
+                    // floor and Godot's angle is zero.
+                    _ => None,
+                };
+                // `acos` of a dot product that floating-point error can push a
+                // hair outside [-1, 1], which would answer NaN.
+                let angle = dot.map(|d| d.clamp(-1.0, 1.0).acos()).unwrap_or(0.0);
+                Some(Variant::Float(angle as f64))
             }
             // `*_only` variants ignore the "was on X last frame" distinction
             // Patina does not model separately; report the same state.
@@ -7678,6 +8004,27 @@ impl SceneAccess for SceneTreeAccessor {
     }
 
     fn instantiate_packed_scene(&mut self, path: &str) -> Option<u64> {
+        // A `.glb`/`.gltf` is a PackedScene in Godot's sense (its importer
+        // reports that type), but it is NOT `.tscn` text: it is binary GLB or
+        // glTF JSON. The reader below would fail to parse it and hand the script
+        // a silent `null`, so it is instantiated from the parsed document
+        // instead (pat-mgixk.23).
+        //
+        // ⚠️ This branch is required by the class rename in `gltf_import.rs`.
+        // Reporting PackedScene without it turns "cannot instantiate a
+        // GltfDocument resource" — a clear error — into a silent null, which is
+        // strictly worse. The two changes belong together.
+        let lower = path.to_lowercase();
+        if lower.ends_with(".glb") || lower.ends_with(".gltf") {
+            let fs_path = gdcore::file_access::resolve_path(path).ok()?;
+            let doc = gdresource::import_gltf(&fs_path).ok()?;
+            let tree = self.tree_mut();
+            let root = tree.root_id();
+            // Attached under the root like the tscn path below; the script's
+            // follow-up `add_child` reparents it.
+            return crate::gltf_scene::build_gltf_subtree(tree, root, &doc).map(|id| id.raw());
+        }
+
         // `res://` resolves against the configured project root, exactly like
         // `SceneTree::change_scene_to_file`. Hand-rolling
         // `strip_prefix("res://")` here instead mapped `res://X` to the
@@ -8610,7 +8957,22 @@ fn astar_call_grid(
 /// defaulting to `Node`. A path/quoted base (`extends "res://x.gd"`) resolves
 /// to a Node subtype we cannot name statically, so it falls back to `Node` —
 /// matching the autoload boot path's `base_class_from_source`.
+/// The native (engine) class a script ultimately extends.
+///
+/// `extends Sprite2D` answers `Sprite2D`. `extends "res://base.gd"` follows the
+/// chain of script-to-script extends to the first NON-script ancestor, which is
+/// the class Godot gives a node built from that script (pat-mgixk.21).
 fn script_base_class(source: &str) -> String {
+    script_base_class_chain(source, 0)
+}
+
+/// `depth` bounds a cycle — `a.gd extends "res://b.gd"` and back again would
+/// otherwise recurse until the stack ran out.
+fn script_base_class_chain(source: &str, depth: usize) -> String {
+    // Real script inheritance is not deeper than this; anything past it is a
+    // cycle, and answering the default beats overflowing the stack.
+    const MAX_SCRIPT_BASE_DEPTH: usize = 16;
+
     for raw in source.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -8622,8 +8984,29 @@ fn script_base_class(source: &str) -> String {
                 Some(r) => r.trim(),
                 None => return "Node".to_string(),
             };
-            if rest.is_empty() || rest.starts_with('"') {
+            if rest.is_empty() {
                 return "Node".to_string();
+            }
+            // A SCRIPT base. This used to answer "Node", so a script extending
+            // another script lost its engine class entirely: the only non-test
+            // caller is `instantiate_script_with_values`, which passes this
+            // straight to `Node::new(name, base_class)`, so
+            // `load("res://player.gd").new()` built a bare `Node` however
+            // specific the base's own `extends` was (pat-mgixk.21).
+            //
+            // ⚠️ Every failure to resolve still falls back to "Node", and that
+            // is load-bearing rather than lazy: a unit test configures no
+            // project root, so the path is unreadable there, and the
+            // pre-existing `script_base_class("extends \"res://base.gd\"")
+            // == "Node"` assertion has to keep passing.
+            if let Some(base_path) = quoted_extends_path(rest) {
+                if depth >= MAX_SCRIPT_BASE_DEPTH {
+                    return "Node".to_string();
+                }
+                return match read_script_source(&base_path) {
+                    Some(base_source) => script_base_class_chain(&base_source, depth + 1),
+                    None => "Node".to_string(),
+                };
             }
             return rest.split_whitespace().next().unwrap_or("Node").to_string();
         }
@@ -8631,6 +9014,32 @@ fn script_base_class(source: &str) -> String {
         break;
     }
     "Node".to_string()
+}
+
+/// The path inside `extends "res://base.gd"`, or `None` for a bare class name.
+fn quoted_extends_path(rest: &str) -> Option<String> {
+    let inner = rest.strip_prefix('"')?;
+    let end = inner.find('"')?;
+    let path = &inner[..end];
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
+    }
+}
+
+/// Reads a script's text, consulting `FileAccess` first so a script inside a
+/// mounted `.pck` resolves, then falling back to a CWD-relative path.
+///
+/// The two steps mirror `interpreter.rs`'s `read_resource_source` and exist for
+/// the same reason: `FileAccess` treats an unconfigured `res://` root as an
+/// error, and dropping the fallback would break every caller that loads a
+/// script without configuring a root first.
+fn read_script_source(path: &str) -> Option<String> {
+    if let Ok(text) = gdcore::file_access::FileAccess::read_file_string(path) {
+        return Some(text);
+    }
+    std::fs::read_to_string(path.strip_prefix("res://").unwrap_or(path)).ok()
 }
 
 #[cfg(test)]

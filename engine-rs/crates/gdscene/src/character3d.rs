@@ -262,6 +262,10 @@ pub fn process_character_movement(tree: &mut SceneTree, physics: &PhysicsServer3
         let on_wall = character.is_on_wall();
         let on_ceiling = character.is_on_ceiling();
         let floor_normal = character.get_floor_normal();
+        // Never published before pat-mgixk.37, so `get_wall_normal()` had
+        // nothing to read in 3D even though the solver tracked it — the same
+        // gap the 2D side had, and the dispatch arm is shared.
+        let wall_normal = character.get_wall_normal();
         let platform_velocity = character.get_platform_velocity();
 
         // Godot's `get_real_velocity()` — the motion the last move ACTUALLY
@@ -332,6 +336,7 @@ pub fn process_character_movement(tree: &mut SceneTree, physics: &PhysicsServer3
             node.set_property("is_on_wall", Variant::Bool(on_wall));
             node.set_property("is_on_ceiling", Variant::Bool(on_ceiling));
             node.set_property("floor_normal", Variant::Vector3(floor_normal));
+            node.set_property("wall_normal", Variant::Vector3(wall_normal));
             node.set_property("platform_velocity", Variant::Vector3(platform_velocity));
             node.set_property("_real_velocity", Variant::Vector3(real_velocity));
             node.set_property("_position_delta", Variant::Vector3(position_delta));

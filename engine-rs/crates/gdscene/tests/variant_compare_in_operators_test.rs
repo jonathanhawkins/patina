@@ -55,25 +55,66 @@ var int_in_float_packed
 var str_in_packed
 var has_position
 var has_nonsense
+var stage = 0
 var ran = false
 
 func _ready():
     self.v2_lt = Vector2(1, 5) < Vector2(2, 0)
+    self.stage = 1
     self.v2_lt_swapped = Vector2(2, 0) < Vector2(1, 5)
+    self.stage = 2
     self.v2i_le = Vector2i(1, 2) <= Vector2i(1, 2)
+    self.stage = 3
     self.v3_lt = Vector3(1, 2, 3) < Vector3(1, 2, 4)
+    self.stage = 4
     self.arr_lt = [1, 2] < [1, 3]
+    self.stage = 5
     self.arr_prefix_lt = [1, 2] < [1, 2, 3]
+    self.stage = 6
     self.bool_lt = false < true
+    self.stage = 7
     self.str_in_str = "ell" in "hello"
+    self.stage = 8
     self.int_in_packed = 3 in PackedInt32Array([1, 3])
+    self.stage = 9
     self.int_not_in_packed = 2 in PackedInt32Array([1, 3])
+    self.stage = 10
     self.int_in_float_packed = 3 in PackedFloat32Array([1.0, 3.0])
+    self.stage = 11
     self.str_in_packed = "b" in PackedStringArray(["a", "b"])
+    self.stage = 12
     self.has_position = "position" in self
+    self.stage = 13
     self.has_nonsense = "no_such_property_xyz" in self
+    self.stage = 14
     self.ran = true
 "#;
+
+/// What each `stage` value means, so a TypeError names the expression that
+/// raised instead of just reporting "`_ready` did not finish".
+///
+/// ⚠️ This exists because the first version of this test asserted only a
+/// `ran` flag. When `[1, 2] < [1, 3]` raised — `variant_math::cmp` recursed
+/// into the array's elements and had no `(Int, Int)` row — the failure said
+/// nothing about WHICH of fourteen expressions was responsible. A worker that
+/// cannot run the suite itself has to get that from the assertion text.
+const STAGES: [&str; 15] = [
+    "Vector2(1,5) < Vector2(2,0)",
+    "Vector2(2,0) < Vector2(1,5)",
+    "Vector2i(1,2) <= Vector2i(1,2)",
+    "Vector3(1,2,3) < Vector3(1,2,4)",
+    "[1,2] < [1,3]",
+    "[1,2] < [1,2,3]",
+    "false < true",
+    "\"ell\" in \"hello\"",
+    "3 in PackedInt32Array([1,3])",
+    "2 in PackedInt32Array([1,3])",
+    "3 in PackedFloat32Array([1.0,3.0])",
+    "\"b\" in PackedStringArray([\"a\",\"b\"])",
+    "\"position\" in self",
+    "\"no_such_property_xyz\" in self",
+    "(all expressions completed)",
+];
 
 /// Reads a script `var` — node properties and script vars are separate stores.
 fn script_var(tree: &SceneTree, node: NodeId, name: &str) -> Variant {
@@ -108,12 +149,22 @@ fn variant_compare_in_operators_test() {
 
     // First, and for a reason: a TypeError on any line of `_ready` aborts it
     // silently, which from here is indistinguishable from "that var was never
-    // declared".
+    // declared". `stage` turns that into the name of the offending expression.
+    let stage = match script_var(ml.tree(), scene_root, "stage") {
+        Variant::Int(i) => i as usize,
+        other => panic!("`stage` should be an Int, got {other:?}"),
+    };
     assert_eq!(
         script_var(ml.tree(), scene_root, "ran"),
         Variant::Bool(true),
-        "`_ready` must run to completion — an unsupported comparison or `in` \
-         raises a TypeError and aborts it part-way"
+        "`_ready` aborted: the last expression to complete was stage {stage} \
+         ({}), so the one that raised is `{}`. An unsupported comparison or \
+         `in` raises a TypeError and aborts the rest of `_ready`.",
+        STAGES
+            .get(stage.saturating_sub(1))
+            .copied()
+            .unwrap_or("(none yet)"),
+        STAGES.get(stage).copied().unwrap_or("(unknown)"),
     );
 
     let tree = ml.tree();

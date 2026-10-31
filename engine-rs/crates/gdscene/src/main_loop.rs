@@ -1824,7 +1824,13 @@ impl MainLoop {
                     if radius <= 0.0 {
                         continue;
                     }
-                    let position = crate::node2d::get_position(&self.tree, id);
+                    // GLOBAL, not local (pat-mgixk.27). Godot's
+                    // `NavigationObstacle2D` submits `get_global_position()`
+                    // (`scene/2d/navigation/navigation_obstacle_2d.cpp`), and an
+                    // obstacle is normally a CHILD of the body it guards, so its
+                    // own `position` is an offset within the parent — or absent
+                    // entirely, which `get_position` reports as ZERO.
+                    let position = crate::node2d::get_global_position(&self.tree, id);
                     // max_speed is irrelevant for something that never moves
                     // under its own avoidance solve.
                     let mut obstacle = OrcaAgent::new(position, radius, 0.0);
@@ -1844,9 +1850,24 @@ impl MainLoop {
             return;
         }
 
+        // ⚠️ GLOBAL, not local (pat-mgixk.27). Godot's `NavigationAgent2D`
+        // feeds the solver its PARENT's position every physics frame —
+        // `agent_set_position(agent, agent_parent->get_global_position())`
+        // (`scene/2d/navigation/navigation_agent_2d.cpp`,
+        // NOTIFICATION_INTERNAL_PHYSICS_PROCESS).
+        //
+        // An agent is a plain `Node` child of a CharacterBody2D, so it has no
+        // `position` property of its own and `node2d::get_position` returned
+        // ZERO for every one of them: ORCA saw every agent stacked at the origin
+        // and `velocity_computed` came back as garbage. `process_navigation`
+        // already read the global position (see its 2D arm); only this
+        // avoidance pass was left behind, so the two disagreed.
+        //
+        // It stayed hidden because the avoidance tests set `position` directly
+        // on the agent node — a property a Godot agent never carries.
         let positions: Vec<Vector2> = agent_nodes
             .iter()
-            .map(|(id, _)| crate::node2d::get_position(&self.tree, *id))
+            .map(|(id, _)| crate::node2d::get_global_position(&self.tree, *id))
             .collect();
 
         // -- sync node properties onto the agents, then snapshot solver views --
@@ -1948,7 +1969,9 @@ impl MainLoop {
                         // Godot's obstacle height defaults to 1.0.
                         _ => 1.0,
                     };
-                    let position = crate::node3d::get_position(&self.tree, id);
+                    // GLOBAL, not local — see the 2D twin (pat-mgixk.27).
+                    // `navigation_obstacle_3d.cpp` submits `get_global_position()`.
+                    let position = crate::node3d::get_global_transform(&self.tree, id).origin;
                     let mut obstacle = NavigationObstacle3D::new(position, radius, height);
                     if let Variant::Vector3(v) = node.get_property("velocity") {
                         obstacle.velocity = v;
@@ -1966,9 +1989,12 @@ impl MainLoop {
             return;
         }
 
+        // GLOBAL, not local — see the 2D twin above (pat-mgixk.27).
+        // `navigation_agent_3d.cpp` calls
+        // `agent_set_position(agent, agent_parent->get_global_position())`.
         let positions: Vec<Vector3> = agent_nodes
             .iter()
-            .map(|(id, _)| crate::node3d::get_position(&self.tree, *id))
+            .map(|(id, _)| crate::node3d::get_global_transform(&self.tree, *id).origin)
             .collect();
 
         // -- sync node properties onto the agents, then snapshot solver views --
@@ -2940,6 +2966,11 @@ impl MainLoop {
     /// The bracket is as tight as the per-phase ones: `&mut self` means the
     /// bridge cannot move while the address is installed.
     pub fn enter_tree_with_scripts(&mut self, node: NodeId) {
+        // The physics TICK, not a frame delta: Godot's `move_and_slide()` uses
+        // `get_physics_process_delta_time()` whichever callback calls it
+        // (pat-mgixk.37), and `_ready` has no delta of its own at all.
+        let physics_delta = 1.0 / self.physics_ticks_per_second as f64;
+        self.tree.set_script_physics_delta(physics_delta);
         self.tree
             .set_script_physics_server(&mut self.physics_server);
         self.tree
@@ -2988,6 +3019,10 @@ impl MainLoop {
     /// Per-frame state (just_pressed / just_released) is flushed automatically
     /// at the end of each step.
     pub fn push_event(&mut self, event: InputEvent) {
+        // Window pixels -> canvas coordinates, FIRST, so everything downstream
+        // (the GUI hit test, `_input`, `InputState`, the touch/mouse emulation)
+        // sees the same space the renderer drew in (pat-mgixk.25).
+        let event = self.map_event_to_canvas(event);
         // ⚠️ Decided BEFORE `process_event`, which mutates the very state the
         // decision reads: processing a touch release clears
         // `mouse_from_touch_index`, so asking afterwards can never tell that
@@ -3004,6 +3039,91 @@ impl MainLoop {
             // double-count the press and re-enter `emulate_touch_from_mouse`,
             // which is how a touch/mouse emulation pair loops.
             self.pending_input.push(synth);
+        }
+    }
+
+    /// Maps a pointer event from window pixels into canvas coordinates.
+    ///
+    /// Godot transforms every pointer event by the inverse of the window's
+    /// content-scale transform before `_input` or the GUI sees it
+    /// (`scene/main/viewport.cpp` `Viewport::push_input`), which is what makes a
+    /// click land on what was drawn. Patina DREW through
+    /// `RootWindow::stretch_transform` but never mapped input back:
+    /// `window_to_canvas` carried the comment "Input MUST go through this" and
+    /// had no caller outside its own tests, so the moment a project enabled
+    /// stretching every click missed by the stretch factor (pat-mgixk.25).
+    ///
+    /// Positions go through the full affine inverse; `relative`, `velocity` and
+    /// `delta` are DELTAS and take the basis only, because adding the
+    /// transform's translation to a difference of two points would offset it by
+    /// the letterbox margin twice over.
+    ///
+    /// A project with stretching off has an identity `window_transform`, so this
+    /// is a no-op there — but it early-outs anyway rather than running four
+    /// matrix ops per event on the common path.
+    fn map_event_to_canvas(&self, event: InputEvent) -> InputEvent {
+        let window = self.tree.root_window();
+        if !window.is_stretching() {
+            return event;
+        }
+        let inverse = window.content_scale().window_transform.affine_inverse();
+        let point = |p: gdcore::math::Vector2| inverse.xform(p);
+        let delta = |v: gdcore::math::Vector2| inverse.basis_xform(v);
+        match event {
+            InputEvent::MouseButton {
+                button,
+                pressed,
+                position,
+            } => InputEvent::MouseButton {
+                button,
+                pressed,
+                position: point(position),
+            },
+            InputEvent::MouseMotion { position, relative } => InputEvent::MouseMotion {
+                position: point(position),
+                relative: delta(relative),
+            },
+            InputEvent::ScreenTouch {
+                index,
+                position,
+                pressed,
+                double_tap,
+                canceled,
+            } => InputEvent::ScreenTouch {
+                index,
+                position: point(position),
+                pressed,
+                double_tap,
+                canceled,
+            },
+            InputEvent::ScreenDrag {
+                index,
+                position,
+                relative,
+                velocity,
+                pressure,
+                tilt,
+            } => InputEvent::ScreenDrag {
+                index,
+                position: point(position),
+                relative: delta(relative),
+                velocity: delta(velocity),
+                pressure,
+                // Tilt is a direction in -1..=1 per axis, not a screen
+                // measurement, so a stretch must not touch it.
+                tilt,
+            },
+            InputEvent::MagnifyGesture { position, factor } => InputEvent::MagnifyGesture {
+                position: point(position),
+                // `factor` is a ratio; scaling it would compound the stretch.
+                factor,
+            },
+            InputEvent::PanGesture { position, delta: d } => InputEvent::PanGesture {
+                position: point(position),
+                delta: delta(d),
+            },
+            // Keys, gamepads and MIDI carry no screen coordinate.
+            other => other,
         }
     }
 
@@ -3611,6 +3731,19 @@ impl MainLoop {
     ///
     /// Returns a [`FrameOutput`] describing what happened during this frame.
     pub fn step(&mut self, delta_secs: f64) -> FrameOutput {
+        // -- JavaScriptBridge callbacks (pat-mgixk.41) --
+        // Runs the callbacks the browser invoked since the last frame, on the
+        // main thread at a frame boundary. A `create_callback` closure cannot
+        // call straight back into the interpreter — it fires while that
+        // interpreter is already borrowed further up the stack — so the wasm
+        // side queues and this drains.
+        //
+        // FIRST in the frame, so a callback that moves a node or sets a flag is
+        // visible to BOTH the physics and the process phases of the same frame
+        // rather than landing a frame late. The loop itself is in `scripting`:
+        // it needs nothing from `MainLoop` but the tree.
+        crate::scripting::pump_javascript_callbacks(&mut self.tree);
+
         // -- Engine singleton sync (pat-0q2kx.121) --
         // `Engine.physics_ticks_per_second = N` from a script has to land on the
         // loop that owns the fixed step. The generation counter distinguishes a
@@ -3964,6 +4097,10 @@ impl MainLoop {
             // (pat-0q2kx.200). Bracketed tightly around the phase: the tree
             // holds only the address, so it must not outlive this statement, and
             // the next thing to touch the server is the following tick's step.
+            // What a script-phase `move_and_slide()` moves by (pat-mgixk.37).
+            // Recorded with the server address, so the two always describe the
+            // same tick.
+            self.tree.set_script_physics_delta(physics_dt);
             self.tree
                 .set_script_physics_server(&mut self.physics_server);
             self.tree
@@ -4006,9 +4143,15 @@ impl MainLoop {
             // what carries a rigid body's velocity and pending forces into the
             // solver. Running it after would leave those writes on the node
             // until the next tick — one frame late (pat-s3rrv.94).
+            // The server is passed in so the state can report the SOLVER's
+            // inverse inertia rather than a recomputation (pat-mgixk.38).
+            // `tree` and `physics_server` are disjoint fields, so the mutable
+            // and shared borrows do not overlap.
+            let gravity_2d = self.physics_server.gravity();
             crate::integrate_forces::run_integrate_forces_2d(
                 &mut self.tree,
-                self.physics_server.gravity(),
+                &self.physics_server,
+                gravity_2d,
                 physics_dt as f32,
             );
             self.physics_server.sync_to_physics(&mut self.tree);
@@ -4305,6 +4448,13 @@ impl MainLoop {
         // from `_process` are ordinary Godot, and leaving the idle phase unbound
         // would hand those scripts an invalid RID with nothing to explain why
         // (pat-0q2kx.200).
+        // Deliberately the physics TICK and not `delta_secs`: Godot's
+        // `move_and_slide()` reads `get_physics_process_delta_time()` even when
+        // a `_process` handler calls it, so using the frame delta here would
+        // make the same script move at a different speed out of `_process`
+        // (pat-mgixk.37).
+        let physics_delta = 1.0 / self.physics_ticks_per_second as f64;
+        self.tree.set_script_physics_delta(physics_delta);
         self.tree
             .set_script_physics_server(&mut self.physics_server);
         self.tree

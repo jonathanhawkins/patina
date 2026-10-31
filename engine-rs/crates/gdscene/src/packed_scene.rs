@@ -873,6 +873,46 @@ impl PackedScene {
                         .and_then(|p| sub_ref_id(p.get("material")))
                 })
             });
+            // pat-mgixk.53: an `ExtResource` material, flattened the same way.
+            //
+            // Tried only when no SubResource matched, so an inline material
+            // keeps precedence exactly as before — this fills a gap rather than
+            // changing any case that already worked.
+            //
+            // ⚠️ Scoped to the two properties that flatten onto `__material__*`,
+            // which is the only material bag the renderer reads. `material_overlay`
+            // and `surface_material_override/N` for N > 0 are deliberately NOT
+            // flattened here: there is no `__overlay__`/`__surfmat` ExtResource
+            // reader on the render side, so inventing a prefix nothing consumes
+            // would be wired-but-dead code that looks like support. Worth its own
+            // bead once those readers exist.
+            if mat_id.is_none() {
+                if let Some((class, props)) = ext_material_props(
+                    tmpl.properties.get("material_override"),
+                    &ext_resources,
+                )
+                .or_else(|| {
+                    ext_material_props(
+                        tmpl.properties.get("surface_material_override/0"),
+                        &ext_resources,
+                    )
+                }) {
+                    if let Some(Variant::Color(c)) = props
+                        .iter()
+                        .find(|(k, _)| k == "albedo_color")
+                        .map(|(_, v)| v)
+                    {
+                        tmpl.properties
+                            .insert("albedo_color".into(), Variant::Color(*c));
+                    }
+                    tmpl.properties
+                        .insert("__material__class".into(), Variant::String(class));
+                    for (key, value) in props {
+                        tmpl.properties
+                            .insert(format!("__material__{key}"), value);
+                    }
+                }
+            }
             if let Some(mat_id) = mat_id {
                 if let Some(Variant::Color(c)) = sub_resource_props
                     .get(&mat_id)
@@ -2689,7 +2729,37 @@ impl PackedScene {
 /// this is inert rather than wrong in bare tests.
 fn node_with_class_defaults(name: &str, class_name: &str) -> Node {
     let mut node = Node::new(name, class_name);
-    for prop in gdobject::class_db::get_property_list(class_name) {
+    let props = gdobject::class_db::get_property_list(class_name);
+    // 🔑 A Node3D's `transform` is a DERIVED VIEW of position/rotation/scale,
+    // not storage of its own, so seeding its identity default is actively
+    // harmful: `node3d::local_transform_of` PREFERS an explicit `transform`,
+    // and a seeded one is indistinguishable from a `.tscn`-authored one. The
+    // defaults are applied BEFORE the scene's own properties, so a node
+    // authoring bare `position = Vector3(10, 0, 0)` ended up with an identity
+    // `transform` beating it — and rendered at the ORIGIN (pat-mgixk.29).
+    //
+    // Godot has no such conflict: `position`/`rotation`/`scale`/`transform` are
+    // all views of one `data.local_transform` (`scene/3d/node_3d.cpp`), so
+    // there is nothing to prefer. Patina stores them separately, so precedence
+    // decides, and a DEFAULT must never beat an AUTHORED value.
+    //
+    // ⚠️ Scoped two ways to keep the blast radius minimal. Only a
+    // `Transform3D`-valued default is skipped, so Node2D's `transform`
+    // (Transform2D) is untouched — nothing treats that one as canonical. And
+    // only when the class also registers `position`, so a class whose
+    // `transform` really is its own storage keeps its default.
+    //
+    // Nothing is lost by not seeding it: an unauthored node composes identity
+    // from position ZERO / rotation ZERO / scale ONE, and every setter writes
+    // `transform` back through `node3d::store_local_transform`.
+    let derives_transform = props.iter().any(|p| p.name == "position");
+    for prop in props {
+        if derives_transform
+            && prop.name == "transform"
+            && matches!(prop.default_value, Variant::Transform3D(_))
+        {
+            continue;
+        }
         node.set_property(&prop.name, prop.default_value);
     }
     node
@@ -3182,6 +3252,60 @@ fn parse_groups_attr(raw: &str) -> Vec<String> {
 }
 
 /// Parses an `ExtResource("id")` value string and returns the id.
+/// Loads an `ExtResource` material's `.tres` and returns its class plus its
+/// property bag, so the material pass can flatten it exactly as it already
+/// flattens a `SubResource` (pat-mgixk.53).
+///
+/// 🔑 Before this, an `ExtResource` material did not merely lose its textures —
+/// it never reached the renderer at all. `packed_scene` stores such a property
+/// as the RAW REFERENCE STRING (`ExtResource("1_abc")`), so
+/// `render_server_3d::resolve_material` handed that literal to
+/// `material_from_path`, whose filename test for `red`/`green`/`blue` matched
+/// nothing and returned the default white. The heuristic never saw a path.
+///
+/// ⚠️ Returns `None` on ANY failure — missing file, unreadable, unparseable —
+/// rather than propagating an error. Scenes are routinely loaded in tests and
+/// tools with no `res://` roots configured, so a failed read is an ordinary
+/// condition; the node then keeps no `__material__*` bag and renders exactly as
+/// it did before this existed.
+fn ext_material_props(
+    value: Option<&Variant>,
+    ext_resources: &HashMap<String, ExtResourceEntry>,
+) -> Option<(String, Vec<(String, Variant)>)> {
+    let raw = match value? {
+        Variant::String(s) => s,
+        _ => return None,
+    };
+    let entry = ext_resources.get(&parse_ext_resource_ref(raw)?)?;
+
+    // ⚠️ ShaderMaterial is EXCLUDED, for the same reason the SubResource branch
+    // excludes it and with the same consequence if it were not: its keys are
+    // `shader_parameter/*`, so a `__material__*` bag holding none of the
+    // StandardMaterial3D keys would make `material3d_for_node` hand the
+    // renderer a DEFAULT material where it correctly answers `None` today —
+    // turning every shader-material mesh flat.
+    //
+    // Checked on BOTH the section's declared type and the parsed class: Godot
+    // writes the BASE type on an `[ext_resource]` line (`type="Material"`), so
+    // the declared type usually cannot tell the two apart and the authoritative
+    // answer is in the file's own `[gd_resource type=...]`.
+    if entry.res_type == "ShaderMaterial" {
+        return None;
+    }
+    let text = gdcore::file_access::FileAccess::read_file_string(&entry.path).ok()?;
+    let resource = gdresource::loader::TresLoader::new()
+        .parse_str(&text, &entry.path)
+        .ok()?;
+    if resource.class_name == "ShaderMaterial" {
+        return None;
+    }
+    let props = resource
+        .properties()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    Some((resource.class_name.clone(), props))
+}
+
 fn parse_ext_resource_ref(value: &str) -> Option<String> {
     let trimmed = value.trim();
     // Two spellings reach us: the raw `.tscn` call form stored by this parser,

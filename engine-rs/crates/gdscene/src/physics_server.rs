@@ -1746,6 +1746,24 @@ impl PhysicsServer {
                 body.continuous_cd = u32_prop(tree, node_id, "continuous_cd", 0) != 0;
                 body.linear_damp = float_prop(tree, node_id, "linear_damp", 0.0) as f32;
                 body.angular_damp = float_prop(tree, node_id, "angular_damp", 0.0) as f32;
+                // `RigidBody2D.custom_integrator` -> the server's omit flag,
+                // Godot's `body_set_omit_force_integration`.
+                //
+                // ⚠️ Until this read existed the property was a FALSE GREEN in
+                // exactly the way `continuous_cd` was: ClassDB registers it, a
+                // .tscn could author it and the inspector would show it, while
+                // nothing in `gdphysics2d` ever looked at it — so turning it on
+                // omitted nothing and the body kept falling (pat-mgixk.38).
+                body.omit_force_integration = bool_prop(tree, node_id, "custom_integrator", false);
+                // `inertia = 0` is Godot's "derive it from the shapes"
+                // sentinel, so only a positive value becomes an override; the
+                // body falls back to its shape-derived moment otherwise.
+                let authored_inertia = float_prop(tree, node_id, "inertia", 0.0) as f32;
+                body.custom_inertia = if authored_inertia > 0.0 {
+                    Some(authored_inertia)
+                } else {
+                    None
+                };
                 // StaticBody2D's conveyor surface (pat-s3rrv.101). Godot
                 // defaults both to zero (`doc/classes/StaticBody2D.xml`), and a
                 // zero surface velocity is exactly "no conveyor", so the plain
@@ -2413,6 +2431,24 @@ impl PhysicsServer {
                 if let Some(a) = conveyor_angular {
                     body.constant_angular_velocity = a as f32;
                 }
+                // `RigidBody2D.custom_integrator` -> the server's omit flag,
+                // Godot's `body_set_omit_force_integration`.
+                //
+                // ⚠️ Until this read existed the property was a FALSE GREEN in
+                // exactly the way `continuous_cd` was: ClassDB registers it, a
+                // .tscn could author it and the inspector would show it, while
+                // nothing in `gdphysics2d` ever looked at it — so turning it on
+                // omitted nothing and the body kept falling (pat-mgixk.38).
+                body.omit_force_integration = bool_prop(tree, node_id, "custom_integrator", false);
+                // `inertia = 0` is Godot's "derive it from the shapes"
+                // sentinel, so only a positive value becomes an override; the
+                // body falls back to its shape-derived moment otherwise.
+                let authored_inertia = float_prop(tree, node_id, "inertia", 0.0) as f32;
+                body.custom_inertia = if authored_inertia > 0.0 {
+                    Some(authored_inertia)
+                } else {
+                    None
+                };
                 match body.body_type {
                     BodyType::Kinematic => {
                         // ⚠️ Read the displacement BEFORE the assignment below
@@ -3170,12 +3206,6 @@ impl PhysicsServer {
             .collect();
 
         for (node_id, body_id) in char_entries {
-            // `velocity` is in pixels-per-second (Godot contract). Cross-frame
-            // state (is_on_floor, platform_velocity) is persisted on the node.
-            let velocity = vec2_prop(tree, node_id, "velocity", Vector2::ZERO);
-            let was_on_floor = bool_prop(tree, node_id, "is_on_floor", false);
-            let stored_platform_vel = vec2_prop(tree, node_id, "platform_velocity", Vector2::ZERO);
-
             // Godot only moves a CharacterBody2D when the script calls
             // `move_and_slide()`; the engine never auto-moves it. Patina used to
             // move every kinematic body with a velocity, so a scripted body
@@ -3185,6 +3215,14 @@ impl PhysicsServer {
             // script has nothing that could call `move_and_slide`, and scenes
             // and tests that drive `velocity` directly rely on the old
             // behavior, so those keep auto-moving.
+            //
+            // ⚠️ Since pat-mgixk.37 a scripted `move_and_slide()` does its slide
+            // SYNCHRONOUSLY and does NOT set this flag, so the common path
+            // leaves the body alone here — sliding again would move it twice in
+            // one tick. The flag survives as the fallback for a host that runs
+            // scripts without binding the script-facing physics server
+            // (`set_script_physics_server`), where the arm has no server to
+            // slide through and defers to this pass as it always did.
             if tree.has_script(node_id) {
                 if !bool_prop(tree, node_id, "_move_and_slide_requested", false) {
                     continue;
@@ -3195,6 +3233,12 @@ impl PhysicsServer {
                     node.set_property("_move_and_slide_requested", Variant::Bool(false));
                 }
             }
+
+            // `velocity` is in pixels-per-second (Godot contract). Cross-frame
+            // state (is_on_floor, platform_velocity) is persisted on the node.
+            let velocity = vec2_prop(tree, node_id, "velocity", Vector2::ZERO);
+            let was_on_floor = bool_prop(tree, node_id, "is_on_floor", false);
+            let stored_platform_vel = vec2_prop(tree, node_id, "platform_velocity", Vector2::ZERO);
 
             // Skip idle bodies unless a moving platform would still carry them.
             //
@@ -3213,127 +3257,222 @@ impl PhysicsServer {
                 continue;
             }
 
-            let body = match self.world.get_body(body_id) {
-                Some(b) => b,
-                None => continue,
-            };
-
-            // Build a CharacterBody2D seeded from the node's persisted state and
-            // configuration properties.
-            // Captured BEFORE the move: `get_real_velocity()` is the motion
-            // actually achieved, which is only knowable by differencing the
-            // start and end positions (pat-s3rrv.97).
-            let start_position = body.position;
-            let mut character = PhysicsCharacterBody2D::new(body.position, body.shape.clone());
-            character.collision_layer = body.collision_layer;
-            character.collision_mask = body.collision_mask;
-            character.up_direction =
-                vec2_prop(tree, node_id, "up_direction", Vector2::new(0.0, -1.0));
-            character.floor_max_angle = float_prop(
-                tree,
-                node_id,
-                "floor_max_angle",
-                std::f64::consts::FRAC_PI_4,
-            ) as f32;
-            character.floor_snap_length =
-                float_prop(tree, node_id, "floor_snap_length", 0.0) as f32;
-            character.floor_stop_on_slope = bool_prop(tree, node_id, "floor_stop_on_slope", false);
-            character.floor_constant_speed =
-                bool_prop(tree, node_id, "floor_constant_speed", false);
-            character.floor_block_on_wall = bool_prop(tree, node_id, "floor_block_on_wall", true);
-            character.slide_on_ceiling = bool_prop(tree, node_id, "slide_on_ceiling", true);
-            character.max_slides = u32_prop(tree, node_id, "max_slides", 4).max(1) as usize;
-            character.set_on_floor(was_on_floor);
-            character.platform_velocity = stored_platform_vel;
-
-            // Collect static/other bodies to collide against (exclude self).
-            //
-            // Tile bodies are included explicitly: they are generated from
-            // painted cells and so have no scene node of their own, which means
-            // they never appear in `node_to_body`. Walking that map alone let a
-            // character pass straight through painted ground even though the
-            // static bodies were sitting in the world (pat-0q2kx.117).
-            let obstacle_refs: Vec<&PhysicsBody2D> = self.obstacle_bodies(node_id);
-
-            // move_and_slide_delta applies dt internally and returns px/s velocity.
-            let result_velocity = character.move_and_slide_delta(velocity, dt, &obstacle_refs);
-            let result_platform_vel = character.get_platform_velocity();
-            let new_position = character.position;
-            let on_floor = character.is_on_floor();
-            let on_wall = character.is_on_wall();
-            let on_ceiling = character.is_on_ceiling();
-
-            // Release the immutable borrow of `self.world` before the mutable one.
-            drop(obstacle_refs);
-
-            // Write position back to the physics body
-            if let Some(phys_body) = self.world.get_body_mut(body_id) {
-                phys_body.position = new_position;
-            }
-
-            // Sync to scene tree. `new_position` is world-space (the character
-            // was seeded from `body.position`), so it has to be de-parented
-            // before landing in the local `position` property (pat-0q2kx.31).
-            crate::node2d::set_global_position(tree, node_id, new_position);
-
-            // Slide contacts, published for `get_slide_collision(i)`
-            // (pat-s3rrv.95). The slide loop computed these every tick and then
-            // dropped them, so `get_slide_collision_count()` had nothing to read
-            // and the standard CharacterBody damage idiom was unwritable.
-            //
-            // Same bridge as `publish_overlapping_bodies`: the script phase
-            // holds no handle on the physics server, so the physics phase leaves
-            // the answer on the node.
-            //
-            // ⚠️ The collider is resolved to a NODE id HERE, not carried out as
-            // a `BodyId`. This is the only layer that owns `body_to_node`, and
-            // `get_collider()` has to hand a script something it can call
-            // `is_in_group()` on — a raw body id would be a dead end.
-            let slide_records: Vec<Variant> = (0..character.get_slide_collision_count())
-                .filter_map(|i| character.get_slide_collision(i))
-                .map(|c| {
-                    let mut rec = gdvariant::Dictionary::new();
-                    rec.insert("normal", Variant::Vector2(c.normal));
-                    rec.insert("depth", Variant::Float(c.depth as f64));
-                    rec.insert("position", Variant::Vector2(c.position));
-                    rec.insert("remainder", Variant::Vector2(c.remainder));
-                    rec.insert(
-                        "collider",
-                        c.collider
-                            .and_then(|bid| self.body_to_node.get(&bid).copied())
-                            .map(|nid| Variant::ObjectId(nid.object_id()))
-                            .unwrap_or(Variant::Nil),
-                    );
-                    Variant::Dictionary(rec.into())
-                })
-                .collect();
-
-            // Godot's `get_real_velocity()` reports the motion the last move
-            // ACHIEVED, not the one that was asked for — they differ whenever a
-            // wall cancelled part of the requested motion, which is precisely
-            // when a script wants to know (pat-s3rrv.97).
-            //
-            // ⚠️ Derived from the position DELTA, not from the post-slide
-            // velocity. The two look interchangeable and are not: the slide
-            // solver reports the velocity it would carry into the next tick,
-            // which stays non-zero along a wall the body did not actually move
-            // along this tick.
-            let real_velocity = if dt > 0.0 {
-                (new_position - start_position) / dt
-            } else {
-                Vector2::ZERO
-            };
-
-            if let Some(node) = tree.get_node_mut(node_id) {
-                node.set_property("_real_velocity", Variant::Vector2(real_velocity));
-                node.set_property("_slide_collisions", Variant::Array(slide_records.into()));
-                node.set_property("velocity", Variant::Vector2(result_velocity));
-                node.set_property("platform_velocity", Variant::Vector2(result_platform_vel));
-                node.set_property("is_on_floor", Variant::Bool(on_floor));
-                node.set_property("is_on_wall", Variant::Bool(on_wall));
-                node.set_property("is_on_ceiling", Variant::Bool(on_ceiling));
-            }
+            self.slide_character(tree, node_id, body_id, dt);
         }
+    }
+
+    /// Runs one `CharacterBody2D`'s slide: builds the solver body from the
+    /// node's authored properties, slides it against the world, writes the
+    /// resulting position to BOTH the physics body and the scene node, and
+    /// publishes the state a script reads back (`velocity`, the floor/wall/
+    /// ceiling flags, the floor and wall normals, the slide-collision list and
+    /// `_real_velocity`).
+    ///
+    /// Returns whether the motion collided, which is what Godot's
+    /// `move_and_slide()` answers — `motion_results.size() > 0` in
+    /// `scene/2d/physics/character_body_2d.cpp`, i.e. the slide-collision
+    /// count, NOT the floor/wall/ceiling flags. Those differ: a body resting on
+    /// the floor reports `is_on_floor()` while a tick that touched nothing new
+    /// collided with nothing.
+    ///
+    /// Shared by the two callers so they cannot drift (pat-mgixk.37):
+    /// `script_move_and_slide` during the script phase, and
+    /// `process_character_movement` for scriptless bodies at the end of a tick.
+    /// It deliberately re-reads `velocity`/`is_on_floor`/`platform_velocity`
+    /// rather than taking them as arguments, so the script path needs no
+    /// caller-side setup.
+    fn slide_character(
+        &mut self,
+        tree: &mut SceneTree,
+        node_id: NodeId,
+        body_id: BodyId,
+        dt: f32,
+    ) -> bool {
+        // `velocity` is in pixels-per-second (Godot contract). Cross-frame
+        // state (is_on_floor, platform_velocity) is persisted on the node.
+        let velocity = vec2_prop(tree, node_id, "velocity", Vector2::ZERO);
+        let was_on_floor = bool_prop(tree, node_id, "is_on_floor", false);
+        let stored_platform_vel = vec2_prop(tree, node_id, "platform_velocity", Vector2::ZERO);
+        let body = match self.world.get_body(body_id) {
+            Some(b) => b,
+            None => return false,
+        };
+
+        // Build a CharacterBody2D seeded from the node's persisted state and
+        // configuration properties.
+        // Captured BEFORE the move: `get_real_velocity()` is the motion
+        // actually achieved, which is only knowable by differencing the
+        // start and end positions (pat-s3rrv.97).
+        let start_position = body.position;
+        let mut character = PhysicsCharacterBody2D::new(body.position, body.shape.clone());
+        character.collision_layer = body.collision_layer;
+        character.collision_mask = body.collision_mask;
+        character.up_direction = vec2_prop(tree, node_id, "up_direction", Vector2::new(0.0, -1.0));
+        character.floor_max_angle = float_prop(
+            tree,
+            node_id,
+            "floor_max_angle",
+            std::f64::consts::FRAC_PI_4,
+        ) as f32;
+        character.floor_snap_length = float_prop(tree, node_id, "floor_snap_length", 0.0) as f32;
+        character.floor_stop_on_slope = bool_prop(tree, node_id, "floor_stop_on_slope", false);
+        character.floor_constant_speed = bool_prop(tree, node_id, "floor_constant_speed", false);
+        character.floor_block_on_wall = bool_prop(tree, node_id, "floor_block_on_wall", true);
+        character.slide_on_ceiling = bool_prop(tree, node_id, "slide_on_ceiling", true);
+        character.max_slides = u32_prop(tree, node_id, "max_slides", 4).max(1) as usize;
+        character.set_on_floor(was_on_floor);
+        character.platform_velocity = stored_platform_vel;
+
+        // Collect static/other bodies to collide against (exclude self).
+        //
+        // Tile bodies are included explicitly: they are generated from
+        // painted cells and so have no scene node of their own, which means
+        // they never appear in `node_to_body`. Walking that map alone let a
+        // character pass straight through painted ground even though the
+        // static bodies were sitting in the world (pat-0q2kx.117).
+        let obstacle_refs: Vec<&PhysicsBody2D> = self.obstacle_bodies(node_id);
+
+        // move_and_slide_delta applies dt internally and returns px/s velocity.
+        let result_velocity = character.move_and_slide_delta(velocity, dt, &obstacle_refs);
+        let result_platform_vel = character.get_platform_velocity();
+        let new_position = character.position;
+        let on_floor = character.is_on_floor();
+        let on_wall = character.is_on_wall();
+        let on_ceiling = character.is_on_ceiling();
+        // The solver has tracked both of these all along; nothing ever read
+        // them out, which is why `get_floor_normal()` had no arm to write.
+        let floor_normal = character.get_floor_normal();
+        let wall_normal = character.get_wall_normal();
+
+        // Release the immutable borrow of `self.world` before the mutable one.
+        drop(obstacle_refs);
+
+        // Write position back to the physics body
+        if let Some(phys_body) = self.world.get_body_mut(body_id) {
+            phys_body.position = new_position;
+        }
+
+        // Sync to scene tree. `new_position` is world-space (the character
+        // was seeded from `body.position`), so it has to be de-parented
+        // before landing in the local `position` property (pat-0q2kx.31).
+        crate::node2d::set_global_position(tree, node_id, new_position);
+
+        // Slide contacts, published for `get_slide_collision(i)`
+        // (pat-s3rrv.95). The slide loop computed these every tick and then
+        // dropped them, so `get_slide_collision_count()` had nothing to read
+        // and the standard CharacterBody damage idiom was unwritable.
+        //
+        // Same bridge as `publish_overlapping_bodies`: the script phase
+        // holds no handle on the physics server, so the physics phase leaves
+        // the answer on the node.
+        //
+        // ⚠️ The collider is resolved to a NODE id HERE, not carried out as
+        // a `BodyId`. This is the only layer that owns `body_to_node`, and
+        // `get_collider()` has to hand a script something it can call
+        // `is_in_group()` on — a raw body id would be a dead end.
+        let slide_records: Vec<Variant> = (0..character.get_slide_collision_count())
+            .filter_map(|i| character.get_slide_collision(i))
+            .map(|c| {
+                let mut rec = gdvariant::Dictionary::new();
+                rec.insert("normal", Variant::Vector2(c.normal));
+                rec.insert("depth", Variant::Float(c.depth as f64));
+                rec.insert("position", Variant::Vector2(c.position));
+                rec.insert("remainder", Variant::Vector2(c.remainder));
+                rec.insert(
+                    "collider",
+                    c.collider
+                        .and_then(|bid| self.body_to_node.get(&bid).copied())
+                        .map(|nid| Variant::ObjectId(nid.object_id()))
+                        .unwrap_or(Variant::Nil),
+                );
+                Variant::Dictionary(rec.into())
+            })
+            .collect();
+
+        // Godot's `get_real_velocity()` reports the motion the last move
+        // ACHIEVED, not the one that was asked for — they differ whenever a
+        // wall cancelled part of the requested motion, which is precisely
+        // when a script wants to know (pat-s3rrv.97).
+        //
+        // ⚠️ Derived from the position DELTA, not from the post-slide
+        // velocity. The two look interchangeable and are not: the slide
+        // solver reports the velocity it would carry into the next tick,
+        // which stays non-zero along a wall the body did not actually move
+        // along this tick.
+        let real_velocity = if dt > 0.0 {
+            (new_position - start_position) / dt
+        } else {
+            Vector2::ZERO
+        };
+
+        // Godot's `move_and_slide()` returns `motion_results.size() > 0`
+        // (`character_body_2d.cpp`), so the answer is whether the slide
+        // recorded a contact — read BEFORE `slide_records` is moved into the
+        // node below.
+        let collided = !slide_records.is_empty();
+
+        // Published for `get_floor_normal()` / `get_wall_normal()`, which had
+        // no dispatch arm at all before this bead — the solver tracked both
+        // normals and nothing ever read them out (pat-mgixk.37).
+        if let Some(node) = tree.get_node_mut(node_id) {
+            // `floor_normal` / `wall_normal`, NOT `_floor_normal`: the 3D path
+            // (`character3d.rs`) has published the floor normal under the
+            // unprefixed key since pat-s3rrv.103, so one dispatch arm serves
+            // both dimensions. Godot defines no such PROPERTY in either, only
+            // the getters, so the key is ours to keep consistent.
+            node.set_property("floor_normal", Variant::Vector2(floor_normal));
+            node.set_property("wall_normal", Variant::Vector2(wall_normal));
+            node.set_property("_real_velocity", Variant::Vector2(real_velocity));
+            node.set_property("_slide_collisions", Variant::Array(slide_records.into()));
+            node.set_property("velocity", Variant::Vector2(result_velocity));
+            node.set_property("platform_velocity", Variant::Vector2(result_platform_vel));
+            node.set_property("is_on_floor", Variant::Bool(on_floor));
+            node.set_property("is_on_wall", Variant::Bool(on_wall));
+            node.set_property("is_on_ceiling", Variant::Bool(on_ceiling));
+        }
+        collided
+    }
+
+    /// `move_and_slide()` as called FROM A SCRIPT: the whole slide happens
+    /// before this returns, so the next line of the same `_physics_process`
+    /// sees the new position, velocity, flags and normals (pat-mgixk.37).
+    ///
+    /// Patina used to set a `_move_and_slide_requested` flag and do the real
+    /// work after every script had run, so everything a script read back was
+    /// one tick stale, `move_and_slide(); velocity = Vector2.ZERO` moved by the
+    /// ZEROED velocity, and two calls in a tick moved once.
+    /// `None` means "not mine, nothing was done" — the node is not a 2D
+    /// character — and the caller must then fall back to the deferred request.
+    /// That distinction is load-bearing: `call_node_method` answers
+    /// `move_and_slide` for EVERY node, so a scripted `CharacterBody3D` reaches
+    /// here too, and `character3d::process_character_movement` still drives it
+    /// from the `_move_and_slide_requested` flag. A bare `false` would be
+    /// indistinguishable from "slid, hit nothing", and clearing the flag on the
+    /// strength of it would stop every 3D character dead.
+    pub fn script_move_and_slide(
+        &mut self,
+        tree: &mut SceneTree,
+        node_id: NodeId,
+        dt: f32,
+    ) -> Option<bool> {
+        let &body_id = self.node_to_body.get(&node_id)?;
+        // The same filter `process_character_movement` applies when it walks
+        // `node_to_body`, and it is load-bearing HERE because the script
+        // dispatch table answers `move_and_slide` for any node: a RigidBody2D
+        // and a StaticBody2D are both in `node_to_body` too, and without this
+        // a script calling `move_and_slide()` on one would slide it like a
+        // character. Godot only defines the method on CharacterBody2D.
+        let kinematic = self
+            .world
+            .get_body(body_id)
+            .is_some_and(|b| b.body_type == BodyType::Kinematic);
+        let is_character = tree
+            .get_node(node_id)
+            .is_some_and(|n| n.class_name() == "CharacterBody2D");
+        if !kinematic || !is_character {
+            return None;
+        }
+        Some(self.slide_character(tree, node_id, body_id, dt))
     }
 }
 

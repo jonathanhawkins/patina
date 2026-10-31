@@ -94,6 +94,14 @@ pub struct PeerId(pub u32);
 impl PeerId {
     /// The well-known server peer identifier.
     pub const SERVER: PeerId = PeerId(1);
+
+    /// Godot's "every connected peer" target (`rpcp` with `p_peer_id == 0`).
+    ///
+    /// ⚠️ Not a peer that exists. A transport must fan this out rather than
+    /// look it up in its connection table — `websocket_multiplayer.rs` used to
+    /// answer `PeerUnreachable(0)` for it, which is how a broadcast silently
+    /// became an error (pat-mgixk.26).
+    pub const BROADCAST: PeerId = PeerId(0);
 }
 
 impl std::fmt::Display for PeerId {
@@ -255,6 +263,10 @@ pub struct MultiplayerAPI {
     /// Seconds before an unauthenticated peer is dropped (Godot
     /// `auth_timeout`, default 3s). `0` disables the timeout.
     auth_timeout: f32,
+    /// Godot `SceneMultiplayer.server_relay`, default **true**: a client's
+    /// packet aimed at anyone but the server is wrapped and sent to the
+    /// server, which forwards it to the real destination.
+    server_relay: bool,
 }
 
 /// A script-visible multiplayer event — the signal set Godot's
@@ -343,6 +355,98 @@ impl NetworkCommand {
     }
 }
 
+/// Sub-command byte of a [`NetworkCommand::Sys`] packet — Godot's
+/// `SceneMultiplayer::SysCommands` (modules/multiplayer/scene_multiplayer.h).
+///
+/// `Sys` has been a reserved command byte since the shared header landed
+/// (pat-0q2kx.95), but nothing ever framed one, so the sub-namespace did not
+/// exist until relay needed it (pat-mgixk.26). The discriminants are Godot's,
+/// so they are wire meaning, not an implementation detail — do not renumber.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SysCommand {
+    /// Authentication payload exchange (`SYS_COMMAND_AUTH`).
+    Auth = 0,
+    /// Server announces a new peer to the others (`SYS_COMMAND_ADD_PEER`).
+    AddPeer = 1,
+    /// Server announces a departed peer (`SYS_COMMAND_DEL_PEER`).
+    DelPeer = 2,
+    /// A client packet wrapped for the server to forward
+    /// (`SYS_COMMAND_RELAY`).
+    Relay = 3,
+}
+
+impl SysCommand {
+    /// The wire byte for this sub-command.
+    pub const fn to_byte(self) -> u8 {
+        self as u8
+    }
+
+    /// Parses a wire byte, or `None` when it is not a known sub-command — an
+    /// unknown sub-command must not be guessed at, as with [`NetworkCommand`].
+    pub const fn from_byte(byte: u8) -> Option<SysCommand> {
+        Some(match byte {
+            0 => SysCommand::Auth,
+            1 => SysCommand::AddPeer,
+            2 => SysCommand::DelPeer,
+            3 => SysCommand::Relay,
+            _ => return None,
+        })
+    }
+}
+
+/// Length of a relay envelope's header: `cmd | sys | dest:i32`.
+const RELAY_HEADER_LEN: usize = 6;
+
+/// Wrap `inner` in a relay envelope naming `dest` as its true destination.
+///
+/// Framing is Godot's `SceneMultiplayer::send_command`, which writes the
+/// destination into the envelope and addresses the whole thing to peer 1:
+/// `cmd:u8 | sys:u8 | dest:i32 | inner…`.
+///
+/// `dest` keeps Godot's signed target encoding — a positive id is one peer,
+/// `0` is every peer, a negative id is every peer except `-dest` — which is
+/// why it is an `i32` here even though [`PeerId`] is unsigned. The envelope is
+/// the only place that encoding survives a hop, and it is what lets the server
+/// honour "all except" for a client that has no roster of its own.
+pub fn encode_relay_packet(dest: i32, inner: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(inner.len() + RELAY_HEADER_LEN);
+    out.push(NetworkCommand::Sys.to_byte());
+    out.push(SysCommand::Relay.to_byte());
+    out.extend_from_slice(&dest.to_be_bytes());
+    out.extend_from_slice(inner);
+    out
+}
+
+/// Unwrap a relay envelope into `(dest, inner)`.
+///
+/// Returns `None` for every other packet kind, so a `RemoteCall`, `Raw`,
+/// `Spawn` or `Sync` payload can never be mistaken for one — the same
+/// discipline [`decode_rpc_packet`] follows.
+pub fn decode_relay_packet(data: &[u8]) -> Option<(i32, &[u8])> {
+    if data.len() < RELAY_HEADER_LEN {
+        return None;
+    }
+    if NetworkCommand::from_byte(data[0])? != NetworkCommand::Sys {
+        return None;
+    }
+    if SysCommand::from_byte(data[1])? != SysCommand::Relay {
+        return None;
+    }
+    let dest = i32::from_be_bytes([data[2], data[3], data[4], data[5]]);
+    Some((dest, &data[RELAY_HEADER_LEN..]))
+}
+
+/// Whether a relay destination also covers the server doing the relaying.
+///
+/// Godot's `_process_sys` relay branch delivers the payload locally as well as
+/// forwarding it when the destination includes the server: `1` names it
+/// directly, `0` is everyone, and a negative id is everyone but `-dest`.
+fn relay_includes_server(dest: i32) -> bool {
+    let server = PeerId::SERVER.0 as i32;
+    dest == server || (dest <= 0 && -dest != server)
+}
+
 /// Whether a decoder may materialize `Object` variants from the wire.
 ///
 /// Godot gates this behind `allow_object_decoding` because decoding an object
@@ -391,6 +495,7 @@ impl MultiplayerAPI {
             auth_required: false,
             pending_auth: HashMap::new(),
             auth_timeout: DEFAULT_AUTH_TIMEOUT,
+            server_relay: true,
         }
     }
 
@@ -417,12 +522,18 @@ impl MultiplayerAPI {
         let peer = self.peer.as_mut().ok_or(NetworkError::NoPeer)?;
         let sender_id = peer.get_unique_id();
 
-        // Determine target: authority of the node, or server if unset.
-        let target_id = self
-            .authority_map
-            .get(&node_path)
-            .copied()
-            .unwrap_or(PeerId::SERVER);
+        // ⚠️ Godot's `Node.rpc()` targets peer **0** — every connected peer
+        // (`scene_rpc_interface.cpp` `rpcp`, where `p_peer_id == 0` means all).
+        // This used to route by `authority_map`, falling back to
+        // `PeerId::SERVER`; since nothing outside this module's own tests ever
+        // writes that map, the target was ALWAYS peer 1. So a server's `rpc()`
+        // was addressed to itself and the WebSocket transport answered
+        // `PeerUnreachable` — `rpc()` reached nobody, ever (pat-mgixk.26).
+        //
+        // The map and `get_authority`/`set_authority` stay: authority is still
+        // what the RECEIVER checks for `RPCMode::Authority`. It just is not a
+        // routing table.
+        let target_id = PeerId::BROADCAST;
 
         let data = encode_rpc_packet(node_path, method, &args)?;
 
@@ -433,7 +544,9 @@ impl MultiplayerAPI {
             transfer_mode: config.transfer_mode,
         };
 
-        peer.send_packet(target_id, packet)
+        // `dest` is 0 because `rpc()` broadcasts: on a client this wraps the
+        // packet for the server to fan out to the other peers.
+        self.send_command(target_id, 0, packet)
     }
 
     /// The registered config for `method`, if any.
@@ -475,7 +588,107 @@ impl MultiplayerAPI {
             transfer_mode: config.transfer_mode,
         };
 
-        peer_handle.send_packet(PeerId(peer as u32), packet)
+        self.send_command(PeerId(peer as u32), peer as i32, packet)
+    }
+
+    /// Godot `SceneMultiplayer.server_relay`.
+    pub fn server_relay(&self) -> bool {
+        self.server_relay
+    }
+
+    /// Sets [`server_relay`](Self::server_relay).
+    ///
+    /// With relay off a client's broadcast reaches only the server, exactly as
+    /// in Godot — the other clients never hear it.
+    pub fn set_server_relay(&mut self, enabled: bool) {
+        self.server_relay = enabled;
+    }
+
+    /// Send `packet` to `target`, routing it through the server when this peer
+    /// is a client that cannot reach the destination directly.
+    ///
+    /// Godot's `SceneMultiplayer::send_command`: on a star topology a client
+    /// holds exactly one connection — to the server — so a packet aimed at
+    /// anyone else is wrapped in a relay envelope carrying the true
+    /// destination and addressed to peer 1. The server's [`poll`](Self::poll)
+    /// unwraps and forwards it.
+    ///
+    /// `dest` is the Godot-level target: `0` broadcast, a positive id one
+    /// peer, a negative id everyone but `-dest`.
+    fn send_command(&mut self, target: PeerId, dest: i32, packet: Packet) -> Result<()> {
+        let relay = self.server_relay;
+        let own_id = self
+            .peer
+            .as_ref()
+            .ok_or(NetworkError::NoPeer)?
+            .get_unique_id();
+        if relay && own_id != PeerId::SERVER && dest != PeerId::SERVER.0 as i32 {
+            let data = encode_relay_packet(dest, &packet.data);
+            let wrapped = Packet { data, ..packet };
+            let peer = self.peer.as_mut().ok_or(NetworkError::NoPeer)?;
+            return peer.send_packet(PeerId::SERVER, wrapped);
+        }
+        // "Every peer except `-dest`" (Godot's `set_target_peer` with a
+        // negative id) cannot be handed to a transport at all: `PeerId` wraps a
+        // `u32`, so `send_packet` has no way to receive the sign. The fan-out
+        // therefore belongs here, over the roster this end already keeps —
+        // which is also where `send_bytes` has always done it.
+        if dest < 0 {
+            let excluded = -dest;
+            let targets: Vec<i32> = self
+                .peers
+                .get_peers()
+                .into_iter()
+                .filter(|id| *id != excluded && *id != own_id.0 as i32)
+                .collect();
+            let peer = self.peer.as_mut().ok_or(NetworkError::NoPeer)?;
+            for id in targets {
+                // One unreachable peer must not sink the rest of the fan-out.
+                let _ = peer.send_packet(PeerId(id.unsigned_abs()), packet.clone());
+            }
+            return Ok(());
+        }
+        let peer = self.peer.as_mut().ok_or(NetworkError::NoPeer)?;
+        peer.send_packet(target, packet)
+    }
+
+    /// Forward a relayed payload to the destination its envelope named.
+    ///
+    /// Godot's `SceneMultiplayer::_process_sys` `SYS_COMMAND_RELAY` branch.
+    ///
+    /// ⚠️ The ORIGINAL sender is preserved on the forwarded packet. The
+    /// receiver's `RPCMode::Authority` check and `get_remote_sender_id()` must
+    /// see the client that made the call, not the server that passed it on —
+    /// rewriting the sender here would both lie to the script and let a client
+    /// inherit the server's authority.
+    fn forward_relayed(&mut self, dest: i32, packet: Packet) {
+        let server = PeerId::SERVER.0 as i32;
+        let from = packet.sender.0 as i32;
+        let excluded = -dest;
+        let targets: Vec<i32> = if dest > 0 {
+            // A destination of 1 is the server itself, already delivered
+            // locally by `poll`, so there is nothing to forward on.
+            if dest == server {
+                Vec::new()
+            } else {
+                vec![dest]
+            }
+        } else {
+            self.peers
+                .get_peers()
+                .into_iter()
+                .filter(|id| *id != from && *id != server && (excluded == 0 || *id != excluded))
+                .collect()
+        };
+        let Some(peer) = self.peer.as_mut() else {
+            return;
+        };
+        for id in targets {
+            // A roster entry the transport cannot reach is not fatal: Godot's
+            // relay skips it and carries on, and failing the whole poll
+            // because one peer dropped would strand every other peer.
+            let _ = peer.send_packet(PeerId(id.unsigned_abs()), packet.clone());
+        }
     }
 
     /// Poll the transport and decode inbound RPC / leave non-RPC packets to caller.
@@ -495,7 +708,34 @@ impl MultiplayerAPI {
         let transport_signals = peer.drain_signals();
         let mut other = Vec::new();
         let mut raw = Vec::new();
+        // Unwrap relay envelopes BEFORE decoding: the payload is an ordinary
+        // packet, and the server both forwards it and — when the destination
+        // covers the server too — handles it itself. Only a server unwraps;
+        // Godot never sends an envelope to a client, because the server
+        // unwraps before forwarding.
+        let relaying = self.server_relay && peer.get_unique_id() == PeerId::SERVER;
+        let mut to_forward = Vec::new();
+        let mut inbound = Vec::new();
         for packet in peer.poll() {
+            // Decoded to an owned payload so no borrow of `packet` outlives
+            // the move below.
+            let relayed = if relaying {
+                decode_relay_packet(&packet.data).map(|(dest, inner)| (dest, inner.to_vec()))
+            } else {
+                None
+            };
+            match relayed {
+                Some((dest, data)) => {
+                    let unwrapped = Packet { data, ..packet };
+                    if relay_includes_server(dest) {
+                        inbound.push(unwrapped.clone());
+                    }
+                    to_forward.push((dest, unwrapped));
+                }
+                None => inbound.push(packet),
+            }
+        }
+        for packet in inbound {
             if let Some(rpc) = decode_rpc_packet(&packet.data) {
                 self.inbound_rpcs.push(DecodedRPC {
                     node_path: rpc.0,
@@ -568,6 +808,11 @@ impl MultiplayerAPI {
                 self.peers.remove_peer(id);
             }
             self.peers.drain_signals();
+        }
+        // Forwarded last, so the roster the fan-out reads already includes any
+        // peer that connected in this same poll.
+        for (dest, packet) in to_forward {
+            self.forward_relayed(dest, packet);
         }
         other
     }
@@ -1272,9 +1517,14 @@ impl MockNetworkPeer {
     ///
     /// Opt in per test rather than changing `create_pair`: every existing
     /// caller relies on unconditional delivery, including paths that address
-    /// `PeerId::SERVER` while paired with a client
-    /// (`MultiplayerAPI::rpc` targets the node authority, defaulting to the
-    /// server), so making routing the default would drop those packets.
+    /// `PeerId::SERVER` while paired with a client, so making routing the
+    /// default would drop those packets.
+    ///
+    /// ⚠️ This used to say `MultiplayerAPI::rpc` "targets the node authority,
+    /// defaulting to the server". It no longer does — `rpc` targets
+    /// [`PeerId::BROADCAST`] (pat-mgixk.26). A test that opts into addressed
+    /// delivery and expects an RPC must therefore allow `BROADCAST`, not
+    /// `SERVER`.
     pub fn set_addressed_delivery(&mut self, to: Option<PeerId>) {
         self.deliver_only_to = to;
     }
@@ -2791,6 +3041,329 @@ mod tests {
 
     /// Command bytes are Godot's wire values
     /// (scene_multiplayer.h `enum NetworkCommands`) and must not be renumbered.
+    /// A transport double that records every send, so the relay fan-out can be
+    /// observed directly. `MockNetworkPeer` cannot: a pair has one remote and
+    /// reports nothing about the address a packet was sent to.
+    struct RecordingPeer {
+        id: PeerId,
+        inbox: Vec<Packet>,
+        sent: Arc<Mutex<Vec<(PeerId, Packet)>>>,
+        signals: Vec<MultiplayerPeerSignal>,
+    }
+
+    impl NetworkPeer for RecordingPeer {
+        fn send_packet(&mut self, to: PeerId, packet: Packet) -> Result<()> {
+            self.sent.lock().expect("lock poisoned").push((to, packet));
+            Ok(())
+        }
+
+        fn poll(&mut self) -> Vec<Packet> {
+            std::mem::take(&mut self.inbox)
+        }
+
+        fn get_unique_id(&self) -> PeerId {
+            self.id
+        }
+
+        fn is_server(&self) -> bool {
+            self.id == PeerId::SERVER
+        }
+
+        fn get_connection_status(&self) -> ConnectionStatus {
+            ConnectionStatus::Connected
+        }
+
+        fn close(&mut self) {}
+
+        fn drain_signals(&mut self) -> Vec<MultiplayerPeerSignal> {
+            std::mem::take(&mut self.signals)
+        }
+    }
+
+    fn any_peer_config() -> RPCConfig {
+        RPCConfig {
+            mode: RPCMode::Any,
+            transfer_mode: TransferMode::Reliable,
+            channel: 0,
+        }
+    }
+
+    /// A server that received a relay envelope from `from`, with `roster`
+    /// connected. Returns the API and the recording handle.
+    fn relaying_server(
+        dest: i32,
+        from: PeerId,
+        roster: &[i32],
+    ) -> (MultiplayerAPI, Arc<Mutex<Vec<(PeerId, Packet)>>>) {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let inner = encode_rpc_packet(7, "m", &[Variant::Int(1)]).expect("rpc encodes");
+        let peer = RecordingPeer {
+            id: PeerId::SERVER,
+            inbox: vec![Packet {
+                sender: from,
+                channel: 0,
+                data: encode_relay_packet(dest, &inner),
+                transfer_mode: TransferMode::Reliable,
+            }],
+            sent: Arc::clone(&sent),
+            signals: roster
+                .iter()
+                .map(|id| MultiplayerPeerSignal::PeerConnected(*id))
+                .collect(),
+        };
+        let mut api = MultiplayerAPI::new();
+        api.register_rpc("m", any_peer_config());
+        api.set_multiplayer_peer(Box::new(peer));
+        api.poll();
+        (api, sent)
+    }
+
+    fn forwarded_ids(sent: &Arc<Mutex<Vec<(PeerId, Packet)>>>) -> Vec<u32> {
+        let mut ids: Vec<u32> = sent
+            .lock()
+            .expect("lock poisoned")
+            .iter()
+            .map(|(to, _)| to.0)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// `SysCommand` carries Godot's own discriminants
+    /// (scene_multiplayer.h `SysCommands`), so they are wire meaning.
+    #[test]
+    fn sys_command_bytes_match_godot() {
+        for (cmd, byte) in [
+            (SysCommand::Auth, 0u8),
+            (SysCommand::AddPeer, 1),
+            (SysCommand::DelPeer, 2),
+            (SysCommand::Relay, 3),
+        ] {
+            assert_eq!(cmd.to_byte(), byte);
+            assert_eq!(SysCommand::from_byte(byte), Some(cmd));
+        }
+        assert_eq!(SysCommand::from_byte(4), None);
+    }
+
+    /// A relay envelope round-trips, and no other packet kind is mistaken for
+    /// one — the discipline every decoder here follows.
+    #[test]
+    fn relay_envelope_round_trips_and_rejects_other_kinds() {
+        let inner = encode_rpc_packet(42, "m", &[Variant::Int(9)]).expect("rpc encodes");
+        // Every destination shape Godot can express, including the negative
+        // "all except" form that `PeerId` cannot hold.
+        for dest in [0i32, 1, 7, -2, i32::MIN, i32::MAX] {
+            let envelope = encode_relay_packet(dest, &inner);
+            let (got, payload) =
+                decode_relay_packet(&envelope).expect("its own envelope must decode");
+            assert_eq!(got, dest, "the destination must survive the hop");
+            assert_eq!(payload, &inner[..], "the payload must be untouched");
+            assert!(
+                decode_rpc_packet(&envelope).is_none(),
+                "an envelope must not decode as the RPC it wraps, or the server \
+                 would dispatch it instead of forwarding it"
+            );
+            assert!(
+                decode_raw_packet(&envelope).is_none(),
+                "nor as a raw packet"
+            );
+        }
+
+        // And the inverse: the kinds that already exist are not envelopes.
+        assert!(
+            decode_relay_packet(&inner).is_none(),
+            "an RPC is not a relay"
+        );
+        assert!(
+            decode_relay_packet(&encode_raw_packet(&[1, 2, 3])).is_none(),
+            "a raw payload is not a relay"
+        );
+        assert!(
+            decode_relay_packet(&[]).is_none(),
+            "a truncated packet is not a relay"
+        );
+        assert!(
+            decode_relay_packet(&[NetworkCommand::Sys.to_byte(), 3, 0]).is_none(),
+            "a header too short to hold a destination is not a relay"
+        );
+    }
+
+    /// A client's `rpc()` is wrapped for the server to forward, and the wrapper
+    /// names peer 0 — every peer.
+    #[test]
+    fn a_client_broadcast_is_wrapped_for_the_server() {
+        let (mut server, client) = MockNetwork::create_pair(PeerId(2));
+        let mut api = MultiplayerAPI::new();
+        api.register_rpc("m", any_peer_config());
+        api.set_multiplayer_peer(Box::new(client));
+        api.rpc(7, "m", vec![Variant::Int(1)])
+            .expect("the send succeeds");
+
+        let arrived = server.poll();
+        assert_eq!(arrived.len(), 1, "exactly one packet reaches the server");
+        let (dest, payload) = decode_relay_packet(&arrived[0].data)
+            .expect("a client's broadcast must be wrapped for the server to forward");
+        assert_eq!(dest, 0, "the envelope must name every peer");
+        assert!(
+            decode_rpc_packet(payload).is_some(),
+            "the payload must be the original RPC, unchanged"
+        );
+        assert_eq!(
+            arrived[0].sender,
+            PeerId(2),
+            "the sender must stay the client"
+        );
+    }
+
+    /// With relay off the packet goes bare to the server, as Godot's
+    /// `server_relay = false` does — the other clients never hear it.
+    #[test]
+    fn relay_can_be_turned_off() {
+        let (mut server, client) = MockNetwork::create_pair(PeerId(2));
+        let mut api = MultiplayerAPI::new();
+        assert!(api.server_relay(), "Godot defaults server_relay to true");
+        api.set_server_relay(false);
+        api.register_rpc("m", any_peer_config());
+        api.set_multiplayer_peer(Box::new(client));
+        api.rpc(7, "m", vec![Variant::Int(1)])
+            .expect("the send succeeds");
+
+        let arrived = server.poll();
+        assert_eq!(arrived.len(), 1);
+        assert!(
+            decode_relay_packet(&arrived[0].data).is_none(),
+            "with relay off nothing is wrapped"
+        );
+        assert!(
+            decode_rpc_packet(&arrived[0].data).is_some(),
+            "…the bare RPC reaches the server as before"
+        );
+    }
+
+    /// A server never wraps its own sends: it is already the hub.
+    #[test]
+    fn a_servers_own_rpc_is_not_wrapped() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let peer = RecordingPeer {
+            id: PeerId::SERVER,
+            inbox: Vec::new(),
+            sent: Arc::clone(&sent),
+            signals: Vec::new(),
+        };
+        let mut api = MultiplayerAPI::new();
+        api.register_rpc("m", any_peer_config());
+        api.set_multiplayer_peer(Box::new(peer));
+        api.rpc(7, "m", vec![Variant::Int(1)])
+            .expect("the send succeeds");
+
+        let log = sent.lock().expect("lock poisoned");
+        assert_eq!(log.len(), 1);
+        assert_eq!(
+            log[0].0,
+            PeerId::BROADCAST,
+            "a server addresses every peer directly"
+        );
+        assert!(
+            decode_relay_packet(&log[0].1.data).is_none(),
+            "a server has nobody to relay through"
+        );
+    }
+
+    /// A server's `rpc_id(-N, …)` reaches every peer BUT `N`.
+    ///
+    /// No transport can be handed this: `PeerId` wraps a `u32`, so the sign is
+    /// gone by the time `send_packet` sees it. The fan-out has to happen above
+    /// the transport, and this pins that it does.
+    #[test]
+    fn a_negative_target_skips_only_that_peer() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let peer = RecordingPeer {
+            id: PeerId::SERVER,
+            inbox: Vec::new(),
+            sent: Arc::clone(&sent),
+            signals: [2, 3, 4]
+                .iter()
+                .map(|id| MultiplayerPeerSignal::PeerConnected(*id))
+                .collect(),
+        };
+        let mut api = MultiplayerAPI::new();
+        api.register_rpc("m", any_peer_config());
+        api.set_multiplayer_peer(Box::new(peer));
+        // The roster arrives the way a real handshake delivers it.
+        let _ = api.poll();
+
+        api.rpc_id(7, -3, "m", vec![Variant::Int(1)])
+            .expect("the send succeeds");
+        assert_eq!(
+            forwarded_ids(&sent),
+            vec![2, 4],
+            "peer 3 is excluded by the negative target; everyone else is sent to"
+        );
+    }
+
+    /// A broadcast envelope reaches every other peer AND the server itself,
+    /// never echoing back to the peer that sent it.
+    #[test]
+    fn relay_forwards_a_broadcast_to_every_other_peer() {
+        let (mut api, sent) = relaying_server(0, PeerId(2), &[2, 3, 4]);
+        assert_eq!(
+            forwarded_ids(&sent),
+            vec![3, 4],
+            "a broadcast goes to the other clients — never back to the sender, \
+             which would run its own call twice"
+        );
+        assert!(
+            sent.lock()
+                .expect("lock poisoned")
+                .iter()
+                .all(|(_, p)| p.sender == PeerId(2)),
+            "the forwarded packet must keep the ORIGINAL sender: the receiver's \
+             authority check reads it, so rewriting it would hand a client the \
+             server's authority"
+        );
+        assert_eq!(
+            api.take_inbound_rpcs().len(),
+            1,
+            "the server runs a broadcast itself as well as forwarding it"
+        );
+    }
+
+    /// A positive destination is one peer, and the server does not run it.
+    #[test]
+    fn relay_forwards_a_single_destination_without_running_it() {
+        let (mut api, sent) = relaying_server(4, PeerId(2), &[2, 3, 4]);
+        assert_eq!(forwarded_ids(&sent), vec![4], "only the named peer");
+        assert!(
+            api.take_inbound_rpcs().is_empty(),
+            "a call addressed to peer 4 must not run on the server"
+        );
+    }
+
+    /// A negative destination is "everyone except `-dest`" — the shape
+    /// [`PeerId`] cannot express, which is why the envelope carries an `i32`.
+    #[test]
+    fn relay_honours_an_all_except_destination() {
+        let (mut api, sent) = relaying_server(-3, PeerId(2), &[2, 3, 4]);
+        assert_eq!(
+            forwarded_ids(&sent),
+            vec![4],
+            "peer 3 is excluded and peer 2 sent it, leaving peer 4"
+        );
+        assert_eq!(
+            api.take_inbound_rpcs().len(),
+            1,
+            "the server is not the excluded peer, so it still runs the call"
+        );
+
+        // …and excluding the server itself keeps it out.
+        let (mut api, sent) = relaying_server(-1, PeerId(2), &[2, 3, 4]);
+        assert_eq!(forwarded_ids(&sent), vec![3, 4]);
+        assert!(
+            api.take_inbound_rpcs().is_empty(),
+            "dest -1 excludes the server, so it must not run the call"
+        );
+    }
+
     #[test]
     fn network_command_bytes_match_godot() {
         for (cmd, byte) in [

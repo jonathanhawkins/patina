@@ -795,16 +795,14 @@ impl PhysicsWorld3D {
         //    narrow-phase test and impulse resolution.
         let pairs = self.broadphase_pairs();
         for (id_a, id_b) in pairs {
-            let (should_collide, pos_a, rot_a, shapes_a, pos_b, rot_b, shapes_b) = {
+            let (should_collide, pos_a, shapes_a, pos_b, shapes_b) = {
                 let a = &self.bodies[&id_a];
                 let b = &self.bodies[&id_b];
                 (
                     a.should_collide_with(b),
                     a.position,
-                    a.rotation,
                     a.shapes_world(),
                     b.position,
-                    b.rotation,
                     b.shapes_world(),
                 )
             };
@@ -835,29 +833,58 @@ impl PhysicsWorld3D {
             // The narrow phase itself is unchanged: `test_collision_rot` already
             // takes loose (pos, rot, shape) triples rather than bodies, so shapes
             // at an offset need no new collision math — only the right positions.
+            // ⚠️ The rotations are part of this tuple, not just of the loop
+            // below: the support points are computed AFTER the loop ends and
+            // must use the same orientation the winning test did (pat-mgixk.39).
             let mut hit: Option<(
                 collision::CollisionResult3D,
                 Vector3,
+                Quaternion,
                 Shape3D,
                 Vector3,
+                Quaternion,
                 Shape3D,
             )> = None;
-            for (shape_pos_a, sa) in &shapes_a {
-                for (shape_pos_b, sb) in &shapes_b {
+            // ⚠️ The PER-SHAPE rotation, not the body-wide `rot_a`/`rot_b`.
+            // `shapes_world` composes each shape's own local rotation onto the
+            // body's, so a rotated `CollisionShape3D` under an unrotated body
+            // has a non-identity rotation here while `rot_a` is identity
+            // (pat-mgixk.39). The winning pair's rotations are carried in `hit`
+            // because the support points below are computed after the loop has
+            // ended and must use the same orientation the test did.
+            for (shape_pos_a, shape_rot_a, sa) in &shapes_a {
+                for (shape_pos_b, shape_rot_b, sb) in &shapes_b {
                     let r = collision::test_collision_rot(
                         *shape_pos_a,
-                        rot_a,
+                        *shape_rot_a,
                         sa,
                         *shape_pos_b,
-                        rot_b,
+                        *shape_rot_b,
                         sb,
                     );
                     if r.colliding && hit.as_ref().map_or(true, |(best, ..)| r.depth > best.depth) {
-                        hit = Some((r, *shape_pos_a, sa.clone(), *shape_pos_b, sb.clone()));
+                        hit = Some((
+                            r,
+                            *shape_pos_a,
+                            *shape_rot_a,
+                            sa.clone(),
+                            *shape_pos_b,
+                            *shape_rot_b,
+                            sb.clone(),
+                        ));
                     }
                 }
             }
-            if let Some((result, shape_pos_a, shape_a, shape_pos_b, shape_b)) = hit {
+            if let Some((
+                result,
+                shape_pos_a,
+                shape_rot_a,
+                shape_a,
+                shape_pos_b,
+                shape_rot_b,
+                shape_b,
+            )) = hit
+            {
                 // Contact point on the touching surfaces: midpoint of each
                 // body's support point toward the other. This is offset from a
                 // body's centre of mass for tilted/edge contacts, so the normal
@@ -866,8 +893,9 @@ impl PhysicsWorld3D {
                 // ⚠️ The SHAPE's world centre, not the body's. These coincided
                 // before offsets existed; with them, using `pos_a` would place
                 // the contact on a phantom shape at the body origin.
-                let support_a = support_point(&shape_a, shape_pos_a, rot_a, result.normal);
-                let support_b = support_point(&shape_b, shape_pos_b, rot_b, result.normal * -1.0);
+                let support_a = support_point(&shape_a, shape_pos_a, shape_rot_a, result.normal);
+                let support_b =
+                    support_point(&shape_b, shape_pos_b, shape_rot_b, result.normal * -1.0);
                 let contact_pos = (support_a + support_b) * 0.5;
                 if let Some(a) = self.bodies.get_mut(&id_a) {
                     a.add_contact(ContactPoint3D {

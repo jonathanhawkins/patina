@@ -104,6 +104,59 @@ impl WebEngine {
         self.main_loop.tree()
     }
 
+    /// Rasterizes the current 2D scene into an RGBA8 buffer of `width` x
+    /// `height`, row-major, four bytes a pixel (pat-mgixk.28).
+    ///
+    /// 🔑 This is the web half of "one canvas builder, two runtime drivers".
+    /// The node-to-draw-command producer used to live only in
+    /// `gdeditor::viewport_2d_render`, and this crate depended on neither
+    /// `gdeditor` nor `gdrender2d` — `WebRenderer::present_clear` was its only
+    /// presentation call, so a 2D game in the browser drew a flat colour and
+    /// nothing else. The builder now lives in `gdscene::canvas_render` and this
+    /// drives exactly the same four calls `patina-runner --frame-out` does.
+    ///
+    /// ⚠️ Returns PIXELS, and does not present them. The host decides: a 2D
+    /// canvas context can take these straight through `putImageData`, while the
+    /// WebGPU surface in `crate::canvas` would need a texture upload and a blit
+    /// pipeline it does not have yet. Handing back the buffer keeps that choice
+    /// out of the engine instead of guessing at it — and the guess would be the
+    /// expensive one to undo.
+    ///
+    /// ⚠️ `res://` texture paths resolve against `project_root`. An empty root
+    /// means `resolve_res_path` falls back to a CWD-relative path, which in a
+    /// browser resolves nothing — so a caller that wants textures must pass the
+    /// mounted project directory.
+    pub fn render_2d_rgba(&mut self, width: u32, height: u32, project_root: &str) -> Vec<u8> {
+        use gdcore::math::{Color, Vector2};
+
+        let tree = self.main_loop.tree();
+        let mut items = gdscene::canvas_render::collect_canvas_items(tree);
+        if let Some(view) = gdscene::canvas_render::camera2d_view_transform(
+            tree,
+            Vector2::new(width as f32, height as f32),
+            None,
+            0.0,
+        ) {
+            gdscene::canvas_render::apply_camera2d_view(&mut items, view);
+        }
+        let mut textures = gdscene::texture_cache::TextureCache::new(project_root.to_string());
+        let frame = gdscene::canvas_render::rasterize_render_list(
+            &items,
+            width,
+            height,
+            Color::new(0.0, 0.0, 0.0, 1.0),
+            Some(&mut textures),
+        );
+        let mut out = Vec::with_capacity((width as usize) * (height as usize) * 4);
+        for px in &frame.pixels {
+            // `putImageData` wants straight (non-premultiplied) sRGB bytes in
+            // RGBA order, which is the order `Color` already stores.
+            let to_u8 = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+            out.extend_from_slice(&[to_u8(px.r), to_u8(px.g), to_u8(px.b), to_u8(px.a)]);
+        }
+        out
+    }
+
     /// Mutable access to the scene, for wiring a scene up after construction.
     pub fn tree_mut(&mut self) -> &mut SceneTree {
         self.main_loop.tree_mut()

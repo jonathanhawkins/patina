@@ -22,3 +22,4 @@ mod editor_polling_bounded_test;
 mod editor_profiler_modes_test;
 mod editor_profiler_panel_test;
 mod editor_project_settings_input_map_test;
+mod editor_signal_connect_test;

@@ -46,6 +46,22 @@ fn fixture(camera_claims_current: bool) -> Fixture {
     let mesh = tree
         .add_child(root, Node::new("Box", "MeshInstance3D"))
         .unwrap();
+    // ⚠️ A REAL mesh, and the assertion below depends on it (pat-mgixk.51).
+    //
+    // This node is this test's stand-in for "scene content", but it used to carry
+    // no `mesh` at all — and a mesh-less MeshInstance3D resolves to
+    // `PrimitiveShape::Box`, the same placeholder a plain Node3D gets. So
+    // "game mode ... keeps scene content" was really pinning the PLACEHOLDER, and
+    // the fixture could not tell real geometry from editor furniture. Godot draws
+    // nothing for a mesh-less MeshInstance3D either, so the game path now strips
+    // `Box`; giving the node an actual mesh is what makes it content.
+    //
+    // `primitive:BoxMesh` is the repo's own generated primitive, read by
+    // `node3d::get_mesh_path` straight off the `mesh` property.
+    tree.get_node_mut(mesh).unwrap().set_property(
+        "mesh",
+        Variant::String("primitive:BoxMesh".to_string()),
+    );
     tree.add_child(root, Node::new("Sun", "DirectionalLight3D"))
         .unwrap();
     let collision = tree

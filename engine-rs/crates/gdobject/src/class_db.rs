@@ -1343,6 +1343,17 @@ fn register_joint_3d_classes() {
     register_class(
         ClassRegistration::new("PinJoint3D")
             .parent("Joint3D")
+            // pat-mgixk.31: `PinJoint3D.Param`, the index `set_param`/`get_param`
+            // take. Values from `PhysicsServer3D::PinJointParam` in
+            // `servers/physics_3d/physics_server_3d.h`, which this enum aliases
+            // one-for-one; no initialisers, so sequential from zero.
+            // PinJoint3D::Param has NO PARAM_MAX, unlike the other three.
+            .enumeration(
+                EnumInfo::new("Param")
+                    .constant("PARAM_BIAS", 0)
+                    .constant("PARAM_DAMPING", 1)
+                    .constant("PARAM_IMPULSE_CLAMP", 2),
+            )
             .property(
                 PropertyInfo::new("params/bias", Variant::Float(0.3))
                     .with_accessors("get_param", "set_param"),
@@ -1360,6 +1371,33 @@ fn register_joint_3d_classes() {
     register_class(
         ClassRegistration::new("HingeJoint3D")
             .parent("Joint3D")
+            // pat-mgixk.31: `HingeJoint3D.Param`, the index `set_param`/`get_param`
+            // take. Values from `PhysicsServer3D::HingeJointParam` in
+            // `servers/physics_3d/physics_server_3d.h`, which this enum aliases
+            // one-for-one; no initialisers, so sequential from zero.
+            // PARAM_MAX = 8. HingeJoint3D ALSO has a Flag enum, below.
+            .enumeration(
+                EnumInfo::new("Param")
+                    .constant("PARAM_BIAS", 0)
+                    .constant("PARAM_LIMIT_UPPER", 1)
+                    .constant("PARAM_LIMIT_LOWER", 2)
+                    .constant("PARAM_LIMIT_BIAS", 3)
+                    .constant("PARAM_LIMIT_SOFTNESS", 4)
+                    .constant("PARAM_LIMIT_RELAXATION", 5)
+                    .constant("PARAM_MOTOR_TARGET_VELOCITY", 6)
+                    .constant("PARAM_MOTOR_MAX_IMPULSE", 7)
+                    .constant("PARAM_MAX", 8),
+            )
+            // pat-mgixk.31: `HingeJoint3D.Flag`, the SECOND indexed family on this
+            // class. `set_flag`/`get_flag` carry the two BOOL properties
+            // (`angular_limit/enable`, `motor/enable`) that `set_param` does not,
+            // so a param-only table leaves them unreachable from a script.
+            .enumeration(
+                EnumInfo::new("Flag")
+                    .constant("FLAG_USE_LIMIT", 0)
+                    .constant("FLAG_ENABLE_MOTOR", 1)
+                    .constant("FLAG_MAX", 2),
+            )
             .property(
                 PropertyInfo::new("params/bias", Variant::Float(0.3))
                     .with_accessors("get_param", "set_param"),
@@ -1405,6 +1443,37 @@ fn register_joint_3d_classes() {
     register_class(
         ClassRegistration::new("SliderJoint3D")
             .parent("Joint3D")
+            // pat-mgixk.31: `SliderJoint3D.Param`, the index `set_param`/`get_param`
+            // take. Values from `PhysicsServer3D::SliderJointParam` in
+            // `servers/physics_3d/physics_server_3d.h`, which this enum aliases
+            // one-for-one; no initialisers, so sequential from zero.
+            // 22 params + PARAM_MAX = 22. Every one maps to a property the solver reads.
+            .enumeration(
+                EnumInfo::new("Param")
+                    .constant("PARAM_LINEAR_LIMIT_UPPER", 0)
+                    .constant("PARAM_LINEAR_LIMIT_LOWER", 1)
+                    .constant("PARAM_LINEAR_LIMIT_SOFTNESS", 2)
+                    .constant("PARAM_LINEAR_LIMIT_RESTITUTION", 3)
+                    .constant("PARAM_LINEAR_LIMIT_DAMPING", 4)
+                    .constant("PARAM_LINEAR_MOTION_SOFTNESS", 5)
+                    .constant("PARAM_LINEAR_MOTION_RESTITUTION", 6)
+                    .constant("PARAM_LINEAR_MOTION_DAMPING", 7)
+                    .constant("PARAM_LINEAR_ORTHOGONAL_SOFTNESS", 8)
+                    .constant("PARAM_LINEAR_ORTHOGONAL_RESTITUTION", 9)
+                    .constant("PARAM_LINEAR_ORTHOGONAL_DAMPING", 10)
+                    .constant("PARAM_ANGULAR_LIMIT_UPPER", 11)
+                    .constant("PARAM_ANGULAR_LIMIT_LOWER", 12)
+                    .constant("PARAM_ANGULAR_LIMIT_SOFTNESS", 13)
+                    .constant("PARAM_ANGULAR_LIMIT_RESTITUTION", 14)
+                    .constant("PARAM_ANGULAR_LIMIT_DAMPING", 15)
+                    .constant("PARAM_ANGULAR_MOTION_SOFTNESS", 16)
+                    .constant("PARAM_ANGULAR_MOTION_RESTITUTION", 17)
+                    .constant("PARAM_ANGULAR_MOTION_DAMPING", 18)
+                    .constant("PARAM_ANGULAR_ORTHOGONAL_SOFTNESS", 19)
+                    .constant("PARAM_ANGULAR_ORTHOGONAL_RESTITUTION", 20)
+                    .constant("PARAM_ANGULAR_ORTHOGONAL_DAMPING", 21)
+                    .constant("PARAM_MAX", 22),
+            )
             .property(
                 PropertyInfo::new("linear_limit/upper_distance", Variant::Float(1.0))
                     .with_accessors("get_param", "set_param"),
@@ -1415,6 +1484,72 @@ fn register_joint_3d_classes() {
             )
             .property(
                 PropertyInfo::new("linear_limit/softness", Variant::Float(1.0))
+                    .with_accessors("get_param", "set_param"),
+            )
+            // pat-mgixk.31: the twelve `*_motion/*` and `*_ortho/*` params. These
+            // were the only SliderJoint3D params with no `PropertyInfo`, which
+            // made them look unbacked — but `physics_server_3d.rs` reads every
+            // one through `float_prop_3d` when it syncs the joint, so they were
+            // always live. The registration gap only broke the GETTER: with no
+            // `PropertyInfo` there is no default to fall back to, so
+            // `get_param` on an unwritten one answered `Nil` while the solver
+            // used its own hardcoded value — two different answers for the same
+            // parameter.
+            //
+            // Each default is transcribed from the solver's own
+            // `float_prop_3d(tree, node_id, <key>, <default>)` call site and
+            // cross-checked against `doc/classes/SliderJoint3D.xml`; all twelve
+            // agree.
+            //
+            // ⚠️ `linear_motion/damping` is **0.0** while the other three
+            // dampings are 1.0. That asymmetry is Godot's, not a typo — the
+            // solver comments on it at `physics_server_3d.rs:1469`.
+            .property(
+                PropertyInfo::new("linear_motion/softness", Variant::Float(1.0))
+                    .with_accessors("get_param", "set_param"),
+            )
+            .property(
+                PropertyInfo::new("linear_motion/restitution", Variant::Float(0.7))
+                    .with_accessors("get_param", "set_param"),
+            )
+            .property(
+                PropertyInfo::new("linear_motion/damping", Variant::Float(0.0))
+                    .with_accessors("get_param", "set_param"),
+            )
+            .property(
+                PropertyInfo::new("linear_ortho/softness", Variant::Float(1.0))
+                    .with_accessors("get_param", "set_param"),
+            )
+            .property(
+                PropertyInfo::new("linear_ortho/restitution", Variant::Float(0.7))
+                    .with_accessors("get_param", "set_param"),
+            )
+            .property(
+                PropertyInfo::new("linear_ortho/damping", Variant::Float(1.0))
+                    .with_accessors("get_param", "set_param"),
+            )
+            .property(
+                PropertyInfo::new("angular_motion/softness", Variant::Float(1.0))
+                    .with_accessors("get_param", "set_param"),
+            )
+            .property(
+                PropertyInfo::new("angular_motion/restitution", Variant::Float(0.7))
+                    .with_accessors("get_param", "set_param"),
+            )
+            .property(
+                PropertyInfo::new("angular_motion/damping", Variant::Float(1.0))
+                    .with_accessors("get_param", "set_param"),
+            )
+            .property(
+                PropertyInfo::new("angular_ortho/softness", Variant::Float(1.0))
+                    .with_accessors("get_param", "set_param"),
+            )
+            .property(
+                PropertyInfo::new("angular_ortho/restitution", Variant::Float(0.7))
+                    .with_accessors("get_param", "set_param"),
+            )
+            .property(
+                PropertyInfo::new("angular_ortho/damping", Variant::Float(1.0))
                     .with_accessors("get_param", "set_param"),
             )
             .property(
@@ -1450,6 +1585,20 @@ fn register_joint_3d_classes() {
     register_class(
         ClassRegistration::new("ConeTwistJoint3D")
             .parent("Joint3D")
+            // pat-mgixk.31: `ConeTwistJoint3D.Param`, the index `set_param`/`get_param`
+            // take. Values from `PhysicsServer3D::ConeTwistJointParam` in
+            // `servers/physics_3d/physics_server_3d.h`, which this enum aliases
+            // one-for-one; no initialisers, so sequential from zero.
+            // PARAM_MAX = 5. Its properties are BARE names (`bias`), not `params/bias`.
+            .enumeration(
+                EnumInfo::new("Param")
+                    .constant("PARAM_SWING_SPAN", 0)
+                    .constant("PARAM_TWIST_SPAN", 1)
+                    .constant("PARAM_BIAS", 2)
+                    .constant("PARAM_SOFTNESS", 3)
+                    .constant("PARAM_RELAXATION", 4)
+                    .constant("PARAM_MAX", 5),
+            )
             .property(
                 PropertyInfo::new("swing_span", Variant::Float(FRAC_PI_4 as f64))
                     .with_accessors("get_param", "set_param"),
@@ -1533,9 +1682,18 @@ pub fn register_3d_classes() {
         ClassRegistration::new("Node3D")
             .signal(SignalInfo::new("visibility_changed"))
             .parent("Node")
-            .property(PropertyInfo::new("rotation_edit_mode", Variant::Int(0)))
-            .property(PropertyInfo::new("rotation_order", Variant::Int(2)))
-            .property(PropertyInfo::new("top_level", Variant::Bool(false)))
+            .property(
+                PropertyInfo::new("rotation_edit_mode", Variant::Int(0))
+                    .with_accessors("get_rotation_edit_mode", "set_rotation_edit_mode"),
+            )
+            .property(
+                PropertyInfo::new("rotation_order", Variant::Int(2))
+                    .with_accessors("get_rotation_order", "set_rotation_order"),
+            )
+            .property(
+                PropertyInfo::new("top_level", Variant::Bool(false))
+                    .with_accessors("is_set_as_top_level", "set_as_top_level"),
+            )
             // pat-s3rrv.24 — the 37 methods of doc/classes/Node3D.xml. The class
             // carried its transform PROPERTIES but not a single method, so the
             // whole transform API a 3D game calls — look_at, rotate_y, translate,
@@ -1618,17 +1776,41 @@ pub fn register_3d_classes() {
                 PropertyInfo::new("current", Variant::Bool(false))
                     .with_accessors("is_current", "set_current"),
             )
-            .property(PropertyInfo::new("cull_mask", Variant::Int(1048575)))
-            .property(PropertyInfo::new("doppler_tracking", Variant::Int(0)))
-            .property(PropertyInfo::new(
-                "frustum_offset",
-                Variant::Vector2(gdcore::math::Vector2::new(0.0, 0.0)),
-            ))
-            .property(PropertyInfo::new("h_offset", Variant::Float(0.0)))
-            .property(PropertyInfo::new("keep_aspect", Variant::Int(1)))
-            .property(PropertyInfo::new("projection", Variant::Int(0)))
-            .property(PropertyInfo::new("size", Variant::Float(1.0)))
-            .property(PropertyInfo::new("v_offset", Variant::Float(0.0)))
+            .property(
+                PropertyInfo::new("cull_mask", Variant::Int(1048575))
+                    .with_accessors("get_cull_mask", "set_cull_mask"),
+            )
+            .property(
+                PropertyInfo::new("doppler_tracking", Variant::Int(0))
+                    .with_accessors("get_doppler_tracking", "set_doppler_tracking"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "frustum_offset",
+                    Variant::Vector2(gdcore::math::Vector2::new(0.0, 0.0)),
+                )
+                .with_accessors("get_frustum_offset", "set_frustum_offset"),
+            )
+            .property(
+                PropertyInfo::new("h_offset", Variant::Float(0.0))
+                    .with_accessors("get_h_offset", "set_h_offset"),
+            )
+            .property(
+                PropertyInfo::new("keep_aspect", Variant::Int(1))
+                    .with_accessors("get_keep_aspect_mode", "set_keep_aspect_mode"),
+            )
+            .property(
+                PropertyInfo::new("projection", Variant::Int(0))
+                    .with_accessors("get_projection", "set_projection"),
+            )
+            .property(
+                PropertyInfo::new("size", Variant::Float(1.0))
+                    .with_accessors("get_size", "set_size"),
+            )
+            .property(
+                PropertyInfo::new("v_offset", Variant::Float(0.0))
+                    .with_accessors("get_v_offset", "set_v_offset"),
+            )
             // pat-s3rrv.24 — the 19 methods of doc/classes/Camera3D.xml,
             // including the picking helpers (unproject_position,
             // project_ray_normal/origin) and make_current.
@@ -1667,7 +1849,10 @@ pub fn register_3d_classes() {
             .method(MethodInfo::new("make_current", 0))
             .method(MethodInfo::new("clear_current", 0))
             .method(MethodInfo::new("is_current", 0).const_method())
-            .property(PropertyInfo::new("doppler_tracking", Variant::Int(0))),
+            .property(
+                PropertyInfo::new("doppler_tracking", Variant::Int(0))
+                    .with_accessors("get_doppler_tracking", "set_doppler_tracking"),
+            ),
     );
 
     // -- MeshInstance3D (inherits GeometryInstance3D → VisualInstance3D → Node3D;
@@ -2271,6 +2456,42 @@ pub fn register_3d_classes() {
         ClassRegistration::new("Light3D")
             .parent("VisualInstance3D")
             .abstract_class()
+            // pat-mgixk.31: `Light3D.Param`, the index `set_param`/`get_param`
+            // take. Without these a script cannot NAME the parameter it wants —
+            // `Light3D.PARAM_ENERGY` was an `UndefinedVariable`, so the indexed
+            // accessors were unreachable from GDScript however they dispatched.
+            //
+            // Values come from `RS::LightParam` in
+            // `servers/rendering/rendering_server.h:541`, which `Light3D::Param`
+            // aliases one-for-one; the first member has no initializer, so the
+            // enum is sequential from zero. Registered whole, PARAM_MAX
+            // included, because a partly-filled enum fails as an
+            // `UndefinedVariable` only for the names left out.
+            .enumeration(
+                EnumInfo::new("Param")
+                    .constant("PARAM_ENERGY", 0)
+                    .constant("PARAM_INDIRECT_ENERGY", 1)
+                    .constant("PARAM_VOLUMETRIC_FOG_ENERGY", 2)
+                    .constant("PARAM_SPECULAR", 3)
+                    .constant("PARAM_RANGE", 4)
+                    .constant("PARAM_SIZE", 5)
+                    .constant("PARAM_ATTENUATION", 6)
+                    .constant("PARAM_SPOT_ANGLE", 7)
+                    .constant("PARAM_SPOT_ATTENUATION", 8)
+                    .constant("PARAM_SHADOW_MAX_DISTANCE", 9)
+                    .constant("PARAM_SHADOW_SPLIT_1_OFFSET", 10)
+                    .constant("PARAM_SHADOW_SPLIT_2_OFFSET", 11)
+                    .constant("PARAM_SHADOW_SPLIT_3_OFFSET", 12)
+                    .constant("PARAM_SHADOW_FADE_START", 13)
+                    .constant("PARAM_SHADOW_NORMAL_BIAS", 14)
+                    .constant("PARAM_SHADOW_BIAS", 15)
+                    .constant("PARAM_SHADOW_PANCAKE_SIZE", 16)
+                    .constant("PARAM_SHADOW_OPACITY", 17)
+                    .constant("PARAM_SHADOW_BLUR", 18)
+                    .constant("PARAM_TRANSMITTANCE_BIAS", 19)
+                    .constant("PARAM_INTENSITY", 20)
+                    .constant("PARAM_MAX", 21),
+            )
             .property(
                 PropertyInfo::new("light_energy", Variant::Float(1.0))
                     .with_accessors("get_param", "set_param"),
@@ -2308,23 +2529,26 @@ pub fn register_3d_classes() {
                 PropertyInfo::new("light_bake_mode", Variant::Int(2))
                     .with_accessors("get_bake_mode", "set_bake_mode"),
             )
-            .property(PropertyInfo::new(
-                "distance_fade_begin",
-                Variant::Float(40.0),
-            ))
-            .property(PropertyInfo::new(
-                "distance_fade_enabled",
-                Variant::Bool(false),
-            ))
-            .property(PropertyInfo::new(
-                "distance_fade_length",
-                Variant::Float(10.0),
-            ))
-            .property(PropertyInfo::new(
-                "distance_fade_shadow",
-                Variant::Float(50.0),
-            ))
-            .property(PropertyInfo::new("editor_only", Variant::Bool(false)))
+            .property(
+                PropertyInfo::new("distance_fade_begin", Variant::Float(40.0))
+                    .with_accessors("get_distance_fade_begin", "set_distance_fade_begin"),
+            )
+            .property(
+                PropertyInfo::new("distance_fade_enabled", Variant::Bool(false))
+                    .with_accessors("is_distance_fade_enabled", "set_enable_distance_fade"),
+            )
+            .property(
+                PropertyInfo::new("distance_fade_length", Variant::Float(10.0))
+                    .with_accessors("get_distance_fade_length", "set_distance_fade_length"),
+            )
+            .property(
+                PropertyInfo::new("distance_fade_shadow", Variant::Float(50.0))
+                    .with_accessors("get_distance_fade_shadow", "set_distance_fade_shadow"),
+            )
+            .property(
+                PropertyInfo::new("editor_only", Variant::Bool(false))
+                    .with_accessors("is_editor_only", "set_editor_only"),
+            )
             .property(PropertyInfo::new(
                 "light_angular_distance",
                 Variant::Float(0.0),
@@ -2342,15 +2566,17 @@ pub fn register_3d_classes() {
                 "light_volumetric_fog_energy",
                 Variant::Float(1.0),
             ))
-            .property(PropertyInfo::new(
-                "shadow_caster_mask",
-                Variant::Int(4294967295),
-            ))
+            .property(
+                PropertyInfo::new("shadow_caster_mask", Variant::Int(4294967295))
+                    .with_accessors("get_shadow_caster_mask", "set_shadow_caster_mask"),
+            )
             .property(PropertyInfo::new("shadow_opacity", Variant::Float(1.0)))
-            .property(PropertyInfo::new(
-                "shadow_reverse_cull_face",
-                Variant::Bool(false),
-            ))
+            .property(
+                PropertyInfo::new("shadow_reverse_cull_face", Variant::Bool(false)).with_accessors(
+                    "get_shadow_reverse_cull_face",
+                    "set_shadow_reverse_cull_face",
+                ),
+            )
             .property(PropertyInfo::new(
                 "shadow_transmittance_bias",
                 Variant::Float(0.05),
@@ -2369,10 +2595,10 @@ pub fn register_3d_classes() {
                 PropertyInfo::new("directional_shadow_max_distance", Variant::Float(100.0))
                     .with_accessors("get_param", "set_param"),
             )
-            .property(PropertyInfo::new(
-                "directional_shadow_blend_splits",
-                Variant::Bool(false),
-            ))
+            .property(
+                PropertyInfo::new("directional_shadow_blend_splits", Variant::Bool(false))
+                    .with_accessors("is_blend_splits_enabled", "set_blend_splits"),
+            )
             .property(PropertyInfo::new(
                 "directional_shadow_fade_start",
                 Variant::Float(0.8),
@@ -2393,7 +2619,10 @@ pub fn register_3d_classes() {
                 "directional_shadow_split_3",
                 Variant::Float(0.5),
             ))
-            .property(PropertyInfo::new("sky_mode", Variant::Int(0)))
+            .property(
+                PropertyInfo::new("sky_mode", Variant::Int(0))
+                    .with_accessors("get_sky_mode", "set_sky_mode"),
+            )
             // Overrides the Light3D base's 0.5. The DirectionalLight3D ctor
             // sets PARAM_SPECULAR = 1.0 explicitly
             // (upstream/godot/scene/3d/light_3d.cpp:606) while the base sets
@@ -2470,13 +2699,22 @@ pub fn register_3d_classes() {
                 PropertyInfo::new("collision_mask", Variant::Int(1))
                     .with_accessors("get_collision_mask", "set_collision_mask"),
             )
-            .property(PropertyInfo::new("collision_priority", Variant::Float(1.0)))
-            .property(PropertyInfo::new("disable_mode", Variant::Int(0)))
-            .property(PropertyInfo::new(
-                "input_capture_on_drag",
-                Variant::Bool(false),
-            ))
-            .property(PropertyInfo::new("input_ray_pickable", Variant::Bool(true))),
+            .property(
+                PropertyInfo::new("collision_priority", Variant::Float(1.0))
+                    .with_accessors("get_collision_priority", "set_collision_priority"),
+            )
+            .property(
+                PropertyInfo::new("disable_mode", Variant::Int(0))
+                    .with_accessors("get_disable_mode", "set_disable_mode"),
+            )
+            .property(
+                PropertyInfo::new("input_capture_on_drag", Variant::Bool(false))
+                    .with_accessors("get_capture_input_on_drag", "set_capture_input_on_drag"),
+            )
+            .property(
+                PropertyInfo::new("input_ray_pickable", Variant::Bool(true))
+                    .with_accessors("is_ray_pickable", "set_ray_pickable"),
+            ),
     );
 
     register_class(
@@ -2514,14 +2752,26 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("StaticBody3D")
             .parent("PhysicsBody3D")
-            .property(PropertyInfo::new(
-                "constant_angular_velocity",
-                Variant::Vector3(gdcore::math::Vector3::new(0.0, 0.0, 0.0)),
-            ))
-            .property(PropertyInfo::new(
-                "constant_linear_velocity",
-                Variant::Vector3(gdcore::math::Vector3::new(0.0, 0.0, 0.0)),
-            )),
+            .property(
+                PropertyInfo::new(
+                    "constant_angular_velocity",
+                    Variant::Vector3(gdcore::math::Vector3::new(0.0, 0.0, 0.0)),
+                )
+                .with_accessors(
+                    "get_constant_angular_velocity",
+                    "set_constant_angular_velocity",
+                ),
+            )
+            .property(
+                PropertyInfo::new(
+                    "constant_linear_velocity",
+                    Variant::Vector3(gdcore::math::Vector3::new(0.0, 0.0, 0.0)),
+                )
+                .with_accessors(
+                    "get_constant_linear_velocity",
+                    "set_constant_linear_velocity",
+                ),
+            ),
     );
 
     // The 3D twin of AnimatableBody2D (pat-s3rrv.93); same parent-chain and
@@ -2797,28 +3047,60 @@ pub fn register_3d_classes() {
                 PropertyInfo::new("freeze", Variant::Bool(false))
                     .with_accessors("is_freeze_enabled", "set_freeze_enabled"),
             )
-            .property(PropertyInfo::new("angular_damp", Variant::Float(0.0)))
-            .property(PropertyInfo::new("angular_damp_mode", Variant::Int(0)))
-            .property(PropertyInfo::new(
-                "angular_velocity",
-                Variant::Vector3(gdcore::math::Vector3::new(0.0, 0.0, 0.0)),
-            ))
-            .property(PropertyInfo::new("can_sleep", Variant::Bool(true)))
-            .property(PropertyInfo::new(
-                "center_of_mass",
-                Variant::Vector3(gdcore::math::Vector3::new(0.0, 0.0, 0.0)),
-            ))
-            .property(PropertyInfo::new("center_of_mass_mode", Variant::Int(0)))
-            .property(PropertyInfo::new(
-                "constant_force",
-                Variant::Vector3(gdcore::math::Vector3::new(0.0, 0.0, 0.0)),
-            ))
-            .property(PropertyInfo::new(
-                "constant_torque",
-                Variant::Vector3(gdcore::math::Vector3::new(0.0, 0.0, 0.0)),
-            ))
-            .property(PropertyInfo::new("contact_monitor", Variant::Bool(false)))
-            .property(PropertyInfo::new("continuous_cd", Variant::Bool(false)))
+            .property(
+                PropertyInfo::new("angular_damp", Variant::Float(0.0))
+                    .with_accessors("get_angular_damp", "set_angular_damp"),
+            )
+            .property(
+                PropertyInfo::new("angular_damp_mode", Variant::Int(0))
+                    .with_accessors("get_angular_damp_mode", "set_angular_damp_mode"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "angular_velocity",
+                    Variant::Vector3(gdcore::math::Vector3::new(0.0, 0.0, 0.0)),
+                )
+                .with_accessors("get_angular_velocity", "set_angular_velocity"),
+            )
+            .property(
+                PropertyInfo::new("can_sleep", Variant::Bool(true))
+                    .with_accessors("is_able_to_sleep", "set_can_sleep"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "center_of_mass",
+                    Variant::Vector3(gdcore::math::Vector3::new(0.0, 0.0, 0.0)),
+                )
+                .with_accessors("get_center_of_mass", "set_center_of_mass"),
+            )
+            .property(
+                PropertyInfo::new("center_of_mass_mode", Variant::Int(0))
+                    .with_accessors("get_center_of_mass_mode", "set_center_of_mass_mode"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "constant_force",
+                    Variant::Vector3(gdcore::math::Vector3::new(0.0, 0.0, 0.0)),
+                )
+                .with_accessors("get_constant_force", "set_constant_force"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "constant_torque",
+                    Variant::Vector3(gdcore::math::Vector3::new(0.0, 0.0, 0.0)),
+                )
+                .with_accessors("get_constant_torque", "set_constant_torque"),
+            )
+            .property(
+                PropertyInfo::new("contact_monitor", Variant::Bool(false))
+                    .with_accessors("is_contact_monitor_enabled", "set_contact_monitor"),
+            )
+            .property(
+                PropertyInfo::new("continuous_cd", Variant::Bool(false)).with_accessors(
+                    "is_using_continuous_collision_detection",
+                    "set_use_continuous_collision_detection",
+                ),
+            )
             // Accessors match RigidBody2D's entry and Godot's
             // `set_use_custom_integrator` / `is_using_custom_integrator`. The 3D
             // registration carried the property but no accessors, so
@@ -2828,20 +3110,44 @@ pub fn register_3d_classes() {
                 PropertyInfo::new("custom_integrator", Variant::Bool(false))
                     .with_accessors("is_using_custom_integrator", "set_use_custom_integrator"),
             )
-            .property(PropertyInfo::new("freeze_mode", Variant::Int(0)))
-            .property(PropertyInfo::new(
-                "inertia",
-                Variant::Vector3(gdcore::math::Vector3::new(0.0, 0.0, 0.0)),
-            ))
-            .property(PropertyInfo::new("linear_damp", Variant::Float(0.0)))
-            .property(PropertyInfo::new("linear_damp_mode", Variant::Int(0)))
-            .property(PropertyInfo::new(
-                "linear_velocity",
-                Variant::Vector3(gdcore::math::Vector3::new(0.0, 0.0, 0.0)),
-            ))
-            .property(PropertyInfo::new("lock_rotation", Variant::Bool(false)))
-            .property(PropertyInfo::new("max_contacts_reported", Variant::Int(0)))
-            .property(PropertyInfo::new("sleeping", Variant::Bool(false))),
+            .property(
+                PropertyInfo::new("freeze_mode", Variant::Int(0))
+                    .with_accessors("get_freeze_mode", "set_freeze_mode"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "inertia",
+                    Variant::Vector3(gdcore::math::Vector3::new(0.0, 0.0, 0.0)),
+                )
+                .with_accessors("get_inertia", "set_inertia"),
+            )
+            .property(
+                PropertyInfo::new("linear_damp", Variant::Float(0.0))
+                    .with_accessors("get_linear_damp", "set_linear_damp"),
+            )
+            .property(
+                PropertyInfo::new("linear_damp_mode", Variant::Int(0))
+                    .with_accessors("get_linear_damp_mode", "set_linear_damp_mode"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "linear_velocity",
+                    Variant::Vector3(gdcore::math::Vector3::new(0.0, 0.0, 0.0)),
+                )
+                .with_accessors("get_linear_velocity", "set_linear_velocity"),
+            )
+            .property(
+                PropertyInfo::new("lock_rotation", Variant::Bool(false))
+                    .with_accessors("is_lock_rotation_enabled", "set_lock_rotation_enabled"),
+            )
+            .property(
+                PropertyInfo::new("max_contacts_reported", Variant::Int(0))
+                    .with_accessors("get_max_contacts_reported", "set_max_contacts_reported"),
+            )
+            .property(
+                PropertyInfo::new("sleeping", Variant::Bool(false))
+                    .with_accessors("is_sleeping", "set_sleeping"),
+            ),
     );
 
     register_class(
@@ -2855,37 +3161,69 @@ pub fn register_3d_classes() {
                 PropertyInfo::new("floor_max_angle", Variant::Float(0.785398))
                     .with_accessors("get_floor_max_angle", "set_floor_max_angle"),
             )
-            .property(PropertyInfo::new(
-                "floor_block_on_wall",
-                Variant::Bool(true),
-            ))
-            .property(PropertyInfo::new(
-                "floor_constant_speed",
-                Variant::Bool(false),
-            ))
-            .property(PropertyInfo::new("floor_snap_length", Variant::Float(0.1)))
-            .property(PropertyInfo::new(
-                "floor_stop_on_slope",
-                Variant::Bool(true),
-            ))
-            .property(PropertyInfo::new("max_slides", Variant::Int(6)))
-            .property(PropertyInfo::new("motion_mode", Variant::Int(0)))
-            .property(PropertyInfo::new(
-                "platform_floor_layers",
-                Variant::Int(4294967295),
-            ))
-            .property(PropertyInfo::new("platform_on_leave", Variant::Int(0)))
-            .property(PropertyInfo::new("platform_wall_layers", Variant::Int(0)))
-            .property(PropertyInfo::new("safe_margin", Variant::Float(0.001)))
-            .property(PropertyInfo::new("slide_on_ceiling", Variant::Bool(true)))
-            .property(PropertyInfo::new(
-                "up_direction",
-                Variant::Vector3(gdcore::math::Vector3::new(0.0, 1.0, 0.0)),
-            ))
-            .property(PropertyInfo::new(
-                "wall_min_slide_angle",
-                Variant::Float(0.2617994),
-            )),
+            .property(
+                PropertyInfo::new("floor_block_on_wall", Variant::Bool(true)).with_accessors(
+                    "is_floor_block_on_wall_enabled",
+                    "set_floor_block_on_wall_enabled",
+                ),
+            )
+            .property(
+                PropertyInfo::new("floor_constant_speed", Variant::Bool(false)).with_accessors(
+                    "is_floor_constant_speed_enabled",
+                    "set_floor_constant_speed_enabled",
+                ),
+            )
+            .property(
+                PropertyInfo::new("floor_snap_length", Variant::Float(0.1))
+                    .with_accessors("get_floor_snap_length", "set_floor_snap_length"),
+            )
+            .property(
+                PropertyInfo::new("floor_stop_on_slope", Variant::Bool(true)).with_accessors(
+                    "is_floor_stop_on_slope_enabled",
+                    "set_floor_stop_on_slope_enabled",
+                ),
+            )
+            .property(
+                PropertyInfo::new("max_slides", Variant::Int(6))
+                    .with_accessors("get_max_slides", "set_max_slides"),
+            )
+            .property(
+                PropertyInfo::new("motion_mode", Variant::Int(0))
+                    .with_accessors("get_motion_mode", "set_motion_mode"),
+            )
+            .property(
+                PropertyInfo::new("platform_floor_layers", Variant::Int(4294967295))
+                    .with_accessors("get_platform_floor_layers", "set_platform_floor_layers"),
+            )
+            .property(
+                PropertyInfo::new("platform_on_leave", Variant::Int(0))
+                    .with_accessors("get_platform_on_leave", "set_platform_on_leave"),
+            )
+            .property(
+                PropertyInfo::new("platform_wall_layers", Variant::Int(0))
+                    .with_accessors("get_platform_wall_layers", "set_platform_wall_layers"),
+            )
+            .property(
+                PropertyInfo::new("safe_margin", Variant::Float(0.001))
+                    .with_accessors("get_safe_margin", "set_safe_margin"),
+            )
+            .property(
+                PropertyInfo::new("slide_on_ceiling", Variant::Bool(true)).with_accessors(
+                    "is_slide_on_ceiling_enabled",
+                    "set_slide_on_ceiling_enabled",
+                ),
+            )
+            .property(
+                PropertyInfo::new(
+                    "up_direction",
+                    Variant::Vector3(gdcore::math::Vector3::new(0.0, 1.0, 0.0)),
+                )
+                .with_accessors("get_up_direction", "set_up_direction"),
+            )
+            .property(
+                PropertyInfo::new("wall_min_slide_angle", Variant::Float(0.2617994))
+                    .with_accessors("get_wall_min_slide_angle", "set_wall_min_slide_angle"),
+            ),
     );
 
     register_class(
@@ -2931,49 +3269,85 @@ pub fn register_3d_classes() {
                 PropertyInfo::new("monitorable", Variant::Bool(true))
                     .with_accessors("is_monitorable", "set_monitorable"),
             )
-            .property(PropertyInfo::new("angular_damp", Variant::Float(0.1)))
-            .property(PropertyInfo::new(
-                "angular_damp_space_override",
-                Variant::Int(0),
-            ))
-            .property(PropertyInfo::new("gravity", Variant::Float(9.8)))
-            .property(PropertyInfo::new(
-                "gravity_direction",
-                Variant::Vector3(gdcore::math::Vector3::new(0.0, -1.0, 0.0)),
-            ))
-            .property(PropertyInfo::new("gravity_point", Variant::Bool(false)))
-            .property(PropertyInfo::new(
-                "gravity_point_center",
-                Variant::Vector3(gdcore::math::Vector3::new(0.0, -1.0, 0.0)),
-            ))
-            .property(PropertyInfo::new(
-                "gravity_point_unit_distance",
-                Variant::Float(0.0),
-            ))
-            .property(PropertyInfo::new("gravity_space_override", Variant::Int(0)))
-            .property(PropertyInfo::new("linear_damp", Variant::Float(0.1)))
-            .property(PropertyInfo::new(
-                "linear_damp_space_override",
-                Variant::Int(0),
-            ))
-            .property(PropertyInfo::new("priority", Variant::Int(0)))
-            .property(PropertyInfo::new("reverb_bus_amount", Variant::Float(0.0)))
-            .property(PropertyInfo::new(
-                "reverb_bus_enabled",
-                Variant::Bool(false),
-            ))
-            .property(PropertyInfo::new(
-                "reverb_bus_uniformity",
-                Variant::Float(0.0),
-            ))
-            .property(PropertyInfo::new(
-                "wind_attenuation_factor",
-                Variant::Float(0.0),
-            ))
-            .property(PropertyInfo::new(
-                "wind_force_magnitude",
-                Variant::Float(0.0),
-            ))
+            .property(
+                PropertyInfo::new("angular_damp", Variant::Float(0.1))
+                    .with_accessors("get_angular_damp", "set_angular_damp"),
+            )
+            .property(
+                PropertyInfo::new("angular_damp_space_override", Variant::Int(0)).with_accessors(
+                    "get_angular_damp_space_override_mode",
+                    "set_angular_damp_space_override_mode",
+                ),
+            )
+            .property(
+                PropertyInfo::new("gravity", Variant::Float(9.8))
+                    .with_accessors("get_gravity", "set_gravity"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "gravity_direction",
+                    Variant::Vector3(gdcore::math::Vector3::new(0.0, -1.0, 0.0)),
+                )
+                .with_accessors("get_gravity_direction", "set_gravity_direction"),
+            )
+            .property(
+                PropertyInfo::new("gravity_point", Variant::Bool(false))
+                    .with_accessors("is_gravity_a_point", "set_gravity_is_point"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "gravity_point_center",
+                    Variant::Vector3(gdcore::math::Vector3::new(0.0, -1.0, 0.0)),
+                )
+                .with_accessors("get_gravity_point_center", "set_gravity_point_center"),
+            )
+            .property(
+                PropertyInfo::new("gravity_point_unit_distance", Variant::Float(0.0))
+                    .with_accessors(
+                        "get_gravity_point_unit_distance",
+                        "set_gravity_point_unit_distance",
+                    ),
+            )
+            .property(
+                PropertyInfo::new("gravity_space_override", Variant::Int(0)).with_accessors(
+                    "get_gravity_space_override_mode",
+                    "set_gravity_space_override_mode",
+                ),
+            )
+            .property(
+                PropertyInfo::new("linear_damp", Variant::Float(0.1))
+                    .with_accessors("get_linear_damp", "set_linear_damp"),
+            )
+            .property(
+                PropertyInfo::new("linear_damp_space_override", Variant::Int(0)).with_accessors(
+                    "get_linear_damp_space_override_mode",
+                    "set_linear_damp_space_override_mode",
+                ),
+            )
+            .property(
+                PropertyInfo::new("priority", Variant::Int(0))
+                    .with_accessors("get_priority", "set_priority"),
+            )
+            .property(
+                PropertyInfo::new("reverb_bus_amount", Variant::Float(0.0))
+                    .with_accessors("get_reverb_amount", "set_reverb_amount"),
+            )
+            .property(
+                PropertyInfo::new("reverb_bus_enabled", Variant::Bool(false))
+                    .with_accessors("is_using_reverb_bus", "set_use_reverb_bus"),
+            )
+            .property(
+                PropertyInfo::new("reverb_bus_uniformity", Variant::Float(0.0))
+                    .with_accessors("get_reverb_uniformity", "set_reverb_uniformity"),
+            )
+            .property(
+                PropertyInfo::new("wind_attenuation_factor", Variant::Float(0.0))
+                    .with_accessors("get_wind_attenuation_factor", "set_wind_attenuation_factor"),
+            )
+            .property(
+                PropertyInfo::new("wind_force_magnitude", Variant::Float(0.0))
+                    .with_accessors("get_wind_force_magnitude", "set_wind_force_magnitude"),
+            )
             // Same audio-bus surface as Area2D (pat-0q2kx.189). `gdaudio`'s
             // reroute path is written against Area3D specifically, so this is
             // the class whose properties it was already looking for.
@@ -3020,10 +3394,13 @@ pub fn register_3d_classes() {
                 PropertyInfo::new("disabled", Variant::Bool(false))
                     .with_accessors("is_disabled", "set_disabled"),
             )
-            .property(PropertyInfo::new(
-                "debug_color",
-                Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 0.0)),
-            ))
+            .property(
+                PropertyInfo::new(
+                    "debug_color",
+                    Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 0.0)),
+                )
+                .with_accessors("get_debug_color", "set_debug_color"),
+            )
             .property(PropertyInfo::new("debug_fill", Variant::Bool(true))),
     );
 
@@ -3039,22 +3416,31 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("CollisionPolygon3D")
             .parent("Node3D")
-            .property(PropertyInfo::new(
-                "polygon",
-                Variant::PackedVector2Array(Vec::new()),
-            ))
+            .property(
+                PropertyInfo::new("polygon", Variant::PackedVector2Array(Vec::new()))
+                    .with_accessors("get_polygon", "set_polygon"),
+            )
             // Godot's default is 1.0, not 0: a zero depth would collapse the
             // extruded prism to a sheet.
-            .property(PropertyInfo::new("depth", Variant::Float(1.0)))
+            .property(
+                PropertyInfo::new("depth", Variant::Float(1.0))
+                    .with_accessors("get_depth", "set_depth"),
+            )
             .property(
                 PropertyInfo::new("disabled", Variant::Bool(false))
                     .with_accessors("is_disabled", "set_disabled"),
             )
-            .property(PropertyInfo::new("margin", Variant::Float(0.04)))
-            .property(PropertyInfo::new(
-                "debug_color",
-                Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 0.0)),
-            ))
+            .property(
+                PropertyInfo::new("margin", Variant::Float(0.04))
+                    .with_accessors("get_margin", "set_margin"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "debug_color",
+                    Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 0.0)),
+                )
+                .with_accessors("get_debug_color", "set_debug_color"),
+            )
             .property(
                 PropertyInfo::new("debug_fill", Variant::Bool(true))
                     .with_accessors("get_enable_debug_fill", "set_enable_debug_fill"),
@@ -3079,7 +3465,10 @@ pub fn register_3d_classes() {
                 PropertyInfo::new("margin", Variant::Float(0.04))
                     .with_accessors("get_margin", "set_margin"),
             )
-            .property(PropertyInfo::new("custom_solver_bias", Variant::Float(0.0))),
+            .property(
+                PropertyInfo::new("custom_solver_bias", Variant::Float(0.0))
+                    .with_accessors("get_custom_solver_bias", "set_custom_solver_bias"),
+            ),
     );
     register_class(
         ClassRegistration::new("SphereShape3D")
@@ -3092,10 +3481,13 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("BoxShape3D")
             .parent("Shape3D")
-            .property(PropertyInfo::new(
-                "size",
-                Variant::Vector3(gdcore::math::Vector3::new(1.0, 1.0, 1.0)),
-            )),
+            .property(
+                PropertyInfo::new(
+                    "size",
+                    Variant::Vector3(gdcore::math::Vector3::new(1.0, 1.0, 1.0)),
+                )
+                .with_accessors("get_size", "set_size"),
+            ),
     );
     register_class(
         ClassRegistration::new("CapsuleShape3D")
@@ -3125,17 +3517,25 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("ConcavePolygonShape3D")
             .parent("Shape3D")
-            .property(PropertyInfo::new(
-                "backface_collision",
-                Variant::Bool(false),
-            )),
+            .property(
+                PropertyInfo::new("backface_collision", Variant::Bool(false)).with_accessors(
+                    "is_backface_collision_enabled",
+                    "set_backface_collision_enabled",
+                ),
+            ),
     );
     register_class(ClassRegistration::new("WorldBoundaryShape3D").parent("Shape3D"));
     register_class(
         ClassRegistration::new("HeightMapShape3D")
             .parent("Shape3D")
-            .property(PropertyInfo::new("map_depth", Variant::Int(2)))
-            .property(PropertyInfo::new("map_width", Variant::Int(2))),
+            .property(
+                PropertyInfo::new("map_depth", Variant::Int(2))
+                    .with_accessors("get_map_depth", "set_map_depth"),
+            )
+            .property(
+                PropertyInfo::new("map_width", Variant::Int(2))
+                    .with_accessors("get_map_width", "set_map_width"),
+            ),
     );
     register_class(
         ClassRegistration::new("SeparationRayShape3D")
@@ -3189,11 +3589,20 @@ pub fn register_3d_classes() {
                 PropertyInfo::new("hit_from_inside", Variant::Bool(false))
                     .with_accessors("is_hit_from_inside_enabled", "set_hit_from_inside"),
             )
-            .property(PropertyInfo::new(
-                "debug_shape_custom_color",
-                Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0)),
-            ))
-            .property(PropertyInfo::new("debug_shape_thickness", Variant::Int(2))),
+            .property(
+                PropertyInfo::new(
+                    "debug_shape_custom_color",
+                    Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0)),
+                )
+                .with_accessors(
+                    "get_debug_shape_custom_color",
+                    "set_debug_shape_custom_color",
+                ),
+            )
+            .property(
+                PropertyInfo::new("debug_shape_thickness", Variant::Int(2))
+                    .with_accessors("get_debug_shape_thickness", "set_debug_shape_thickness"),
+            ),
     );
     register_class(
         ClassRegistration::new("ShapeCast3D")
@@ -3229,11 +3638,20 @@ pub fn register_3d_classes() {
                 PropertyInfo::new("max_results", Variant::Int(32))
                     .with_accessors("get_max_results", "set_max_results"),
             )
-            .property(PropertyInfo::new(
-                "debug_shape_custom_color",
-                Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0)),
-            ))
-            .property(PropertyInfo::new("margin", Variant::Float(0.0))),
+            .property(
+                PropertyInfo::new(
+                    "debug_shape_custom_color",
+                    Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0)),
+                )
+                .with_accessors(
+                    "get_debug_shape_custom_color",
+                    "set_debug_shape_custom_color",
+                ),
+            )
+            .property(
+                PropertyInfo::new("margin", Variant::Float(0.0))
+                    .with_accessors("get_margin", "set_margin"),
+            ),
     );
     register_class(
         ClassRegistration::new("SpringArm3D")
@@ -3257,7 +3675,10 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("Marker3D")
             .parent("Node3D")
-            .property(PropertyInfo::new("gizmo_extents", Variant::Float(0.25))),
+            .property(
+                PropertyInfo::new("gizmo_extents", Variant::Float(0.25))
+                    .with_accessors("get_gizmo_extents", "set_gizmo_extents"),
+            ),
     );
 
     // -- XR (pat-p0s82.29): high-use runtime class registered with defaults so
@@ -3341,11 +3762,16 @@ pub fn register_3d_classes() {
                 PropertyInfo::new("tracker", Variant::String(String::new()))
                     .with_accessors("get_tracker", "set_tracker"),
             )
-            .property(PropertyInfo::new(
-                "physics_interpolation_mode",
-                Variant::Int(2),
-            ))
-            .property(PropertyInfo::new("show_when_tracked", Variant::Bool(false))),
+            .property(
+                PropertyInfo::new("physics_interpolation_mode", Variant::Int(2)).with_accessors(
+                    "get_physics_interpolation_mode",
+                    "set_physics_interpolation_mode",
+                ),
+            )
+            .property(
+                PropertyInfo::new("show_when_tracked", Variant::Bool(false))
+                    .with_accessors("get_show_when_tracked", "set_show_when_tracked"),
+            ),
     );
     register_class(
         ClassRegistration::new("XRController3D")
@@ -3368,10 +3794,12 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("XRCamera3D")
             .parent("Camera3D")
-            .property(PropertyInfo::new(
-                "physics_interpolation_mode",
-                Variant::Int(2),
-            )),
+            .property(
+                PropertyInfo::new("physics_interpolation_mode", Variant::Int(2)).with_accessors(
+                    "get_physics_interpolation_mode",
+                    "set_physics_interpolation_mode",
+                ),
+            ),
     );
 
     // -- Additional 3D types --
@@ -3635,7 +4063,10 @@ pub fn register_3d_classes() {
                 PropertyInfo::new("vertices", Variant::Array(Default::default()))
                     .with_accessors("get_vertices", "set_vertices"),
             )
-            .property(PropertyInfo::new("use_3d_avoidance", Variant::Bool(false))),
+            .property(
+                PropertyInfo::new("use_3d_avoidance", Variant::Bool(false))
+                    .with_accessors("get_use_3d_avoidance", "set_use_3d_avoidance"),
+            ),
     );
     // Vehicle / soft body scene types (physics sim lives in gdphysics2d; pat-n1gh1).
     register_class(
@@ -3653,7 +4084,10 @@ pub fn register_3d_classes() {
                 PropertyInfo::new("steering", Variant::Float(0.0))
                     .with_accessors("get_steering", "set_steering"),
             )
-            .property(PropertyInfo::new("mass", Variant::Float(40.0))),
+            .property(
+                PropertyInfo::new("mass", Variant::Float(40.0))
+                    .with_accessors("get_mass", "set_mass"),
+            ),
     );
     register_class(
         // The full 14-property surface Godot exposes (pat-nzgdu.127). Names and
@@ -3691,10 +4125,12 @@ pub fn register_3d_classes() {
                 PropertyInfo::new("use_as_steering", Variant::Bool(false))
                     .with_accessors("is_used_as_steering", "set_use_as_steering"),
             )
-            .property(PropertyInfo::new(
-                "physics_interpolation_mode",
-                Variant::Int(2),
-            ))
+            .property(
+                PropertyInfo::new("physics_interpolation_mode", Variant::Int(2)).with_accessors(
+                    "get_physics_interpolation_mode",
+                    "set_physics_interpolation_mode",
+                ),
+            )
             // How much this wheel's suspension resists chassis roll in a turn.
             .property(
                 PropertyInfo::new("wheel_roll_influence", Variant::Float(0.1))
@@ -3759,12 +4195,30 @@ pub fn register_3d_classes() {
                 PropertyInfo::new("damping_coefficient", Variant::Float(0.01))
                     .with_accessors("get_damping_coefficient", "set_damping_coefficient"),
             )
-            .property(PropertyInfo::new("collision_layer", Variant::Int(1)))
-            .property(PropertyInfo::new("collision_mask", Variant::Int(1)))
-            .property(PropertyInfo::new("disable_mode", Variant::Int(0)))
-            .property(PropertyInfo::new("drag_coefficient", Variant::Float(0.0)))
-            .property(PropertyInfo::new("ray_pickable", Variant::Bool(true)))
-            .property(PropertyInfo::new("shrinking_factor", Variant::Float(0.0))),
+            .property(
+                PropertyInfo::new("collision_layer", Variant::Int(1))
+                    .with_accessors("get_collision_layer", "set_collision_layer"),
+            )
+            .property(
+                PropertyInfo::new("collision_mask", Variant::Int(1))
+                    .with_accessors("get_collision_mask", "set_collision_mask"),
+            )
+            .property(
+                PropertyInfo::new("disable_mode", Variant::Int(0))
+                    .with_accessors("get_disable_mode", "set_disable_mode"),
+            )
+            .property(
+                PropertyInfo::new("drag_coefficient", Variant::Float(0.0))
+                    .with_accessors("get_drag_coefficient", "set_drag_coefficient"),
+            )
+            .property(
+                PropertyInfo::new("ray_pickable", Variant::Bool(true))
+                    .with_accessors("is_ray_pickable", "set_ray_pickable"),
+            )
+            .property(
+                PropertyInfo::new("shrinking_factor", Variant::Float(0.0))
+                    .with_accessors("get_shrinking_factor", "set_shrinking_factor"),
+            ),
     );
     // Skeleton3D's real member surface (pat-s3rrv.23).
     //
@@ -3844,21 +4298,32 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("BoneAttachment3D")
             .parent("Node3D")
-            .property(PropertyInfo::new(
-                "bone_name",
-                Variant::String(String::new()),
-            ))
-            .property(PropertyInfo::new("bone_idx", Variant::Int(-1)))
-            .property(PropertyInfo::new("override_pose", Variant::Bool(false)))
-            .property(PropertyInfo::new(
-                "use_external_skeleton",
-                Variant::Bool(false),
-            ))
-            .property(PropertyInfo::new("external_skeleton", Variant::Nil))
-            .property(PropertyInfo::new(
-                "physics_interpolation_mode",
-                Variant::Int(2),
-            )),
+            .property(
+                PropertyInfo::new("bone_name", Variant::String(String::new()))
+                    .with_accessors("get_bone_name", "set_bone_name"),
+            )
+            .property(
+                PropertyInfo::new("bone_idx", Variant::Int(-1))
+                    .with_accessors("get_bone_idx", "set_bone_idx"),
+            )
+            .property(
+                PropertyInfo::new("override_pose", Variant::Bool(false))
+                    .with_accessors("get_override_pose", "set_override_pose"),
+            )
+            .property(
+                PropertyInfo::new("use_external_skeleton", Variant::Bool(false))
+                    .with_accessors("get_use_external_skeleton", "set_use_external_skeleton"),
+            )
+            .property(
+                PropertyInfo::new("external_skeleton", Variant::Nil)
+                    .with_accessors("get_external_skeleton", "set_external_skeleton"),
+            )
+            .property(
+                PropertyInfo::new("physics_interpolation_mode", Variant::Int(2)).with_accessors(
+                    "get_physics_interpolation_mode",
+                    "set_physics_interpolation_mode",
+                ),
+            ),
     );
 
     // -- Skeleton modifier stack (pat-nzgdu.151, pat-nzgdu.182) ------------
@@ -4890,7 +5355,10 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("root_bone", Variant::Int(-1)))
             .property(PropertyInfo::new("tip_bone", Variant::Int(-1)))
             .property(PropertyInfo::new("iterations", Variant::Int(10)))
-            .property(PropertyInfo::new("mutable_bone_axes", Variant::Bool(true))),
+            .property(
+                PropertyInfo::new("mutable_bone_axes", Variant::Bool(true))
+                    .with_accessors("are_bone_axes_mutable", "set_mutable_bone_axes"),
+            ),
     );
     // Animation resources + the Node <- AnimationMixer <- Player/Tree chain
     // (pat-0q2kx.1). `Animation` and `AnimationLibrary` were absent entirely, so
@@ -5534,28 +6002,81 @@ pub fn register_3d_classes() {
                     .constant("TRANSFORM_ALIGN_Y_TO_VELOCITY", 2)
                     .constant("TRANSFORM_ALIGN_Z_BILLBOARD_Y_TO_VELOCITY", 3),
             )
-            .property(PropertyInfo::new("amount", Variant::Int(8)))
-            .property(PropertyInfo::new("amount_ratio", Variant::Float(1.0)))
-            .property(PropertyInfo::new(
-                "collision_base_size",
-                Variant::Float(0.01),
-            ))
-            .property(PropertyInfo::new("draw_order", Variant::Int(0)))
-            .property(PropertyInfo::new("draw_passes", Variant::Int(1)))
-            .property(PropertyInfo::new("emitting", Variant::Bool(true)))
-            .property(PropertyInfo::new("explosiveness", Variant::Float(0.0)))
-            .property(PropertyInfo::new("fixed_fps", Variant::Int(30)))
-            .property(PropertyInfo::new("fract_delta", Variant::Bool(true)))
-            .property(PropertyInfo::new("interp_to_end", Variant::Float(0.0)))
-            .property(PropertyInfo::new("interpolate", Variant::Bool(true)))
-            .property(PropertyInfo::new("lifetime", Variant::Float(1.0)))
-            .property(PropertyInfo::new("local_coords", Variant::Bool(false)))
-            .property(PropertyInfo::new("one_shot", Variant::Bool(false)))
-            .property(PropertyInfo::new("preprocess", Variant::Float(0.0)))
-            .property(PropertyInfo::new("randomness", Variant::Float(0.0)))
-            .property(PropertyInfo::new("seed", Variant::Int(0)))
-            .property(PropertyInfo::new("speed_scale", Variant::Float(1.0)))
-            .property(PropertyInfo::new("use_fixed_seed", Variant::Bool(false))),
+            .property(
+                PropertyInfo::new("amount", Variant::Int(8))
+                    .with_accessors("get_amount", "set_amount"),
+            )
+            .property(
+                PropertyInfo::new("amount_ratio", Variant::Float(1.0))
+                    .with_accessors("get_amount_ratio", "set_amount_ratio"),
+            )
+            .property(
+                PropertyInfo::new("collision_base_size", Variant::Float(0.01))
+                    .with_accessors("get_collision_base_size", "set_collision_base_size"),
+            )
+            .property(
+                PropertyInfo::new("draw_order", Variant::Int(0))
+                    .with_accessors("get_draw_order", "set_draw_order"),
+            )
+            .property(
+                PropertyInfo::new("draw_passes", Variant::Int(1))
+                    .with_accessors("get_draw_passes", "set_draw_passes"),
+            )
+            .property(
+                PropertyInfo::new("emitting", Variant::Bool(true))
+                    .with_accessors("is_emitting", "set_emitting"),
+            )
+            .property(
+                PropertyInfo::new("explosiveness", Variant::Float(0.0))
+                    .with_accessors("get_explosiveness_ratio", "set_explosiveness_ratio"),
+            )
+            .property(
+                PropertyInfo::new("fixed_fps", Variant::Int(30))
+                    .with_accessors("get_fixed_fps", "set_fixed_fps"),
+            )
+            .property(
+                PropertyInfo::new("fract_delta", Variant::Bool(true))
+                    .with_accessors("get_fractional_delta", "set_fractional_delta"),
+            )
+            .property(
+                PropertyInfo::new("interp_to_end", Variant::Float(0.0))
+                    .with_accessors("get_interp_to_end", "set_interp_to_end"),
+            )
+            .property(
+                PropertyInfo::new("interpolate", Variant::Bool(true))
+                    .with_accessors("get_interpolate", "set_interpolate"),
+            )
+            .property(
+                PropertyInfo::new("lifetime", Variant::Float(1.0))
+                    .with_accessors("get_lifetime", "set_lifetime"),
+            )
+            .property(
+                PropertyInfo::new("local_coords", Variant::Bool(false))
+                    .with_accessors("get_use_local_coordinates", "set_use_local_coordinates"),
+            )
+            .property(
+                PropertyInfo::new("one_shot", Variant::Bool(false))
+                    .with_accessors("get_one_shot", "set_one_shot"),
+            )
+            .property(
+                PropertyInfo::new("preprocess", Variant::Float(0.0))
+                    .with_accessors("get_pre_process_time", "set_pre_process_time"),
+            )
+            .property(
+                PropertyInfo::new("randomness", Variant::Float(0.0))
+                    .with_accessors("get_randomness_ratio", "set_randomness_ratio"),
+            )
+            .property(
+                PropertyInfo::new("seed", Variant::Int(0)).with_accessors("get_seed", "set_seed"),
+            )
+            .property(
+                PropertyInfo::new("speed_scale", Variant::Float(1.0))
+                    .with_accessors("get_speed_scale", "set_speed_scale"),
+            )
+            .property(
+                PropertyInfo::new("use_fixed_seed", Variant::Bool(false))
+                    .with_accessors("get_use_fixed_seed", "set_use_fixed_seed"),
+            ),
     );
 
     // -- GPU particle attractors (pat-nzgdu.144) ---------------------------
@@ -5726,6 +6247,32 @@ pub fn register_3d_classes() {
         ClassRegistration::new("CPUParticles3D")
             .signal(SignalInfo::new("finished"))
             .parent("GeometryInstance3D")
+            // pat-mgixk.31: `CPUParticles3D.Parameter`, the index
+            // `set_param_min`/`set_param_max` take. Without these a script
+            // cannot NAME the parameter, so the indexed accessors are
+            // unreachable from GDScript however they dispatch — the same
+            // prerequisite `Light3D.Param` and `PhysicsServer3D.BodyAxis` were.
+            //
+            // Sequential from zero: the enum in
+            // `upstream/godot/scene/3d/cpu_particles_3d.h` has no initialisers.
+            // Registered whole, PARAM_MAX included, because a partly-filled
+            // enum fails as `UndefinedVariable` only for the names left out.
+            .enumeration(
+                EnumInfo::new("Parameter")
+                    .constant("PARAM_INITIAL_LINEAR_VELOCITY", 0)
+                    .constant("PARAM_ANGULAR_VELOCITY", 1)
+                    .constant("PARAM_ORBIT_VELOCITY", 2)
+                    .constant("PARAM_LINEAR_ACCEL", 3)
+                    .constant("PARAM_RADIAL_ACCEL", 4)
+                    .constant("PARAM_TANGENTIAL_ACCEL", 5)
+                    .constant("PARAM_DAMPING", 6)
+                    .constant("PARAM_ANGLE", 7)
+                    .constant("PARAM_SCALE", 8)
+                    .constant("PARAM_HUE_VARIATION", 9)
+                    .constant("PARAM_ANIM_SPEED", 10)
+                    .constant("PARAM_ANIM_OFFSET", 11)
+                    .constant("PARAM_MAX", 12),
+            )
             .property(
                 PropertyInfo::new("angle_curve", Variant::Nil)
                     .with_accessors("get_param_curve", "set_param_curve"),
@@ -5856,7 +6403,10 @@ pub fn register_3d_classes() {
                 )
                 .with_accessors("get_visibility_aabb", "set_visibility_aabb"),
             )
-            .property(PropertyInfo::new("amount", Variant::Int(8)))
+            .property(
+                PropertyInfo::new("amount", Variant::Int(8))
+                    .with_accessors("get_amount", "set_amount"),
+            )
             .property(PropertyInfo::new("angle_max", Variant::Float(0.0)))
             .property(PropertyInfo::new("angle_min", Variant::Float(0.0)))
             .property(PropertyInfo::new(
@@ -5873,13 +6423,34 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new("anim_speed_min", Variant::Float(0.0)))
             .property(PropertyInfo::new("damping_max", Variant::Float(0.0)))
             .property(PropertyInfo::new("damping_min", Variant::Float(0.0)))
-            .property(PropertyInfo::new("draw_order", Variant::Int(0)))
-            .property(PropertyInfo::new("emission_shape", Variant::Int(0)))
-            .property(PropertyInfo::new("emitting", Variant::Bool(true)))
-            .property(PropertyInfo::new("explosiveness", Variant::Float(0.0)))
-            .property(PropertyInfo::new("fixed_fps", Variant::Int(0)))
-            .property(PropertyInfo::new("flatness", Variant::Float(0.0)))
-            .property(PropertyInfo::new("fract_delta", Variant::Bool(true)))
+            .property(
+                PropertyInfo::new("draw_order", Variant::Int(0))
+                    .with_accessors("get_draw_order", "set_draw_order"),
+            )
+            .property(
+                PropertyInfo::new("emission_shape", Variant::Int(0))
+                    .with_accessors("get_emission_shape", "set_emission_shape"),
+            )
+            .property(
+                PropertyInfo::new("emitting", Variant::Bool(true))
+                    .with_accessors("is_emitting", "set_emitting"),
+            )
+            .property(
+                PropertyInfo::new("explosiveness", Variant::Float(0.0))
+                    .with_accessors("get_explosiveness_ratio", "set_explosiveness_ratio"),
+            )
+            .property(
+                PropertyInfo::new("fixed_fps", Variant::Int(0))
+                    .with_accessors("get_fixed_fps", "set_fixed_fps"),
+            )
+            .property(
+                PropertyInfo::new("flatness", Variant::Float(0.0))
+                    .with_accessors("get_flatness", "set_flatness"),
+            )
+            .property(
+                PropertyInfo::new("fract_delta", Variant::Bool(true))
+                    .with_accessors("get_fractional_delta", "set_fractional_delta"),
+            )
             .property(PropertyInfo::new("hue_variation_max", Variant::Float(0.0)))
             .property(PropertyInfo::new("hue_variation_min", Variant::Float(0.0)))
             .property(PropertyInfo::new(
@@ -5890,15 +6461,24 @@ pub fn register_3d_classes() {
                 "initial_velocity_min",
                 Variant::Float(0.0),
             ))
-            .property(PropertyInfo::new("lifetime", Variant::Float(1.0)))
-            .property(PropertyInfo::new(
-                "lifetime_randomness",
-                Variant::Float(0.0),
-            ))
+            .property(
+                PropertyInfo::new("lifetime", Variant::Float(1.0))
+                    .with_accessors("get_lifetime", "set_lifetime"),
+            )
+            .property(
+                PropertyInfo::new("lifetime_randomness", Variant::Float(0.0))
+                    .with_accessors("get_lifetime_randomness", "set_lifetime_randomness"),
+            )
             .property(PropertyInfo::new("linear_accel_max", Variant::Float(0.0)))
             .property(PropertyInfo::new("linear_accel_min", Variant::Float(0.0)))
-            .property(PropertyInfo::new("local_coords", Variant::Bool(false)))
-            .property(PropertyInfo::new("one_shot", Variant::Bool(false)))
+            .property(
+                PropertyInfo::new("local_coords", Variant::Bool(false))
+                    .with_accessors("get_use_local_coordinates", "set_use_local_coordinates"),
+            )
+            .property(
+                PropertyInfo::new("one_shot", Variant::Bool(false))
+                    .with_accessors("get_one_shot", "set_one_shot"),
+            )
             .property(PropertyInfo::new(
                 "particle_flag_align_y",
                 Variant::Bool(false),
@@ -5911,16 +6491,33 @@ pub fn register_3d_classes() {
                 "particle_flag_rotate_y",
                 Variant::Bool(false),
             ))
-            .property(PropertyInfo::new("preprocess", Variant::Float(0.0)))
+            .property(
+                PropertyInfo::new("preprocess", Variant::Float(0.0))
+                    .with_accessors("get_pre_process_time", "set_pre_process_time"),
+            )
             .property(PropertyInfo::new("radial_accel_max", Variant::Float(0.0)))
             .property(PropertyInfo::new("radial_accel_min", Variant::Float(0.0)))
-            .property(PropertyInfo::new("randomness", Variant::Float(0.0)))
+            .property(
+                PropertyInfo::new("randomness", Variant::Float(0.0))
+                    .with_accessors("get_randomness_ratio", "set_randomness_ratio"),
+            )
             .property(PropertyInfo::new("scale_amount_max", Variant::Float(1.0)))
             .property(PropertyInfo::new("scale_amount_min", Variant::Float(1.0)))
-            .property(PropertyInfo::new("seed", Variant::Int(0)))
-            .property(PropertyInfo::new("speed_scale", Variant::Float(1.0)))
-            .property(PropertyInfo::new("split_scale", Variant::Bool(false)))
-            .property(PropertyInfo::new("spread", Variant::Float(45.0)))
+            .property(
+                PropertyInfo::new("seed", Variant::Int(0)).with_accessors("get_seed", "set_seed"),
+            )
+            .property(
+                PropertyInfo::new("speed_scale", Variant::Float(1.0))
+                    .with_accessors("get_speed_scale", "set_speed_scale"),
+            )
+            .property(
+                PropertyInfo::new("split_scale", Variant::Bool(false))
+                    .with_accessors("get_split_scale", "set_split_scale"),
+            )
+            .property(
+                PropertyInfo::new("spread", Variant::Float(45.0))
+                    .with_accessors("get_spread", "set_spread"),
+            )
             .property(PropertyInfo::new(
                 "tangential_accel_max",
                 Variant::Float(0.0),
@@ -5929,19 +6526,31 @@ pub fn register_3d_classes() {
                 "tangential_accel_min",
                 Variant::Float(0.0),
             ))
-            .property(PropertyInfo::new("use_fixed_seed", Variant::Bool(false)))
-            .property(PropertyInfo::new(
-                "color",
-                Variant::Color(gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0)),
-            ))
-            .property(PropertyInfo::new(
-                "direction",
-                Variant::Vector3(gdcore::math::Vector3::new(1.0, 0.0, 0.0)),
-            ))
-            .property(PropertyInfo::new(
-                "gravity",
-                Variant::Vector3(gdcore::math::Vector3::new(0.0, -9.8, 0.0)),
-            )),
+            .property(
+                PropertyInfo::new("use_fixed_seed", Variant::Bool(false))
+                    .with_accessors("get_use_fixed_seed", "set_use_fixed_seed"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "color",
+                    Variant::Color(gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0)),
+                )
+                .with_accessors("get_color", "set_color"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "direction",
+                    Variant::Vector3(gdcore::math::Vector3::new(1.0, 0.0, 0.0)),
+                )
+                .with_accessors("get_direction", "set_direction"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "gravity",
+                    Variant::Vector3(gdcore::math::Vector3::new(0.0, -9.8, 0.0)),
+                )
+                .with_accessors("get_gravity", "set_gravity"),
+            ),
     );
     // -- Environment probe / decal nodes (pat-0q2kx.195) ---------------------
     //
@@ -6726,12 +7335,30 @@ pub fn register_3d_classes() {
             .parent("GeometryInstance3D")
             .abstract_class()
             // `operation`: 0 UNION, 1 INTERSECTION, 2 SUBTRACTION.
-            .property(PropertyInfo::new("operation", Variant::Int(0)))
-            .property(PropertyInfo::new("use_collision", Variant::Bool(false)))
-            .property(PropertyInfo::new("collision_layer", Variant::Int(1)))
-            .property(PropertyInfo::new("collision_mask", Variant::Int(1)))
-            .property(PropertyInfo::new("collision_priority", Variant::Float(1.0)))
-            .property(PropertyInfo::new("calculate_tangents", Variant::Bool(true))),
+            .property(
+                PropertyInfo::new("operation", Variant::Int(0))
+                    .with_accessors("get_operation", "set_operation"),
+            )
+            .property(
+                PropertyInfo::new("use_collision", Variant::Bool(false))
+                    .with_accessors("is_using_collision", "set_use_collision"),
+            )
+            .property(
+                PropertyInfo::new("collision_layer", Variant::Int(1))
+                    .with_accessors("get_collision_layer", "set_collision_layer"),
+            )
+            .property(
+                PropertyInfo::new("collision_mask", Variant::Int(1))
+                    .with_accessors("get_collision_mask", "set_collision_mask"),
+            )
+            .property(
+                PropertyInfo::new("collision_priority", Variant::Float(1.0))
+                    .with_accessors("get_collision_priority", "set_collision_priority"),
+            )
+            .property(
+                PropertyInfo::new("calculate_tangents", Variant::Bool(true))
+                    .with_accessors("is_calculating_tangents", "set_calculate_tangents"),
+            ),
     );
     register_class(
         ClassRegistration::new("CSGPrimitive3D")
@@ -6744,35 +7371,68 @@ pub fn register_3d_classes() {
             // it would break green tests to fix a box that over-reports one
             // property. Recorded rather than silently corrected.
             .property(PropertyInfo::new("smooth_faces", Variant::Bool(true)))
-            .property(PropertyInfo::new("flip_faces", Variant::Bool(false))),
+            .property(
+                PropertyInfo::new("flip_faces", Variant::Bool(false))
+                    .with_accessors("get_flip_faces", "set_flip_faces"),
+            ),
     );
     register_class(
         ClassRegistration::new("CSGBox3D")
             .parent("CSGPrimitive3D")
-            .property(PropertyInfo::new(
-                "size",
-                Variant::Vector3(gdcore::math::Vector3::ONE),
-            ))
+            .property(
+                PropertyInfo::new("size", Variant::Vector3(gdcore::math::Vector3::ONE))
+                    .with_accessors("get_size", "set_size"),
+            )
             // Resource-valued members register as `Nil`, the convention the
             // rest of this file already uses for object properties.
-            .property(PropertyInfo::new("material", Variant::Nil)),
+            .property(
+                PropertyInfo::new("material", Variant::Nil)
+                    .with_accessors("get_material", "set_material"),
+            ),
     );
     register_class(
         ClassRegistration::new("CSGSphere3D")
             .parent("CSGPrimitive3D")
-            .property(PropertyInfo::new("radius", Variant::Float(0.5)))
-            .property(PropertyInfo::new("radial_segments", Variant::Int(12)))
-            .property(PropertyInfo::new("rings", Variant::Int(6)))
-            .property(PropertyInfo::new("material", Variant::Nil)),
+            .property(
+                PropertyInfo::new("radius", Variant::Float(0.5))
+                    .with_accessors("get_radius", "set_radius"),
+            )
+            .property(
+                PropertyInfo::new("radial_segments", Variant::Int(12))
+                    .with_accessors("get_radial_segments", "set_radial_segments"),
+            )
+            .property(
+                PropertyInfo::new("rings", Variant::Int(6))
+                    .with_accessors("get_rings", "set_rings"),
+            )
+            .property(
+                PropertyInfo::new("material", Variant::Nil)
+                    .with_accessors("get_material", "set_material"),
+            ),
     );
     register_class(
         ClassRegistration::new("CSGCylinder3D")
             .parent("CSGPrimitive3D")
-            .property(PropertyInfo::new("radius", Variant::Float(0.5)))
-            .property(PropertyInfo::new("height", Variant::Float(2.0)))
-            .property(PropertyInfo::new("sides", Variant::Int(8)))
-            .property(PropertyInfo::new("cone", Variant::Bool(false)))
-            .property(PropertyInfo::new("material", Variant::Nil)),
+            .property(
+                PropertyInfo::new("radius", Variant::Float(0.5))
+                    .with_accessors("get_radius", "set_radius"),
+            )
+            .property(
+                PropertyInfo::new("height", Variant::Float(2.0))
+                    .with_accessors("get_height", "set_height"),
+            )
+            .property(
+                PropertyInfo::new("sides", Variant::Int(8))
+                    .with_accessors("get_sides", "set_sides"),
+            )
+            .property(
+                PropertyInfo::new("cone", Variant::Bool(false))
+                    .with_accessors("is_cone", "set_cone"),
+            )
+            .property(
+                PropertyInfo::new("material", Variant::Nil)
+                    .with_accessors("get_material", "set_material"),
+            ),
     );
 
     // The three CSG primitives that were absent entirely (pat-0q2kx.194).
@@ -6787,66 +7447,133 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("CSGTorus3D")
             .parent("CSGPrimitive3D")
-            .property(PropertyInfo::new("inner_radius", Variant::Float(0.5)))
-            .property(PropertyInfo::new("outer_radius", Variant::Float(1.0)))
-            .property(PropertyInfo::new("sides", Variant::Int(8)))
-            .property(PropertyInfo::new("ring_sides", Variant::Int(6)))
-            .property(PropertyInfo::new("smooth_faces", Variant::Bool(true)))
-            .property(PropertyInfo::new("material", Variant::Nil)),
+            .property(
+                PropertyInfo::new("inner_radius", Variant::Float(0.5))
+                    .with_accessors("get_inner_radius", "set_inner_radius"),
+            )
+            .property(
+                PropertyInfo::new("outer_radius", Variant::Float(1.0))
+                    .with_accessors("get_outer_radius", "set_outer_radius"),
+            )
+            .property(
+                PropertyInfo::new("sides", Variant::Int(8))
+                    .with_accessors("get_sides", "set_sides"),
+            )
+            .property(
+                PropertyInfo::new("ring_sides", Variant::Int(6))
+                    .with_accessors("get_ring_sides", "set_ring_sides"),
+            )
+            .property(
+                PropertyInfo::new("smooth_faces", Variant::Bool(true))
+                    .with_accessors("get_smooth_faces", "set_smooth_faces"),
+            )
+            .property(
+                PropertyInfo::new("material", Variant::Nil)
+                    .with_accessors("get_material", "set_material"),
+            ),
     );
     register_class(
         ClassRegistration::new("CSGMesh3D")
             .parent("CSGPrimitive3D")
-            .property(PropertyInfo::new("mesh", Variant::Nil))
-            .property(PropertyInfo::new("material", Variant::Nil)),
+            .property(
+                PropertyInfo::new("mesh", Variant::Nil).with_accessors("get_mesh", "set_mesh"),
+            )
+            .property(
+                PropertyInfo::new("material", Variant::Nil)
+                    .with_accessors("get_material", "set_material"),
+            ),
     );
     register_class(
         ClassRegistration::new("CSGPolygon3D")
             .parent("CSGPrimitive3D")
             // Godot's default outline is the unit square.
-            .property(PropertyInfo::new(
-                "polygon",
-                // Fully qualified: `register_3d_classes` imports `Vector3`, not
-                // `Vector2` — the `Vector2` imports in this file are fn-local to
-                // other registration functions.
-                Variant::PackedVector2Array(vec![
-                    gdcore::math::Vector2::new(0.0, 0.0),
-                    gdcore::math::Vector2::new(0.0, 1.0),
-                    gdcore::math::Vector2::new(1.0, 1.0),
-                    gdcore::math::Vector2::new(1.0, 0.0),
-                ]),
-            ))
+            .property(
+                PropertyInfo::new(
+                    "polygon",
+                    // Fully qualified: `register_3d_classes` imports `Vector3`, not
+                    // `Vector2` — the `Vector2` imports in this file are fn-local to
+                    // other registration functions.
+                    Variant::PackedVector2Array(vec![
+                        gdcore::math::Vector2::new(0.0, 0.0),
+                        gdcore::math::Vector2::new(0.0, 1.0),
+                        gdcore::math::Vector2::new(1.0, 1.0),
+                        gdcore::math::Vector2::new(1.0, 0.0),
+                    ]),
+                )
+                .with_accessors("get_polygon", "set_polygon"),
+            )
             // MODE_DEPTH = 0.
-            .property(PropertyInfo::new("mode", Variant::Int(0)))
-            .property(PropertyInfo::new("depth", Variant::Float(1.0)))
-            .property(PropertyInfo::new("spin_degrees", Variant::Float(360.0)))
-            .property(PropertyInfo::new("spin_sides", Variant::Int(8)))
-            .property(PropertyInfo::new(
-                "path_node",
-                Variant::NodePath(gdcore::node_path::NodePath::empty()),
-            ))
+            .property(
+                PropertyInfo::new("mode", Variant::Int(0)).with_accessors("get_mode", "set_mode"),
+            )
+            .property(
+                PropertyInfo::new("depth", Variant::Float(1.0))
+                    .with_accessors("get_depth", "set_depth"),
+            )
+            .property(
+                PropertyInfo::new("spin_degrees", Variant::Float(360.0))
+                    .with_accessors("get_spin_degrees", "set_spin_degrees"),
+            )
+            .property(
+                PropertyInfo::new("spin_sides", Variant::Int(8))
+                    .with_accessors("get_spin_sides", "set_spin_sides"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "path_node",
+                    Variant::NodePath(gdcore::node_path::NodePath::empty()),
+                )
+                .with_accessors("get_path_node", "set_path_node"),
+            )
             // PATH_INTERVAL_DISTANCE = 0.
-            .property(PropertyInfo::new("path_interval_type", Variant::Int(0)))
-            .property(PropertyInfo::new("path_interval", Variant::Float(1.0)))
-            .property(PropertyInfo::new(
-                "path_simplify_angle",
-                Variant::Float(0.0),
-            ))
+            .property(
+                PropertyInfo::new("path_interval_type", Variant::Int(0))
+                    .with_accessors("get_path_interval_type", "set_path_interval_type"),
+            )
+            .property(
+                PropertyInfo::new("path_interval", Variant::Float(1.0))
+                    .with_accessors("get_path_interval", "set_path_interval"),
+            )
+            .property(
+                PropertyInfo::new("path_simplify_angle", Variant::Float(0.0))
+                    .with_accessors("get_path_simplify_angle", "set_path_simplify_angle"),
+            )
             // ⚠️ PATH_ROTATION_PATH_FOLLOW = **2**, not enum-zero: the enum runs
             // POLYGON=0, PATH=1, PATH_FOLLOW=2 and Godot's constructor picks the
             // last. Registering 0 would silently change how the polygon is
             // oriented along its path.
-            .property(PropertyInfo::new("path_rotation", Variant::Int(2)))
-            .property(PropertyInfo::new(
-                "path_rotation_accurate",
-                Variant::Bool(false),
-            ))
-            .property(PropertyInfo::new("path_local", Variant::Bool(false)))
-            .property(PropertyInfo::new("path_continuous_u", Variant::Bool(true)))
-            .property(PropertyInfo::new("path_u_distance", Variant::Float(1.0)))
-            .property(PropertyInfo::new("path_joined", Variant::Bool(false)))
-            .property(PropertyInfo::new("smooth_faces", Variant::Bool(false)))
-            .property(PropertyInfo::new("material", Variant::Nil)),
+            .property(
+                PropertyInfo::new("path_rotation", Variant::Int(2))
+                    .with_accessors("get_path_rotation", "set_path_rotation"),
+            )
+            .property(
+                PropertyInfo::new("path_rotation_accurate", Variant::Bool(false))
+                    .with_accessors("get_path_rotation_accurate", "set_path_rotation_accurate"),
+            )
+            .property(
+                PropertyInfo::new("path_local", Variant::Bool(false))
+                    .with_accessors("is_path_local", "set_path_local"),
+            )
+            .property(
+                PropertyInfo::new("path_continuous_u", Variant::Bool(true))
+                    .with_accessors("is_path_continuous_u", "set_path_continuous_u"),
+            )
+            .property(
+                PropertyInfo::new("path_u_distance", Variant::Float(1.0))
+                    .with_accessors("get_path_u_distance", "set_path_u_distance"),
+            )
+            .property(
+                PropertyInfo::new("path_joined", Variant::Bool(false))
+                    .with_accessors("is_path_joined", "set_path_joined"),
+            )
+            .property(
+                PropertyInfo::new("smooth_faces", Variant::Bool(false))
+                    .with_accessors("get_smooth_faces", "set_smooth_faces"),
+            )
+            .property(
+                PropertyInfo::new("material", Variant::Nil)
+                    .with_accessors("get_material", "set_material"),
+            ),
     );
     // CSGCombiner3D is NOT a primitive — it is a boolean grouping node, and
     // Godot parents it straight to CSGShape3D. Leave it there.
@@ -13399,6 +14126,28 @@ pub fn register_2d_classes() {
                 // anything else that answers from ClassDB rather than from the
                 // native dispatch table — reported that CanvasItem could not
                 // redraw itself.
+                // `show()` / `hide()` / `is_visible_in_tree()` — Godot binds
+                // all three on CanvasItem (`canvas_item.cpp:1357-1359`), and
+                // CanvasItem registered NONE of them (pat-mgixk.22).
+                //
+                // ⚠️ This is the INVERSE of the usual registered-but-undispatched
+                // bug, and it reads the opposite way round: the dispatch arms
+                // DO exist (`scripting::call_node_method` handles
+                // `hide`/`show`/`set_visible`/`is_visible`, and
+                // `core_node_methods` handles `is_visible_in_tree`), so
+                // `$Panel.hide()` has always worked — while
+                // `has_method("hide")` answered **false**, because
+                // `ClassDB::has_method` walks the inheritance chain and reads
+                // only the `methods` lists. Godot answers true. So a script
+                // guarding a call with `if node.has_method("hide")` skipped a
+                // call that would have worked fine.
+                //
+                // The three `hide`/`show` registrations at the Node3D block
+                // (:1553-1574) are that class's own and do NOT reach a Control:
+                // Panel/Label descend from CanvasItem, not Node3D.
+                .method(MethodInfo::new("show", 0))
+                .method(MethodInfo::new("hide", 0))
+                .method(MethodInfo::new("is_visible_in_tree", 0).const_method())
                 .method(MethodInfo::new("queue_redraw", 0))
                 .method(MethodInfo::new("is_queued_for_redraw", 0))
                 .method(MethodInfo::new("draw_rect", 4))
@@ -15075,25 +15824,55 @@ pub fn register_2d_classes() {
                 .parent("Node3D")
                 .signal(SignalInfo::new("curve_changed"))
                 .signal(SignalInfo::new("debug_color_changed"))
-                .property(PropertyInfo::new(
-                    "debug_custom_color",
-                    Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0)),
-                )),
+                .property(
+                    PropertyInfo::new(
+                        "debug_custom_color",
+                        Variant::Color(gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0)),
+                    )
+                    .with_accessors("get_debug_custom_color", "set_debug_custom_color"),
+                ),
         );
     }
     if !class_exists("PathFollow3D") {
         register_class(
             ClassRegistration::new("PathFollow3D")
                 .parent("Node3D")
-                .property(PropertyInfo::new("cubic_interp", Variant::Bool(true)))
-                .property(PropertyInfo::new("h_offset", Variant::Float(0.0)))
-                .property(PropertyInfo::new("loop", Variant::Bool(true)))
-                .property(PropertyInfo::new("progress", Variant::Float(0.0)))
-                .property(PropertyInfo::new("progress_ratio", Variant::Float(0.0)))
-                .property(PropertyInfo::new("rotation_mode", Variant::Int(3)))
-                .property(PropertyInfo::new("tilt_enabled", Variant::Bool(true)))
-                .property(PropertyInfo::new("use_model_front", Variant::Bool(false)))
-                .property(PropertyInfo::new("v_offset", Variant::Float(0.0))),
+                .property(
+                    PropertyInfo::new("cubic_interp", Variant::Bool(true))
+                        .with_accessors("get_cubic_interpolation", "set_cubic_interpolation"),
+                )
+                .property(
+                    PropertyInfo::new("h_offset", Variant::Float(0.0))
+                        .with_accessors("get_h_offset", "set_h_offset"),
+                )
+                .property(
+                    PropertyInfo::new("loop", Variant::Bool(true))
+                        .with_accessors("has_loop", "set_loop"),
+                )
+                .property(
+                    PropertyInfo::new("progress", Variant::Float(0.0))
+                        .with_accessors("get_progress", "set_progress"),
+                )
+                .property(
+                    PropertyInfo::new("progress_ratio", Variant::Float(0.0))
+                        .with_accessors("get_progress_ratio", "set_progress_ratio"),
+                )
+                .property(
+                    PropertyInfo::new("rotation_mode", Variant::Int(3))
+                        .with_accessors("get_rotation_mode", "set_rotation_mode"),
+                )
+                .property(
+                    PropertyInfo::new("tilt_enabled", Variant::Bool(true))
+                        .with_accessors("is_tilt_enabled", "set_tilt_enabled"),
+                )
+                .property(
+                    PropertyInfo::new("use_model_front", Variant::Bool(false))
+                        .with_accessors("is_using_model_front", "set_use_model_front"),
+                )
+                .property(
+                    PropertyInfo::new("v_offset", Variant::Float(0.0))
+                        .with_accessors("get_v_offset", "set_v_offset"),
+                ),
         );
     }
     // GridMap (pat-nzgdu.193) — was registered bare (`.parent("Node3D")` and
@@ -15481,42 +16260,89 @@ pub fn register_2d_classes() {
                     PropertyInfo::new("fixed_size", Variant::Bool(false))
                         .with_accessors("get_draw_flag", "set_draw_flag"),
                 )
-                .property(PropertyInfo::new(
-                    "alpha_antialiasing_edge",
-                    Variant::Float(0.0),
-                ))
-                .property(PropertyInfo::new(
-                    "alpha_antialiasing_mode",
-                    Variant::Int(0),
-                ))
-                .property(PropertyInfo::new("alpha_hash_scale", Variant::Float(1.0)))
-                .property(PropertyInfo::new(
-                    "alpha_scissor_threshold",
-                    Variant::Float(0.5),
-                ))
-                .property(PropertyInfo::new("autowrap_trim_flags", Variant::Int(192)))
-                .property(PropertyInfo::new("cast_shadow", Variant::Int(0)))
-                .property(PropertyInfo::new("gi_mode", Variant::Int(0)))
-                .property(PropertyInfo::new("justification_flags", Variant::Int(163)))
-                .property(PropertyInfo::new("language", Variant::String("".into())))
-                .property(PropertyInfo::new("line_spacing", Variant::Float(0.0)))
-                .property(PropertyInfo::new(
-                    "offset",
-                    Variant::Vector2(gdcore::math::Vector2::new(0.0, 0.0)),
-                ))
-                .property(PropertyInfo::new(
-                    "outline_render_priority",
-                    Variant::Int(-1),
-                ))
-                .property(PropertyInfo::new("render_priority", Variant::Int(0)))
+                .property(
+                    PropertyInfo::new("alpha_antialiasing_edge", Variant::Float(0.0))
+                        .with_accessors(
+                            "get_alpha_antialiasing_edge",
+                            "set_alpha_antialiasing_edge",
+                        ),
+                )
+                .property(
+                    PropertyInfo::new("alpha_antialiasing_mode", Variant::Int(0))
+                        .with_accessors("get_alpha_antialiasing", "set_alpha_antialiasing"),
+                )
+                .property(
+                    PropertyInfo::new("alpha_hash_scale", Variant::Float(1.0))
+                        .with_accessors("get_alpha_hash_scale", "set_alpha_hash_scale"),
+                )
+                .property(
+                    PropertyInfo::new("alpha_scissor_threshold", Variant::Float(0.5))
+                        .with_accessors(
+                            "get_alpha_scissor_threshold",
+                            "set_alpha_scissor_threshold",
+                        ),
+                )
+                .property(
+                    PropertyInfo::new("autowrap_trim_flags", Variant::Int(192))
+                        .with_accessors("get_autowrap_trim_flags", "set_autowrap_trim_flags"),
+                )
+                .property(
+                    PropertyInfo::new("cast_shadow", Variant::Int(0))
+                        .with_accessors("get_cast_shadows_setting", "set_cast_shadows_setting"),
+                )
+                .property(
+                    PropertyInfo::new("gi_mode", Variant::Int(0))
+                        .with_accessors("get_gi_mode", "set_gi_mode"),
+                )
+                .property(
+                    PropertyInfo::new("justification_flags", Variant::Int(163))
+                        .with_accessors("get_justification_flags", "set_justification_flags"),
+                )
+                .property(
+                    PropertyInfo::new("language", Variant::String("".into()))
+                        .with_accessors("get_language", "set_language"),
+                )
+                .property(
+                    PropertyInfo::new("line_spacing", Variant::Float(0.0))
+                        .with_accessors("get_line_spacing", "set_line_spacing"),
+                )
+                .property(
+                    PropertyInfo::new(
+                        "offset",
+                        Variant::Vector2(gdcore::math::Vector2::new(0.0, 0.0)),
+                    )
+                    .with_accessors("get_offset", "set_offset"),
+                )
+                .property(
+                    PropertyInfo::new("outline_render_priority", Variant::Int(-1)).with_accessors(
+                        "get_outline_render_priority",
+                        "set_outline_render_priority",
+                    ),
+                )
+                .property(
+                    PropertyInfo::new("render_priority", Variant::Int(0))
+                        .with_accessors("get_render_priority", "set_render_priority"),
+                )
                 .property(PropertyInfo::new("shaded", Variant::Bool(false)))
-                .property(PropertyInfo::new(
-                    "structured_text_bidi_override",
-                    Variant::Int(0),
-                ))
-                .property(PropertyInfo::new("text_direction", Variant::Int(0)))
-                .property(PropertyInfo::new("texture_filter", Variant::Int(3)))
-                .property(PropertyInfo::new("uppercase", Variant::Bool(false))),
+                .property(
+                    PropertyInfo::new("structured_text_bidi_override", Variant::Int(0))
+                        .with_accessors(
+                            "get_structured_text_bidi_override",
+                            "set_structured_text_bidi_override",
+                        ),
+                )
+                .property(
+                    PropertyInfo::new("text_direction", Variant::Int(0))
+                        .with_accessors("get_text_direction", "set_text_direction"),
+                )
+                .property(
+                    PropertyInfo::new("texture_filter", Variant::Int(3))
+                        .with_accessors("get_texture_filter", "set_texture_filter"),
+                )
+                .property(
+                    PropertyInfo::new("uppercase", Variant::Bool(false))
+                        .with_accessors("is_uppercase", "set_uppercase"),
+                ),
         );
     }
     if !class_exists("RichTextLabel") {
@@ -25014,11 +25840,26 @@ pub fn register_audio_classes() {
                     PropertyInfo::new("unit_size", Variant::Float(10.0))
                         .with_accessors("get_unit_size", "set_unit_size"),
                 )
-                .property(PropertyInfo::new("area_mask", Variant::Int(1)))
-                .property(PropertyInfo::new("doppler_tracking", Variant::Int(0)))
-                .property(PropertyInfo::new("max_polyphony", Variant::Int(1)))
-                .property(PropertyInfo::new("playback_type", Variant::Int(0)))
-                .property(PropertyInfo::new("stream_paused", Variant::Bool(false)))
+                .property(
+                    PropertyInfo::new("area_mask", Variant::Int(1))
+                        .with_accessors("get_area_mask", "set_area_mask"),
+                )
+                .property(
+                    PropertyInfo::new("doppler_tracking", Variant::Int(0))
+                        .with_accessors("get_doppler_tracking", "set_doppler_tracking"),
+                )
+                .property(
+                    PropertyInfo::new("max_polyphony", Variant::Int(1))
+                        .with_accessors("get_max_polyphony", "set_max_polyphony"),
+                )
+                .property(
+                    PropertyInfo::new("playback_type", Variant::Int(0))
+                        .with_accessors("get_playback_type", "set_playback_type"),
+                )
+                .property(
+                    PropertyInfo::new("stream_paused", Variant::Bool(false))
+                        .with_accessors("get_stream_paused", "set_stream_paused"),
+                )
                 // The rest of Godot's spatial surface, all mirrored per frame by
                 // the audio bridge (pat-0q2kx.57). `attenuation_model` is the
                 // `AudioStreamPlayer3D.AttenuationModel` enum: 0 inverse,
@@ -30429,7 +31270,31 @@ pub fn register_server_extension_classes() {
         register_class(
             ClassRegistration::new("PhysicsServer3D")
                 .parent("Object")
-                .abstract_class(),
+                .abstract_class()
+                // pat-mgixk.31: `PhysicsServer3D.BodyAxis`, the argument
+                // `PhysicsBody3D.set_axis_lock`/`get_axis_lock` take. Without
+                // these a script cannot NAME the axis it wants to freeze, so
+                // the indexed accessor is unreachable from GDScript however it
+                // dispatches — the same prerequisite `Light3D.Param` was.
+                //
+                // ⚠️ These are POWERS OF TWO, not 0..5
+                // (`servers/physics_3d/physics_server_3d.h:493`). An index-style
+                // 0,1,2,3,4,5 table would map LINEAR_Y to LINEAR_X's slot and
+                // shift every axis after it, silently.
+                //
+                // Registered as a plain enum, NOT `.bitfield()`: Godot binds
+                // these with `BIND_ENUM_CONSTANT`
+                // (`physics_server_3d.cpp:1127`) and `set_axis_lock` takes one
+                // axis, not an OR-ed mask.
+                .enumeration(
+                    EnumInfo::new("BodyAxis")
+                        .constant("BODY_AXIS_LINEAR_X", 1)
+                        .constant("BODY_AXIS_LINEAR_Y", 2)
+                        .constant("BODY_AXIS_LINEAR_Z", 4)
+                        .constant("BODY_AXIS_ANGULAR_X", 8)
+                        .constant("BODY_AXIS_ANGULAR_Y", 16)
+                        .constant("BODY_AXIS_ANGULAR_Z", 32),
+                ),
         );
     }
     if !class_exists("TextServerExtension") {

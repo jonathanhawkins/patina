@@ -21,7 +21,7 @@ use gdrender2d::font::{char_bitmap, CHAR_GAP, CHAR_HEIGHT, CHAR_WIDTH};
 use gdscene::node::NodeId;
 use gdscene::render_server_3d::MaterialTextureCache;
 use gdscene::SceneTree;
-use gdserver3d::material::{Material3D, ShadingMode, TextureImage};
+use gdserver3d::material::{CullMode, Material3D, ShadingMode, TextureImage};
 use gdserver3d::mesh::{Mesh3D, PrimitiveType};
 use gdvariant::Variant;
 
@@ -60,8 +60,60 @@ pub fn sprite_quad_mesh(
     flip_v: bool,
     axis: i64,
 ) -> Mesh3D {
-    let w = tex_w.max(1) as f32 * pixel_size;
-    let h = tex_h.max(1) as f32 * pixel_size;
+    // The whole texture as one frame — the 1x1 sheet every existing caller means.
+    sprite_quad_mesh_framed(
+        tex_w, tex_h, pixel_size, centered, offset, flip_h, flip_v, axis, 1, 1, 0,
+    )
+}
+
+/// [`sprite_quad_mesh`] for one cell of an `hframes` x `vframes` sprite sheet
+/// (pat-mgixk.34 part 2).
+///
+/// Godot's `SpriteBase3D` treats the texture as a grid and draws a single cell:
+/// `hframes`/`vframes` divide it and `frame` indexes it row-major
+/// (`scene/3d/sprite_3d.cpp`). Two things follow, and missing either is a visible
+/// bug rather than a subtle one:
+///
+/// 1. **The quad shrinks.** A frame of a 2x1 sheet is half the texture's width, so
+///    the quad is half as wide. Sizing it from the full texture would stretch one
+///    cell across the whole sprite.
+/// 2. **The UVs cover only that cell**, so the other frames are not sampled.
+///
+/// ⚠️ Added as a separate entry point rather than three more parameters on
+/// `sprite_quad_mesh`, which already takes eight: its four unit tests pin the
+/// unframed geometry exactly, and every existing call site means "the whole
+/// texture". Delegating keeps both true by construction.
+///
+/// `frame` wraps rather than clamping or panicking: Godot stores it as an int a
+/// script can set past the end, and an out-of-range frame showing cell 0 is far
+/// easier to recognise than a blank sprite.
+#[allow(clippy::too_many_arguments)]
+pub fn sprite_quad_mesh_framed(
+    tex_w: u32,
+    tex_h: u32,
+    pixel_size: f32,
+    centered: bool,
+    offset: Vector2,
+    flip_h: bool,
+    flip_v: bool,
+    axis: i64,
+    hframes: i64,
+    vframes: i64,
+    frame: i64,
+) -> Mesh3D {
+    // `max(1)`: Godot's properties have a minimum of 1, but a `.tscn` can carry 0
+    // and dividing by it would blow up the quad instead of drawing something.
+    let hf = hframes.max(1) as u32;
+    let vf = vframes.max(1) as u32;
+    let cells = (hf as i64) * (vf as i64);
+    // `rem_euclid`, not `%`: a negative `frame` must land on a real cell, and `%`
+    // would give a negative index.
+    let cell = frame.rem_euclid(cells.max(1)) as u32;
+    let (col, row) = (cell % hf, cell / hf);
+
+    // One CELL's worth of pixels, not the whole sheet (point 1 above).
+    let w = (tex_w.max(1) / hf).max(1) as f32 * pixel_size;
+    let h = (tex_h.max(1) / vf).max(1) as f32 * pixel_size;
 
     // Top-left of the quad in the sprite's own plane.
     let mut left = offset.x * pixel_size;
@@ -93,8 +145,23 @@ pub fn sprite_quad_mesh(
 
     // UVs run top-left origin, matching image row order; flipping swaps the ends
     // rather than negating, so the quad keeps its winding and stays front-facing.
-    let (u0, u1) = if flip_h { (1.0, 0.0) } else { (0.0, 1.0) };
-    let (v0, v1) = if flip_v { (1.0, 0.0) } else { (0.0, 1.0) };
+    //
+    // Spanning only the selected cell is point 2 above. With the default 1x1 sheet
+    // `du`/`dv` are 1.0 and the cell origin is 0, so this reduces to the full-range
+    // 0..1 the unframed callers had.
+    let du = 1.0 / hf as f32;
+    let dv = 1.0 / vf as f32;
+    let (cu, cv) = (col as f32 * du, row as f32 * dv);
+    let (u0, u1) = if flip_h {
+        (cu + du, cu)
+    } else {
+        (cu, cu + du)
+    };
+    let (v0, v1) = if flip_v {
+        (cv + dv, cv)
+    } else {
+        (cv, cv + dv)
+    };
 
     Mesh3D {
         vertices: vec![
@@ -152,11 +219,27 @@ pub fn sprite3d_geometry(
     // and Decal both carry one — so without this any textured node in the scene
     // would be replaced by a flat quad. Declining by class is what keeps this
     // additive to the existing render list rather than a reinterpretation of it.
-    if node.class_name() != "Sprite3D" {
+    //
+    // ⚠️ AnimatedSprite3D belongs in this list, and its absence is the whole of
+    // pat-mgixk.34. `billboard_geometry` below has always ROUTED
+    // "AnimatedSprite3D" here, and its doc comment has always claimed playback
+    // reaches the viewport — but this guard rejected the class, so every
+    // AnimatedSprite3D fell through to the default marker cube with its texture
+    // computed, published and then discarded. The routing and the guard
+    // disagreed, and the comment documented the routing.
+    if !matches!(node.class_name(), "Sprite3D" | "AnimatedSprite3D") {
         return None;
     }
+    // `process_animated_sprites` publishes the current SpriteFrames frame as a
+    // plain path String (scene_tree.rs `set_property("texture", ...)`), which is
+    // the same shape a `.tscn`-authored Sprite3D carries, so one read serves
+    // both. A `Variant::Resource` is accepted too: a script that assigns an
+    // already-loaded texture (`$Sprite.texture = load(..)`) stores the resource
+    // rather than its path, and dropping that case would make a scripted
+    // assignment silently invisible the same way this bug did.
     let path = match node.get_property("texture") {
         Variant::String(p) if !p.is_empty() => p,
+        Variant::Resource(r) if !r.path.is_empty() => r.path.clone(),
         _ => return None,
     };
     let texture = cache.get_or_load(&path)?;
@@ -176,7 +259,45 @@ pub fn sprite3d_geometry(
         _ => AXIS_Z,
     };
 
-    let mesh = sprite_quad_mesh(
+    // Sprite-sheet frame selection (pat-mgixk.34 part 2). Godot's defaults are
+    // `hframes = vframes = 1`, `frame = 0`, which is the whole texture — so an
+    // unauthored sprite is unchanged and an `AnimatedSprite3D`, which selects its
+    // image through `SpriteFrames` instead, is unaffected.
+    let int_prop = |key: &str, default: i64| match node.get_property(key) {
+        Variant::Int(i) => i,
+        Variant::Float(f) => f as i64,
+        _ => default,
+    };
+    let hframes = int_prop("hframes", 1);
+    let vframes = int_prop("vframes", 1);
+    // `frame_coords` is Godot's (column, row) spelling of the same selection, and
+    // in Godot both are views of ONE value (`sprite_3d.cpp` keeps them in step).
+    // Patina stores them as separate properties, so precedence decides.
+    //
+    // ⚠️ A ZERO `frame_coords` must NOT win over an authored `frame`, and reading
+    // it unconditionally is a real bug I shipped and had to fix here:
+    // `packed_scene::node_with_class_defaults` seeds every ClassDB default onto an
+    // instantiated node, and ClassDB declares `frame_coords` with a default of
+    // `Vector2i(0, 0)` (class_db.rs:2395). So EVERY `.tscn`-instantiated Sprite3D
+    // carries a zero `frame_coords`, which beat `frame = 1` and selected cell 0 —
+    // the test showed frame 1 still drawing the red (left) cell.
+    //
+    // This is the same shape as the identity-`transform`-beats-`position` bug that
+    // pat-mgixk.29 fixed in `node_with_class_defaults`: **a seeded default must
+    // never beat an authored value.** Treating only a NON-ZERO `frame_coords` as
+    // authored is safe in both directions — a genuine `(0, 0)` means cell 0, which
+    // is what the `frame` fallback yields anyway.
+    let coords_cell = match node.get_property("frame_coords") {
+        Variant::Vector2i(v) if v.x != 0 || v.y != 0 => {
+            Some((v.y as i64) * hframes.max(1) + (v.x as i64))
+        }
+        Variant::Vector2(v) if v.x != 0.0 || v.y != 0.0 => {
+            Some((v.y as i64) * hframes.max(1) + (v.x as i64))
+        }
+        _ => None,
+    };
+    let frame = coords_cell.unwrap_or_else(|| int_prop("frame", 0));
+    let mesh = sprite_quad_mesh_framed(
         texture.width,
         texture.height,
         pixel_size,
@@ -185,6 +306,9 @@ pub fn sprite3d_geometry(
         flag("flip_h"),
         flag("flip_v"),
         axis,
+        hframes,
+        vframes,
+        frame,
     );
 
     let modulate = match node.get_property("modulate") {
@@ -197,7 +321,17 @@ pub fn sprite3d_geometry(
         albedo: modulate,
         albedo_texture: Some(texture),
         shading_mode: shading_for(node),
+        // ⚠️ BOTH fields, and `cull_mode` is the load-bearing one. `double_sided`
+        // is "retained for existing callers" (`gdserver3d::material`) and the
+        // software rasterizer NEVER READS IT — `gdrender3d` mentions it only in
+        // a comment. Culling is decided solely by `cull_mode`, which defaults to
+        // `Back`, and `sprite_quad_mesh`'s winding is clockwise as seen from the
+        // camera the sprite faces. So every Sprite3D quad was built correctly,
+        // handed to the renderer correctly, and then discarded by
+        // `render_modes::should_cull` before it shaded a single pixel
+        // (pat-mgixk.34).
         double_sided: true,
+        cull_mode: CullMode::Disabled,
         ..Default::default()
     };
     Some((mesh, material))
@@ -311,7 +445,12 @@ pub fn label3d_geometry(tree: &SceneTree, nid: NodeId) -> Option<(Mesh3D, Materi
         shading_mode: shading_for(node),
         // `double_sided` defaults to TRUE on Label3D (`doc/classes/Label3D.xml`),
         // unlike most materials — text is meant to be legible from behind.
+        //
+        // ⚠️ `cull_mode` is what the rasterizer actually honours — see the note
+        // on the Sprite3D material above. Without it the label's quad is culled
+        // by winding and the text never reaches a pixel (pat-mgixk.34).
         double_sided: true,
+        cull_mode: CullMode::Disabled,
         ..Default::default()
     };
     Some((mesh, material))
@@ -324,6 +463,12 @@ pub fn label3d_geometry(tree: &SceneTree, nid: NodeId) -> Option<(Mesh3D, Materi
 /// `SceneTree::process_animated_sprites`, exactly as it is for the 2D canvas, so
 /// reading `texture` here is what makes playback reach the viewport without a
 /// second animation path that could disagree about which frame is showing.
+///
+/// ⚠️ **Routing a class here is only half of it — `sprite3d_geometry`'s class
+/// guard must name it too.** This arm listed "AnimatedSprite3D" from the start
+/// while that guard accepted only "Sprite3D", so the comment above described an
+/// intent the code did not have and every AnimatedSprite3D silently drew a
+/// marker cube (pat-mgixk.34). Add to both or neither.
 pub fn billboard_geometry(
     tree: &SceneTree,
     nid: NodeId,

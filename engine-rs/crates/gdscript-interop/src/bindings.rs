@@ -181,6 +181,22 @@ pub trait ScriptInstance {
         Vec::new()
     }
 
+    /// Runs the JavaScript callbacks this script registered through
+    /// `JavaScriptBridge.create_callback`, returning how many ran
+    /// (pat-mgixk.41).
+    ///
+    /// 🔑 Exists for the same reason [`Self::drain_print_output`] does: the work
+    /// needs the script's `Interpreter`, and a host holding
+    /// `&mut dyn ScriptInstance` out of the scene tree cannot reach a
+    /// GDScript-only inherent method. The frame loop calls this on every script
+    /// once per frame; without a caller a `create_callback` function queues
+    /// invocations forever and silently never runs.
+    ///
+    /// Defaults to 0 so a non-GDScript script instance needs no change.
+    fn pump_js_callbacks(&mut self) -> usize {
+        0
+    }
+
     /// Returns the human-readable name of this script.
     fn get_script_name(&self) -> &str;
 

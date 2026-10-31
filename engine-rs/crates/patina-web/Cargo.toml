@@ -33,6 +33,12 @@ gdaudio = { path = "../gdaudio" }
 # drive frames from requestAnimationFrame. Not a cycle — nothing in the
 # workspace depends on patina-web; it is the wasm leaf.
 gdscene = { path = "../gdscene" }
+# pat-mgixk.28: the 2D canvas the web runtime presents. `FrameBuffer` and the
+# PPM/PNG encoders live here; the scene->draw-list builder that fills it lives
+# in `gdscene::canvas_render`, which is what links the shared builder into the
+# wasm target. NOTE the absence of `gdeditor`, which is the point: the builder
+# used to live there, so a web build could not draw a 2D scene at all.
+gdrender2d = { path = "../gdrender2d" }
 
 # pat-u3l8c.113: PckMount - the `.pck` reader the web VFS mounts over `res://`.
 # Not a new crate on wasm32: `gdscene` above depends on gdresource

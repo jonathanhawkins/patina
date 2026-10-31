@@ -8,11 +8,23 @@
 //! Asserting "the position changed" instead would pass on gravity alone and
 //! prove nothing about the callback.
 //!
-//! ⚠️ The `custom_integrator = false` control uses the SAME script. Godot gates
-//! the callback on the property, not on whether the method exists, so a body
-//! that defines `_integrate_forces` without opting in must never receive it —
-//! and only a control sharing the script can tell "the gate works" apart from
-//! "the script never loaded".
+//! ⚠️ **Corrected by pat-mgixk.38.** This file used to state that Godot gates
+//! the callback on `custom_integrator` rather than on whether the method is
+//! overridden, and the 2D control asserted that a body defining
+//! `_integrate_forces` without opting in is never called. That is not Godot's
+//! behaviour: `RigidBody2D::_body_state_changed` (rigid_body_2d.cpp:163) calls
+//! `_integrate_forces` whenever `GDVIRTUAL_IS_OVERRIDDEN`, and
+//! `custom_integrator` only tells the SERVER to omit its own gravity and
+//! damping (`body_set_omit_force_integration`). The 2D control below now
+//! asserts the real rule; the dispatch still shares one script with the
+//! opted-in case, which is what tells "dispatch works" apart from "the script
+//! never loaded".
+//!
+//! ⚠️ The **3D** half of this file still asserts the old gate, because
+//! `run_integrate_forces_3d` still carries the same mistake
+//! (`integrate_forces.rs:245`). pat-mgixk.38 is scoped to 2D
+//! (`subsys:physics-2d`), so the 3D tests are deliberately left alone rather
+//! than changed ahead of the fix they describe.
 
 use gdscene::node::{Node, NodeId};
 use gdscene::scene_tree::SceneTree;
@@ -104,9 +116,15 @@ fn rigidbody_custom_integrator_direct_body_state() {
     );
 }
 
-/// 🔑 The gate: the same script, without `custom_integrator`, is never called.
+/// 🔑 Dispatch follows the OVERRIDE, not `custom_integrator`.
+///
+/// This test asserted the opposite until pat-mgixk.38 — that the same script
+/// without `custom_integrator` is never called. Conflating the two silently
+/// broke the most common idiom there is: an `_integrate_forces` override left
+/// at the default `custom_integrator = false` was never dispatched at all, and
+/// nothing reported an error because the body simply was not a target.
 #[test]
-fn without_custom_integrator_the_callback_never_runs() {
+fn the_callback_runs_without_custom_integrator() {
     let (mut ml, id) = scene_with(false);
     for _ in 0..5 {
         ml.step(PHYSICS_DT);
@@ -114,15 +132,26 @@ fn without_custom_integrator_the_callback_never_runs() {
 
     assert_eq!(
         ticks(&ml, id),
-        0,
-        "`custom_integrator` gates the callback — a body that merely defines \
-         `_integrate_forces` must not receive it",
+        5,
+        "a script that OVERRIDES `_integrate_forces` must be called every \
+         physics tick even with `custom_integrator` off; 0 means dispatch is \
+         still gated on the property",
     );
     let p = position(&ml, id);
     assert!(
-        p.x.abs() < 1e-3,
-        "…and with no callback there is no sideways velocity, so x must stay 0; \
-         got {p:?}",
+        p.x > 5.0,
+        "…and the velocity the script wrote must still reach the body; got {p:?}",
+    );
+    // 🔑 The property's REAL job, asserted from the other side: with it off the
+    // server still integrates its own gravity, so the body falls while the
+    // script steers it sideways. The fall is small because the script rewrites
+    // the whole velocity every tick, so only one tick of gravity is ever
+    // carried — but it must not be zero.
+    assert!(
+        p.y > 0.0,
+        "with `custom_integrator` off the server's gravity must still apply, so \
+         the body falls as it moves; got {p:?}. A y of exactly 0 means gravity \
+         was omitted for a body that never asked for it",
     );
 }
 
@@ -198,7 +227,11 @@ fn without_custom_integrator_the_3d_callback_never_runs() {
     assert_eq!(
         ticks(&ml, id),
         0,
-        "`custom_integrator` gates the 3D callback exactly as it does the 2D one",
+        "the 3D path still gates the callback on `custom_integrator`. \
+         ⚠️ This is the OLD, wrong rule — Godot dispatches on the override \
+         (`rigid_body_3d.cpp` `_body_state_changed`) — and it is asserted here \
+         only because pat-mgixk.38 is scoped to 2D. When the 3D twin of that \
+         bead lands, this becomes `ticks == 5` like its 2D counterpart",
     );
     let p = position_3d(&ml, id);
     assert!(

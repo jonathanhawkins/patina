@@ -24,6 +24,7 @@
 //! render paths that drift.
 
 use gdcore::math::Color;
+use gdrender2d::FrameBuffer;
 use gdscene::render_server_3d::RenderServer3DAdapter;
 use gdscene::scene_tree::SceneTree;
 
@@ -56,6 +57,103 @@ impl RunnerFrame3D {
                     || (c.b - background.b).abs() > 1.0 / 255.0
             })
             .count()
+    }
+
+    /// The colour at `(x, y)`, or black outside the frame.
+    ///
+    /// Exists so a caller can ask about one pixel — "is the centre of the frame
+    /// the colour of the box I put in front of the camera" — without indexing
+    /// `pixels` and getting the stride arithmetic wrong.
+    pub fn pixel(&self, x: u32, y: u32) -> Color {
+        if x >= self.width || y >= self.height {
+            return Color::new(0.0, 0.0, 0.0, 1.0);
+        }
+        self.pixels[(y * self.width + x) as usize]
+    }
+
+    /// The frame as a [`FrameBuffer`], the representation every image encoder in
+    /// `gdrender2d` takes.
+    pub fn to_frame_buffer(&self) -> FrameBuffer {
+        let mut fb = FrameBuffer::new(
+            self.width.max(1),
+            self.height.max(1),
+            Color::new(0.0, 0.0, 0.0, 1.0),
+        );
+        let n = fb.pixels.len().min(self.pixels.len());
+        fb.pixels[..n].copy_from_slice(&self.pixels[..n]);
+        fb
+    }
+
+    /// Writes the frame to `path` as a PNG.
+    ///
+    /// 🔑 This is what makes a headless run observable at all. The runner
+    /// previously dumped the tree as JSON and nothing else, so "did the scene
+    /// render" had no answer outside the editor process (pat-mgixk.49).
+    pub fn save_png(&self, path: &str) -> std::io::Result<()> {
+        gdrender2d::save_png(&self.to_frame_buffer(), path)
+    }
+}
+
+/// One 3D renderer for a whole run.
+///
+/// 🔑 The point of the type is that the [`RenderServer3DAdapter`] is built ONCE
+/// and reused. [`render_scene_frame`] constructs a fresh adapter per call, which
+/// is fine for a one-shot screenshot and wrong for a frame loop: every frame
+/// would throw away the adapter's mesh and texture caches and re-derive them, so
+/// the per-frame cost grows with the scene instead of staying flat. Godot keeps
+/// one `RenderingServer` for the process and draws from it every iteration
+/// (`Main::iteration`).
+///
+/// Holding the adapter is also what lets a caller ask for [`last_frame`] after
+/// the loop ends — the runner writes its image from that rather than rendering a
+/// second, separate frame that nothing on screen ever corresponded to.
+///
+/// [`last_frame`]: Self::last_frame
+pub struct SceneRenderer3D {
+    adapter: RenderServer3DAdapter,
+    width: u32,
+    height: u32,
+    last: Option<RunnerFrame3D>,
+}
+
+impl SceneRenderer3D {
+    /// A renderer producing `width` x `height` frames for the rest of the run.
+    pub fn new(width: u32, height: u32) -> Self {
+        let width = width.max(1);
+        let height = height.max(1);
+        Self {
+            adapter: RenderServer3DAdapter::new(width, height),
+            width,
+            height,
+            last: None,
+        }
+    }
+
+    /// Frame width in pixels.
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Frame height in pixels.
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Renders `tree` and keeps the result as the run's latest frame.
+    pub fn render(&mut self, tree: &SceneTree) -> &RunnerFrame3D {
+        let (_snapshot, frame) = self.adapter.render_frame(tree);
+        self.last = Some(RunnerFrame3D {
+            width: frame.width,
+            height: frame.height,
+            pixels: frame.pixels,
+        });
+        // Just assigned, so the expect cannot fire.
+        self.last.as_ref().expect("frame was just stored")
+    }
+
+    /// The most recently rendered frame, or `None` before the first render.
+    pub fn last_frame(&self) -> Option<&RunnerFrame3D> {
+        self.last.as_ref()
     }
 }
 

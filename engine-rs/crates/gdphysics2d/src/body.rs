@@ -272,6 +272,25 @@ pub struct PhysicsBody2D {
     /// the same way here, so the distinction is between "sweep" and "do not"
     /// rather than between two sweep shapes. Default OFF, as in Godot.
     pub continuous_cd: bool,
+    /// Skip the server's own gravity and damping for this body — Godot's
+    /// `RigidBody2D.custom_integrator`, which reaches the server as
+    /// `body_set_omit_force_integration`.
+    ///
+    /// ⚠️ This is NOT a switch for whether `_integrate_forces` is called. Godot
+    /// calls that callback whenever a script overrides it
+    /// (`rigid_body_2d.cpp:163`) and uses this flag only to stop
+    /// `GodotBody2D::integrate_forces` adding gravity and damping. Patina had
+    /// the two confused: the flag gated the callback and nothing in this crate
+    /// ever read it, so turning it on stopped nothing (pat-mgixk.38).
+    pub omit_force_integration: bool,
+    /// An authored `RigidBody2D.inertia`, when the scene set one.
+    ///
+    /// `None` means "derive it from the shapes", which is what Godot's `0`
+    /// sentinel asks for and what [`Self::moment_of_inertia`] does. A `Some`
+    /// value replaces that computation, as `body_set_param(BODY_PARAM_INERTIA)`
+    /// does upstream. Before this the authored number never reached the body at
+    /// all — the shape-derived value was always used.
+    pub custom_inertia: Option<f32>,
 }
 
 impl PhysicsBody2D {
@@ -319,6 +338,8 @@ impl PhysicsBody2D {
             constant_angular_velocity: 0.0,
             collision_exceptions: Vec::new(),
             continuous_cd: false,
+            omit_force_integration: false,
+            custom_inertia: None,
         }
     }
 
@@ -514,6 +535,15 @@ impl PhysicsBody2D {
     ///
     /// [`inverse_inertia`]: Self::inverse_inertia
     pub fn moment_of_inertia(&self) -> f32 {
+        // An authored inertia replaces the shape-derived one, as Godot's
+        // `body_set_param(BODY_PARAM_INERTIA)` does. Clamped like the derived
+        // value below so a near-zero author cannot turn the inverse into an
+        // enormous number.
+        if let Some(i) = self.custom_inertia {
+            if i > 0.0 {
+                return i.max(1e-4);
+            }
+        }
         let m = self.mass.max(0.0);
         let i = match &self.shape {
             Shape2D::Circle { radius } => 0.5 * m * radius * radius,
@@ -650,18 +680,37 @@ impl PhysicsBody2D {
                 }
             }
             BodyType::Rigid => {
+                // `omit_force_integration` (Godot's `custom_integrator`)
+                // suppresses the SERVER's own contributions — gravity and
+                // damping — and nothing else.
+                //
+                // ⚠️ It must NOT skip this phase wholesale. Forces a script
+                // applied through `apply_force` / `apply_impulse` /
+                // `add_constant_force`, and torque likewise, still integrate
+                // under a custom integrator in Godot
+                // (`GodotBody2D::integrate_forces` guards only the default
+                // force block). Skipping everything would break exactly the
+                // calls a custom integrator is written to make.
+                let omit = self.omit_force_integration;
+                let effective_gravity = if omit { Vector2::ZERO } else { gravity };
+                let (linear_damp, angular_damp) = if omit {
+                    (0.0, 0.0)
+                } else {
+                    (self.linear_damp, self.angular_damp)
+                };
+
                 // Apply damping to the existing velocity before integrating
                 // forces (Godot: `linear_velocity *= max(1 - dt*damp, 0)`).
-                let linear_damp_factor = (1.0 - dt * self.linear_damp).max(0.0);
-                let angular_damp_factor = (1.0 - dt * self.angular_damp).max(0.0);
+                let linear_damp_factor = (1.0 - dt * linear_damp).max(0.0);
+                let angular_damp_factor = (1.0 - dt * angular_damp).max(0.0);
                 self.linear_velocity = self.linear_velocity * linear_damp_factor;
                 self.angular_velocity *= angular_damp_factor;
 
                 if self.mass > 0.0 {
                     // gravity acts as a pure acceleration (scaled per body); the
                     // accumulated force is divided by mass.
-                    let acceleration =
-                        gravity * self.gravity_scale + self.accumulated_force * (1.0 / self.mass);
+                    let acceleration = effective_gravity * self.gravity_scale
+                        + self.accumulated_force * (1.0 / self.mass);
                     self.linear_velocity = self.linear_velocity + acceleration * dt;
                     // Angular acceleration from accumulated torque (τ / I).
                     let inv_i = self.inverse_inertia();
@@ -966,6 +1015,108 @@ mod tests {
         }
         assert!((light.position.y - heavy.position.y).abs() < 1e-4);
         assert!(light.position.y > 0.0, "body should fall in +Y");
+    }
+
+    /// An authored `inertia` replaces the shape-derived moment — the path by
+    /// which `RigidBody2D.inertia` finally reaches the solver (pat-mgixk.38).
+    #[test]
+    fn custom_inertia_overrides_the_shape_derived_moment() {
+        let mut body = PhysicsBody2D::new(
+            BodyId(1),
+            BodyType::Rigid,
+            Vector2::ZERO,
+            Shape2D::Circle { radius: 8.0 },
+            1.0,
+        );
+        // A unit disc of radius 8 has I = 0.5*m*r^2 = 32, so an authored 4 is
+        // visibly different from the derived value and the two cannot be
+        // confused for each other.
+        let derived = body.moment_of_inertia();
+        assert!(
+            (derived - 32.0).abs() < 1e-3,
+            "the shape-derived moment should be 0.5*m*r^2 = 32; got {derived}"
+        );
+
+        body.custom_inertia = Some(4.0);
+        assert!(
+            (body.moment_of_inertia() - 4.0).abs() < 1e-6,
+            "an authored inertia must replace the shape-derived moment"
+        );
+        assert!(
+            (body.inverse_inertia() - 0.25).abs() < 1e-6,
+            "…so the inverse is 1/4, which is what the state hands a script"
+        );
+
+        // Godot's `inertia = 0` means "derive it from the shapes", so a
+        // non-positive value is NOT an override.
+        body.custom_inertia = Some(0.0);
+        assert!(
+            (body.moment_of_inertia() - 32.0).abs() < 1e-3,
+            "a non-positive authored inertia must fall back to the shape"
+        );
+    }
+
+    /// `custom_integrator` omits the server's gravity AND its damping.
+    #[test]
+    fn omit_force_integration_skips_gravity_and_damping() {
+        let g = Vector2::new(0.0, 980.0);
+        let mut body = PhysicsBody2D::new(
+            BodyId(1),
+            BodyType::Rigid,
+            Vector2::ZERO,
+            Shape2D::Circle { radius: 1.0 },
+            1.0,
+        );
+        body.set_linear_damp(5.0);
+        body.linear_velocity = Vector2::new(100.0, 0.0);
+        body.omit_force_integration = true;
+
+        for _ in 0..60 {
+            body.integrate_forces(1.0 / 60.0, g);
+        }
+
+        assert!(
+            body.linear_velocity.y.abs() < 1e-6,
+            "gravity must be omitted, so no vertical velocity accumulates; got {:?}",
+            body.linear_velocity
+        );
+        assert!(
+            (body.linear_velocity.x - 100.0).abs() < 1e-3,
+            "damping must be omitted too, so the velocity is untouched after a \
+             full second; got {:?}",
+            body.linear_velocity
+        );
+    }
+
+    /// …but it must NOT drop the forces a script applied.
+    ///
+    /// Godot guards only the default-force block
+    /// (`GodotBody2D::integrate_forces`), and `apply_force` / `apply_impulse`
+    /// are exactly what a custom integrator is written to call — suppressing
+    /// the whole phase would break the one API such a script uses.
+    #[test]
+    fn omit_force_integration_still_applies_an_applied_force() {
+        let mut body = PhysicsBody2D::new(
+            BodyId(1),
+            BodyType::Rigid,
+            Vector2::ZERO,
+            Shape2D::Circle { radius: 1.0 },
+            1.0,
+        );
+        body.omit_force_integration = true;
+        body.apply_force(Vector2::new(60.0, 0.0));
+        body.integrate_forces(1.0 / 60.0, Vector2::new(0.0, 980.0));
+
+        assert!(
+            (body.linear_velocity.x - 1.0).abs() < 1e-3,
+            "a 60 N force on a 1 kg body over 1/60 s must give 1 px/s; got {:?}",
+            body.linear_velocity
+        );
+        assert!(
+            body.linear_velocity.y.abs() < 1e-6,
+            "…while the omitted gravity contributes nothing; got {:?}",
+            body.linear_velocity
+        );
     }
 
     #[test]

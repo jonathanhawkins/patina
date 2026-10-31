@@ -319,6 +319,13 @@ impl JsBackend for RecordingJsBackend {
             _ => None,
         }
     }
+
+    /// Answers from the module-level [`set_pwa_pending`] rather than from a
+    /// field on `self`, because the backend is moved into the registry on
+    /// install and a test needs to move this between frames (pat-mgixk.41).
+    fn pwa_needs_update(&mut self) -> bool {
+        PWA_PENDING.with(|p| p.get())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -341,6 +348,17 @@ thread_local! {
     /// Set while a [`with_backend`] call is in flight, so a nested one can be
     /// rejected instead of silently getting a different backend.
     static IN_BACKEND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+    /// What [`RecordingJsBackend`] answers for `pwa_needs_update`
+    /// (pat-mgixk.41).
+    ///
+    /// Module-level for the same reason [`RECORDED`] is: [`set_backend`] takes
+    /// OWNERSHIP of the backend, so a test cannot reach the concrete
+    /// `RecordingJsBackend` afterwards to flip a field. And a builder set
+    /// before installation could not express this at all: the
+    /// `pwa_update_available` signal is defined by the flag CHANGING while the
+    /// loop runs, so the test has to be able to move it mid-run.
+    static PWA_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Every call a [`RecordingJsBackend`] has served since the last
@@ -351,6 +369,21 @@ thread_local! {
 /// proves a script `Callable` registered via `create_callback` really ran.
 pub fn recorded_calls() -> Vec<String> {
     RECORDED.with(|r| r.borrow().clone())
+}
+
+/// Sets what [`RecordingJsBackend`] reports for `pwa_needs_update`, standing in
+/// for a service worker parking a new version (pat-mgixk.41).
+///
+/// The engine polls that answer once per frame and emits
+/// `JavaScriptBridge.pwa_update_available` on the false->true edge, so moving
+/// this between frames is how a test drives the signal.
+pub fn set_pwa_pending(pending: bool) {
+    PWA_PENDING.with(|p| p.set(pending));
+}
+
+/// Whether a PWA update is currently being reported (diagnostics / tests).
+pub fn pwa_pending() -> bool {
+    PWA_PENDING.with(|p| p.get())
 }
 
 /// The backend to use when nothing has been installed: the browser one on
@@ -382,6 +415,10 @@ pub fn reset_backend() {
     BACKEND.with(|b| *b.borrow_mut() = None);
     PENDING.with(|p| p.borrow_mut().clear());
     RECORDED.with(|r| r.borrow_mut().clear());
+    // ⚠️ Cleared with the rest: the flag is thread-local, not per-test, so a
+    // leaked `true` would make the NEXT test emit a phantom
+    // `pwa_update_available` on its very first frame.
+    PWA_PENDING.with(|p| p.set(false));
 }
 
 /// Restores the checked-out backend and clears the re-entrancy guard even if
@@ -452,8 +489,54 @@ pub fn queue_callback_invocation(callback_id: u64, args: Vec<JsValue>) {
 ///
 /// The interpreter calls this from `pump_javascript_callbacks` and dispatches
 /// each one onto the `Callable` registered under that id.
+///
+/// ⚠️ Takes the WHOLE queue, which is only correct when there is a single
+/// interpreter. A scene has one `Interpreter` per scripted node, all sharing
+/// this process-global queue, so use
+/// [`take_callback_invocations_where`] from a multi-script host — see its docs
+/// for what goes wrong otherwise.
 pub fn take_callback_invocations() -> Vec<(u64, Vec<JsValue>)> {
     PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()))
+}
+
+/// Drains the queued invocations `keep` accepts, in arrival order, and leaves
+/// the rest queued in arrival order for a later caller (pat-mgixk.41).
+///
+/// 🔑 Why this exists. Every scripted node owns its own `Interpreter`, but this
+/// queue and the interpreter's callback registry are both process-wide. With a
+/// blanket drain the FIRST interpreter pumped takes every other script's
+/// invocations — and because the registry is shared it RESOLVES those foreign
+/// ids rather than skipping them, then runs each `Callable` against its own
+/// instance. A `create_callback(_on_js)` parks a self-relative method
+/// reference (`CallableRef::Method { target_id: 0, .. }` is "self"), so script
+/// B's browser callback would execute as if it were script A's — with A's
+/// member variables — and `pump_javascript_callbacks` swallows the error, so it
+/// fails silently. A single-script test passes either way, which is what makes
+/// the blanket drain worth guarding against.
+pub fn take_callback_invocations_where(
+    mut keep: impl FnMut(u64) -> bool,
+) -> Vec<(u64, Vec<JsValue>)> {
+    PENDING.with(|p| {
+        let queued = std::mem::take(&mut *p.borrow_mut());
+        let mut taken = Vec::new();
+        let mut left = Vec::new();
+        for (id, args) in queued {
+            if keep(id) {
+                taken.push((id, args));
+            } else {
+                left.push((id, args));
+            }
+        }
+        // ⚠️ Anything that arrived WHILE we were partitioning is appended
+        // after the untaken remainder, not clobbered by it. Assigning `left`
+        // outright would silently drop an invocation queued during the loop,
+        // and arrival order has to survive: these are browser events.
+        let mut q = p.borrow_mut();
+        let mut arrived_meanwhile = std::mem::take(&mut *q);
+        left.append(&mut arrived_meanwhile);
+        *q = left;
+        taken
+    })
 }
 
 /// Number of invocations waiting to be drained (diagnostics / tests).

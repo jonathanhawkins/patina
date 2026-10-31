@@ -839,6 +839,26 @@ fn render_node(
     parent_is_container: bool,
     fonts: &mut std::collections::HashMap<u64, String>,
 ) {
+    // Godot's `CanvasItem.visible`: a hidden node draws nothing, and neither do
+    // its descendants (`CanvasItem::_propagate_visibility_changed`). This walk
+    // is top-down, so returning here skips the node AND its whole subtree —
+    // which is also why the node's OWN flag is the right one to read rather
+    // than `is_visible_in_tree`: a hidden ancestor has already returned before
+    // the walk could reach this node. Same reasoning as the comment at
+    // `control.rs:801`.
+    //
+    // ⚠️ The draw list ignored `visible` ENTIRELY before this (pat-mgixk.22):
+    // zero occurrences of `visible` in this file. So `$Panel.hide()` wrote the
+    // property, `is_visible()` read it back, and `control_at_point` honoured it
+    // (`control.rs:3912`) — while the Panel KEPT BEING PAINTED. "Wired but
+    // dead" in the one direction a player would actually notice.
+    //
+    // `unwrap_or(true)`: an unauthored `visible` means visible, as in Godot,
+    // and a `.tscn` only serializes the property when it is false.
+    if !bool_prop(tree, node_id, "visible").unwrap_or(true) {
+        return;
+    }
+
     // pat-s3rrv.38: a theme assigned to THIS node joins the chain for it and
     // everything below it.
     //

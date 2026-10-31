@@ -145,6 +145,171 @@ pub fn coerce_to_declared_type(value: Variant, hint: &str) -> Result<Variant, Co
     }
 }
 
+/// Godot's default value for a slot declared `var x: T` with no initialiser
+/// (pat-mgixk.19).
+///
+/// GDScript does not leave a typed member or local at `null`: the analyzer
+/// default-initialises it to the type's zero value
+/// (`modules/gdscript/gdscript_analyzer.cpp`), which is why `var count: int`
+/// followed by `count += 1` yields `1` in Godot and operated on `Nil` here.
+///
+/// ⚠️ The zero values are **transcribed from Godot's default constructors**,
+/// never derived, because the two disagree where it matters most:
+/// `Color()` is opaque black `(0, 0, 0, 1)` and `Quaternion()` is the identity
+/// `(0, 0, 0, 1)`, while a byte-zero or `#[derive(Default)]` version of either
+/// would be transparent / degenerate. `gdcore::Color` and
+/// `gdcore::math3d::Quaternion` deliberately have no `Default` impl, so there is
+/// nothing to accidentally lean on.
+///
+/// A hint this does not know — an engine or script class, `Variant`, `RID`,
+/// `Callable`, `Signal`, `NodePath`, `Plane`, `AABB`, `Rect2` — answers `Nil`.
+/// That is Godot's answer for object types and, for the rest, it is exactly the
+/// behaviour every declaration had before this function existed, so an unknown
+/// hint is never a regression.
+pub fn typed_default(hint: &str) -> Variant {
+    // A parameterised container defaults to an EMPTY container *of that type*,
+    // not an untyped one: `var a: Array[int]` must already refuse
+    // `a.append("x")` before anything is assigned to it.
+    match declared_container(hint) {
+        Some(DeclaredContainer::Array(want)) => return Variant::Array(SharedArray::typed(want)),
+        Some(DeclaredContainer::Dictionary(key, val)) => {
+            let dict = SharedDictionary::new();
+            // Empty, so `set_typed` is allowed; it cannot fail here.
+            let _ = dict.set_typed(key, val);
+            return Variant::Dictionary(dict);
+        }
+        None => {}
+    }
+    // Reuses `from_hint_name`'s transcribed spelling table rather than matching
+    // hint strings again here — that table already knows `AABB` is not `Aabb`
+    // and `RID` is not `Rid`.
+    let Some(ty) = ContainerType::from_hint_name(hint).builtin else {
+        return Variant::Nil;
+    };
+    zero_value(ty)
+}
+
+/// The zero value of a builtin type, as Godot's default constructor produces it.
+fn zero_value(ty: VariantType) -> Variant {
+    use gdcore::math::{
+        Color, Transform2D, Vector2, Vector2i, Vector3, Vector3i, Vector4, Vector4i,
+    };
+    use gdcore::math3d::{Basis, Projection, Quaternion, Transform3D};
+    use gdcore::string_name::StringName;
+
+    match ty {
+        VariantType::Bool => Variant::Bool(false),
+        VariantType::Int => Variant::Int(0),
+        VariantType::Float => Variant::Float(0.0),
+        VariantType::String => Variant::String(String::new()),
+        VariantType::StringName => Variant::StringName(StringName::new("")),
+        VariantType::Vector2 => Variant::Vector2(Vector2::ZERO),
+        VariantType::Vector2i => Variant::Vector2i(Vector2i::ZERO),
+        VariantType::Vector3 => Variant::Vector3(Vector3::ZERO),
+        VariantType::Vector3i => Variant::Vector3i(Vector3i::ZERO),
+        VariantType::Vector4 => Variant::Vector4(Vector4::ZERO),
+        VariantType::Vector4i => Variant::Vector4i(Vector4i::ZERO),
+        // Opaque black, not transparent: `Color()` sets `a = 1`.
+        VariantType::Color => Variant::Color(Color::BLACK),
+        VariantType::Transform2D => Variant::Transform2D(Transform2D::IDENTITY),
+        VariantType::Basis => Variant::Basis(Basis::IDENTITY),
+        VariantType::Transform3D => Variant::Transform3D(Transform3D::IDENTITY),
+        // `Quaternion()` is the identity rotation, w = 1.
+        VariantType::Quaternion => Variant::Quaternion(Quaternion::IDENTITY),
+        VariantType::Projection => Variant::Projection(Projection::IDENTITY),
+        VariantType::Array => Variant::Array(SharedArray::new()),
+        VariantType::Dictionary => Variant::Dictionary(SharedDictionary::new()),
+        VariantType::PackedByteArray => Variant::PackedByteArray(Vec::new()),
+        VariantType::PackedInt32Array => Variant::PackedInt32Array(Vec::new()),
+        VariantType::PackedInt64Array => Variant::PackedInt64Array(Vec::new()),
+        VariantType::PackedFloat32Array => Variant::PackedFloat32Array(Vec::new()),
+        VariantType::PackedFloat64Array => Variant::PackedFloat64Array(Vec::new()),
+        VariantType::PackedStringArray => Variant::PackedStringArray(Vec::new()),
+        VariantType::PackedVector2Array => Variant::PackedVector2Array(Vec::new()),
+        VariantType::PackedVector3Array => Variant::PackedVector3Array(Vec::new()),
+        VariantType::PackedColorArray => Variant::PackedColorArray(Vec::new()),
+        VariantType::PackedVector4Array => Variant::PackedVector4Array(Vec::new()),
+        // Object types start at null in Godot, and everything else this does
+        // not model keeps the pre-existing `Nil`.
+        _ => Variant::Nil,
+    }
+}
+
+/// Godot's typed assignment for a **non-container** slot (pat-mgixk.19).
+///
+/// `OPCODE_ASSIGN_TYPED_BUILTIN` (`modules/gdscript/gdscript_vm.cpp`) does not
+/// store whatever it is handed: it converts between the compatible builtins and
+/// raises otherwise. So `var speed: float = 200` holds `200.0` — which is why
+/// `speed / 3` is `66.666…` in Godot and was integer division here — and
+/// `var n: int = "x"` is an error rather than a silently stored String.
+///
+/// Returns `value` untouched when the hint carries no builtin constraint, so
+/// this is safe to call on every declaration and assignment.
+pub fn coerce_scalar(value: Variant, hint: &str) -> Result<Variant, ContainerError> {
+    use gdcore::string_name::StringName;
+
+    let Some(ty) = ContainerType::from_hint_name(hint).builtin else {
+        // No hint, or `Variant`: no constraint at all.
+        return Ok(value);
+    };
+    // An engine or script class. Narrowing to the exact class needs ClassDB and
+    // an is-a walk, which is a separate concern; accepting the value here keeps
+    // `var n: Node2D = get_node(..)` and `var n: Node2D = null` working.
+    if ty == VariantType::ObjectId {
+        return Ok(value);
+    }
+    if value.variant_type() == ty {
+        return Ok(value);
+    }
+    let converted = match (ty, &value) {
+        // int <-> float <-> bool, Godot's numeric conversions. The float->int
+        // direction narrows; Godot warns and converts rather than refusing.
+        (VariantType::Int, Variant::Float(f)) => Some(Variant::Int(*f as i64)),
+        (VariantType::Int, Variant::Bool(b)) => Some(Variant::Int(i64::from(*b))),
+        (VariantType::Float, Variant::Int(i)) => Some(Variant::Float(*i as f64)),
+        (VariantType::Float, Variant::Bool(b)) => Some(Variant::Float(f64::from(*b))),
+        (VariantType::Bool, Variant::Int(i)) => Some(Variant::Bool(*i != 0)),
+        (VariantType::Bool, Variant::Float(f)) => Some(Variant::Bool(*f != 0.0)),
+        // The string-like family, exactly the rows `can_convert_strict` lists:
+        // STRING accepts NODE_PATH and STRING_NAME; each of those accepts
+        // STRING. Notably `int` -> `String` is NOT among them (it is commented
+        // out in Godot's own table), so `var s: String = 1` raises rather than
+        // stringifying.
+        (VariantType::String, Variant::StringName(sn)) => {
+            Some(Variant::String(sn.as_str().to_string()))
+        }
+        (VariantType::String, Variant::NodePath(np)) => Some(Variant::String(np.to_string())),
+        (VariantType::StringName, Variant::String(s)) => {
+            Some(Variant::StringName(StringName::new(s)))
+        }
+        (VariantType::NodePath, Variant::String(s)) => Some(Variant::NodePath(
+            gdcore::node_path::NodePath::from(s.as_str()),
+        )),
+        _ => None,
+    };
+    match converted {
+        Some(v) => Ok(v),
+        None => Err(ContainerError::TypeMismatch {
+            expected: hint.trim().to_string(),
+            got: value.variant_type().to_string(),
+        }),
+    }
+}
+
+/// Converts `value` for assignment into a slot declared `hint`, whichever kind
+/// of constraint that is (pat-mgixk.19).
+///
+/// The one entry point the interpreter should call: a parameterised container
+/// goes to [`coerce_to_declared_type`] (whose semantics are unchanged), and
+/// everything else to [`coerce_scalar`].
+pub fn coerce_for_declared_slot(value: Variant, hint: &str) -> Result<Variant, ContainerError> {
+    if declared_container(hint).is_some() {
+        coerce_to_declared_type(value, hint)
+    } else {
+        coerce_scalar(value, hint)
+    }
+}
+
 /// Freezes a `const`'s container value, so `const DIRS = [...]` cannot be
 /// appended to (Godot's analyzer calls `make_read_only()` on every constant).
 ///

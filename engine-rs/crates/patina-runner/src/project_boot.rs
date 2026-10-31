@@ -23,6 +23,7 @@ use gdcore::file_access::FileAccess;
 use gdcore::{set_path_roots, ProjectSettings};
 use gdplatform::InputMap;
 use gdresource::{AutoloadEntry, ProjectLoader};
+use gdscene::scripting::GDScriptNodeInstance;
 use gdscene::{add_packed_scene_to_tree, Node, NodeId, PackedScene, SceneTree};
 use gdvariant::Variant;
 
@@ -442,18 +443,23 @@ fn boot_from_project_text(
     // same OS layer that answers `OS.has_feature`, so `setting.web` resolves
     // against the same truth, and the source path is remembered so
     // `ProjectSettings.save()` writes back where it read from.
-    gdscript_interop::interpreter::seed_project_settings(
-        settings
-            .iter()
-            .filter_map(|(k, v)| settings_value_to_variant(v).map(|var| (k.to_string(), var))),
-    );
-    gdscript_interop::interpreter::set_project_feature_tags(active_feature_tags());
-    gdscript_interop::interpreter::set_project_settings_path(
-        project_root
-            .join("project.godot")
-            .to_string_lossy()
-            .to_string(),
-    );
+    //
+    // 🔑 TWO seeds, defaults first. Godot's `GLOBAL_DEF` registers every default
+    // in `ProjectSettings::props`, so `get_setting("physics/2d/default_gravity")`
+    // answers 980.0 in a project that never overrides it — and `project.godot`
+    // never writes a key it has not changed. Seeding only `settings.iter()`
+    // (declared keys; see `ProjectSettings::iter`) left every default `Nil`,
+    // which broke the classic `CharacterBody2D` idiom (pat-mgixk.42).
+    //
+    // The halves stay apart rather than merging into one iterator: the defaults
+    // are not marked project-declared, so `ProjectSettings.save()` still writes
+    // back only overrides instead of stamping ~230 engine defaults into the
+    // user's `project.godot`.
+    // Delegated to the shared helper so the runner and the editor's Play path
+    // cannot drift apart: the editor applied NONE of this, which is the whole of
+    // pat-mgixk.44. The defaults/declared split, the feature tags and the
+    // settings path all live there now, with the reasoning.
+    gdscene::project_runtime::seed_script_settings_for_this_thread(&settings, &project_root);
 
     // (1b) Install the DisplayServer backend now that the project's configured
     // viewport is known. Without this a script calling
@@ -491,6 +497,24 @@ fn boot_from_project_text(
         Some(load_scene_into_tree(&mut tree, root_id, &main_scene)?)
     };
 
+    // (4b) Attach the scenes' GDScripts.
+    //
+    // ⚠️ This is the step the project-directory boot path never had
+    // (pat-mgixk.414). `boot_project` instanced the main scene and the
+    // autoloads, but only script AUTOLOADS ever got a script, so every node in
+    // the main scene ran with no script at all: no `_ready`, no `_process`, no
+    // prints. The conformance gate measured it as 0 of 4 projects passing with
+    // ZERO `[T]` lines from any of them.
+    //
+    // It happens HERE, not in the callers, because three call paths booted a
+    // project and only one of them (the single-`.tscn` path in `main.rs`)
+    // remembered to attach. Doing it inside the boot means a path cannot forget.
+    //
+    // Ordering matters: after the main scene is instanced (there is nothing to
+    // attach to before that) and before any caller runs `enter_tree`, because
+    // `_ready` has to find a script already on the node.
+    attach_scripts(&mut tree, &project_root);
+
     // (5) Seed the runtime InputMap from `[input]`. Godot's
     // InputMap::load_from_project_settings installs the builtin `ui_*` actions
     // and then registers each project action with its real deadzone and bound
@@ -511,41 +535,84 @@ fn boot_from_project_text(
     })
 }
 
-/// Maps a `project.godot` value to the `Variant` a script sees
-/// (pat-0q2kx.135). Every `SettingsValue` has a Variant counterpart, so this is
-/// total — there is no silently dropped setting.
-fn settings_value_to_variant(v: &gdcore::SettingsValue) -> Option<Variant> {
-    use gdcore::SettingsValue as S;
-    Some(match v {
-        S::Bool(b) => Variant::Bool(*b),
-        S::Int(i) => Variant::Int(*i),
-        S::Float(f) => Variant::Float(*f),
-        S::String(s) => Variant::String(s.clone()),
-        S::Vector2(x, y) => Variant::Vector2(gdcore::math::Vector2::new(*x as f32, *y as f32)),
-        S::Vector3(x, y, z) => {
-            Variant::Vector3(gdcore::math::Vector3::new(*x as f32, *y as f32, *z as f32))
+/// Attaches each node's `_script_path` GDScript, returning how many attached.
+///
+/// This is the ONE implementation. It used to exist three times — in
+/// `main.rs::attach_scripts`, in `Bootstrap::init_scripts` and nowhere on the
+/// project-directory boot path, which is exactly how that path shipped without
+/// it (pat-mgixk.414). Both of the others now call this.
+///
+/// ⚠️ Nodes that already carry a script are SKIPPED. Autoloads are
+/// instantiated with their script before the main scene is loaded, and
+/// re-attaching would re-parse the source and clobber state their `_ready` has
+/// already produced.
+///
+/// A script that fails to read or parse is logged and skipped rather than
+/// failing the boot: Godot loads the rest of the scene when one script is
+/// broken, and a project with one bad file should still start.
+pub fn attach_scripts(tree: &mut SceneTree, project_dir: &Path) -> usize {
+    // Collected first: attaching borrows the tree mutably, and the walk needs it
+    // immutably.
+    let mut scripts_to_load: Vec<(NodeId, PathBuf)> = Vec::new();
+    for node_id in tree.all_nodes_in_tree_order() {
+        if tree.get_script(node_id).is_some() {
+            continue;
         }
-        S::Color(r, g, b, a) => Variant::Color(gdcore::math::Color::new(
-            *r as f32, *g as f32, *b as f32, *a as f32,
-        )),
-    })
+        if let Some(node) = tree.get_node(node_id) {
+            if let Variant::String(res_path) = node.get_property("_script_path") {
+                scripts_to_load.push((node_id, resolve_res_path(project_dir, &res_path)));
+            }
+        }
+    }
+
+    let mut attached = 0usize;
+    for (node_id, path) in scripts_to_load {
+        match std::fs::read_to_string(&path) {
+            Ok(source) => match GDScriptNodeInstance::from_source(&source, node_id) {
+                Ok(instance) => {
+                    tree.attach_script(node_id, Box::new(instance));
+                    attached += 1;
+                    tracing::info!(path = %path.display(), "attached GDScript to node");
+                }
+                Err(e) => tracing::warn!(
+                    path = %path.display(),
+                    error = format!("{e:?}"),
+                    "failed to parse GDScript"
+                ),
+            },
+            Err(e) => tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "failed to read GDScript file"
+            ),
+        }
+    }
+    attached
 }
 
-/// The feature tags active for this run, in the order
-/// `get_setting_with_override` should try them.
+/// Resolves a `res://` path against the project directory.
 ///
-/// Sourced from `gdplatform::os::has_feature` so a script's
-/// `OS.has_feature("web")` and a `setting.web` override can never disagree —
-/// two tables answering the same question is the bug pat-0q2kx.123 removed.
-fn active_feature_tags() -> Vec<String> {
-    [
-        "web", "editor", "template", "debug", "release", "pc", "desktop", "mobile", "linuxbsd",
-        "macos", "windows", "linux", "android", "ios", "x86_64", "arm64",
-    ]
-    .into_iter()
-    .filter(|tag| gdplatform::os::has_feature(tag))
-    .map(str::to_string)
-    .collect()
+/// Walks ancestors of `project_dir` and then of the cwd, because a fixture
+/// project is often nested below the directory the runner was pointed at.
+/// Falls back to `project_dir.join(relative)` so the caller gets a path to
+/// report even when nothing exists.
+pub fn resolve_res_path(project_dir: &Path, res_path: &str) -> PathBuf {
+    let relative = res_path.strip_prefix("res://").unwrap_or(res_path);
+    for ancestor in project_dir.ancestors() {
+        let candidate = ancestor.join(relative);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        for ancestor in cwd.ancestors() {
+            let candidate = ancestor.join(relative);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+    project_dir.join(relative)
 }
 
 /// Instantiates one autoload under `parent`, returning its node id. Scene

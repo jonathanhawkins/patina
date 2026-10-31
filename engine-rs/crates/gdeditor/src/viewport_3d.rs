@@ -1046,7 +1046,11 @@ impl Viewport3D {
                 node_id: nid.raw(),
                 class_name: node.class_name().to_string(),
                 global_transform: node3d::get_global_transform(tree, nid),
-                visible: node3d::is_visible(tree, nid),
+                // pat-mgixk.32: visible IN THE TREE, not the node's own flag.
+                // Hiding a parent hides the subtree in Godot
+                // (`Node3D::_propagate_visibility_changed`); reading only the
+                // own flag meant a hidden parent still rendered every child.
+                visible: node3d::is_visible_in_tree(tree, nid),
                 mesh_path: node3d::get_mesh_path(tree, nid),
                 shape_path,
                 albedo,

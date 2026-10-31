@@ -55,6 +55,11 @@ enum RenderJob {
     Gpu {
         vp: gdeditor::viewport_3d::Viewport3D,
         inputs: gdeditor::viewport_3d_render::Editor3DRenderInputs,
+        /// The canvas layers to composite OVER the rendered 3D frame
+        /// (pat-mgixk.36), already rasterized under the state lock with a
+        /// transparent clear. `None` for the editor's own idle 3D viewport,
+        /// which draws editor chrome rather than the game's HUD.
+        canvas: Option<gdrender2d::FrameBuffer>,
     },
     /// Software-rendered 2D viewport (already rasterized under the lock).
     Cpu(gdrender2d::FrameBuffer),
@@ -237,7 +242,13 @@ fn main() {
                     .as_ref()
                     .map(|ml| ml.tree())
                     .unwrap_or(&state.scene_tree);
-                if gdeditor::scene_renderer::scene_is_3d(running_tree) {
+                // ⚠️ `scene_has_3d_content`, NOT `scene_is_3d` (pat-mgixk.36).
+                // `scene_is_3d` answers "which editor main screen does this scene
+                // belong to" and falls back to `count_3d > count_2d`, so a 3D game
+                // with a big UI counted as 2D and its world was never rendered.
+                // What this branch actually needs to know is whether a 3D PASS is
+                // required; the HUD is composited over it either way below.
+                if gdeditor::scene_renderer::scene_has_3d_content(running_tree) {
                     // Snapshot the tree-dependent inputs under the lock; GPU-render
                     // off it (same lock-hold reduction as the editor path).
                     //
@@ -281,7 +292,57 @@ fn main() {
                             gdeditor::viewport_3d_render::editor_3d_render_inputs(&vp, running_tree)
                         }
                     };
-                    RenderJob::Gpu { vp, inputs }
+                    // The HUD (pat-mgixk.36). Godot's viewport draws its World3D
+                    // and then composites the canvas layers over it; this branch
+                    // used to publish the 3D frame alone, so a 3D game's
+                    // CanvasLayer UI was never drawn in the Play tab at all.
+                    //
+                    // Rasterized HERE, under the state lock, because it has to
+                    // read the tree; the composite itself happens off the lock
+                    // next to the GPU render. Same item order as
+                    // `scene_renderer::render_runtime_frame` (list -> Camera2D ->
+                    // window stretch) so both Play paths frame the HUD alike.
+                    //
+                    // ⚠️ KNOWN GAP, deliberately not fixed here: the 2D branch
+                    // below also runs `build_control_render_items`, the themed
+                    // Control pass that resolves container layout. It needs
+                    // `&mut` on the tree, which cannot be taken while
+                    // `running_tree` is borrowed, so wiring it in means
+                    // restructuring this branch. Plain CanvasItems — ColorRect,
+                    // Sprite2D, Label — composite correctly today; themed
+                    // containers over a 3D scene are follow-up work.
+                    let canvas = {
+                        let mut items =
+                            gdeditor::viewport_2d_render::build_runtime_render_list(running_tree);
+                        let canvas_size =
+                            gdcore::math::Vector2::new(rw.max(1) as f32, rh.max(1) as f32);
+                        if let Some(view) = gdeditor::viewport_2d_render::camera2d_view_transform(
+                            running_tree,
+                            canvas_size,
+                            None,
+                            1.0 / 60.0,
+                        ) {
+                            gdeditor::viewport_2d_render::apply_camera2d_view(&mut items, view);
+                        }
+                        let mut window = *running_tree.root_window();
+                        window.size = canvas_size;
+                        gdeditor::viewport_2d_render::apply_stretch_transform(
+                            &mut items,
+                            window.stretch_transform(),
+                        );
+                        gdeditor::viewport_2d_render::rasterize_render_list(
+                            &items,
+                            rw.max(1),
+                            rh.max(1),
+                            gdeditor::scene_renderer::CANVAS_OVERLAY_CLEAR,
+                            None,
+                        )
+                    };
+                    RenderJob::Gpu {
+                        vp,
+                        inputs,
+                        canvas: Some(canvas),
+                    }
                 } else {
                     // 2D running scene: rasterize the real CanvasItem pixels the
                     // game draws (pat-u3l8c.23) — textured sprites, color rects,
@@ -289,74 +350,79 @@ fn main() {
                     // sprite textures via the editor's texture cache. Build the
                     // render list off the tree first so its borrow ends before we
                     // mutably borrow the texture cache below.
-                    let mut items =
-                        gdeditor::viewport_2d_render::build_runtime_render_list(running_tree);
-                    // Themed Control pass (pat-0q2kx.19): lay out containers and
-                    // draw the UI subtree. It needs `&mut` (layout resolution
-                    // writes each control's rect), so it runs after the immutable
-                    // list above has been collected. Control items carry
-                    // `CONTROL_Z_BASE`-offset z, so appending keeps the list
-                    // ascending — UI composites above the plain 2D nodes.
-                    if let Some(ml) = state.run_main_loop.as_mut() {
-                        let root = ml.tree().root_id();
-                        items.extend(gdeditor::viewport_2d_render::build_control_render_items(
-                            ml.tree_mut(),
-                            root,
-                            gdcore::math::Vector2::new(rw as f32, rh as f32),
-                        ));
-                    }
-                    // Camera2D scroll (pat-0q2kx.27): an enabled Camera2D sets the
-                    // canvas transform every frame in Godot, centring content on
-                    // the camera and magnifying by its zoom. Folded onto the items
-                    // so the rasterizer stays camera-agnostic. `None` for the
-                    // previous centre snaps to the target, which is correct while
-                    // position smoothing is off (Godot's default); carrying the
-                    // centre across frames is what smoothing needs and is noted as
-                    // follow-up.
-                    if let Some(view) = gdeditor::viewport_2d_render::camera2d_view_transform(
-                        state
-                            .run_main_loop
-                            .as_ref()
-                            .map(|ml| ml.tree())
-                            .unwrap_or(&state.scene_tree),
-                        gdcore::math::Vector2::new(rw as f32, rh as f32),
-                        None,
-                        // `dt` only matters once a previous centre is carried
-                        // across frames (position smoothing); with `None` above the
-                        // camera snaps to its target, so this is inert today.
-                        1.0 / 60.0,
-                    ) {
-                        gdeditor::viewport_2d_render::apply_camera2d_view(&mut items, view);
-                    }
-                    let mut fb = gdeditor::viewport_2d_render::rasterize_render_list(
-                        &items,
-                        rw,
-                        rh,
-                        gdeditor::viewport_2d_render::RUNTIME_CLEAR_COLOR,
-                        Some(&mut state.texture_cache),
-                    );
-                    // 2D lights / occluders / CanvasModulate (pat-0q2kx.103).
-                    // This path builds its own item list (it folds in the Control
-                    // pass and the Camera2D transform), so it cannot go through
-                    // `render_runtime_canvas` and needs the shading pass named
-                    // explicitly — otherwise the Play tab draws lit scenes unlit.
-                    gdeditor::viewport_2d_render::shade_runtime_canvas(
-                        state
-                            .run_main_loop
-                            .as_ref()
-                            .map(|ml| ml.tree())
-                            .unwrap_or(&state.scene_tree),
-                        &mut fb,
-                    );
+                    // 🔑 ONE entry point for the running 2D canvas
+                    // (pat-mgixk.45). This block used to build its own pipeline
+                    // — list + controls + camera + raster + shade — which
+                    // silently skipped everything only `render_runtime_canvas`
+                    // did: CanvasGroup compositing, the NoiseTexture2D bake,
+                    // normal/specular surface sampling, the window content-scale
+                    // (stretch) transform, and the project's `msaa_2d` /
+                    // `snap_2d_*` canvas quality. Those four helpers had no
+                    // production caller at all, so the tests driving them were
+                    // asserting against a path Play did not run.
+                    //
+                    // `render_play_frame` needs `&mut SceneTree` (the themed
+                    // Control pass resolves container layout), so the state is
+                    // dereferenced once here to take disjoint field borrows of
+                    // the tree, the texture cache and the settings.
+                    //
+                    // ⚠️ `running_tree` (bound above from `state`) holds an
+                    // IMMUTABLE borrow of the same state. NLL ends it at its
+                    // last use, which on this branch is the `scene_has_3d_content`
+                    // condition, so the `&mut` below is already legal — but it is
+                    // released explicitly so that stays true if someone later
+                    // reads `running_tree` after the if/else. Without this the
+                    // failure would be a borrow error pointing at the `&mut`,
+                    // nowhere near the line that caused it.
+                    drop(running_tree);
+                    let st = &mut *state;
+                    let fb = match st.run_main_loop.as_mut() {
+                        Some(ml) => {
+                            let settings = st
+                                .run_project_settings
+                                .as_ref()
+                                .unwrap_or(&st.project_settings);
+                            gdeditor::viewport_2d_render::render_play_frame(
+                                ml.tree_mut(),
+                                rw,
+                                rh,
+                                &mut st.texture_cache,
+                                settings,
+                            )
+                        }
+                        // No running MainLoop: fall back to the edited scene, as
+                        // this branch always has, so pressing Play on a scene
+                        // that failed to boot still publishes a frame.
+                        None => {
+                            let settings = st
+                                .run_project_settings
+                                .as_ref()
+                                .unwrap_or(&st.project_settings);
+                            gdeditor::viewport_2d_render::render_play_frame(
+                                &mut st.scene_tree,
+                                rw,
+                                rh,
+                                &mut st.texture_cache,
+                                settings,
+                            )
+                        }
+                    };
                     RenderJob::Cpu(fb)
                 }
             };
             match job {
                 // Running 3D scene: GPU-render off the lock, then publish BMP (the
                 // Game view streams BMP, like the editor viewport).
-                RenderJob::Gpu { vp, inputs } => {
-                    let img =
+                RenderJob::Gpu { vp, inputs, canvas } => {
+                    let mut img =
                         gdeditor::viewport_3d_render::render_editor_3d_frame_gpu(&vp, &inputs);
+                    // The canvas goes on AFTER the 3D render, off the lock
+                    // (pat-mgixk.36). A scene with no CanvasItems rasterized a
+                    // fully transparent pass, which this skips pixel by pixel, so
+                    // a 3D-only game publishes the same bytes as before.
+                    if let Some(canvas) = canvas.as_ref() {
+                        gdeditor::scene_renderer::composite_canvas_over_bgra(&mut img, canvas);
+                    }
                     let bmp = gdrender2d::encode_bmp_bgra(&img);
                     handle.update_frame_bmp(bmp, img.width, img.height);
                 }
@@ -468,7 +534,15 @@ fn main() {
                             &vp,
                             &state.scene_tree,
                         );
-                        RenderJob::Gpu { vp, inputs }
+                        // No canvas overlay: this is the EDITOR's 3D viewport, not
+                        // a running game's frame. Compositing the scene's HUD over
+                        // the spatial editor would paint game UI across the
+                        // designer's view.
+                        RenderJob::Gpu {
+                            vp,
+                            inputs,
+                            canvas: None,
+                        }
                     } else {
                         let selected = state.selected_node;
                         let zoom = state.viewport_zoom;
@@ -502,7 +576,11 @@ fn main() {
                     // compositing) runs HERE, off the state lock, from the snapshot.
                     // Then encode BMP with a cheap per-row copy (no per-pixel Color
                     // pass) and publish. Only BMP is streamed live, so PNG is skipped.
-                    RenderJob::Gpu { vp, inputs } => {
+                    RenderJob::Gpu {
+                        vp,
+                        inputs,
+                        canvas: _,
+                    } => {
                         let raster_t = std::time::Instant::now();
                         let img =
                             gdeditor::viewport_3d_render::render_editor_3d_frame_gpu(&vp, &inputs);

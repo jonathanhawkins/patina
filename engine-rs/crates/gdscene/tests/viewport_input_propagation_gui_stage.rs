@@ -136,9 +136,25 @@ fn viewport_input_propagation_gui_stage() {
         got.iter().any(|n| n.starts_with("on:")),
         "the still-listening node must receive the event, got {got:?}"
     );
+    // ⚠️ Narrowed from "receives NOTHING" to "receives no `_input`"
+    // (pat-mgixk.57). Godot keeps a SEPARATE node group per input stage
+    // (`scene/main/node.cpp` set_process_input vs set_process_unhandled_input;
+    // `scene_tree.cpp::_call_input_pause` is called once per group), so
+    // `set_process_input(false)` silences `_input` and nothing else. The
+    // original wording described Patina's single shared flag, which made the
+    // standard "handle only unhandled input" idiom impossible to express.
     assert!(
-        !got.iter().any(|n| n.starts_with("off:")),
-        "a node that called set_process_input(false) must receive NOTHING, got {got:?}"
+        !got.iter().any(|n| n == "off:_input"),
+        "a node that called set_process_input(false) must receive no `_input`, got {got:?}"
+    );
+    // ...and the gate really is per-stage: the SAME click still reaches the
+    // muted node's `_unhandled_input`, which is the half a single global flag
+    // could not express. Stated positively so a regression to one shared flag
+    // fails here rather than passing quietly.
+    assert!(
+        got.iter().any(|n| n == "off:_unhandled_input"),
+        "set_process_input(false) must NOT silence `_unhandled_input` — Godot \
+         gates that stage on its own set_process_unhandled_input flag, got {got:?}"
     );
 
     // -- (3) physics picking reaches an input_pickable collider ---------------
