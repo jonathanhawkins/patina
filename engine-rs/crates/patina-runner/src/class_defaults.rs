@@ -14,6 +14,28 @@ use std::sync::LazyLock;
 /// A property default: (property_name, default_value).
 type PropDefault = (&'static str, Variant);
 
+/// Replaces an inherited default in place, for a subclass whose constructor
+/// changes one.
+///
+/// Godot's property dump strips a value equal to the *instantiated* class's
+/// default, so a subclass that overrides an inherited default in its
+/// constructor needs the overridden value here or every instance reports the
+/// property as though it had been authored.
+///
+/// 🔑 This has to replace rather than append: [`should_output_property`] returns
+/// on the FIRST entry whose name matches, so a second entry for the same key is
+/// silently ignored and the stale inherited value keeps winning. Panics on an
+/// unknown name, because a typo would otherwise be exactly that silent no-op.
+fn override_default(props: &mut [PropDefault], name: &str, value: Variant) {
+    for entry in props.iter_mut() {
+        if entry.0 == name {
+            entry.1 = value;
+            return;
+        }
+    }
+    panic!("`{name}` is not an inherited default here, so there is nothing to override");
+}
+
 /// Map from class name → list of property defaults (including inherited).
 static CLASS_DEFAULTS: LazyLock<HashMap<&'static str, Vec<PropDefault>>> = LazyLock::new(|| {
     let mut m: HashMap<&str, Vec<PropDefault>> = HashMap::new();
@@ -56,7 +78,22 @@ static CLASS_DEFAULTS: LazyLock<HashMap<&'static str, Vec<PropDefault>>> = LazyL
     };
 
     // -- PhysicsBody2D = CollisionObject2D --
-    let physics_body_2d = collision_object_2d.clone();
+    // -- PhysicsBody2D = CollisionObject2D, but NOT pickable --
+    //
+    // `PhysicsBody2D::PhysicsBody2D` calls `set_pickable(false)`
+    // (scene/2d/physics/physics_body_2d.cpp:46), and the class reference records
+    // the override: `input_pickable ... overrides="CollisionObject2D"
+    // default="false"` (doc/classes/PhysicsBody2D.xml:71). Only `Area2D` keeps
+    // CollisionObject2D's `true`.
+    //
+    // Inherited unchanged, every StaticBody2D/RigidBody2D/CharacterBody2D
+    // reported `input_pickable = false` as a non-default value, which Godot's
+    // own dump strips — 22 nodes across the golden scenes.
+    let physics_body_2d = {
+        let mut v = collision_object_2d.clone();
+        override_default(&mut v, "input_pickable", Variant::Bool(false));
+        v
+    };
 
     // -- StaticBody2D --
     let static_body_2d: Vec<PropDefault> = {
@@ -303,6 +340,11 @@ static CLASS_DEFAULTS: LazyLock<HashMap<&'static str, Vec<PropDefault>>> = LazyL
             ("spot_angle", Variant::Float(45.0)),
             ("spot_angle_attenuation", Variant::Float(1.0)),
         ]);
+        // `SpotLight3D::SpotLight3D` sets PARAM_SHADOW_BIAS to 0.03
+        // (scene/3d/light_3d.cpp:682), against Light3D's 0.1
+        // (light_3d.cpp:490) — `shadow_bias ... overrides="Light3D"
+        // default="0.03"` (doc/classes/SpotLight3D.xml:19).
+        override_default(&mut v, "shadow_bias", Variant::Float(0.03));
         v
     };
 
@@ -657,6 +699,71 @@ mod tests {
             "collision_mask",
             &Variant::Int(1)
         ));
+    }
+
+    /// A `PhysicsBody2D` subclass is NOT pickable by default, so the value its
+    /// constructor sets must be stripped.
+    ///
+    /// Both directions, per class: the `false` case is the regression (it was
+    /// reported as authored on every physics body in the golden scenes), and the
+    /// `true` case proves the override did not simply make the key unreadable.
+    #[test]
+    fn physics_body_2d_input_pickable_default_is_false() {
+        for class in ["StaticBody2D", "RigidBody2D", "CharacterBody2D"] {
+            assert!(
+                !should_output_property(class, "input_pickable", &Variant::Bool(false)),
+                "{class} inherits PhysicsBody2D's `set_pickable(false)`, so `false` \
+                 is its default and Godot's dump strips it"
+            );
+            assert!(
+                should_output_property(class, "input_pickable", &Variant::Bool(true)),
+                "a scene that authors `input_pickable = true` on a {class} is \
+                 overriding the default and must still be reported"
+            );
+        }
+    }
+
+    /// `Area2D` keeps `CollisionObject2D`'s `true` — the override above must not
+    /// have reached it.
+    ///
+    /// 🔑 This is the half that catches an over-broad fix: `Area2D` derives from
+    /// `collision_object_2d`, not `physics_body_2d`, and Godot gives it no
+    /// override (doc/classes/Area2D.xml declares none).
+    #[test]
+    fn area2d_input_pickable_default_stays_true() {
+        assert!(!should_output_property(
+            "Area2D",
+            "input_pickable",
+            &Variant::Bool(true)
+        ));
+        assert!(should_output_property(
+            "Area2D",
+            "input_pickable",
+            &Variant::Bool(false)
+        ));
+    }
+
+    /// `SpotLight3D` overrides `Light3D`'s `shadow_bias`, and the sibling light
+    /// classes do not.
+    #[test]
+    fn spotlight3d_shadow_bias_default_is_point_zero_three() {
+        assert!(!should_output_property(
+            "SpotLight3D",
+            "shadow_bias",
+            &Variant::Float(0.03)
+        ));
+        assert!(should_output_property(
+            "SpotLight3D",
+            "shadow_bias",
+            &Variant::Float(0.1)
+        ));
+        // Light3D itself and the other two subclasses keep 0.1.
+        for class in ["Light3D", "OmniLight3D", "DirectionalLight3D"] {
+            assert!(
+                !should_output_property(class, "shadow_bias", &Variant::Float(0.1)),
+                "{class} has no constructor override, so 0.1 is still its default"
+            );
+        }
     }
 
     #[test]

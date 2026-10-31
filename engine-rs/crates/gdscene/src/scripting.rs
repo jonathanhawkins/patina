@@ -41,7 +41,8 @@ use std::collections::HashMap;
 
 use gdcore::math::{Color, Rect2, Vector2};
 use gdscript_interop::bindings::{
-    MethodFlags, MethodInfo, SceneAccess, ScriptError, ScriptInstance, ScriptPropertyInfo,
+    is_scene_tree_handle, MethodFlags, MethodInfo, SceneAccess, ScriptError, ScriptInstance,
+    ScriptPropertyInfo, SCENE_TREE_SIGNALS,
 };
 use gdscript_interop::interpreter::{ClassInstance, Interpreter, RuntimeError};
 use gdserver2d::canvas::DrawCommand;
@@ -150,6 +151,63 @@ pub type ScriptStore = HashMap<NodeId, Box<dyn ScriptInstance>>;
 /// Wraps an [`Interpreter`], [`ClassDef`], and [`ClassInstance`] so that
 /// lifecycle methods like `_ready` and `_process` execute the corresponding
 /// GDScript methods defined in the source file.
+/// Attaches a [`GDScriptNodeInstance`] to every node in `subtree_root`'s
+/// subtree that carries a `_script_path` and has no script yet, returning how
+/// many were attached.
+///
+/// Godot's `PackedScene.instantiate()` hands back a graph whose nodes already
+/// hold their script instances; `.tscn` parsing in Patina records the path as
+/// `_script_path` but nothing on the runtime spawn path ever turned that into a
+/// live script, so a spawned enemy's `_ready`/`_process` never ran
+/// (pat-mgixk.61).
+///
+/// ⚠️ Reads through [`FileAccess`](gdcore::file_access::FileAccess), NOT
+/// `std::fs`, so a script packed inside an exported `.pck` loads too — the same
+/// reason `instantiate_packed_scene` reads the `.tscn` that way. The
+/// boot-time loops this mirrors use `std::fs` against a project root, which is
+/// why they cannot serve an exported game.
+///
+/// A script that fails to read or parse is skipped rather than fatal: one bad
+/// script in a spawned scene must not take the whole spawn down, matching how
+/// the autoload path treats it.
+pub fn attach_subtree_scripts_from_res(tree: &mut SceneTree, subtree_root: NodeId) -> usize {
+    // Ids first: the attach loop mutates the tree, so no borrow may be held.
+    let mut ids = Vec::new();
+    let mut stack = vec![subtree_root];
+    while let Some(id) = stack.pop() {
+        if let Some(node) = tree.get_node(id) {
+            for &child in node.children() {
+                stack.push(child);
+            }
+            ids.push(id);
+        }
+    }
+
+    let mut to_load: Vec<(NodeId, String)> = Vec::new();
+    for id in ids {
+        if tree.get_script(id).is_some() {
+            continue;
+        }
+        if let Some(node) = tree.get_node(id) {
+            if let Variant::String(res_path) = node.get_property("_script_path") {
+                to_load.push((id, res_path));
+            }
+        }
+    }
+
+    let mut attached = 0;
+    for (id, res_path) in to_load {
+        let Ok(source) = gdcore::file_access::FileAccess::read_file_string(&res_path) else {
+            continue;
+        };
+        if let Ok(instance) = GDScriptNodeInstance::from_source(&source, id) {
+            tree.attach_script(id, Box::new(instance));
+            attached += 1;
+        }
+    }
+    attached
+}
+
 pub struct GDScriptNodeInstance {
     interpreter: Interpreter,
     instance: ClassInstance,
@@ -2156,6 +2214,34 @@ impl SceneAccess for SceneTreeAccessor {
     }
 
     fn get_node_property(&self, node: u64, prop: &str) -> Variant {
+        // `get_tree().paused` / `.current_scene` / `.root`, and the SceneTree
+        // signals (pat-mgixk.59). Answered before anything resolves `node` as a
+        // NodeId, for the same reason the physics-query branch below is:
+        // the handle names no node, so the scene route would read back `Nil`
+        // and `var t = get_tree(); t.paused` would be silently empty.
+        if is_scene_tree_handle(node) {
+            // 🔑 Every SceneTree signal is emitted on the tree ROOT
+            // (`main_loop.rs` emits `process_frame`/`physics_frame` on
+            // `tree.root_id()`), so the Signal value has to name the root. Bound
+            // anywhere else, `.connect` would land where nothing emits and
+            // `await get_tree().process_frame` would hang forever.
+            if SCENE_TREE_SIGNALS.contains(&prop) {
+                return Variant::Signal {
+                    object_id: self.tree().root_id().raw(),
+                    name: prop.to_string(),
+                };
+            }
+            return match prop {
+                "paused" => Variant::Bool(self.tree().paused()),
+                "root" => Variant::ObjectId(self.tree().root_id().object_id()),
+                // Godot answers null before a scene is set, not the root.
+                "current_scene" => match self.tree().current_scene() {
+                    Some(id) => Variant::ObjectId(id.object_id()),
+                    None => Variant::Nil,
+                },
+                _ => Variant::Nil,
+            };
+        }
         // `World2D.direct_space_state` (pat-s3rrv.26). Answered before the node
         // lookup below because the receiver is a physics-query handle, not a
         // node — `NodeId::from_object_id` on it would name nothing and the
@@ -2290,6 +2376,25 @@ impl SceneAccess for SceneTreeAccessor {
     }
 
     fn set_node_property(&mut self, node: u64, prop: &str, value: Variant) {
+        // `get_tree().paused = true` — the pause-menu idiom (pat-mgixk.59).
+        // Before the node resolution below: the handle names no node, so the
+        // write would land on nothing and the tree would keep running.
+        if is_scene_tree_handle(node) {
+            if prop == "paused" {
+                let paused = match value {
+                    Variant::Bool(b) => b,
+                    Variant::Int(i) => i != 0,
+                    // A malformed value is a no-op rather than an un-pause: the
+                    // same rule `set_process` follows.
+                    _ => return,
+                };
+                self.tree_mut().set_paused(paused);
+            }
+            // Every other SceneTree property is read-only from a script, and an
+            // unknown name is dropped rather than creating a bag entry on a
+            // handle that has no node to carry it.
+            return;
+        }
         // pat-s3rrv.26 — assignments onto a `PhysicsRayQueryParameters2D`
         // handle: `params.exclude = [body]`, `params.collision_mask = 2`.
         //
@@ -3232,6 +3337,227 @@ impl SceneAccess for SceneTreeAccessor {
                     .map(|n| n.is_inside_tree())
                     .unwrap_or(false),
             )),
+            // ── pat-mgixk.60: Node's hierarchy / query API ──────────────────
+            //
+            // Every name below is a `Node` member in Godot
+            // (`scene/main/node.cpp` `_bind_methods`) and every one is already
+            // registered in our ClassDB — with NO arm anywhere. That
+            // combination is the silent failure, not an error: `node_has_method`
+            // answers true, so `call_object_method` skips straight to its
+            // `if responds` branch and hands the script a `Nil` placeholder. A
+            // script calling `get_path_to(n)` got null with no hint why.
+            //
+            // Wired in THIS table for the reason the comment above `get_child`
+            // gives: `call_object_method` and `call_self_func_or_native` both
+            // fall back here, so one arm serves `$B.m()`, the bare `m()` a
+            // script on the node itself writes, AND `obj.call("m")`. The
+            // interpreter's own ObjectId match would cover only the first.
+            //
+            // Each delegates to the `SceneTree` implementation that already
+            // existed; the work here is reaching them, not reimplementing them.
+            "has_node" => {
+                let Some(path) = arg_str(0) else {
+                    return Some(Variant::Bool(false));
+                };
+                // 🔑 Deliberately built on the SAME resolver as
+                // `get_node_or_null` above, rather than a second path walk: a
+                // `has_node` that answered true where `get_node` returns null
+                // would be worse than either being wrong on its own, and
+                // `if has_node(p): get_node(p)` is the idiom this exists for.
+                Some(Variant::Bool(
+                    SceneAccess::get_node(self, node, &path).is_some(),
+                ))
+            }
+            "get_index" => Some(Variant::Int(
+                // Godot answers -1 for a node with no parent.
+                self.tree().get_index(nid).map(|i| i as i64).unwrap_or(-1),
+            )),
+            "is_ancestor_of" => {
+                let Some(other) = args.first().and_then(variant_object_raw) else {
+                    return Some(Variant::Bool(false));
+                };
+                Some(Variant::Bool(self.tree().is_ancestor_of(
+                    nid,
+                    NodeId::from_object_id(ObjectId::from_raw(other)),
+                )))
+            }
+            "get_path_to" => {
+                let Some(other) = args.first().and_then(variant_object_raw) else {
+                    return Some(Variant::Nil);
+                };
+                let other_nid = NodeId::from_object_id(ObjectId::from_raw(other));
+                // ⚠️ Godot returns a NodePath here, not a String, and the
+                // documented comparison is `get_path_to(n) == NodePath("B/A")`.
+                // A `Variant::String` would print identically and compare
+                // FALSE, so the type is the whole point of this arm.
+                match self.tree().get_path_to(nid, other_nid) {
+                    Some(path) => Some(Variant::NodePath(
+                        gdcore::node_path::NodePath::new(&path),
+                    )),
+                    None => Some(Variant::Nil),
+                }
+            }
+            "move_child" => {
+                let Some(child) = args.first().and_then(variant_object_raw) else {
+                    return Some(Variant::Nil);
+                };
+                let Some(to_index) = args.get(1).and_then(|v| match v {
+                    Variant::Int(i) => Some(*i),
+                    Variant::Float(f) => Some(*f as i64),
+                    _ => None,
+                }) else {
+                    return Some(Variant::Nil);
+                };
+                // Godot lets a negative index count back from the end.
+                //
+                // ⚠️ The negative guard is not cosmetic: `SceneTree::move_child`
+                // takes a `usize`, so a still-negative value would cast to an
+                // enormous index. It clamps a too-LARGE index itself
+                // (`to_index.min(len - 1)`) and rejects a non-child, so only the
+                // sign has to be handled here.
+                let len = self
+                    .tree()
+                    .get_node(nid)
+                    .map(|n| n.children().len())
+                    .unwrap_or(0) as i64;
+                let resolved = if to_index < 0 { to_index + len } else { to_index };
+                if resolved < 0 {
+                    return Some(Variant::Nil);
+                }
+                let child_nid = NodeId::from_object_id(ObjectId::from_raw(child));
+                let _ = self.tree_mut().move_child(nid, child_nid, resolved as usize);
+                Some(Variant::Nil)
+            }
+            "find_parent" => {
+                let Some(pattern) = arg_str(0) else {
+                    return Some(Variant::Nil);
+                };
+                match self.tree().find_parent(nid, &pattern) {
+                    Some(found) => Some(Variant::ObjectId(found.object_id())),
+                    None => Some(Variant::Nil),
+                }
+            }
+            "find_children" => {
+                let Some(pattern) = arg_str(0) else {
+                    return Some(Variant::Array(Default::default()));
+                };
+                // Godot: `find_children(pattern, type = "", recursive = true,
+                // owned = true)`. An empty type means "any class", which is
+                // `None` to the implementation — passing `Some("")` would match
+                // nothing.
+                let type_name = arg_str(1).filter(|t| !t.is_empty());
+                // Both default to TRUE in Godot, so the test is for an explicit
+                // `false` rather than for a present `true` — a missing or
+                // malformed argument must keep the documented default, not fall
+                // through to `false` and silently narrow the search.
+                let recursive = !matches!(args.get(2), Some(Variant::Bool(false)));
+                let owned = !matches!(args.get(3), Some(Variant::Bool(false)));
+                let found = self.tree().find_children(
+                    nid,
+                    &pattern,
+                    type_name.as_deref(),
+                    recursive,
+                );
+                // 🔑 The `owned` filter is applied HERE rather than by changing
+                // `SceneTree::find_children`'s signature. Godot's default
+                // `owned = true` matches only nodes whose `owner` is set, which
+                // excludes anything `add_child`ed at runtime. Adding the
+                // parameter upstream would change the arity of a function called
+                // from several crates and their tests — a crate-wide break for a
+                // predicate that is one line over the result.
+                let items: Vec<Variant> = found
+                    .into_iter()
+                    .filter(|id| {
+                        !owned
+                            || self
+                                .tree()
+                                .get_node(*id)
+                                .and_then(|n| n.owner())
+                                .is_some()
+                    })
+                    .map(|id| Variant::ObjectId(id.object_id()))
+                    .collect();
+                Some(Variant::Array(items.into()))
+            }
+            "get_groups" => Some(Variant::Array(
+                self.tree()
+                    .node_groups(nid)
+                    .into_iter()
+                    .map(Variant::String)
+                    .collect::<Vec<Variant>>()
+                    .into(),
+            )),
+            "get_owner" => match self.tree().get_node(nid).and_then(|n| n.owner()) {
+                Some(owner) => Some(Variant::ObjectId(owner.object_id())),
+                None => Some(Variant::Nil),
+            },
+            "set_owner" => {
+                // A missing or non-object argument clears the owner, which is
+                // Godot's `set_owner(null)`.
+                let owner = args
+                    .first()
+                    .and_then(variant_object_raw)
+                    .map(|raw| NodeId::from_object_id(ObjectId::from_raw(raw)));
+                if let Some(target) = self.tree_mut().get_node_mut(nid) {
+                    target.set_owner(owner);
+                }
+                Some(Variant::Nil)
+            }
+            "is_node_ready" => Some(Variant::Bool(
+                self.tree().get_node(nid).map(|n| n.is_ready()).unwrap_or(false),
+            )),
+            "request_ready" => {
+                self.tree_mut().request_node_ready(nid);
+                Some(Variant::Nil)
+            }
+            "propagate_notification" => {
+                let Some(what) = args.first().and_then(|v| match v {
+                    Variant::Int(i) => Some(*i),
+                    Variant::Float(f) => Some(*f as i64),
+                    _ => None,
+                }) else {
+                    return Some(Variant::Nil);
+                };
+                self.tree_mut().propagate_notification(nid, what);
+                Some(Variant::Nil)
+            }
+            "replace_by" => {
+                let Some(new_raw) = args.first().and_then(variant_object_raw) else {
+                    return Some(Variant::Nil);
+                };
+                // Godot's second argument is `keep_groups`, defaulting to false.
+                let keep_groups = matches!(args.get(1), Some(Variant::Bool(true)));
+                let new_nid = NodeId::from_object_id(ObjectId::from_raw(new_raw));
+                self.tree_mut().replace_by(nid, new_nid, keep_groups);
+                Some(Variant::Nil)
+            }
+            // pat-mgixk.64: `Node.set_name`. ⚠️ This had NO arm, and the gap was
+            // wider than a missing signal: `Node::set_name` is reached from
+            // exactly one place in the crate (`SceneTree::set_node_name`), and
+            // that in turn had exactly one caller — a test. So a script could
+            // not rename a node by ANY spelling, and `renamed` was unreachable
+            // no matter where it was emitted.
+            //
+            // Routed through `SceneTree::set_node_name` rather than touching the
+            // node directly, because that is where the rename signals live: the
+            // tree-level `node_renamed` on the root and `renamed` on the node
+            // itself. Writing `Node::set_name` straight would rename the node and
+            // emit neither.
+            "set_name" => {
+                let Some(name) = arg_str(0) else {
+                    return Some(Variant::Nil);
+                };
+                self.tree_mut().set_node_name(nid, name);
+                Some(Variant::Nil)
+            }
+            "get_tree_string" => Some(Variant::String(self.tree().get_tree_string(nid))),
+            "print_tree" => {
+                // Godot prints to stdout and returns nothing; the string form is
+                // `get_tree_string` above, which this reuses so the two can
+                // never drift.
+                println!("{}", self.tree().get_tree_string(nid));
+                Some(Variant::Nil)
+            }
             "set_process" | "set_physics_process" => {
                 // A malformed argument is a no-op, not a disable: reading a
                 // missing argument as `false` would silently stop the node's
@@ -3338,6 +3664,40 @@ impl SceneAccess for SceneTreeAccessor {
             "get_process_delta_time" => Some(Variant::Float(self.tree().script_process_delta())),
             "get_physics_process_delta_time" => {
                 Some(Variant::Float(self.tree().script_physics_delta_time()))
+            }
+            // -- Viewport / Window surface (pat-mgixk.59) --------------------
+            //
+            // `get_viewport()` returns a REAL node — Patina's tree root is a
+            // `Window`, and ClassDB registers `Window` with `.parent("Viewport")`
+            // — so these belong in this table rather than behind a handle, and
+            // one registration serves both `get_viewport().m()` and
+            // `$SomeViewport.m()`.
+            //
+            // The class guard is satisfiable by construction for anything
+            // `get_viewport()` hands back, and keeps a same-named method on an
+            // unrelated node from being answered with the root window's state.
+            "get_visible_rect" | "set_input_as_handled" | "is_input_handled"
+                if self
+                    .tree()
+                    .get_node(nid)
+                    .is_some_and(|n| n.is_class("Viewport")) =>
+            {
+                match method {
+                    "get_visible_rect" => {
+                        // Godot's visible rect starts at the origin; only the
+                        // SIZE varies with the stretch settings.
+                        let size = self.tree().root_window().visible_size();
+                        Some(Variant::Rect2(Rect2 {
+                            position: Vector2::ZERO,
+                            size,
+                        }))
+                    }
+                    "set_input_as_handled" => {
+                        self.tree_mut().set_input_as_handled();
+                        Some(Variant::Nil)
+                    }
+                    _ => Some(Variant::Bool(self.tree().is_input_handled())),
+                }
             }
             "notification" => {
                 let what = match args.first() {
@@ -4786,6 +5146,18 @@ impl SceneAccess for SceneTreeAccessor {
                 let pattern = arg_str(0)?;
                 // Godot's signature is find_child(pattern, recursive = true, ...).
                 let recursive = !matches!(args.get(1), Some(Variant::Bool(false)));
+                // ⚠️ pat-mgixk.60 clause 2 (the `owned` filter) is deliberately
+                // NOT applied here, and the reason is a measurement, not caution:
+                // Godot's `owned = true` default returns only nodes with an
+                // `owner`, and `cross_node_and_native_method_dispatch_test.rs:96`
+                // builds its `Hitbox` with `tree.add_child(.., Node::new(..))`,
+                // which sets no owner. That test asserts at :142 that
+                // `e.find_child("Hitbox")` resolves, and it is GREEN at HEAD — so
+                // honouring the default turns a passing test red. The fixture
+                // encodes the pre-Godot behaviour; fixing it is one `set_owner`
+                // line, but it is another bead's test and runs in other beads'
+                // verify commands, so the call is not this bead's to make
+                // silently. Reported as blocked instead.
                 Some(match self.tree().find_child(nid, &pattern, recursive) {
                     Some(found) => Variant::ObjectId(found.object_id()),
                     None => Variant::Nil,
@@ -5517,6 +5889,23 @@ impl SceneAccess for SceneTreeAccessor {
 
     fn is_input_handled(&self) -> bool {
         self.tree().is_input_handled()
+    }
+
+    // -- Viewport / Window objects (pat-mgixk.59) ---------------------------
+
+    fn node_viewport(&self, node: u64) -> Option<u64> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // `viewport::get_viewport` falls back to the tree root, which is always
+        // a Window and therefore always a Viewport — so this is `None` only for
+        // a receiver that names no node at all.
+        self.tree().get_node(nid)?;
+        Some(crate::viewport::get_viewport(self.tree(), nid).raw())
+    }
+
+    fn node_window(&self, node: u64) -> Option<u64> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        self.tree().get_node(nid)?;
+        Some(crate::viewport::get_window(self.tree(), nid).raw())
     }
 
     // -- Per-node process toggles (pat-nzgdu.137) ---------------------------
@@ -8045,12 +8434,20 @@ impl SceneAccess for SceneTreeAccessor {
             crate::packed_scene::PackedScene::from_tscn(&src).ok()
         };
         let tree = self.tree_mut();
-        let root = tree.root_id();
-        // The subtree is attached under the root here; the script's follow-up
-        // `add_child` reparents it to the desired parent (see `add_child`).
-        crate::packed_scene::add_packed_scene_to_tree_with_subscenes(tree, root, &scene, &resolve)
-            .ok()
-            .map(|id| id.raw())
+        // Built DETACHED, as Godot does: no `_enter_tree` or `_ready` runs until
+        // the script's `add_child` inserts it. Parenting it under `/root` here
+        // meant the lifecycle fired on insertion — each node before its children
+        // existed, so READY went parent-first — and then fired AGAIN when
+        // `add_child` reparented it, so a spawned node's `_ready` ran twice
+        // (pat-mgixk.61).
+        let instance =
+            crate::packed_scene::instantiate_packed_scene_detached(tree, &scene, &resolve).ok()?;
+        // The spawned nodes' own scripts. Without this the subtree is inert: no
+        // `_ready`, no `_process`, no signal handlers — the scene spawns and then
+        // does nothing, which is the half of this bug a tree-shape assertion
+        // cannot see.
+        attach_subtree_scripts_from_res(tree, instance);
+        Some(instance.raw())
     }
 
     fn instantiate_script(&mut self, path: &str) -> Option<u64> {

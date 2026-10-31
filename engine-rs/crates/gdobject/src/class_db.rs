@@ -26914,7 +26914,38 @@ pub fn register_io_classes() {
                 .method(MethodInfo::new("store_buffer", 1))
                 .method(MethodInfo::new("get_error", 0).const_method())
                 .method(MethodInfo::new("close", 0))
-                .method(MethodInfo::new("file_exists", 1).static_method()),
+                .method(MethodInfo::new("file_exists", 1).static_method())
+                // pat-mgixk.54: everything below was dispatchable but unlisted,
+                // so `has_method` denied methods that worked when called.
+                .method(MethodInfo::new("get_open_error", 0).static_method())
+                .method(MethodInfo::new("get_file_as_string", 1).static_method())
+                .method(MethodInfo::new("store_8", 1))
+                .method(MethodInfo::new("store_16", 1))
+                .method(MethodInfo::new("store_32", 1))
+                .method(MethodInfo::new("store_64", 1))
+                .method(MethodInfo::new("store_float", 1))
+                .method(MethodInfo::new("store_double", 1))
+                .method(MethodInfo::new("store_real", 1))
+                .method(MethodInfo::new("get_8", 0).const_method())
+                .method(MethodInfo::new("get_16", 0).const_method())
+                .method(MethodInfo::new("get_32", 0).const_method())
+                .method(MethodInfo::new("get_64", 0).const_method())
+                .method(MethodInfo::new("get_float", 0).const_method())
+                .method(MethodInfo::new("get_double", 0).const_method())
+                .method(MethodInfo::new("get_real", 0).const_method())
+                .method(MethodInfo::new("store_line", 1))
+                .method(MethodInfo::new("get_line", 0).const_method())
+                .method(MethodInfo::new("store_var", 1))
+                .method(MethodInfo::new("get_var", 0).const_method())
+                .method(MethodInfo::new("seek", 1))
+                .method(MethodInfo::new("seek_end", 0))
+                .method(MethodInfo::new("get_position", 0).const_method())
+                .method(MethodInfo::new("get_length", 0).const_method())
+                .method(MethodInfo::new("eof_reached", 0).const_method())
+                .method(MethodInfo::new("is_open", 0).const_method())
+                .method(MethodInfo::new("get_path", 0).const_method())
+                .method(MethodInfo::new("set_big_endian", 1))
+                .method(MethodInfo::new("is_big_endian", 0).const_method()),
         );
     }
     if !class_exists("DirAccess") {
@@ -26928,7 +26959,31 @@ pub fn register_io_classes() {
                 .method(MethodInfo::new("list_dir_end", 0))
                 .method(MethodInfo::new("make_dir", 1))
                 .method(MethodInfo::new("remove", 1))
-                .method(MethodInfo::new("rename", 2)),
+                .method(MethodInfo::new("rename", 2))
+                // pat-mgixk.54: the rest of the surface. gdcore implemented
+                // these (file_access.rs:1418-1557); only the binding was absent,
+                // so `DirAccess.make_dir_recursive_absolute(...)` — the standard
+                // save-folder idiom — raised UndefinedFunction.
+                .method(MethodInfo::new("get_open_error", 0).static_method())
+                .method(MethodInfo::new("dir_exists", 1))
+                .method(MethodInfo::new("dir_exists_absolute", 1).static_method())
+                .method(MethodInfo::new("make_dir_recursive", 1))
+                .method(MethodInfo::new("make_dir_absolute", 1).static_method())
+                .method(MethodInfo::new("make_dir_recursive_absolute", 1).static_method())
+                .method(MethodInfo::new("copy", 2))
+                .method(MethodInfo::new("copy_absolute", 2).static_method())
+                .method(MethodInfo::new("rename_absolute", 2).static_method())
+                .method(MethodInfo::new("remove_absolute", 1).static_method())
+                .method(MethodInfo::new("get_files", 0))
+                .method(MethodInfo::new("get_directories", 0))
+                .method(MethodInfo::new("get_files_at", 1).static_method())
+                .method(MethodInfo::new("get_directories_at", 1).static_method())
+                .method(MethodInfo::new("change_dir", 1))
+                .method(MethodInfo::new("get_current_dir", 0).const_method())
+                .method(MethodInfo::new("file_exists", 1))
+                .method(MethodInfo::new("set_include_hidden", 1))
+                .method(MethodInfo::new("set_include_navigational", 1))
+                .method(MethodInfo::new("get_error", 0).const_method()),
         );
     }
     // -- PackedDataContainer (pat-nzgdu.220) ---------------------------------

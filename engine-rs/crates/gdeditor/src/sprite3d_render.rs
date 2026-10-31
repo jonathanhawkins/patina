@@ -17,6 +17,7 @@
 //! on, and mirrors how `gridmap_items` already lives on the editor side.
 
 use gdcore::math::{Color, Vector2, Vector3};
+use gdcore::math3d::Basis;
 use gdrender2d::font::{char_bitmap, CHAR_GAP, CHAR_HEIGHT, CHAR_WIDTH};
 use gdscene::node::NodeId;
 use gdscene::render_server_3d::MaterialTextureCache;
@@ -152,16 +153,8 @@ pub fn sprite_quad_mesh_framed(
     let du = 1.0 / hf as f32;
     let dv = 1.0 / vf as f32;
     let (cu, cv) = (col as f32 * du, row as f32 * dv);
-    let (u0, u1) = if flip_h {
-        (cu + du, cu)
-    } else {
-        (cu, cu + du)
-    };
-    let (v0, v1) = if flip_v {
-        (cv + dv, cv)
-    } else {
-        (cv, cv + dv)
-    };
+    let (u0, u1) = if flip_h { (cu + du, cu) } else { (cu, cu + du) };
+    let (v0, v1) = if flip_v { (cv + dv, cv) } else { (cv, cv + dv) };
 
     Mesh3D {
         vertices: vec![
@@ -353,6 +346,45 @@ pub const LABEL3D_FONT_SIZE: i64 = 32;
 /// Returns `None` for empty text: Godot draws nothing, and a zero-area quad
 /// would divide by zero when the UVs are built.
 pub fn rasterize_text(text: &str, scale: u32, color: Color) -> Option<TextureImage> {
+    let (width, height, mask) = glyph_mask(text, scale)?;
+    let mut pixels = vec![TRANSPARENT; (width * height) as usize];
+    for (i, set) in mask.iter().enumerate() {
+        if *set {
+            pixels[i] = color;
+        }
+    }
+    Some(TextureImage {
+        width,
+        height,
+        pixels,
+    })
+}
+
+/// Fully transparent, the colour every uncovered texel keeps.
+const TRANSPARENT: Color = Color {
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
+    a: 0.0,
+};
+
+/// Godot's `Label3D.outline_size` default (`doc/classes/Label3D.xml`): no
+/// outline.
+pub const LABEL3D_OUTLINE_SIZE: i64 = 0;
+
+/// An outline wider than this is clamped. The dilation below is
+/// `O(w * h * r^2)`, and Godot's own property caps at 127 — a `.tscn` carrying
+/// a four-digit value would otherwise stall the frame rather than draw a thick
+/// outline.
+const MAX_OUTLINE_PX: i64 = 64;
+
+/// Which texels the glyphs of `text` cover, and the image size that holds them.
+///
+/// 🔑 Extracted so `rasterize_text` and [`rasterize_text_outlined`] cannot
+/// disagree about layout. The line/cell spacing rule here is the one thing both
+/// must share: a second copy would drift, and the outline would then sit beside
+/// glyphs drawn at different positions.
+fn glyph_mask(text: &str, scale: u32) -> Option<(u32, u32, Vec<bool>)> {
     let scale = scale.max(1);
     let lines: Vec<&str> = text.split('\n').collect();
     let cols = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
@@ -365,13 +397,7 @@ pub fn rasterize_text(text: &str, scale: u32, color: Color) -> Option<TextureIma
     let rows = lines.len() as u32;
     let height = (rows * CHAR_HEIGHT + (rows - 1) * CHAR_GAP) * scale;
 
-    let clear = Color {
-        r: 0.0,
-        g: 0.0,
-        b: 0.0,
-        a: 0.0,
-    };
-    let mut pixels = vec![clear; (width * height) as usize];
+    let mut mask = vec![false; (width * height) as usize];
     for (li, line) in lines.iter().enumerate() {
         for (ci, ch) in line.chars().enumerate() {
             let glyph = char_bitmap(ch);
@@ -389,11 +415,92 @@ pub fn rasterize_text(text: &str, scale: u32, color: Color) -> Option<TextureIma
                         for dx in 0..scale {
                             let (x, y) = (x0 + dx, y0 + dy);
                             if x < width && y < height {
-                                pixels[(y * width + x) as usize] = color;
+                                mask[(y * width + x) as usize] = true;
                             }
                         }
                     }
                 }
+            }
+        }
+    }
+    Some((width, height, mask))
+}
+
+/// `text` in `color`, ringed by `outline_px` texels of `outline_color`
+/// (Godot `Label3D.outline_size` / `outline_modulate`).
+///
+/// ⚠️ **Both colours are baked into the texture, so the caller must set the
+/// material's albedo to WHITE.** `albedo_texture` MULTIPLIES the flat albedo
+/// (`gdrender3d::shader`'s own
+/// `sample_material_albedo_texture_multiplies_flat_color`), and Patina draws a
+/// Label3D as ONE quad — so there is no second pass to give the outline a
+/// colour of its own. Leaving albedo at `modulate` would tint the outline by the
+/// glyph colour, and squaring `modulate` on the glyphs.
+///
+/// The image is PADDED by `outline_px` on all four sides: dilating in place
+/// would clip the ring on every glyph touching an edge, which for a single-line
+/// label is all of them.
+pub fn rasterize_text_outlined(
+    text: &str,
+    scale: u32,
+    color: Color,
+    outline_px: u32,
+    outline_color: Color,
+) -> Option<TextureImage> {
+    let (cw, ch, mask) = glyph_mask(text, scale)?;
+    if outline_px == 0 {
+        // No ring to draw, so no padding either — this is `rasterize_text` with
+        // the glyph colour baked in.
+        let mut pixels = vec![TRANSPARENT; (cw * ch) as usize];
+        for (i, set) in mask.iter().enumerate() {
+            if *set {
+                pixels[i] = color;
+            }
+        }
+        return Some(TextureImage {
+            width: cw,
+            height: ch,
+            pixels,
+        });
+    }
+
+    let r = outline_px as i64;
+    let width = cw + 2 * outline_px;
+    let height = ch + 2 * outline_px;
+    let mut pixels = vec![TRANSPARENT; (width * height) as usize];
+
+    let covered = |cx: i64, cy: i64| -> bool {
+        cx >= 0
+            && cy >= 0
+            && cx < cw as i64
+            && cy < ch as i64
+            && mask[(cy * cw as i64 + cx) as usize]
+    };
+
+    for py in 0..height as i64 {
+        for px in 0..width as i64 {
+            let (cx, cy) = (px - r, py - r);
+            if covered(cx, cy) {
+                pixels[(py * width as i64 + px) as usize] = color;
+                continue;
+            }
+            // Euclidean, not Chebyshev: Godot's outline is a rounded dilation,
+            // and a square halo around every glyph reads as a box rather than
+            // an outline.
+            let mut near = false;
+            'ring: for dy in -r..=r {
+                for dx in -r..=r {
+                    if dx * dx + dy * dy > r * r {
+                        continue;
+                    }
+                    if covered(cx + dx, cy + dy) {
+                        near = true;
+                        break 'ring;
+                    }
+                }
+            }
+            if near {
+                pixels[(py * width as i64 + px) as usize] = outline_color;
             }
         }
     }
@@ -402,6 +509,97 @@ pub fn rasterize_text(text: &str, scale: u32, color: Color) -> Option<TextureIma
         height,
         pixels,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Billboarding (pat-mgixk.34 section 2)
+// ---------------------------------------------------------------------------
+
+/// `SpriteBase3D.billboard` / `Label3D.billboard` = BILLBOARD_DISABLED.
+pub const BILLBOARD_DISABLED: i64 = 0;
+/// BILLBOARD_ENABLED: the quad faces the camera on both axes.
+pub const BILLBOARD_ENABLED: i64 = 1;
+/// BILLBOARD_FIXED_Y: the quad yaws toward the camera, keeping its own up axis.
+pub const BILLBOARD_FIXED_Y: i64 = 2;
+
+/// The world basis that turns `nid`'s quad to face the camera, or `None` when
+/// the node does not billboard.
+///
+/// 🔑 Returning a BASIS rather than rotated vertices is what makes this correct
+/// for the wired path. `Render3DItem.global_transform` is applied to the mesh
+/// downstream, so a quad pre-rotated in local space would be rotated AGAIN by
+/// the node's own transform. Godot does the same thing — `BILLBOARD_ENABLED`
+/// replaces the instance basis with the camera's (`sprite_3d.cpp`,
+/// `material_storage` billboard modes), keeping the origin.
+///
+/// The node's SCALE is preserved: the basis columns are the camera's axes
+/// re-scaled by `node_basis.get_scale()`, so a scaled sprite stays scaled.
+///
+/// ⚠️ `Basis` here stores COLUMNS (`gdcore::math3d`, and `Basis::xform` sums
+/// `x * v.x + y * v.y + z * v.z`). Columns X/Y are what the quad spans for the
+/// default `axis = AXIS_Z`, so mapping them onto the camera's right/up is what
+/// squares the quad to the screen. Written against the column convention on
+/// purpose — a transposed basis is still orthonormal and would look like a
+/// plausible rotation rather than a bug.
+pub fn billboard_basis_for(
+    tree: &SceneTree,
+    nid: NodeId,
+    node_basis: Basis,
+    cam_right: Vector3,
+    cam_up: Vector3,
+) -> Option<Basis> {
+    let node = tree.get_node(nid)?;
+    if !matches!(
+        node.class_name(),
+        "Sprite3D" | "AnimatedSprite3D" | "Label3D"
+    ) {
+        return None;
+    }
+    let mode = match node.get_property("billboard") {
+        Variant::Int(i) => i,
+        Variant::Float(f) => f as i64,
+        _ => BILLBOARD_DISABLED,
+    };
+    let scale = node_basis.get_scale();
+    match mode {
+        BILLBOARD_ENABLED => {
+            let x = cam_right.normalized();
+            let y = cam_up.normalized();
+            // Right x up points back toward the viewer, which is where the
+            // quad's +Z face has to look.
+            let z = x.cross(y).normalized();
+            Some(scaled_columns(x, y, z, scale))
+        }
+        BILLBOARD_FIXED_Y => {
+            // Godot locks the Y axis and yaws only, so a sprite stays upright
+            // while following the camera around — the mode billboards trees and
+            // characters with.
+            let y = node_basis.y.normalized();
+            // The camera's right with any component along the kept-up axis
+            // removed, so the result is still perpendicular to `y`.
+            let flat = cam_right - y * cam_right.dot(y);
+            // Degenerate only when the camera looks straight down the kept axis,
+            // where no yaw can face it; leaving the node's own basis alone is
+            // better than emitting a zero basis that collapses the quad.
+            if flat.length() < 1e-5 {
+                return None;
+            }
+            let x = flat.normalized();
+            let z = x.cross(y).normalized();
+            Some(scaled_columns(x, y, z, scale))
+        }
+        _ => None,
+    }
+}
+
+/// An orthonormal basis re-scaled per axis, so billboarding never silently
+/// resets a scaled node to unit size.
+fn scaled_columns(x: Vector3, y: Vector3, z: Vector3, scale: Vector3) -> Basis {
+    Basis {
+        x: x * scale.x,
+        y: y * scale.y,
+        z: z * scale.z,
+    }
 }
 
 /// The quad and material for a `Label3D`, or `None` when it has no text.
@@ -423,7 +621,53 @@ pub fn label3d_geometry(tree: &SceneTree, nid: NodeId) -> Option<(Mesh3D, Materi
     // Godot sizes glyphs in points against a real face; the built-in cell is
     // CHAR_HEIGHT tall, so the nearest whole-cell scale is the honest mapping.
     let scale = (font_size.max(1) as u32 / CHAR_HEIGHT).max(1);
-    let texture = rasterize_text(&text, scale, Color::WHITE)?;
+
+    // Godot `Label3D.outline_size` / `outline_modulate`.
+    let outline_size = match node.get_property("outline_size") {
+        Variant::Int(i) => i,
+        Variant::Float(f) => f as i64,
+        _ => LABEL3D_OUTLINE_SIZE,
+    }
+    .clamp(0, MAX_OUTLINE_PX);
+    let outline_modulate = match node.get_property("outline_modulate") {
+        Variant::Color(c) => c,
+        // Godot's default is opaque black (`doc/classes/Label3D.xml`).
+        _ => Color {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        },
+    };
+    // `outline_size` is in units of Godot's font pixels, but this texture's
+    // glyphs are `CHAR_HEIGHT * scale` tall rather than `font_size` tall — the
+    // built-in 5x7 cell cannot hit an arbitrary point size. Converting through
+    // that ratio keeps the outline the same FRACTION of the glyph it is in
+    // Godot, which is what "has outline-colour pixels around the glyphs" means
+    // at any font size.
+    //
+    // `max(1)` once non-zero: an authored outline must never round down to no
+    // outline at all, which would look exactly like the property being ignored.
+    let outline_px = if outline_size == 0 {
+        0
+    } else {
+        ((outline_size * (CHAR_HEIGHT as i64) * (scale as i64)) / font_size.max(1)).max(1) as u32
+    };
+
+    // ⚠️ Two different colour conventions, and the albedo below depends on
+    // which ran. With an outline the texture carries BOTH colours and the
+    // albedo must be neutral; without one the long-standing path keeps the
+    // glyphs white in the texture and tints them through the albedo. Kept
+    // branch-wise rather than unified so the no-outline case stays
+    // bit-identical to what already shipped and was verified.
+    let (texture, albedo) = if outline_px > 0 {
+        (
+            rasterize_text_outlined(&text, scale, modulate, outline_px, outline_modulate)?,
+            Color::WHITE,
+        )
+    } else {
+        (rasterize_text(&text, scale, Color::WHITE)?, modulate)
+    };
 
     // ⚠️ LABEL3D_PIXEL_SIZE, not SPRITE3D_PIXEL_SIZE — 0.005 against 0.01.
     let pixel_size = as_f32(node.get_property("pixel_size")).unwrap_or(LABEL3D_PIXEL_SIZE);
@@ -440,7 +684,7 @@ pub fn label3d_geometry(tree: &SceneTree, nid: NodeId) -> Option<(Mesh3D, Materi
         AXIS_Z,
     );
     let material = Material3D {
-        albedo: modulate,
+        albedo,
         albedo_texture: Some(std::sync::Arc::new(texture)),
         shading_mode: shading_for(node),
         // `double_sided` defaults to TRUE on Label3D (`doc/classes/Label3D.xml`),

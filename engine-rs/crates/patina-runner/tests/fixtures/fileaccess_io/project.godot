@@ -1,0 +1,12 @@
+; pat-mgixk.54 fixture: a project whose main scene does typed file IO in _ready.
+;
+; Booted with an explicit `user://` root (boot_project_with_user_root), because
+; plain `boot_project` leaves `user://` UNMAPPED — every open would then fail and
+; read exactly like a missing binding.
+
+config_version=5
+
+[application]
+
+config/name="FileAccess IO"
+run/main_scene="res://main.tscn"

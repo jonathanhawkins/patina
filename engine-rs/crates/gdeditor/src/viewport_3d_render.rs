@@ -321,7 +321,7 @@ impl Viewport3D {
                     // mesh is not a file path to deform.
                     None => (deformed.or(csg_mesh).or(script_mesh), material),
                 };
-                let base = render_item_for(
+                let mut base = render_item_for(
                     r,
                     material,
                     geometry,
@@ -329,6 +329,41 @@ impl Viewport3D {
                     shader_material,
                     surface_materials,
                 );
+                // `SpriteBase3D.billboard` / `Label3D.billboard` (pat-mgixk.34
+                // section 2). Applied HERE rather than inside
+                // `billboard_geometry` because the basis is what has to change:
+                // the quad's vertices are in the node's local space and
+                // `global_transform` is applied to them downstream, so rotating
+                // the vertices would be rotated again by the node's own
+                // transform. Godot likewise replaces the instance basis and
+                // keeps the origin.
+                //
+                // ⚠️ `build_render_list` is where the camera lives, and this is
+                // the one call site of `billboard_geometry` — the Play branch
+                // and the editor viewport both come through here, so one
+                // override serves both.
+                //
+                // ⚠️ The camera axes come from `camera.transform().basis`, NOT
+                // from `camera.right()` / `camera.up()`. Those two derive from
+                // the orbit `yaw`/`pitch`, and the Play path never sets them:
+                // `viewport_for_scene_camera` installs the scene Camera3D as
+                // `override_transform`, which ONLY `transform()` honours. Using
+                // the orbit accessors would billboard every sprite toward the
+                // default editor orientation and look right in the editor while
+                // being wrong in the game — the half this bead is about.
+                //
+                // A camera basis is (right, up, -forward) in columns, per
+                // `ViewportCamera3D::transform`.
+                let cam_basis = self.camera.transform().basis;
+                if let Some(basis) = crate::sprite3d_render::billboard_basis_for(
+                    tree,
+                    nid,
+                    base.global_transform.basis,
+                    cam_basis.x,
+                    cam_basis.y,
+                ) {
+                    base.global_transform.basis = basis;
+                }
                 if is_gridmap {
                     return gridmap_items(tree, nid, &base);
                 }

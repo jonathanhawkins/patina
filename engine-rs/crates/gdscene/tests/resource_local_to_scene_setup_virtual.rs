@@ -15,7 +15,7 @@
 //! equal. With it on, each copy is stamped separately — different. Equality
 //! versus difference is the observable; object identity is not.
 
-use gdscene::local_to_scene::{clear_for_testing, local_resource_property, setup_local_to_scene};
+use gdscene::local_to_scene::{clear_for_testing, local_resource_property};
 use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
 use gdscene::scene_tree::SceneTree;
 use gdvariant::Variant;
@@ -83,7 +83,25 @@ fn stamps(local: bool) -> (Stamp, Stamp, usize) {
     let root = tree.root_id();
     let scene_root = add_packed_scene_to_tree(&mut tree, root, &scene).expect("scene instances");
 
-    let made = setup_local_to_scene(&mut tree, &scene);
+    // ⚠️ No explicit `setup_local_to_scene` call any more (pat-mgixk.71).
+    // `add_packed_scene_to_tree` now runs the pass itself, which is the gap that
+    // bead closed: this module was complete and its ONLY caller in the whole
+    // workspace was this test, so the virtual never fired in a real scene load.
+    // Driving it through the loader makes this test cover the wired path instead
+    // of the helper in isolation — and the pass is idempotent, so a second
+    // explicit call would now report 0 copies and say nothing.
+    //
+    // `made` is therefore COUNTED from the copies that actually landed, which
+    // is the same observable the assertions want and is no longer a return value
+    // the test itself produced.
+    let made = ["A", "B"]
+        .iter()
+        .filter(|name| {
+            tree.find_child(scene_root, name, false)
+                .and_then(|child| tree.get_node(child))
+                .is_some_and(|n| n.has_property("__local_res__mat"))
+        })
+        .count();
 
     let mut out: Vec<Stamp> = Vec::new();
     for name in ["A", "B"] {

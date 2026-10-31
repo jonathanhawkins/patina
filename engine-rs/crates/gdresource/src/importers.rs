@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gdcore::error::{EngineError, EngineResult};
+use gdcore::file_access::FileAccess;
 use gdvariant::Variant;
 
 use crate::loader::TresLoader;
@@ -1717,6 +1718,104 @@ pub fn parse_import_file(contents: &str) -> EngineResult<ImportFile> {
     }
 
     Ok(result)
+}
+
+/// Follows a `<path>.remap` redirect, returning the path to actually load
+/// (pat-mgixk.56).
+///
+/// # Why an exported game needs this
+///
+/// The editor exports with `convert_text_resources_to_binary` on by default
+/// (`editor/register_editor_types.cpp:298`), which replaces every text resource
+/// in the pack with a one-line `<path>.remap` pointing at the converted file.
+/// So a shipped game's `run/main_scene` of `res://main.tscn` finds only
+/// `res://main.tscn.remap`, and the scene itself lives somewhere under
+/// `res://.godot/exported/`. Without following the redirect the main scene
+/// cannot be read at all.
+///
+/// Mirrors the `.remap` arm of `ResourceLoader::_path_remap`
+/// (`core/io/resource_loader.cpp:1287-1320`): read the file, take the **first**
+/// `path` assignment, and stop.
+///
+/// 🔑 Read through [`FileAccess`], so a mounted `.pck` is served before disk and
+/// a packed game takes the same path as a loose project. `std::fs` would see
+/// nothing inside a pack, which is the whole situation this exists for.
+///
+/// ⚠️ This is *only* the `.remap` step. Godot handles `.import` artifacts in a
+/// **separate** function (`ResourceLoader::import_remap` via
+/// `ResourceFormatImporter`), not in `_path_remap`, and so does Patina
+/// ([`resolve_import_artifact`]). Chaining them here would diverge from Godot
+/// for a path that has both.
+///
+/// Returns `res_path` unchanged when there is no redirect — the overwhelmingly
+/// common case, including every loose project.
+pub fn remap_path(res_path: &str) -> String {
+    let Ok(text) = FileAccess::read_file_string(&format!("{res_path}.remap")) else {
+        return res_path.to_string();
+    };
+    // A `.remap` that exists but names no `path` is not an error: fall through
+    // to the original, exactly as Godot's loop does when it hits EOF without an
+    // assignment.
+    match parse_import_file(&text) {
+        Ok(f) => f
+            .import_path()
+            .map(str::to_string)
+            .unwrap_or_else(|| res_path.to_string()),
+        Err(e) => {
+            tracing::warn!(
+                path = %res_path,
+                error = %e,
+                "ignoring an unparseable .remap and loading the original path"
+            );
+            res_path.to_string()
+        }
+    }
+}
+
+/// Resolves a `res://` source path to its imported artifact, **inside a mounted
+/// pack as well as on disk** (pat-mgixk.56).
+///
+/// The `res://`-space sibling of [`resolve_import_artifact`]. Same `.import`
+/// sidecar, same `[remap] path` (and the same per-platform `path.*` fallback),
+/// but it reads through [`FileAccess`] and hands back the artifact's `res://`
+/// path instead of a host `PathBuf`.
+///
+/// # Why a second function rather than a rewrite
+///
+/// 🔑 [`resolve_import_artifact`] returns a host `PathBuf`, and **a packed
+/// artifact has no host path at all** — so making it pack-aware is a change of
+/// return type, not of implementation. It has nine call sites across this module
+/// and `gdscene`, each of which then reads that path off the filesystem itself.
+/// Rewriting it would convert every one of those, in two crates, for a feature
+/// only the packed path needs. This way the loose-disk path keeps the code that
+/// already works.
+///
+/// # Why the project root is not needed here
+///
+/// `resolve_import_artifact` walks up for `project.godot` to turn the sidecar's
+/// `res://` value into an absolute path. That value is **already** a `res://`
+/// path, so in `res://` space the walk is simply unnecessary — which is what
+/// makes this version short, and why it works in a pack where there is no
+/// directory to walk.
+///
+/// Returns `None` when there is no sidecar (load the source directly) or when
+/// the sidecar names no artifact — Godot's `keep` and `skip` importers, and any
+/// asset whose `.import` carries only `[params]`, are exactly that case and they
+/// load from the source.
+pub fn resolve_import_artifact_res(res_path: &str) -> Option<String> {
+    let text = FileAccess::read_file_string(&format!("{res_path}.import")).ok()?;
+    let import = parse_import_file(&text).ok()?;
+    import
+        .import_path()
+        .or_else(|| {
+            import
+                .remap
+                .iter()
+                .filter(|(k, _)| k.starts_with("path."))
+                .map(|(_, v)| v.as_str())
+                .next()
+        })
+        .map(str::to_string)
 }
 
 /// Parses a `.import` sidecar file from disk.

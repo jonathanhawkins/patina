@@ -4523,7 +4523,37 @@ impl MainLoop {
         // Godot applies change_scene_to_file() at the frame boundary (after
         // _process and the deferred/deletion phases) so the calling script's
         // scene is not freed mid-run. A load error is non-fatal to the loop.
-        let _ = self.tree.process_deferred_scene_change();
+        //
+        // 🔑 The new scene's SCRIPTS are attached and its lifecycle run here
+        // (pat-mgixk.62). This phase used to swap the tree and stop: the scene
+        // arrived with `_script_path` recorded and no live script, so a game
+        // that changed scenes got a visibly-correct tree in which nothing
+        // ran — no `_ready`, no `_process`. The boot path had an attach loop
+        // and the scene-change path had none.
+        //
+        // ⚠️ It happens HERE rather than inside `change_scene_to_packed`
+        // because `_ready` must run through `enter_tree_with_scripts`, which
+        // binds the physics and audio servers for the duration of the call.
+        // `SceneTree` has no access to those; only the host loop does. Running
+        // `LifecycleManager::enter_tree` without that bracket leaves the
+        // singletons unbound and the callbacks silently no-op.
+        // Bound before the match so the mutable borrow of `self.tree` provably
+        // ends here, leaving the arm free to take it again.
+        let swapped = self.tree.process_deferred_scene_change();
+        match swapped {
+            Ok(Some(new_root)) => {
+                // The shared helper from pat-mgixk.61, which reads through
+                // `FileAccess` so a scene inside an exported `.pck` works too,
+                // and skips any node that already carries a script.
+                crate::scripting::attach_subtree_scripts_from_res(&mut self.tree, new_root);
+                // `_enter_tree` then `_ready`, once, for the whole new subtree.
+                self.enter_tree_with_scripts(new_root);
+            }
+            // `Ok(None)` is "nothing was queued", or an `unload` that
+            // deliberately loaded nothing — neither has a subtree to start.
+            // An `Err` is a bad scene path, which stays non-fatal to the loop.
+            Ok(None) | Err(_) => {}
+        }
 
         // -- input cleanup --
         // Clear input snapshot so it doesn't leak into the next frame.

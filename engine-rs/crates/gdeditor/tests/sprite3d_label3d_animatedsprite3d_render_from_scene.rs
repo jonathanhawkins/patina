@@ -423,7 +423,6 @@ pixel_size = 2.0
     );
 }
 
-
 /// A 2x1 sheet whose left texel is RED and right texel is BLUE, so "which cell is
 /// on screen" is answerable from a single pixel's hue.
 ///
@@ -501,5 +500,186 @@ fn sprite3d_hframes_frame_selects_one_cell() {
     assert!(
         blue1 > blue0,
         "frame 0 must not show the blue cell: blue went {blue0} -> {blue1}"
+    );
+}
+
+// ===========================================================================
+// pat-mgixk.34 section 2: billboard modes and the Label3D outline
+// ===========================================================================
+
+/// Looking down −Z from +Z, Godot's front view — the orientation the quad
+/// already faces, so this is the full-area control.
+const FRONT_CAM: &str = "transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 6)";
+
+/// Rotated 90° about Y and moved onto +X, looking back toward the origin.
+///
+/// A `.tscn` `Transform3D` lists the basis as three COLUMNS then the origin, so
+/// this is `Ry(90°)`: the camera's local +X column is `(0, 0, -1)` and its +Z
+/// column is `(1, 0, 0)`, making its forward (−Z) point along `(-1, 0, 0)`.
+/// A default `axis = AXIS_Z` sprite spans X/Y with its normal along Z, so from
+/// here it is exactly EDGE-ON — which is what makes the billboard difference a
+/// near-total one rather than a matter of degree.
+const SIDE_CAM: &str = "transform = Transform3D(0, 0, -1, 0, 1, 0, 1, 0, 0, 6, 0, 0)";
+
+/// A lone `Sprite3D` at the origin. `pixel_size = 2.0` on the 1x1 red texture
+/// gives a 2x2-unit quad — the same geometry `sprite3d_hframes_frame_selects_one_cell`
+/// uses, and big enough to cover a solid pixel count from 6 units back.
+fn billboard_scene(camera: &str, billboard: i64) -> String {
+    format!(
+        r#"[gd_scene format=3]
+
+[node name="Root" type="Node3D"]
+
+[node name="Camera" type="Camera3D" parent="."]
+{camera}
+current = true
+
+[node name="Sprite" type="Sprite3D" parent="."]
+texture = "{RED_TEX}"
+pixel_size = 2.0
+billboard = {billboard}
+"#
+    )
+}
+
+/// A `Label3D` whose glyphs are red and whose outline is green, so the two can
+/// be counted apart. `pixel_size = 0.05` is the sibling fixture's value: the
+/// built-in 5x7 cell at the default `font_size` is otherwise a few centimetres
+/// across and covers no pixels at all.
+fn outline_scene(outline_size: i64) -> String {
+    format!(
+        r#"[gd_scene format=3]
+
+[node name="Root" type="Node3D"]
+
+[node name="Camera" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 6)
+current = true
+
+[node name="Label" type="Label3D" parent="."]
+text = "IH"
+font_size = 32
+pixel_size = 0.05
+modulate = Color(1, 0, 0, 1)
+outline_size = {outline_size}
+outline_modulate = Color(0, 1, 0, 1)
+"#
+    )
+}
+
+/// Green is the outline's own hue. Separate from [`bluish`] on purpose: the 3D
+/// path paints a procedural sky whose band is bluish, so green is the one
+/// channel nothing in the backdrop competes for.
+fn greenish(c: &Color) -> bool {
+    c.g > c.r + 0.2 && c.g > c.b + 0.2
+}
+
+fn count_green(pixels: &[Color]) -> usize {
+    pixels.iter().filter(|c| greenish(c)).count()
+}
+
+/// **The acceptance test (pat-mgixk.34 section 2).**
+///
+/// `billboard` turns the quad to face the camera; `outline_size` rings the
+/// glyphs of a `Label3D`.
+///
+/// Both properties had **no read anywhere on the wired path** before this:
+/// `grep '"billboard"' sprite3d_render.rs` matched only the function name and a
+/// doc comment, and `outline_size` matched nothing at all — it existed solely in
+/// the inspector schema, the theme editor, ClassDB and gdrender2d's 2D
+/// `label_settings`.
+///
+/// 🔑 **The billboard clause is a three-way comparison, not a pair.** "The
+/// billboarded sprite covers pixels" is true of a sprite that simply ignores the
+/// camera, and "the flat sprite covers none" is true of a sprite that failed to
+/// load. Only front-flat (full area) / side-flat (≈none) / side-billboard
+/// (≈full area again) pins the behaviour: the first two establish that the quad
+/// draws and that the side view really is edge-on, and the third is the only one
+/// the change affects.
+///
+/// ⚠️ Counts are compared as RATIOS of the front-facing control rather than
+/// against hardcoded pixel numbers. The quad's exact coverage depends on the
+/// projection, the frame size and the near plane, none of which this bead
+/// touches — an absolute threshold would turn any future camera change into a
+/// failure here that reads like a billboard regression.
+#[test]
+fn sprite3d_label3d_billboard_region_outline() {
+    // -- billboard ----------------------------------------------------------
+    let front_flat = count_red(&render_game(&load(&billboard_scene(FRONT_CAM, 0))));
+    let side_flat = count_red(&render_game(&load(&billboard_scene(SIDE_CAM, 0))));
+    let side_billboard = count_red(&render_game(&load(&billboard_scene(SIDE_CAM, 1))));
+    let side_fixed_y = count_red(&render_game(&load(&billboard_scene(SIDE_CAM, 2))));
+
+    // CONTROL: the sprite draws at all. Without this every "fewer red pixels"
+    // assertion below is satisfied by a texture that never loaded.
+    assert!(
+        front_flat > 0,
+        "precondition: a front-facing Sprite3D must cover red pixels, got \
+         {front_flat}. Zero means the fixture never drew the quad and the \
+         billboard comparison proves nothing"
+    );
+    // CONTROL: the side view really is edge-on, so there is something for
+    // billboarding to fix. If this failed, the camera transform would not be
+    // the 90° rotation the test claims.
+    assert!(
+        side_flat * 10 < front_flat,
+        "precondition: with billboard disabled the 90°-rotated camera must see \
+         the quad edge-on and draw almost nothing: front={front_flat}, \
+         side={side_flat}"
+    );
+
+    // 🔑 THE DISCRIMINATOR. `billboard = 1` turns the quad back toward the
+    // camera, so it covers the front-facing area again from a viewpoint where
+    // the flat quad was invisible. Unread `billboard` leaves it edge-on and
+    // this lands near `side_flat`.
+    assert!(
+        side_billboard * 4 >= front_flat * 3,
+        "`billboard = 1` must face the camera and cover roughly the \
+         front-facing area: front={front_flat}, billboarded={side_billboard} \
+         (flat from the same angle was {side_flat}). A value near {side_flat} \
+         means the property is still unread"
+    );
+    // ...and BILLBOARD_FIXED_Y yaws toward the camera too. The camera sits at
+    // the sprite's own height, so locking the Y axis costs nothing here — which
+    // is what makes this a check that mode 2 is implemented rather than
+    // silently falling through to "disabled".
+    assert!(
+        side_fixed_y * 4 >= front_flat * 3,
+        "`billboard = 2` (BILLBOARD_FIXED_Y) must yaw toward the camera: \
+         front={front_flat}, fixed_y={side_fixed_y}, flat={side_flat}"
+    );
+
+    // -- Label3D outline -----------------------------------------------------
+    let plain = render_game(&load(&outline_scene(0)));
+    let outlined = render_game(&load(&outline_scene(8)));
+
+    // CONTROL: no outline colour appears when no outline is authored. This is
+    // what rules out the green coming from the backdrop or from the glyphs
+    // themselves — without it, a renderer that painted everything green would
+    // pass the next assertion.
+    assert_eq!(
+        count_green(&plain),
+        0,
+        "with `outline_size = 0` nothing in the frame may be the outline hue"
+    );
+    assert!(
+        count_green(&outlined) > 0,
+        "`outline_size = 8` must put `outline_modulate` pixels around the \
+         glyphs, got {} green pixels",
+        count_green(&outlined)
+    );
+
+    // ...and the glyphs are still drawn, in `modulate`, on BOTH frames. The
+    // outline must ring the text, not replace it — a dilation that overwrote
+    // the glyphs would satisfy the assertion above while making the label
+    // unreadable.
+    assert!(
+        count_red(&plain) > 0,
+        "precondition: the un-outlined label must draw its glyphs in `modulate`"
+    );
+    assert!(
+        count_red(&outlined) > 0,
+        "the outlined label must still draw its glyphs in `modulate`, not be \
+         swallowed by the outline"
     );
 }

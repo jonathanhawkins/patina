@@ -887,16 +887,15 @@ impl PackedScene {
             // would be wired-but-dead code that looks like support. Worth its own
             // bead once those readers exist.
             if mat_id.is_none() {
-                if let Some((class, props)) = ext_material_props(
-                    tmpl.properties.get("material_override"),
-                    &ext_resources,
-                )
-                .or_else(|| {
-                    ext_material_props(
-                        tmpl.properties.get("surface_material_override/0"),
-                        &ext_resources,
-                    )
-                }) {
+                if let Some((class, props)) =
+                    ext_material_props(tmpl.properties.get("material_override"), &ext_resources)
+                        .or_else(|| {
+                            ext_material_props(
+                                tmpl.properties.get("surface_material_override/0"),
+                                &ext_resources,
+                            )
+                        })
+                {
                     if let Some(Variant::Color(c)) = props
                         .iter()
                         .find(|(k, _)| k == "albedo_color")
@@ -908,8 +907,7 @@ impl PackedScene {
                     tmpl.properties
                         .insert("__material__class".into(), Variant::String(class));
                     for (key, value) in props {
-                        tmpl.properties
-                            .insert(format!("__material__{key}"), value);
+                        tmpl.properties.insert(format!("__material__{key}"), value);
                     }
                 }
             }
@@ -1787,6 +1785,28 @@ impl PackedScene {
                     for (key, value) in mm_props {
                         tmpl.properties
                             .insert(format!("__multimesh__{key}"), value.clone());
+                    }
+                    // 🔑 The MultiMesh's own `mesh` is ITSELF a sub-resource
+                    // reference, so the verbatim copy above leaves
+                    // `__multimesh__mesh` as the bare string `SubResource:<id>`
+                    // — an id with no class and no properties. Nothing
+                    // downstream could turn that into geometry, which is why
+                    // every authored MultiMesh drew the fallback cube however
+                    // its mesh was authored.
+                    //
+                    // Recording the nested resource's CLASS alongside it mirrors
+                    // `__multimesh__class` for the MultiMesh itself, and keeps
+                    // this pass free of per-mesh-type knowledge — the class name
+                    // is all `build_primitive` needs (pat-mgixk.50).
+                    if let Some(Variant::String(mesh_ref)) = mm_props.get("mesh") {
+                        if let Some(mesh_id) = mesh_ref.strip_prefix("SubResource:") {
+                            if let Some(mesh_class) = sub_resources.get(mesh_id) {
+                                tmpl.properties.insert(
+                                    "__multimesh__mesh_class".into(),
+                                    Variant::String(mesh_class.clone()),
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -3531,6 +3551,24 @@ pub fn add_packed_scene_to_tree(
     // sites so every caller gets it, and idempotent so instancing a sub-scene
     // does not rewind a player that is already running.
     crate::video_stream::bind_video_players(tree);
+
+    // Give every `resource_local_to_scene` sub-resource in the subtree we just
+    // built its own copy, and run its `_setup_local_to_scene`
+    // (pat-mgixk.71). Godot does this inside `SceneState::instantiate`
+    // (`packed_scene.cpp` `make_local_resource`).
+    //
+    // ⚠️ `gdscene::local_to_scene` was a FINISHED module with no production
+    // caller: its only call site in the whole workspace was its own test, so
+    // every instance shared one resource and the virtual never fired in a real
+    // scene load.
+    //
+    // Scoped to `new_root_id`, not the whole tree, and for a correctness reason
+    // rather than speed: `__resref__` names its sub-resource by a SCENE-LOCAL
+    // id, so a whole-tree pass would resolve another instance's refs against
+    // THIS scene's `sub_resource_props` and could match an unrelated resource.
+    // Here rather than at the callers, for the same reason
+    // `bind_video_players` above is.
+    crate::local_to_scene::setup_local_to_scene_in(tree, scene, new_root_id);
     Ok(new_root_id)
 }
 
@@ -3619,6 +3657,73 @@ where
     Some(new_root)
 }
 
+/// Instantiates `scene` **outside** the tree and returns its detached root,
+/// mirroring Godot's `PackedScene.instantiate()`
+/// (`scene/resources/packed_scene.cpp SceneState::instantiate`).
+///
+/// Patina used to parent the instance under `/root` on creation, so every node
+/// got ENTER_TREE/READY on insertion — before its children existed — and the
+/// caller's `add_child` then reparented it, replaying the whole lifecycle a
+/// second time (pat-mgixk.61).
+///
+/// The returned root has no parent and is not `inside_tree`, so no node in it
+/// has run `_enter_tree` or `_ready`. Those fire once, child-first, when a
+/// caller hands the root to `add_child` — which is exactly Godot's contract and
+/// what lets a script set properties on the instance *before* its
+/// `_enter_tree` observes them.
+///
+/// # Why a holder node rather than a bespoke builder
+///
+/// [`SceneTree::add_child`] only runs the lifecycle when the parent
+/// `is_inside_tree()`. Building the whole scene under a freshly
+/// [`create_node`](crate::scene_tree::SceneTree::create_node)d node — which is
+/// in the arena but has **no parent**, so it is not inside the tree — therefore
+/// fires nothing for any descendant, at any depth. The instance is then cut
+/// loose and the holder dropped.
+///
+/// ⚠️ Reusing [`add_packed_scene_to_tree_with_subscenes`] matters: it also wires
+/// the scene's signal connections and attaches its `AnimationPlayer` resources.
+/// A hand-rolled detached builder would silently skip both, and nothing in a
+/// spawn test would notice until a connected signal failed to fire in a game.
+pub fn instantiate_packed_scene_detached<F>(
+    tree: &mut crate::scene_tree::SceneTree,
+    scene: &PackedScene,
+    resolve_scene: &F,
+) -> EngineResult<crate::node::NodeId>
+where
+    F: Fn(&str) -> Option<PackedScene>,
+{
+    // Not inside the tree: `create_node` inserts into the arena without a
+    // parent, which is the whole point.
+    let holder = tree.create_node("Node", "@PackedSceneInstanceHolder");
+    let built = add_packed_scene_to_tree_with_subscenes(tree, holder, scene, resolve_scene);
+    let root = match built {
+        Ok(root) => root,
+        Err(e) => {
+            // Never leave the holder behind on failure; it would be an
+            // unreachable node that `node_count` still counts.
+            tree.take_node(holder);
+            return Err(e);
+        }
+    };
+
+    // Cut the instance loose, then drop the holder. Order matters: the root must
+    // stop pointing at the holder BEFORE the holder leaves the arena, or the
+    // root keeps a parent id that resolves to nothing — and
+    // `SceneAccess::add_child` reads `parent().is_some()` to decide between
+    // reparenting and inserting, so a dangling parent would send a detached
+    // instance down the reparent path and replay the lifecycle after all.
+    if let Some(holder_node) = tree.get_node_mut(holder) {
+        holder_node.remove_child_id(root);
+    }
+    if let Some(root_node) = tree.get_node_mut(root) {
+        root_node.set_parent(None);
+    }
+    tree.take_node(holder);
+
+    Ok(root)
+}
+
 pub fn add_packed_scene_to_tree_with_subscenes<F>(
     tree: &mut crate::scene_tree::SceneTree,
     parent_id: crate::node::NodeId,
@@ -3682,6 +3787,18 @@ where
     crate::animation_tree_tscn::attach_scene_animation_trees(tree, new_root_id, scene);
 
     auto_assign_current_camera(tree, new_root_id);
+
+    // The local-to-scene pass, as in `add_packed_scene_to_tree` (pat-mgixk.71).
+    //
+    // ⚠️ Covers THIS scene's own nodes. `instance_with_subscenes` flattens the
+    // sub-scenes into one node list, which discards which `PackedScene` each
+    // node's `__resref__` ids belong to — and those ids are scene-local. So a
+    // sub-resource declared inside a flattened sub-scene is not resolvable from
+    // here and is left alone, rather than resolved against the parent scene's
+    // table where the same id may name something unrelated. Instancing that
+    // sub-scene through `add_packed_scene_to_tree` with its own `PackedScene`
+    // does get the pass.
+    crate::local_to_scene::setup_local_to_scene_in(tree, scene, new_root_id);
 
     Ok(new_root_id)
 }

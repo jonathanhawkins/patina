@@ -26,6 +26,7 @@ pub mod cache;
 pub mod config_file;
 pub mod ctex;
 pub mod dpi_texture;
+pub mod ecfg;
 pub mod fbx_import;
 pub mod fuzz_res;
 pub mod glyph_outline;

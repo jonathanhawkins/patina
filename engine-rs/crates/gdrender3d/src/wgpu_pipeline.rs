@@ -76,8 +76,19 @@ struct ModelUniforms {
     // from its mat4x4, and Rust's [[f32; 4]; 4] has an align of only 4, so the
     // two languages agree only if the tail is spelled out. See the note on
     // LightData.
-    _model_pad0: u32,
-    _model_pad1: u32,
+    // `BaseMaterial3D.normal_texture` presence + `normal_scale` (pat-mgixk.52).
+    //
+    // ⚠️ A FLAG rather than an identity texel. A flat normal map is nominally
+    // (0.5, 0.5, 1.0) -> no tilt, but 0.5 is NOT representable in 8 bits:
+    // 128/255 = 0.50196 decodes to 0.00392, so a "flat" dummy would tilt every
+    // normal slightly and no untextured scene would stay bit-identical. Only
+    // k/255 values are exact.
+    //
+    // These take the FIRST TWO of the three slots reserved when the struct was
+    // padded out, so the struct size (128) and every existing field offset —
+    // including `layers` at 112, which a test pins — are unchanged.
+    has_normal_map: u32,
+    normal_scale: f32,
     _model_pad2: u32,
 };
 @group(1) @binding(0)
@@ -102,8 +113,34 @@ var<uniform> model: ModelUniforms;
 // matches `sample_bilinear`; hardware decodes before filtering where software
 // filters before decoding, which differs only between texel centres and
 // agrees exactly at them.
-@group(1) @binding(1) var t_albedo: texture_2d<f32>;
-@group(1) @binding(2) var s_material: sampler;
+// ⚠️ NOT named `t_albedo`/`s_albedo`: the custom-shader codegen emits its
+// group-3 samplers as `t_<uniform name>` / `s_<uniform name>`, so a GDSL
+// shader declaring `uniform sampler2D albedo;` would emit `t_albedo` and
+// duplicate the declaration below. naga would then reject the spliced
+// module and `custom_spatial_wgsl` would fall back to flat albedo —
+// silently. A `base_`-prefixed name cannot be generated.
+@group(1) @binding(1) var base_albedo_map: texture_2d<f32>;
+@group(1) @binding(2) var base_material_sampler: sampler;
+// `BaseMaterial3D.normal_texture` (pat-mgixk.52), sharing the sampler above —
+// same filter and wrap, so there is no reason to burn a second sampler slot.
+//
+// ⚠️ Uploaded `Rgba8Unorm`, NOT `Rgba8UnormSrgb` like the albedo map: the
+// software path does NOT sRGB-decode the normal texel (`shader.rs:252` samples
+// it raw and hands it straight to `apply_normal_map`, unlike the albedo and
+// emission maps two lines up). Decoding it would bend every perturbed normal
+// toward the surface.
+@group(1) @binding(3) var base_normal_map: texture_2d<f32>;
+// `BaseMaterial3D` roughness / metallic / emission maps (pat-mgixk.52), all
+// sharing the sampler at binding 2.
+//
+// ⚠️ Godot reads roughness from the **green** channel and metallic from the
+// **blue** channel by default, not from red or from luminance — the software
+// path spells this out (`shader.rs:241`, `:247`). Both are raw `Rgba8Unorm`
+// because those channels are plain scalars, not colour; emission IS a colour
+// map and so is `Rgba8UnormSrgb` like albedo (`shader.rs:229`).
+@group(1) @binding(4) var base_roughness_map: texture_2d<f32>;
+@group(1) @binding(5) var base_metallic_map: texture_2d<f32>;
+@group(1) @binding(6) var base_emission_map: texture_2d<f32>;
 
 // ── Bind group 2: light array ───────────────────────────────────────
 
@@ -457,6 +494,52 @@ fn directional_shadow_fade(light: LightData, world_position: vec3<f32>, shadow: 
     return shadow + (1.0 - shadow) * fade;
 }
 
+struct TangentFrame {
+    tangent: vec3<f32>,
+    bitangent: vec3<f32>,
+};
+
+// Duff et al.'s branchless orthonormal basis, built from the NORMAL ALONE.
+//
+// ⚠️ The bead asked for a "screen-derivative TBN like the software path", but
+// the software path does not use screen derivatives at all: `tangent_frame`
+// (`shader.rs:273`) derives the frame from the normal and never touches
+// `dpdx`/`dpdy` or the UVs. Mirroring what the code does rather than what the
+// bead says is the whole point — the acceptance compares the two backends, so a
+// different (even defensible) frame is a visible mismatch.
+//
+// No singularity to guard: `s + n.z` is zero only when `n.z == -s`, and `s` is
+// chosen as the sign of `n.z`, so the two can never cancel. That is what
+// "branchless" buys.
+fn tangent_frame(normal: vec3<f32>) -> TangentFrame {
+    let n = normalize(normal);
+    let s = select(-1.0, 1.0, n.z >= 0.0);
+    let a = -1.0 / (s + n.z);
+    let b = n.x * n.y * a;
+    var out: TangentFrame;
+    out.tangent = vec3<f32>(1.0 + s * n.x * n.x * a, s * b, -s * n.x);
+    out.bitangent = vec3<f32>(b, s + n.y * n.y * a, -n.y);
+    return out;
+}
+
+// Decodes a tangent-space texel and rotates it into world space, term for term
+// as `apply_normal_map` (`shader.rs:286`) does — including the `max(.., 1e-4)`
+// floor on the Z term, which keeps the perturbed normal on the outward side of
+// the surface even for a texel whose blue channel is below 0.5.
+fn apply_normal_map(world_normal: vec3<f32>, texel: vec4<f32>, scale: f32) -> vec3<f32> {
+    let n = normalize(world_normal);
+    let tx = (texel.r * 2.0 - 1.0) * scale;
+    let ty = (texel.g * 2.0 - 1.0) * scale;
+    let tz = max(texel.b * 2.0 - 1.0, 1e-4);
+    let f = tangent_frame(n);
+    let perturbed = vec3<f32>(
+        f.tangent.x * tx + f.bitangent.x * ty + n.x * tz,
+        f.tangent.y * tx + f.bitangent.y * ty + n.y * tz,
+        f.tangent.z * tx + f.bitangent.z * ty + n.z * tz,
+    );
+    return normalize(perturbed);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let albedo = model.albedo;
@@ -471,8 +554,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // exact no-op and such draws stay bit-identical to before. A custom shader
     // also binds white (its entry carries no albedo texture), so `albedo_tex`
     // is `custom_albedo(in)` unchanged.
-    let albedo_tex = albedo * textureSample(t_albedo, s_material, in.uv);
-    let emission = model.emission;
+    let albedo_tex = albedo * textureSample(base_albedo_map, base_material_sampler, in.uv);
+    let emission = model.emission * textureSample(base_emission_map, base_material_sampler, in.uv);
+    // ⚠️ Sampled HERE, not where they are used. The roughness and metallic
+    // scalars are consumed inside the light loop, which sits behind a `for` and
+    // an `if` — `textureSample` requires UNIFORM control flow, so fetching them
+    // there would be invalid WGSL. Hoisting also matches the software path,
+    // which samples the material once per fragment (`sample_material`).
+    //
+    // Green for roughness and blue for metallic are Godot's defaults, not an
+    // arbitrary choice of channel. A 1x1 white texel reads 1.0 in every
+    // channel, so an untextured material multiplies by one.
+    let roughness_map = textureSample(base_roughness_map, base_material_sampler, in.uv).g;
+    let metallic_map = textureSample(base_metallic_map, base_material_sampler, in.uv).b;
 
     // Unlit mode. Scene-referred linear HDR: no clamp, so emissive values > 1
     // survive to feed glow (the target is Rgba16Float; the camera post pass
@@ -486,7 +580,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         );
     }
 
-    let normal = normalize(in.world_normal);
+    let geo_normal = normalize(in.world_normal);
+    // Sampled UNCONDITIONALLY: `textureSample` requires uniform control flow,
+    // and an unconditional fetch is trivially uniform. The flag below only
+    // selects between two already-computed values, so it never gates a fetch.
+    let normal_texel = textureSample(base_normal_map, base_material_sampler, in.uv);
+    let mapped_normal = apply_normal_map(geo_normal, normal_texel, model.normal_scale);
+    let normal = select(geo_normal, mapped_normal, model.has_normal_map != 0u);
     var color = vec3<f32>(
         camera.ambient.r * albedo_tex.r,
         camera.ambient.g * albedo_tex.g,
@@ -532,8 +632,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let h = normalize(light_dir + view_dir);
             let n_dot_h = max(dot(normal, h), 1e-4);
             let l_dot_h = max(dot(light_dir, h), 1e-4);
-            let roughness = clamp(model.roughness, 0.0, 1.0);
-            let metallic = clamp(model.metallic, 0.0, 1.0);
+            // Multiply THEN clamp, which is the software order
+            // (`shader.rs:239-248`: `roughness *= texel.g`, clamped only once
+            // the sampled material is assembled). Clamping first would discard
+            // the texture's contribution for any authored value at the rail.
+            let roughness = clamp(model.roughness * roughness_map, 0.0, 1.0);
+            let metallic = clamp(model.metallic * metallic_map, 0.0, 1.0);
             let alpha = max(roughness * roughness, 1e-4);
             let f0_d = 0.04;
             let f0 = mix(vec3<f32>(f0_d), albedo_tex.rgb, metallic);
@@ -834,10 +938,24 @@ pub struct ModelUniformData {
     /// `VisualInstance3D.layers` — the instance's render-layer BITMASK, tested
     /// against each light's `cull_mask` in the shader.
     pub layers: u32,
+    /// Whether this draw has a `normal_texture` bound (pat-mgixk.52).
+    ///
+    /// ⚠️ A flag rather than a "flat" (0.5, 0.5, 1.0) dummy texel, because 0.5
+    /// is not representable in 8 bits (128/255 = 0.50196 decodes to 0.00392).
+    /// A dummy would tilt every normal slightly and no untextured scene would
+    /// stay bit-identical.
+    pub has_normal_map: u32,
+    /// `BaseMaterial3D.normal_scale`, the XY perturbation multiplier.
+    pub normal_scale: f32,
     /// ⚠️ Explicit padding: the struct's align comes from its `mat4x4`, and
     /// `[[f32; 4]; 4]` has a Rust align of 4, so the size must be spelled back
     /// out to a multiple of 16 or the two declarations disagree.
-    pub _model_pad: [u32; 3],
+    ///
+    /// The two fields above took the first two of the three slots this used to
+    /// cover; `u32` and `f32` are both align 4, so the struct is still 128
+    /// bytes and no existing offset moved (`layers` stays at 112, which
+    /// `cull_mask_gpu_*` pins).
+    pub _model_pad: u32,
 }
 
 /// Single light data for the GPU.
@@ -1108,16 +1226,86 @@ impl RenderPipeline3D {
 
         let model_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("model-bind-group-layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                // `BaseMaterial3D.albedo_texture` + its sampler (pat-mgixk.52).
+                //
+                // ⚠️ `filterable: true` and `SamplerBindingType::Filtering`
+                // are a PAIR — a filtering sampler against a non-filterable
+                // texture is a layout validation error. Filtering is what
+                // matches the software path's `sample_bilinear`; the shadow
+                // arrays above use `filterable: false` because they are
+                // compared, not blended.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // `BaseMaterial3D` texture slots (pat-mgixk.52): 3 normal,
+                // 4 roughness, 5 metallic, 6 emission. All share the sampler at
+                // binding 2 — same filter and wrap, so extra sampler slots
+                // would buy nothing.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
         });
 
         let light_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1456,6 +1644,206 @@ fn upload_custom_texture(
         },
     );
     texture
+}
+
+/// Uploads a [`TextureImage`] as an RGBA8 texture for `BaseMaterial3D`
+/// sampling, in the caller's choice of `format` (pat-mgixk.52).
+///
+/// [`TextureImage`]: gdserver3d::material::TextureImage
+///
+/// ⚠️ **The format is the caller's decision because the right answer differs
+/// per map**, and getting it wrong is silent — the image still appears, just
+/// transfer-shifted:
+///
+/// * **Colour maps** (albedo, emission) use `Rgba8UnormSrgb` so the sampler
+///   applies the same sRGB->linear transfer the software path applies per texel
+///   (`shader.rs:218`). `Color::srgb_to_linear` is the standard piecewise sRGB
+///   EOTF (`gdcore::math::srgb_to_linear_channel`), which is precisely what the
+///   hardware format implements, and both leave alpha untouched.
+/// * **Normal maps** use `Rgba8Unorm`: the software path samples the normal
+///   texel RAW and hands it straight to `apply_normal_map` (`shader.rs:252`)
+///   with no decode. Decoding would bend every perturbed normal toward the
+///   surface.
+///
+/// Still deliberately separate from [`upload_custom_texture`] rather than
+/// folding that in too: custom samplers must stay `Rgba8Unorm` so an authored
+/// `texture()` returns the texel undecoded, and refactoring a function owned by
+/// another bead for no behavioural gain is not this bead's business.
+fn upload_material_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    img: &gdserver3d::material::TextureImage,
+    format: wgpu::TextureFormat,
+) -> wgpu::Texture {
+    let (w, h) = (img.width.max(1), img.height.max(1));
+    let mut bytes = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) as usize;
+            let c = img
+                .pixels
+                .get(i)
+                .copied()
+                .unwrap_or(gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0));
+            for ch in [c.r, c.g, c.b, c.a] {
+                bytes.push((ch.clamp(0.0, 1.0) * 255.0).round() as u8);
+            }
+        }
+    }
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("material-texture"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(w * 4),
+            rows_per_image: Some(h),
+        },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+    );
+    texture
+}
+
+/// Texture format for `BaseMaterial3D` **colour** maps (albedo, and emission
+/// when it lands): sRGB, so the sampler performs the transfer the software path
+/// does per texel.
+///
+/// 🔑 Named rather than spelled at each call site for the same reason
+/// [`custom_texture_binding`] is a function: one place decides, so a colour map
+/// and a normal map cannot silently drift onto the wrong transfer.
+const MATERIAL_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+/// Texture format for `BaseMaterial3D` maps the software path samples **raw**,
+/// with no transfer applied: the normal map, and the roughness/metallic maps
+/// whose green/blue channels are read as plain scalars. See
+/// [`upload_material_texture`].
+const MATERIAL_RAW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+/// The 1x1 white texel bound when a material has no map for a slot.
+///
+/// 🔑 For **albedo** this is what keeps the change a no-op for untextured
+/// scenes: the WGSL multiplies unconditionally, and white is the multiplicative
+/// identity in both sRGB and linear, so an untextured draw comes out
+/// bit-identical to before. A bind group must fill every entry its layout
+/// declares, so there is no option to leave a binding empty.
+///
+/// For the **normal** slot the value is irrelevant — `has_normal_map` gates
+/// whether the sampled texel is used at all, because no 8-bit texel decodes to
+/// exactly "no tilt" (see [`ModelUniformData::has_normal_map`]). White is bound
+/// simply because it is the texture already to hand.
+fn white_material_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    format: wgpu::TextureFormat,
+) -> wgpu::Texture {
+    upload_material_texture(
+        device,
+        queue,
+        &gdserver3d::material::TextureImage::new(
+            1,
+            1,
+            vec![gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0)],
+        ),
+        format,
+    )
+}
+
+/// Every `BaseMaterial3D` texture slot's view for one draw, with the uploaded
+/// textures kept alongside them.
+struct MaterialSlotViews {
+    albedo: wgpu::TextureView,
+    normal: wgpu::TextureView,
+    roughness: wgpu::TextureView,
+    metallic: wgpu::TextureView,
+    emission: wgpu::TextureView,
+    /// The uploads themselves. Held rather than dropped so the textures outlive
+    /// the bind group that samples them, the way the custom-sampler path holds
+    /// its own uploads.
+    _uploaded: [wgpu::Texture; 5],
+}
+
+/// Builds all five material texture slots for one draw (pat-mgixk.52).
+///
+/// 🔑 ONE place assembles the slots for BOTH render paths. A bind group must
+/// fill **every** entry its layout declares, and a slot missed at a call site
+/// is a *runtime validation failure that aborts the draw*, not a compile error.
+/// With the slots built here, adding the next map is one edit instead of two
+/// that have to agree.
+///
+/// The per-slot format is not uniform and the difference is silent — see
+/// [`upload_material_texture`]. Colour maps (albedo, emission) carry the sRGB
+/// transfer; the normal map and the roughness/metallic scalars are raw.
+fn material_slot_views(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    albedo: Option<&gdserver3d::material::TextureImage>,
+    normal: Option<&gdserver3d::material::TextureImage>,
+    roughness: Option<&gdserver3d::material::TextureImage>,
+    metallic: Option<&gdserver3d::material::TextureImage>,
+    emission: Option<&gdserver3d::material::TextureImage>,
+) -> MaterialSlotViews {
+    let slot =
+        |img: Option<&gdserver3d::material::TextureImage>, format: wgpu::TextureFormat| match img {
+            Some(i) => upload_material_texture(device, queue, i, format),
+            None => white_material_texture(device, queue, format),
+        };
+    let uploaded = [
+        slot(albedo, MATERIAL_COLOR_FORMAT),
+        slot(normal, MATERIAL_RAW_FORMAT),
+        slot(roughness, MATERIAL_RAW_FORMAT),
+        slot(metallic, MATERIAL_RAW_FORMAT),
+        slot(emission, MATERIAL_COLOR_FORMAT),
+    ];
+    let view = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor::default());
+    MaterialSlotViews {
+        albedo: view(&uploaded[0]),
+        normal: view(&uploaded[1]),
+        roughness: view(&uploaded[2]),
+        metallic: view(&uploaded[3]),
+        emission: view(&uploaded[4]),
+        _uploaded: uploaded,
+    }
+}
+
+/// The sampler for `BaseMaterial3D` maps (pat-mgixk.52).
+///
+/// ⚠️ `AddressMode::Repeat`, NOT the `..Default::default()` the custom-shader
+/// sampler uses — that default is `ClampToEdge`. Godot's `BaseMaterial3D`
+/// default is repeat, and `TextureImage::sample_bilinear` wraps
+/// (`wrap_index`), so clamping here would disagree with the software path for
+/// any UV outside 0..1.
+fn material_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("material-texture-sampler"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        address_mode_w: wgpu::AddressMode::Repeat,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    })
 }
 
 /// How many `sampler2D` uniforms a custom spatial shader can bind
@@ -2511,6 +2899,34 @@ struct GpuDrawEntry<'a> {
     /// Godot `depth_draw_mode` (pat-s3rrv.30); decides whether this draw writes
     /// depth once its transparency is known.
     depth_draw_mode: crate::render_modes::DepthDrawMode,
+    /// `BaseMaterial3D.albedo_texture` for this draw (pat-mgixk.52).
+    ///
+    /// An owned `Arc` clone rather than a borrow: `instance_draw_entries` reads
+    /// it off a LOCAL clone of the material, so a reference would not outlive
+    /// the function. The refcount bump is the whole cost — the pixels are
+    /// shared.
+    ///
+    /// `None` when the material has no map **and also** when a shader material
+    /// resolved the albedo, which keeps pat-s3rrv.122's custom path on the
+    /// white dummy and therefore unchanged.
+    albedo_texture: Option<std::sync::Arc<gdserver3d::material::TextureImage>>,
+    /// `BaseMaterial3D.normal_texture` and its strength (pat-mgixk.52), carried
+    /// the same owned-`Arc` way as `albedo_texture`.
+    normal_texture: Option<std::sync::Arc<gdserver3d::material::TextureImage>>,
+    /// See [`Self::normal_texture`]. Carried even when there is no map so the
+    /// uniform always has a defined value; the shader's `has_normal_map` flag
+    /// is what decides whether it is read.
+    normal_scale: f32,
+    /// `BaseMaterial3D` roughness / metallic / emission maps (pat-mgixk.52).
+    ///
+    /// No presence flag for these three: unlike the normal map they are plain
+    /// MULTIPLIERS, so a 1x1 white texel is an exact identity and `None` is
+    /// indistinguishable from "no map" without one.
+    roughness_texture: Option<std::sync::Arc<gdserver3d::material::TextureImage>>,
+    /// See [`Self::roughness_texture`].
+    metallic_texture: Option<std::sync::Arc<gdserver3d::material::TextureImage>>,
+    /// See [`Self::roughness_texture`].
+    emission_texture: Option<std::sync::Arc<gdserver3d::material::TextureImage>>,
 }
 
 /// Resolves an albedo colour for a shader material, matching the software path's
@@ -2556,6 +2972,34 @@ fn instance_draw_entries(inst: &Instance3D) -> Vec<GpuDrawEntry<'_>> {
     // `unshaded; uniform vec4 albedo_color : source_color;` case).
     let shader_albedo = inst.shader_material.as_ref().and_then(resolve_shader_albedo);
     let mode = if shader_albedo.is_some() { 0 } else { base_mode };
+    // A resolved shader albedo REPLACES the material, so its draw must not also
+    // be modulated by the BaseMaterial3D map — that would tint pat-s3rrv.122's
+    // custom shaders by a texture their author never referenced. Binding no
+    // texture here means the white dummy, i.e. no change at all.
+    let albedo_texture = if shader_albedo.is_some() {
+        None
+    } else {
+        base.albedo_texture.clone()
+    };
+    // Same reasoning as the albedo map: a shader material replaces the
+    // material, so its draw must not be normal-mapped by a texture its author
+    // never referenced.
+    let normal_texture = if shader_albedo.is_some() {
+        None
+    } else {
+        base.normal_texture.clone()
+    };
+    // Same reasoning for the remaining three maps: a shader material replaces
+    // the material, so none of its maps should modulate the custom result.
+    let (roughness_texture, metallic_texture, emission_texture) = if shader_albedo.is_some() {
+        (None, None, None)
+    } else {
+        (
+            base.roughness_texture.clone(),
+            base.metallic_texture.clone(),
+            base.emission_texture.clone(),
+        )
+    };
 
     let mut entries = Vec::new();
     if let Some(mm) = &inst.multimesh {
@@ -2578,6 +3022,12 @@ fn instance_draw_entries(inst: &Instance3D) -> Vec<GpuDrawEntry<'_>> {
                     transparency: base.transparency,
                     alpha_scissor_threshold: base.alpha_scissor_threshold,
                     depth_draw_mode: base.depth_draw_mode,
+                    albedo_texture: albedo_texture.clone(),
+                    normal_texture: normal_texture.clone(),
+                    normal_scale: base.normal_scale,
+                    roughness_texture: roughness_texture.clone(),
+                    metallic_texture: metallic_texture.clone(),
+                    emission_texture: emission_texture.clone(),
                 });
             }
         }
@@ -2594,6 +3044,12 @@ fn instance_draw_entries(inst: &Instance3D) -> Vec<GpuDrawEntry<'_>> {
             transparency: base.transparency,
             alpha_scissor_threshold: base.alpha_scissor_threshold,
             depth_draw_mode: base.depth_draw_mode,
+            albedo_texture,
+            normal_texture,
+            normal_scale: base.normal_scale,
+            roughness_texture,
+            metallic_texture,
+            emission_texture,
         });
     }
     entries
@@ -2743,6 +3199,20 @@ struct GpuDrawCall {
     /// plain materials and for shaders whose body isn't GPU-transpilable (those
     /// keep the resolved flat albedo). See [`custom_spatial_module_wgsl`].
     custom_module: Option<String>,
+    /// `BaseMaterial3D.albedo_texture` for this draw (pat-mgixk.52), carried
+    /// the same owned-`Arc` way as `custom_textures` above. `None` binds the
+    /// 1x1 white dummy, which the WGSL multiply treats as no texture at all.
+    albedo_texture: Option<std::sync::Arc<gdserver3d::material::TextureImage>>,
+    /// `BaseMaterial3D.normal_texture` and its strength (pat-mgixk.52).
+    normal_texture: Option<std::sync::Arc<gdserver3d::material::TextureImage>>,
+    /// See [`Self::normal_texture`].
+    normal_scale: f32,
+    /// `BaseMaterial3D` roughness / metallic / emission maps (pat-mgixk.52).
+    roughness_texture: Option<std::sync::Arc<gdserver3d::material::TextureImage>>,
+    /// See [`Self::roughness_texture`].
+    metallic_texture: Option<std::sync::Arc<gdserver3d::material::TextureImage>>,
+    /// See [`Self::roughness_texture`].
+    emission_texture: Option<std::sync::Arc<gdserver3d::material::TextureImage>>,
 }
 
 /// Max distinct meshes cached before the whole cache is dropped, bounding memory
@@ -3059,6 +3529,12 @@ impl GpuRenderer3D {
                     custom_module: custom_module.clone(),
                     custom_uniforms: custom_uniform_values.clone(),
                     custom_textures: custom_texture_images.clone(),
+                    albedo_texture: entry.albedo_texture.clone(),
+                    normal_texture: entry.normal_texture.clone(),
+                    normal_scale: entry.normal_scale,
+                    roughness_texture: entry.roughness_texture.clone(),
+                    metallic_texture: entry.metallic_texture.clone(),
+                    emission_texture: entry.emission_texture.clone(),
                 });
             }
         }
@@ -3413,7 +3889,9 @@ impl GpuRenderer3D {
                         // carries material fields only. `GpuDrawCall` is the one
                         // that flattens `layers`.
                         layers: inst.geometry.layers,
-                        _model_pad: [0; 3],
+                        has_normal_map: u32::from(entry.normal_texture.is_some()),
+                        normal_scale: entry.normal_scale,
+                        _model_pad: 0,
                     };
                     let model_buf = create_buffer_init(
                         device,
@@ -3422,10 +3900,55 @@ impl GpuRenderer3D {
                         bytemuck::bytes_of(&model_data),
                         wgpu::BufferUsages::UNIFORM,
                     );
+                    // pat-mgixk.52: this draw's material maps, or a 1x1 white texel per
+                    // slot that has none. A bind group must fill EVERY entry its layout
+                    // declares, so there is no "bind nothing" option — white is the
+                    // multiplicative identity for albedo/roughness/metallic/emission,
+                    // which is what keeps an untextured draw bit-identical to before, and
+                    // for the normal slot `has_normal_map` decides whether it is read.
+                    let maps = material_slot_views(
+                        device,
+                        queue,
+                        entry.albedo_texture.as_deref(),
+                        entry.normal_texture.as_deref(),
+                        entry.roughness_texture.as_deref(),
+                        entry.metallic_texture.as_deref(),
+                        entry.emission_texture.as_deref(),
+                    );
+                    let albedo_sampler = material_sampler(device);
                     let model_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("editor-model-bind-group"),
                         layout: &pipeline.model_layout,
-                        entries: &[wgpu::BindGroupEntry { binding: 0, resource: model_buf.as_entire_binding() }],
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: model_buf.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(&maps.albedo),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::Sampler(&albedo_sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::TextureView(&maps.normal),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: wgpu::BindingResource::TextureView(&maps.roughness),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 5,
+                                resource: wgpu::BindingResource::TextureView(&maps.metallic),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 6,
+                                resource: wgpu::BindingResource::TextureView(&maps.emission),
+                            },
+                        ],
                     });
                     pass.set_bind_group(1, &model_bg, &[]);
                     pass.set_vertex_buffer(0, vertex_buf.slice(..));
@@ -4024,7 +4547,9 @@ impl GpuRenderer3D {
                     shading_mode: call.shading_mode,
                     num_lights,
                     layers: call.layers,
-                    _model_pad: [0; 3],
+                    has_normal_map: u32::from(call.normal_texture.is_some()),
+                    normal_scale: call.normal_scale,
+                    _model_pad: 0,
                 };
                 let model_buf = create_buffer_init(
                     device,
@@ -4033,13 +4558,55 @@ impl GpuRenderer3D {
                     bytemuck::bytes_of(&model_data),
                     wgpu::BufferUsages::UNIFORM,
                 );
+                // pat-mgixk.52: this draw's material maps, or a 1x1 white texel per
+                // slot that has none. A bind group must fill EVERY entry its layout
+                // declares, so there is no "bind nothing" option — white is the
+                // multiplicative identity for albedo/roughness/metallic/emission,
+                // which is what keeps an untextured draw bit-identical to before, and
+                // for the normal slot `has_normal_map` decides whether it is read.
+                let maps = material_slot_views(
+                    device,
+                    queue,
+                    call.albedo_texture.as_deref(),
+                    call.normal_texture.as_deref(),
+                    call.roughness_texture.as_deref(),
+                    call.metallic_texture.as_deref(),
+                    call.emission_texture.as_deref(),
+                );
+                let albedo_sampler = material_sampler(device);
                 let model_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("model-bind-group"),
                     layout: &pipeline.model_layout,
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: model_buf.as_entire_binding(),
-                    }],
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: model_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&maps.albedo),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&albedo_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(&maps.normal),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(&maps.roughness),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::TextureView(&maps.metallic),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::TextureView(&maps.emission),
+                        },
+                    ],
                 });
 
                 pass.set_bind_group(1, &model_bg, &[]);
@@ -5123,7 +5690,9 @@ mod tests {
             shading_mode: 0,
             num_lights: 0,
             layers: 0x0000_BEEF,
-            _model_pad: [0; 3],
+            has_normal_map: 0,
+            normal_scale: 1.0,
+            _model_pad: 0,
         };
         assert_eq!(
             &bytemuck::bytes_of(&model)[112..116],

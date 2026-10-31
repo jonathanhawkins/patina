@@ -5,12 +5,11 @@
 ; reaches disk must contain the rect's colour and the sprite's texture pixels —
 ; not merely "something non-black".
 ;
-; Entered as a PROJECT DIRECTORY rather than a loose `.tscn` on purpose. That is
-; how a shipped game boots, and `project_boot` seeds the ClassDB (project_boot.rs
-; :379) so `Node::is_class("CanvasItem")` answers true and
-; `collect_canvas_items` can see the scene. The loose-`.tscn` entry point in
-; main.rs never seeds it, so the same scene renders EMPTY there — a separate
-; defect, reported rather than fixed under this bead.
+; Entered as a PROJECT DIRECTORY rather than a loose `.tscn` because that is how
+; a shipped game boots, and it is the entry point this bead's wiring requirement
+; names. The loose-`.tscn` path renders this same scene identically; an earlier
+; version of this comment claimed otherwise (blaming an unseeded ClassDB) and
+; that was a confounded measurement which does not reproduce.
 
 config_version=5
 

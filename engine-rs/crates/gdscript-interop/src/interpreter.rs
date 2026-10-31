@@ -6663,6 +6663,48 @@ impl Interpreter {
                 }
                 Ok(Some(Variant::Nil))
             }
+            // -- get_tree / get_viewport / get_window (pat-mgixk.59) ---------
+            //
+            // ⚠️ The syntactic `get_tree().m(..)` form is intercepted earlier
+            // and does NOT come through here, so this arm is specifically what
+            // makes the object itself a value: `var t = get_tree()`,
+            // `get_tree().paused = true`, `get_tree().node_added.connect(f)` and
+            // `await get_tree().process_frame` all need `get_tree` to EVALUATE,
+            // and every one of them raised UndefinedFunction before.
+            "get_tree" => {
+                if !args.is_empty() {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "get_tree() takes no arguments".into(),
+                    )));
+                }
+                Ok(Some(Variant::ObjectId(gdcore::id::ObjectId::from_raw(
+                    crate::bindings::SCENE_TREE_HANDLE,
+                ))))
+            }
+            // These two answer a REAL node id (the enclosing Viewport/Window —
+            // Patina's tree root is both), so the result dispatches through the
+            // ordinary node paths with no handle involved.
+            "get_viewport" | "get_window" => {
+                if !args.is_empty() {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                        "{name}() takes no arguments"
+                    ))));
+                }
+                let Some(node) = self.current_node_id else {
+                    // Outside a node's script there is no tree to climb; Godot
+                    // answers null rather than erroring.
+                    return Ok(Some(Variant::Nil));
+                };
+                let found = match self.scene_access.as_ref() {
+                    Some(access) if name == "get_viewport" => access.node_viewport(node),
+                    Some(access) => access.node_window(node),
+                    None => None,
+                };
+                Ok(Some(match found {
+                    Some(id) => Variant::ObjectId(gdcore::id::ObjectId::from_raw(id)),
+                    None => Variant::Nil,
+                }))
+            }
             // The read side of the same flag (`Viewport.is_input_handled()`),
             // so a later stage can ask whether an earlier one already consumed
             // the event rather than only being able to set it (pat-0q2kx.91).
@@ -6687,6 +6729,22 @@ impl Interpreter {
                 }
                 match &args[0] {
                     Variant::String(path) => {
+                        // 🔑 Resolve a `uid://…` FIRST (pat-mgixk.55). Godot puts
+                        // ResourceUID in front of ResourceLoader, so
+                        // `load("uid://b2x…")` loads the mapped resource. It has
+                        // to happen before anything else here because every
+                        // branch below dispatches on the path's EXTENSION, and a
+                        // uid has none — an unresolved uid would skip the `.tres`
+                        // and scene paths entirely and fall through to the
+                        // path-only placeholder, which looks like a successful
+                        // load of nothing.
+                        //
+                        // An unregistered uid resolves to the empty string
+                        // (`get_id_path` fails to `String()` in Godot), so the
+                        // original text is kept in that case and the placeholder
+                        // still names what the script asked for.
+                        let resolved = gdresource::uid::ensure_path(path);
+                        let path = if resolved.is_empty() { path } else { &resolved };
                         // Text resources are parsed off disk so the returned
                         // Resource carries the file's real class name and
                         // properties (`load("x.tres").get("prop")`). An
@@ -13129,6 +13187,24 @@ impl Interpreter {
             },
             Variant::ObjectId(oid) => {
                 let id = oid.raw();
+                // `var t = get_tree(); t.change_scene_to_file(..)` and
+                // `t.quit()` (pat-mgixk.59).
+                //
+                // 🔑 Routed into the SAME `try_scene_tree_method` the syntactic
+                // `get_tree().m(..)` form uses. A second table here would drift
+                // from that one, and the whole point of this bead is that the
+                // two spellings must be the same object.
+                if crate::bindings::is_scene_tree_handle(id) {
+                    if let Some(result) = self.try_scene_tree_method(method, args)? {
+                        return Ok(result);
+                    }
+                    if let Some(result) = self.try_builtin(method, args)? {
+                        return Ok(result);
+                    }
+                    return Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
+                        format!("SceneTree has no method '{method}'"),
+                    )));
+                }
                 match method {
                     "get_children" => {
                         if let Some(ref access) = self.scene_access {
@@ -20324,16 +20400,65 @@ thread_local! {
     /// Thread-local rather than a global because the interpreter's other
     /// script-visible singletons are (see `PROJECT_SETTINGS`), and a script only
     /// ever reads this back on the thread that attempted the open.
-    static FILE_OPEN_ERROR: std::cell::RefCell<Option<String>> =
+    ///
+    /// ⚠️ Holds a Godot **error code**, not a message. Godot's
+    /// `get_open_error()` returns `Error`, and scripts compare it against the
+    /// global barewords (`ERR_FILE_NOT_FOUND`), which `global_constants.rs:384`
+    /// resolves to `Int(7)`. A `String` here is never `==` to any of them, so
+    /// the standard `if FileAccess.get_open_error() == ERR_FILE_NOT_FOUND`
+    /// check silently took its else branch for every cause (pat-mgixk.54).
+    static FILE_OPEN_ERROR: std::cell::RefCell<Option<i64>> =
+        const { std::cell::RefCell::new(None) };
+
+    /// The `DirAccess.open` counterpart. Separate cell because Godot keeps the
+    /// two independent: opening a directory must not clear the reason a file
+    /// open failed.
+    static DIR_OPEN_ERROR: std::cell::RefCell<Option<i64>> =
         const { std::cell::RefCell::new(None) };
 }
 
-fn set_file_open_error(msg: Option<String>) {
-    FILE_OPEN_ERROR.with(|e| *e.borrow_mut() = msg);
+fn set_file_open_error(code: Option<i64>) {
+    FILE_OPEN_ERROR.with(|e| *e.borrow_mut() = code);
 }
 
-fn file_open_error() -> Option<String> {
-    FILE_OPEN_ERROR.with(|e| e.borrow().clone())
+fn file_open_error() -> Option<i64> {
+    FILE_OPEN_ERROR.with(|e| *e.borrow())
+}
+
+fn set_dir_open_error(code: Option<i64>) {
+    DIR_OPEN_ERROR.with(|e| *e.borrow_mut() = code);
+}
+
+fn dir_open_error() -> Option<i64> {
+    DIR_OPEN_ERROR.with(|e| *e.borrow())
+}
+
+/// Maps an [`gdcore::EngineError`] onto the Godot `Error` constant a script
+/// expects, following `NetworkError::godot_error_code` (gdplatform
+/// network.rs:75) as the project's existing convention.
+///
+/// ⚠️ A missing file arrives by **two** routes and both must answer 7, or the
+/// answer depends on whether `user://` happens to be backed by a registered
+/// storage or by the real filesystem: the `user://` backend returns
+/// `EngineError::NotFound` (file_access.rs:622) while the `OpenOptions` branch
+/// below it returns `EngineError::Io` carrying `io::ErrorKind::NotFound`.
+fn engine_err_to_godot_code(err: &gdcore::EngineError) -> i64 {
+    use gdcore::EngineError;
+    const ERR_FILE_NOT_FOUND: i64 = 7;
+    const ERR_FILE_NO_PERMISSION: i64 = 10;
+    const ERR_FILE_ALREADY_IN_USE: i64 = 11;
+    const ERR_FILE_CANT_OPEN: i64 = 12;
+
+    match err {
+        EngineError::NotFound(_) => ERR_FILE_NOT_FOUND,
+        EngineError::Io(e) => match e.kind() {
+            std::io::ErrorKind::NotFound => ERR_FILE_NOT_FOUND,
+            std::io::ErrorKind::PermissionDenied => ERR_FILE_NO_PERMISSION,
+            std::io::ErrorKind::AlreadyExists => ERR_FILE_ALREADY_IN_USE,
+            _ => ERR_FILE_CANT_OPEN,
+        },
+        _ => ERR_FILE_CANT_OPEN,
+    }
 }
 
 fn call_file_access_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
@@ -20373,24 +20498,21 @@ fn call_file_access_static(method: &str, args: &[Variant]) -> Result<Variant, Ru
                     Ok(Variant::ObjectId(id))
                 }
                 Err(e) => {
-                    set_file_open_error(Some(e.to_string()));
+                    set_file_open_error(Some(engine_err_to_godot_code(&e)));
                     Ok(Variant::Nil)
                 }
             }
         }
         // Pairs with the `open` arm above: a script that gets `null` back asks this
-        // why. Shaped like the instance `get_error`: `Int(0)` for OK (Godot's
-        // `Error::OK`), the message otherwise.
+        // why. Answers a Godot `Error` code — `Int(0)` is `OK` — so the script
+        // can compare it against `ERR_FILE_NOT_FOUND` and friends.
         "get_open_error" => {
             if !args.is_empty() {
                 return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                     "FileAccess.get_open_error() takes 0 arguments".into(),
                 )));
             }
-            Ok(match file_open_error() {
-                Some(msg) => Variant::String(msg),
-                None => Variant::Int(0),
-            })
+            Ok(Variant::Int(file_open_error().unwrap_or(0)))
         }
         "file_exists" => {
             if args.len() != 1 {
@@ -20453,10 +20575,8 @@ fn call_file_access_instance(
             // ⚠️ `store_buffer` below gained a `PackedByteArray` arm in the same
             // change, or this would have broken the obvious round trip
             // `dst.store_buffer(src.get_buffer(n))`.
-            FileAccess::with_handle_mut(id, |fa| {
-                fa.get_buffer(len).map(Variant::PackedByteArray)
-            })
-            .map_err(engine_err_to_runtime)
+            FileAccess::with_handle_mut(id, |fa| fa.get_buffer(len).map(Variant::PackedByteArray))
+                .map_err(engine_err_to_runtime)
         }
         "store_string" => {
             let text = arg_as_string(args, 0, "store_string")?;
@@ -20569,6 +20689,55 @@ fn call_file_access_instance(
             }))
         })
         .map_err(engine_err_to_runtime),
+        // Godot frames a stored variant as a u32 BYTE LENGTH followed by the
+        // encoded bytes (`file_access.cpp store_var`), and `get_var` reads the
+        // length back before decoding. Keeping that framing is what lets a
+        // script interleave `store_var` with the typed primitives and still
+        // read everything back in order — a bare encode with no length would
+        // leave `get_var` unable to find where the variant ended.
+        //
+        // ⚠️ The length is the byte count, NOT an element count: a Dictionary
+        // of two entries can be dozens of bytes.
+        "store_var" => {
+            let value = args.first().cloned().unwrap_or(Variant::Nil);
+            let bytes = gdvariant::binary::encode_variant(&value).map_err(|e| {
+                RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "FileAccess.store_var() cannot encode this value: {e}"
+                )))
+            })?;
+            let len = u32::try_from(bytes.len()).map_err(|_| {
+                RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "FileAccess.store_var() value is too large to frame".into(),
+                ))
+            })?;
+            FileAccess::with_handle_mut(id, |fa| {
+                fa.store_32(len)?;
+                fa.store_buffer(&bytes)?;
+                Ok(Variant::Nil)
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        // The `store_var` counterpart. Reads the framed length first, then
+        // exactly that many bytes, so the cursor lands on whatever was written
+        // next.
+        //
+        // ⚠️ `decode_variant` returns `(value, bytes_consumed)`; the value is
+        // taken and the count dropped deliberately — the framed length is
+        // authoritative for cursor position, and trusting the decoder's count
+        // instead would desynchronise the cursor on any trailing padding.
+        "get_var" => {
+            let bytes = FileAccess::with_handle_mut(id, |fa| {
+                let len = fa.get_32()? as usize;
+                fa.get_buffer(len)
+            })
+            .map_err(engine_err_to_runtime)?;
+            let (decoded, _consumed) = gdvariant::binary::decode_variant(&bytes).map_err(|e| {
+                RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "FileAccess.get_var() cannot decode the stored value: {e}"
+                )))
+            })?;
+            Ok(decoded)
+        }
         "store_line" => {
             let text = arg_as_string(args, 0, "store_line")?;
             FileAccess::with_handle_mut(id, |fa| {
@@ -20611,7 +20780,9 @@ fn call_file_access_instance(
         }
         "seek_end" => {
             // Godot's `seek_end(position = 0)` counts BACK from the end.
-            let back = args.first().map_or(Ok(0), |_| arg_as_int(args, 0, "seek_end"))?;
+            let back = args
+                .first()
+                .map_or(Ok(0), |_| arg_as_int(args, 0, "seek_end"))?;
             FileAccess::with_handle_mut(id, |fa| {
                 let len = fa.get_length()? as i64;
                 fa.seek((len + back).clamp(0, len) as u64)?;
@@ -20619,18 +20790,16 @@ fn call_file_access_instance(
             })
             .map_err(engine_err_to_runtime)
         }
-        "get_position" => FileAccess::with_handle_mut(id, |fa| {
-            Ok(Variant::Int(fa.get_position()? as i64))
-        })
-        .map_err(engine_err_to_runtime),
+        "get_position" => {
+            FileAccess::with_handle_mut(id, |fa| Ok(Variant::Int(fa.get_position()? as i64)))
+                .map_err(engine_err_to_runtime)
+        }
         "get_length" => {
             FileAccess::with_handle_mut(id, |fa| Ok(Variant::Int(fa.get_length()? as i64)))
                 .map_err(engine_err_to_runtime)
         }
-        "eof_reached" => {
-            FileAccess::with_handle_mut(id, |fa| Ok(Variant::Bool(fa.eof_reached())))
-                .map_err(engine_err_to_runtime)
-        }
+        "eof_reached" => FileAccess::with_handle_mut(id, |fa| Ok(Variant::Bool(fa.eof_reached())))
+            .map_err(engine_err_to_runtime),
         "set_big_endian" => {
             let on = matches!(args.first(), Some(Variant::Bool(true)));
             FileAccess::with_handle_mut(id, |fa| {
@@ -20646,9 +20815,7 @@ fn call_file_access_instance(
         // ⚠️ `path()` returns `&Path`, which does NOT implement `Display`, so
         // `.to_string()` does not compile. `to_string_lossy` is the conversion.
         "get_path" => FileAccess::with_handle_mut(id, |fa| {
-            Ok(Variant::String(
-                fa.path().to_string_lossy().into_owned(),
-            ))
+            Ok(Variant::String(fa.path().to_string_lossy().into_owned()))
         })
         .map_err(engine_err_to_runtime),
         // The handle exists, so the file is open; a closed handle is no longer a
@@ -20667,6 +20834,21 @@ fn call_file_access_instance(
     }
 }
 
+/// The directory a `*_absolute` static should open to reach `path`.
+///
+/// `resolve_child` (file_access.rs:1631) forwards any `res://`, `user://` or
+/// filesystem-absolute path straight to `resolve_path`, so the handle only has
+/// to sit on the matching scheme for the absolute path to resolve from it.
+fn dir_scheme_root(path: &str) -> &'static str {
+    if path.starts_with("user://") {
+        "user://"
+    } else if path.starts_with("res://") {
+        "res://"
+    } else {
+        "/"
+    }
+}
+
 fn call_dir_access_static(method: &str, args: &[Variant]) -> Result<Variant, RuntimeError> {
     use gdcore::DirAccess;
     match method {
@@ -20677,8 +20859,29 @@ fn call_dir_access_static(method: &str, args: &[Variant]) -> Result<Variant, Run
                 )));
             }
             let path = arg_as_string(args, 0, "DirAccess.open")?;
-            let id = DirAccess::open_handle(&path).map_err(engine_err_to_runtime)?;
-            Ok(Variant::ObjectId(id))
+            // Godot returns **null** here and records the reason for
+            // `get_open_error()`; it does not raise (`core/io/dir_access.cpp`).
+            // Raising meant `var d = DirAccess.open(p); if d == null:` could not
+            // be written — the script died before it could test the result
+            // (pat-mgixk.54).
+            match DirAccess::open_handle(&path) {
+                Ok(id) => {
+                    set_dir_open_error(None);
+                    Ok(Variant::ObjectId(id))
+                }
+                Err(e) => {
+                    set_dir_open_error(Some(engine_err_to_godot_code(&e)));
+                    Ok(Variant::Nil)
+                }
+            }
+        }
+        "get_open_error" => {
+            if !args.is_empty() {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "DirAccess.get_open_error() takes 0 arguments".into(),
+                )));
+            }
+            Ok(Variant::Int(dir_open_error().unwrap_or(0)))
         }
         "dir_exists" => {
             if args.len() != 1 {
@@ -20688,6 +20891,63 @@ fn call_dir_access_static(method: &str, args: &[Variant]) -> Result<Variant, Run
             }
             let path = arg_as_string(args, 0, "DirAccess.dir_exists")?;
             Ok(Variant::Bool(DirAccess::dir_exists(&path)))
+        }
+        "dir_exists_absolute" => {
+            let path = arg_as_string(args, 0, "DirAccess.dir_exists_absolute")?;
+            Ok(Variant::Bool(DirAccess::dir_exists(&path)))
+        }
+        // Godot's `*_absolute` statics act on a path without needing a handle
+        // positioned anywhere (`dir_access.cpp`, via `create_for_path`). gdcore
+        // has only the instance methods, so each opens a transient handle at the
+        // path's own scheme root and lets `resolve_child` take the absolute path
+        // from there (file_access.rs:1631 passes `user://`/`res://`/absolute
+        // straight to `resolve_path`).
+        //
+        // ⚠️ The root, not the parent: `make_dir_recursive_absolute` is called
+        // precisely when the parents do NOT exist yet, so opening the parent
+        // would fail on the one call that matters most.
+        "make_dir_absolute" | "make_dir_recursive_absolute" => {
+            let path = arg_as_string(args, 0, method)?;
+            let mut da = DirAccess::open(dir_scheme_root(&path)).map_err(engine_err_to_runtime)?;
+            if method == "make_dir_absolute" {
+                da.make_dir(&path).map_err(engine_err_to_runtime)?;
+            } else {
+                da.make_dir_recursive(&path)
+                    .map_err(engine_err_to_runtime)?;
+            }
+            Ok(Variant::Int(0))
+        }
+        "copy_absolute" | "rename_absolute" => {
+            if args.len() != 2 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                    "DirAccess.{method}() takes 2 arguments"
+                ))));
+            }
+            let from = arg_as_string(args, 0, method)?;
+            let to = arg_as_string(args, 1, method)?;
+            let mut da = DirAccess::open(dir_scheme_root(&from)).map_err(engine_err_to_runtime)?;
+            if method == "copy_absolute" {
+                da.copy(&from, &to).map_err(engine_err_to_runtime)?;
+            } else {
+                da.rename(&from, &to).map_err(engine_err_to_runtime)?;
+            }
+            Ok(Variant::Int(0))
+        }
+        "remove_absolute" => {
+            let path = arg_as_string(args, 0, "DirAccess.remove_absolute")?;
+            let mut da = DirAccess::open(dir_scheme_root(&path)).map_err(engine_err_to_runtime)?;
+            da.remove(&path).map_err(engine_err_to_runtime)?;
+            Ok(Variant::Int(0))
+        }
+        "get_files_at" | "get_directories_at" => {
+            let path = arg_as_string(args, 0, method)?;
+            let entries = if method == "get_files_at" {
+                DirAccess::get_files_at(&path)
+            } else {
+                DirAccess::get_directories_at(&path)
+            }
+            .map_err(engine_err_to_runtime)?;
+            Ok(Variant::PackedStringArray(entries))
         }
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("DirAccess.{other}"),
@@ -20731,14 +20991,108 @@ fn call_dir_access_instance(
             Ok(Variant::PackedStringArray(da.get_directories()))
         })
         .map_err(engine_err_to_runtime),
-        "make_dir" => {
-            let path = arg_as_string(args, 0, "make_dir")?;
+        "make_dir" | "make_dir_recursive" => {
+            let path = arg_as_string(args, 0, method)?;
+            let recursive = method == "make_dir_recursive";
             DirAccess::with_handle_mut(id, |da| {
-                da.make_dir(&path)?;
+                if recursive {
+                    da.make_dir_recursive(&path)?;
+                } else {
+                    da.make_dir(&path)?;
+                }
                 Ok(Variant::Int(0))
             })
             .map_err(engine_err_to_runtime)
         }
+        "copy" => {
+            if args.len() != 2 {
+                return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                    "copy() takes 2 arguments".into(),
+                )));
+            }
+            let from = arg_as_string(args, 0, "copy")?;
+            let to = arg_as_string(args, 1, "copy")?;
+            DirAccess::with_handle_mut(id, |da| {
+                da.copy(&from, &to)?;
+                Ok(Variant::Int(0))
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "change_dir" => {
+            let path = arg_as_string(args, 0, "change_dir")?;
+            DirAccess::with_handle_mut(id, |da| {
+                da.change_dir(&path)?;
+                Ok(Variant::Int(0))
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        "get_current_dir" | "get_current_dir_without_drive" => {
+            DirAccess::with_handle_mut(id, |da| Ok(Variant::String(da.get_current_dir())))
+                .map_err(engine_err_to_runtime)
+        }
+        "set_include_hidden" | "set_include_navigational" => {
+            let include = matches!(args.first(), Some(Variant::Bool(true)));
+            let hidden = method == "set_include_hidden";
+            DirAccess::with_handle_mut(id, |da| {
+                if hidden {
+                    da.set_include_hidden(include);
+                } else {
+                    da.set_include_navigational(include);
+                }
+                Ok(Variant::Nil)
+            })
+            .map_err(engine_err_to_runtime)
+        }
+        // Godot's `dir_exists` is the INSTANCE method and resolves against the
+        // handle's current directory; `dir_exists_absolute` is the static twin.
+        // Patina bound only a static-shaped `dir_exists` on the class itself, so
+        // after a `change_dir("b")` a bare `d.dir_exists("c")` could not be
+        // asked at all (pat-mgixk.54).
+        "dir_exists" => {
+            let path = arg_as_string(args, 0, "dir_exists")?;
+            let resolved = DirAccess::with_handle_mut(id, |da| {
+                Ok(
+                    if path.starts_with("res://")
+                        || path.starts_with("user://")
+                        || std::path::Path::new(&path).is_absolute()
+                    {
+                        path.clone()
+                    } else {
+                        format!("{}/{}", da.get_current_dir().trim_end_matches('/'), path)
+                    },
+                )
+            })
+            .map_err(engine_err_to_runtime)?;
+            Ok(Variant::Bool(DirAccess::dir_exists(&resolved)))
+        }
+        // Godot's DirAccess carries its own `file_exists`, resolved against the
+        // handle's CURRENT directory — which is why it is not simply
+        // `FileAccess.file_exists`: after a `change_dir("b")` a bare name must
+        // be looked up inside `b`.
+        "file_exists" => {
+            let path = arg_as_string(args, 0, "file_exists")?;
+            let resolved = DirAccess::with_handle_mut(id, |da| {
+                Ok(
+                    if path.starts_with("res://")
+                        || path.starts_with("user://")
+                        || std::path::Path::new(&path).is_absolute()
+                    {
+                        path.clone()
+                    } else {
+                        format!("{}/{}", da.get_current_dir().trim_end_matches('/'), path)
+                    },
+                )
+            })
+            .map_err(engine_err_to_runtime)?;
+            Ok(Variant::Bool(gdcore::FileAccess::file_exists(&resolved)))
+        }
+        "get_error" => DirAccess::with_handle_mut(id, |da| {
+            Ok(match da.get_error() {
+                Some(msg) => Variant::String(msg.to_string()),
+                None => Variant::Int(0),
+            })
+        })
+        .map_err(engine_err_to_runtime),
         "remove" => {
             let path = arg_as_string(args, 0, "remove")?;
             DirAccess::with_handle_mut(id, |da| {

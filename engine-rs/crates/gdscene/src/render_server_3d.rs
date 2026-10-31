@@ -2951,6 +2951,18 @@ pub fn material_props_from_node(
 /// falls back to a unit cube, which is what the adapter has always done
 /// (pat-mgixk.50).
 pub fn multimesh_mesh_for_node(tree: &SceneTree, nid: NodeId) -> Mesh3D {
+    // The MultiMesh's own `mesh` sub-resource, whose class `packed_scene`
+    // records as `__multimesh__mesh_class`. Checked FIRST because it is the
+    // authored answer: `multimesh_mesh_type` below is a flat property nothing in
+    // the `.tscn` chain writes, so before this a `.tscn`-authored MultiMesh mesh
+    // always fell through to the cube (pat-mgixk.50).
+    if let Some(node) = tree.get_node(nid) {
+        if let gdvariant::Variant::String(class) = node.get_property("__multimesh__mesh_class") {
+            if let Some(m) = RenderServer3DAdapter::mesh_from_type_name(&class) {
+                return m;
+            }
+        }
+    }
     if let Some(mesh_type) = node3d::get_multimesh_mesh_type(tree, nid) {
         if let Some(m) = RenderServer3DAdapter::mesh_from_type_name(&mesh_type) {
             return m;

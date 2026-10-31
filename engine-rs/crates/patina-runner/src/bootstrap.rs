@@ -515,6 +515,19 @@ impl EngineBootstrap {
                     message: format!("failed to instance scene: {e}"),
                 })?;
 
+            // Godot's `Main::start` makes the booted main scene the tree's
+            // CURRENT scene (`SceneTree::add_current_scene`). Patina instanced
+            // it and told nobody: `current_scene_id` was written only by the
+            // change-scene functions, so a freshly booted project had a null
+            // `get_tree().current_scene` (pat-mgixk.59).
+            //
+            // The `PackedScene` goes along as the source in the same call —
+            // `set_current_scene` takes both halves precisely so a caller
+            // cannot set the id and forget the source, which is the state that
+            // makes `reload_current_scene()` fail with "No packed scene source"
+            // on the scene the game is visibly running.
+            tree.set_current_scene(scene_root, Some(packed_scene));
+
             self.scene_root_id = Some(scene_root);
         }
         // No main_scene configured is valid (headless/test mode).

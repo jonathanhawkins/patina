@@ -82,6 +82,56 @@ pub enum ProcessMode {
     Disabled,
 }
 
+impl ProcessMode {
+    /// The Godot `Node.ProcessMode` integer for this mode (pat-mgixk.58).
+    ///
+    /// The variant order above IS Godot's enum order — INHERIT 0, PAUSABLE 1,
+    /// WHEN_PAUSED 2, ALWAYS 3, DISABLED 4 (`scene/main/node.h`), matching the
+    /// `PROCESS_MODE_*` constants ClassDB registers for `Node`. Spelled out
+    /// rather than cast from the discriminant so a future variant inserted in
+    /// the middle breaks here instead of silently renumbering every saved scene.
+    pub fn to_godot_int(self) -> i64 {
+        match self {
+            ProcessMode::Inherit => 0,
+            ProcessMode::Pausable => 1,
+            ProcessMode::WhenPaused => 2,
+            ProcessMode::Always => 3,
+            ProcessMode::Disabled => 4,
+        }
+    }
+
+    /// Parses a Godot `Node.ProcessMode` integer, or `None` when out of range.
+    ///
+    /// `None` rather than a default: an out-of-range value in a `.tscn` must not
+    /// silently become INHERIT, which would look exactly like a scene that never
+    /// authored the property.
+    pub fn from_godot_int(value: i64) -> Option<Self> {
+        match value {
+            0 => Some(ProcessMode::Inherit),
+            1 => Some(ProcessMode::Pausable),
+            2 => Some(ProcessMode::WhenPaused),
+            3 => Some(ProcessMode::Always),
+            4 => Some(ProcessMode::Disabled),
+            _ => None,
+        }
+    }
+}
+
+/// Reads an integer out of a `.tscn` / script value for the process keys
+/// (pat-mgixk.58).
+///
+/// `Float` is accepted because a `.tscn` may spell an int-valued property as
+/// `1.0` and a GDScript expression yields a Float from any division; `Bool` is
+/// NOT, so a stray `process_mode = true` leaves the field alone rather than
+/// quietly meaning PAUSABLE.
+fn variant_as_i64(value: &Variant) -> Option<i64> {
+    match value {
+        Variant::Int(i) => Some(*i),
+        Variant::Float(f) => Some(*f as i64),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Node
 // ---------------------------------------------------------------------------
@@ -309,6 +359,41 @@ impl Node {
         if let Some(name) = key.strip_prefix("metadata/") {
             self.meta.insert(name.to_owned(), value.clone());
         }
+        // The three process keys are real `Node` state, not bag entries
+        // (pat-mgixk.58). `should_process_node` / `effective_process_mode` read
+        // the typed `process_mode` field and `all_nodes_in_*_process_order`
+        // read the typed priorities, and NOTHING forwarded the property here —
+        // so a pause menu authored with `process_mode = 3` froze under pause,
+        // and `process_priority = -5` from a `.tscn` reordered nothing.
+        //
+        // Done in this one funnel for the same reason the metadata mirror above
+        // is: all 29 `.tscn` property applications in `packed_scene.rs`, the
+        // script assignment path in `scripting.rs::set_node_property`, and the
+        // editor's own edits all end here.
+        //
+        // The bag row is kept as well, so the saver still round-trips the value
+        // and `properties()` / `get_property_list()` are unchanged.
+        match key {
+            "process_mode" => {
+                // An unparseable value leaves the field alone rather than
+                // resetting it to INHERIT: a malformed scene must not silently
+                // un-pause a menu.
+                if let Some(mode) = variant_as_i64(&value).and_then(ProcessMode::from_godot_int) {
+                    self.process_mode = mode;
+                }
+            }
+            "process_priority" => {
+                if let Some(v) = variant_as_i64(&value) {
+                    self.process_priority = v as i32;
+                }
+            }
+            "process_physics_priority" => {
+                if let Some(v) = variant_as_i64(&value) {
+                    self.process_physics_priority = v as i32;
+                }
+            }
+            _ => {}
+        }
         self.properties
             .insert(key.to_owned(), value)
             .unwrap_or(Variant::Nil)
@@ -316,6 +401,24 @@ impl Node {
 
     /// Gets a property by name, returning `Nil` if absent.
     pub fn get_property(&self, key: &str) -> Variant {
+        // The typed field is the single source of truth for these three
+        // (pat-mgixk.58): `set_process_mode` is also called directly — by
+        // `VisibleOnScreenEnabler` (`visibility_3d.rs`) and the `RemoteTransform2D`
+        // path (`behavioral_2d.rs`) — with no bag row, so reading the row here
+        // would answer `Nil` for a node whose mode had genuinely changed.
+        //
+        // Answering `Int` unconditionally is also what makes a script's
+        // `process_mode = PROCESS_MODE_DISABLED` reach the node at all: the
+        // interpreter routes a bare assignment to the node only when
+        // `get_node_property` is non-Nil (`interpreter.rs` `is_node_prop`).
+        match key {
+            "process_mode" => return Variant::Int(self.process_mode.to_godot_int()),
+            "process_priority" => return Variant::Int(self.process_priority as i64),
+            "process_physics_priority" => {
+                return Variant::Int(self.process_physics_priority as i64)
+            }
+            _ => {}
+        }
         self.properties.get(key).cloned().unwrap_or(Variant::Nil)
     }
 

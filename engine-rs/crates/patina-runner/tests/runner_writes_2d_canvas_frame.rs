@@ -37,17 +37,23 @@
 //! point is that a *running game* produces pixels. A direct call would pass with
 //! the CLI flag unwired.
 //!
-//! ⚠️ It enters by PROJECT DIRECTORY, not by loose `.tscn`, and that is load
-//! bearing. `project_boot` seeds the ClassDB (`project_boot.rs:379`), so
-//! `Node::is_class("CanvasItem")` answers true and
-//! `gdscene::canvas_render::collect_canvas_items` can see the scene. The
-//! loose-`.tscn` entry point in `main.rs` never seeds it — `ClassDB::new()`
-//! starts empty and nothing fills it lazily — so `collect_canvas_items` filters
-//! the whole scene out and the SAME fixture renders as nothing but the clear
-//! colour there. Measured: 256 rect pixels and 64 sprite pixels by project
-//! directory, 0 of 9216 by loose `.tscn`. That gap is a separate defect in a
-//! different entry point and is reported rather than fixed here; booting by
-//! project directory is also what a shipped game does.
+//! It enters by PROJECT DIRECTORY because that is how a shipped game boots, and
+//! it is the entry point this bead's wiring requirement names. The loose-`.tscn`
+//! entry point renders this same fixture identically (measured: 256 rect and 64
+//! sprite pixels either way), so the choice is about testing the realistic path,
+//! not about avoiding a broken one.
+//!
+//! ⚠️ An earlier revision of this comment claimed the loose-`.tscn` path could
+//! not render at all because `main.rs` never seeds the ClassDB. That was wrong.
+//! The measurement behind it (0 of 9216 pixels) does not reproduce: this fixture
+//! and `fixtures/scenes/sprite_scene.tscn` both draw through the loose-`.tscn`
+//! path with no `register_all_classes` call anywhere in `main.rs`. The original
+//! experiment compared a project-directory boot against a loose-`.tscn` boot and
+//! attributed the difference to the one call that differed, without controlling
+//! for anything else — and re-testing the ClassDB call, the working directory
+//! and the presence of a sibling `project.godot` each leaves the scene drawing
+//! correctly. Left recorded here because the false version was reported once and
+//! should not be re-derived from the same confounded comparison.
 //!
 //! ⚠️ Every assertion is a pixel COUNT plus a centroid RELATION, never an exact
 //! coordinate. The fixture declares no `Camera2D`, and `camera2d_view_transform`

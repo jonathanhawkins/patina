@@ -1,0 +1,20 @@
+[gd_scene load_steps=5 format=3 uid="uid://cmainfixture1"]
+
+[ext_resource type="Script" path="res://main.gd" id="1_main"]
+[ext_resource type="Texture2D" path="res://icon.png" id="2_icon"]
+[ext_resource type="PackedScene" path="res://sub.tscn" id="3_sub"]
+[ext_resource type="Script" path="res://receiver.gd" id="4_recv"]
+
+[node name="Main" type="Node2D"]
+script = ExtResource("1_main")
+
+[node name="Icon" type="Sprite2D" parent="." groups=["pickups"]]
+position = Vector2(24, 36)
+texture = ExtResource("2_icon")
+
+[node name="Receiver" type="Node2D" parent="."]
+script = ExtResource("4_recv")
+
+[node name="Sub" parent="." instance=ExtResource("3_sub")]
+
+[connection signal="poked" from="." to="Receiver" method="on_poked" binds= [7]]

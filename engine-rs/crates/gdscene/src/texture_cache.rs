@@ -5,8 +5,9 @@
 
 use std::collections::HashMap;
 
+use gdcore::file_access::FileAccess;
 use gdcore::math::Color;
-use gdrender2d::texture::{load_png, resolve_res_path, Texture2D};
+use gdrender2d::texture::{decode_png, load_png, resolve_res_path, Texture2D};
 use gdvariant::Variant;
 
 /// Cache of loaded textures keyed by their `res://` path.
@@ -42,7 +43,18 @@ impl TextureCache {
             // and a png whose source was replaced by an imported artifact — goes
             // through the engine's format loader, which nothing used to call
             // (pat-0q2kx.45). That is why only PNG ever rendered here.
-            let texture = load_png(&fs_path).or_else(|| load_via_format_loader(&fs_path));
+            // Host path first, so every loose project keeps the exact code that
+            // already works. Only when that finds nothing do we look through
+            // `FileAccess`, which serves a mounted `.pck` (pat-mgixk.56).
+            //
+            // 🔑 Ordered this way deliberately rather than FileAccess-first:
+            // `self.project_root` is this cache's own root and need not be the
+            // globally registered `res://` root — the editor previews a project
+            // that is not the mounted one — so making FileAccess authoritative
+            // would silently redirect those reads.
+            let texture = load_png(&fs_path)
+                .or_else(|| load_via_format_loader(&fs_path))
+                .or_else(|| load_from_res_path(res_path));
             if texture.is_some() {
                 tracing::debug!(
                     "TextureCache: loaded {} ({} bytes)",
@@ -140,6 +152,41 @@ fn load_via_format_loader(fs_path: &str) -> Option<Texture2D> {
     let resource = gdresource::importers::ResourceFormatLoader::with_defaults()
         .load_resource(std::path::Path::new(fs_path))
         .ok()?;
+    texture_from_resource(&resource)
+}
+
+/// Loads a texture through `res://` space, so a mounted `.pck` can serve it
+/// (pat-mgixk.56).
+///
+/// This is the path a shipped game takes. `resolve_res_path` above produces a
+/// host filesystem path, and a packed texture has none, so the reads here go
+/// through [`FileAccess`] — which serves mounted packs before disk.
+///
+/// Follows the `.import` sidecar first, because Godot resolves **every**
+/// imported resource through it (`ResourceFormatImporter`): in an exported game
+/// `res://icon.png` is usually a stub whose real pixels live in
+/// `res://.godot/imported/icon-<md5>.ctex`.
+fn load_from_res_path(res_path: &str) -> Option<Texture2D> {
+    let target = gdresource::importers::resolve_import_artifact_res(res_path)
+        .unwrap_or_else(|| res_path.to_string());
+    let bytes = FileAccess::read_file_bytes(&target).ok()?;
+    // Dispatch on the ARTIFACT's extension, not the source's: the sidecar
+    // redirects `icon.png` to a `.ctex`, so keying off `res_path` would hand
+    // container bytes to the PNG decoder.
+    if target.ends_with(".ctex") {
+        let resource =
+            gdresource::ctex::load_ctex_bytes(&bytes, std::path::Path::new(&target)).ok()?;
+        texture_from_resource(&resource)
+    } else {
+        decode_png(&bytes)
+    }
+}
+
+/// Pulls `width`/`height`/`pixels` off a loaded texture [`Resource`].
+///
+/// Shared by the host-path and `res://` loaders so the two cannot drift on what
+/// counts as a usable texture — in particular the length check below.
+fn texture_from_resource(resource: &gdresource::resource::Resource) -> Option<Texture2D> {
     let int_prop = |key: &str| match resource.get_property(key) {
         Some(Variant::Int(i)) if *i > 0 => Some(*i as u32),
         _ => None,

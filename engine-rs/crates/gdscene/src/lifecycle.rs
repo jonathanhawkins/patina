@@ -48,6 +48,27 @@ impl LifecycleManager {
             // (pat-nzgdu.84). Fires here for both add_child auto-enter and any
             // subtree re-entry; nodes with no connections are a no-op.
             tree.emit_signal(id, "tree_entered", &[]);
+            // ...and the PARENT announces the arrival (pat-mgixk.64). Godot
+            // pairs these: `_propagate_enter_tree` emits `tree_entered` on the
+            // node and then `child_entered_tree(node)` on its parent
+            // (`node.cpp:358-365`). Registered in our ClassDB but never emitted,
+            // so `child_entered_tree.connect(..)` succeeded and never fired.
+            //
+            // ⚠️ Read the parent BEFORE emitting: `emit_signal` takes `&mut
+            // SceneTree`, so the immutable borrow from `get_node` has to end
+            // first.
+            //
+            // Emitted for every node in the subtree, each on its OWN parent —
+            // including `subtree_root`, whose parent sits outside the subtree and
+            // is the one actually gaining a child.
+            let entering_parent = tree.get_node(id).and_then(|n| n.parent());
+            if let Some(parent) = entering_parent {
+                tree.emit_signal(
+                    parent,
+                    "child_entered_tree",
+                    &[gdvariant::Variant::ObjectId(id.object_id())],
+                );
+            }
             // A `ShaderGlobalsOverride` pushes its `params/*` values into the
             // global shader parameter store as it enters (pat-s3rrv.209).
             apply_shader_globals_override(tree, id);
@@ -65,6 +86,16 @@ impl LifecycleManager {
             }
             tree.process_script_ready(id);
             tree.notify_script(id, NOTIFICATION_READY.code() as i64);
+            // Godot's `_propagate_ready` emits `ready` AFTER the node's own
+            // `_ready` has run (`node.cpp:331`), which is what makes
+            // `await child.ready` resume at the right moment (pat-mgixk.64).
+            // Ordering matters and follows the calls above, not precedes them: a
+            // listener woken by `ready` must be able to see whatever `_ready`
+            // set up.
+            //
+            // Bottom-up like the rest of this phase, so a parent's `ready`
+            // fires after every descendant's.
+            tree.emit_signal(id, "ready", &[]);
         }
     }
 
@@ -84,6 +115,13 @@ impl LifecycleManager {
     /// Signals are deliberately not rewound. Nothing can be connected to a node
     /// that has not yet run a script callback, so the premature `tree_entered`
     /// emission had no listeners to reach.
+    ///
+    /// ⚠️ That reasoning was re-checked when `ready` and `child_entered_tree`
+    /// were added to the same phases (pat-mgixk.64) and it still holds for the
+    /// same reason: the premature pass runs before any script is attached, so
+    /// there is nobody connected to receive either. If a future caller ever
+    /// connects to a node BEFORE dispatching, this comment becomes wrong and the
+    /// rewind has to drop those emissions too.
     pub fn rewind_for_redispatch(tree: &mut SceneTree, subtree_root: NodeId) {
         let mut ids = Vec::new();
         tree.collect_subtree_top_down(subtree_root, &mut ids);
@@ -111,6 +149,31 @@ impl LifecycleManager {
     /// Call this before removing a subtree from the tree. The sequence is:
     /// `EXIT_TREE` bottom-up (deepest children first, then parent).
     pub fn exit_tree(tree: &mut SceneTree, subtree_root: NodeId) {
+        // 🔑 Godot emits `tree_exiting` TOP-DOWN and BEFORE any
+        // `NOTIFICATION_EXIT_TREE` is delivered (`node.cpp:423`), pairing it with
+        // `child_exiting_tree(node)` on the parent (`:433`). That ordering is the
+        // point of the signal: a listener gets to inspect the subtree while it is
+        // still intact and still inside the tree. Emitting it alongside the
+        // bottom-up EXIT_TREE pass below would hand listeners a subtree whose
+        // deeper nodes had already torn themselves down.
+        //
+        // Hence a separate pre-pass rather than two more lines in the loop.
+        let mut top_down = Vec::new();
+        tree.collect_subtree_top_down(subtree_root, &mut top_down);
+        for &id in &top_down {
+            tree.emit_signal(id, "tree_exiting", &[]);
+            // Parent read before the emit, as in `enter_tree`: `emit_signal`
+            // needs `&mut SceneTree`.
+            let exiting_parent = tree.get_node(id).and_then(|n| n.parent());
+            if let Some(parent) = exiting_parent {
+                tree.emit_signal(
+                    parent,
+                    "child_exiting_tree",
+                    &[gdvariant::Variant::ObjectId(id.object_id())],
+                );
+            }
+        }
+
         let mut bottom_up = Vec::new();
         tree.collect_subtree_bottom_up(subtree_root, &mut bottom_up);
 

@@ -141,8 +141,36 @@ pub fn setup_local_to_scene(
     tree: &mut crate::scene_tree::SceneTree,
     scene: &crate::packed_scene::PackedScene,
 ) -> usize {
+    let root = tree.root_id();
+    setup_local_to_scene_in(tree, scene, root)
+}
+
+/// The same pass, restricted to `subtree_root` and its descendants
+/// (pat-mgixk.71).
+///
+/// 🔑 **Scoping is a correctness requirement, not an optimisation.** A
+/// `__resref__` companion names its sub-resource by a **scene-local** id
+/// (`SubResource("1")`), so resolving one instance's refs against a DIFFERENT
+/// scene's `sub_resource_props` can silently match an unrelated resource. Each
+/// instancing therefore gets a pass bounded to the subtree it just built, with
+/// the `PackedScene` those ids actually belong to.
+///
+/// Also idempotent: a property that already carries its `__local_res__` copy is
+/// skipped, so a node reached twice (two entry points firing for one load, or a
+/// re-entrant instancing) keeps its first copy instead of minting a second and
+/// orphaning the id the callback already stamped.
+pub fn setup_local_to_scene_in(
+    tree: &mut crate::scene_tree::SceneTree,
+    scene: &crate::packed_scene::PackedScene,
+    subtree_root: crate::node::NodeId,
+) -> usize {
     let mut made = 0usize;
-    for node_id in tree.all_nodes_in_tree_order() {
+    // `SceneTree::collect_subtree_top_down` is the engine's own subtree walk —
+    // `all_nodes_in_tree_order` covers the WHOLE tree, which is the one thing
+    // this pass must not do.
+    let mut ids = Vec::new();
+    tree.collect_subtree_top_down(subtree_root, &mut ids);
+    for node_id in ids {
         // Collect first, mutate second: the walk borrows the node immutably and
         // the write below needs it mutably.
         let refs: Vec<(String, String, String)> = match tree.get_node(node_id) {
@@ -166,6 +194,14 @@ pub fn setup_local_to_scene(
                 continue;
             };
             if !wants_local_to_scene(props) {
+                continue;
+            }
+            // Already has its copy — see the idempotence note on
+            // `setup_local_to_scene_in`.
+            if tree
+                .get_node(node_id)
+                .is_some_and(|n| n.has_property(&format!("__local_res__{prop}")))
+            {
                 continue;
             }
             // `script = ExtResource("id")` survives parsing as the string

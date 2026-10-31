@@ -646,6 +646,30 @@ fn main() {
         return;
     }
 
+    // Populate ClassDB before the scene loads (pat-mgixk.28).
+    //
+    // Godot fills ClassDB in `register_core_types()`/`register_scene_types()`
+    // during engine init, so it is populated whatever the MainLoop then loads —
+    // a loose scene included (`main/main.cpp`). The project entry points above
+    // funnel through `project_boot`, which registers at its step (0); this
+    // loose-`.tscn` path had no equivalent, so it ran with an EMPTY database.
+    //
+    // 🔑 That is not a cosmetic gap. `Node::is_class` defers to
+    // `gdobject::is_parent_class` for anything but an exact class-name match, so
+    // with nothing registered every `is_class("CanvasItem")` answered false and
+    // `gdscene::canvas_render::collect_canvas_items` filtered the entire scene
+    // out: `--frame-out` wrote a frame of nothing but the clear colour, from a
+    // scene that renders correctly through the project entry point. Measured on
+    // `fixtures/scenes/sprite_scene.tscn` at 160x120: 0 drawn pixels before,
+    // 8x8 sprite + 16x16 tile after.
+    //
+    // Ordering matches `project_boot`'s and for the same reason: the loader
+    // seeds each node's defaults from `class_db::get_property_list()` as the
+    // node is built, so registering after the scene loads would leave every
+    // already-built node bare. Idempotent, so this costs nothing if a host has
+    // already registered.
+    gdobject::class_db::register_all_classes();
+
     // Read and parse the .tscn file.
     let source = match fs::read_to_string(&args.scene_path) {
         Ok(s) => s,

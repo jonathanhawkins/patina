@@ -79,12 +79,49 @@ pub fn boot_project_from_pck(
         .unwrap_or_else(|| "game".to_string());
     gdcore::file_access::mount_pack(label, std::sync::Arc::new(mount), 0);
 
-    let content = FileAccess::read_file_string("res://project.godot").map_err(|e| {
-        format!(
-            "pack '{}' has no readable res://project.godot: {e}",
-            pck_path.display()
-        )
-    })?;
+    // `res://project.binary` FIRST, `project.godot` only as a fallback
+    // (pat-mgixk.56).
+    //
+    // 🔑 A real Godot export does not ship `project.godot` at all — it writes
+    // the binary form instead (`editor_export_platform.cpp:1676`), and the
+    // engine prefers it (`project_settings.cpp:993-1002`,
+    // `_load_settings_text_or_binary`). Requiring the text file meant only a
+    // pack assembled by hand from a loose project could boot; a genuinely
+    // exported `.pck` failed here before any scene was touched.
+    //
+    // The decoded settings are rendered back to project.godot text and handed to
+    // the same `boot_from_project_text` the loose-directory path uses, so the
+    // main scene, autoloads, input map and ProjectSettings all keep coming from
+    // one code path rather than growing a second boot sequence that drifts.
+    let content = match FileAccess::read_file_bytes("res://project.binary") {
+        Ok(bytes) => {
+            let decoded = gdresource::ecfg::parse_project_binary(&bytes).map_err(|e| {
+                format!(
+                    "pack '{}' has a res://project.binary that will not decode: {e}",
+                    pck_path.display()
+                )
+            })?;
+            // Named, not swallowed: `SettingsValue` has no Dictionary or
+            // PackedStringArray, so the input map and `application/config/features`
+            // land here. Silence would surface much later as a missing action.
+            if !decoded.skipped.is_empty() {
+                tracing::warn!(
+                    count = decoded.skipped.len(),
+                    keys = ?decoded.skipped,
+                    "project.binary: entries with no ProjectSettings representation"
+                );
+            }
+            decoded.settings.to_godot_format()
+        }
+        Err(binary_err) => FileAccess::read_file_string("res://project.godot").map_err(|e| {
+            format!(
+                "pack '{}' has neither a readable res://project.binary ({binary_err}) nor \
+                 res://project.godot ({e}) — an exported pack ships the former, a \
+                 hand-packed project directory the latter",
+                pck_path.display()
+            )
+        })?,
+    };
     boot_from_project_text(&fallback_root, &content, user_dir)
 }
 
@@ -478,6 +515,16 @@ fn boot_from_project_text(
     // again here keeps `user://` correct now that the project name is known.
     set_path_roots(Some(project_root.clone()), user_dir);
 
+    // (2b) Populate the ResourceUID registry BEFORE anything resolves a path
+    // (pat-mgixk.55). Godot's `ResourceUID::load_from_cache` runs at startup for
+    // exactly this reason: the 4.6 editor writes `run/main_scene` as a
+    // `uid://…` (`editor/editor_node.cpp:2627`), and autoloads and `load()`
+    // calls may be uids too, so the mapping has to exist before the first
+    // resolution rather than being filled in lazily by whoever asks first.
+    //
+    // ⚠️ After `set_path_roots`, because the cache is read through `res://`.
+    load_uid_registry(&project_root);
+
     let mut tree = SceneTree::new();
     let root_id = tree.root_id();
 
@@ -496,6 +543,30 @@ fn boot_from_project_text(
     } else {
         Some(load_scene_into_tree(&mut tree, root_id, &main_scene)?)
     };
+
+    // (4a) Record it as the RUNNING scene (pat-mgixk.62). `current_scene_id` was
+    // assigned only by the change-scene functions, so a freshly booted project
+    // had a null `get_tree().current_scene` and `reload_current_scene()` failed
+    // with "No packed scene source" — on the scene the game was visibly running.
+    //
+    // 🔑 It also decides what a later scene change FREES: the change path now
+    // removes only the current scene instead of every child of `/root`, so
+    // leaving this unset would make the first `change_scene_to_file` free
+    // nothing and stack the new scene on top of the old one.
+    if let Some(root) = main_scene_root {
+        // The packed source comes along so `reload_current_scene()` works from
+        // the first frame; re-reading the `.tscn` here goes through the same
+        // pack-aware `FileAccess` path `load_scene_into_tree` used, so a packed
+        // project behaves identically to a loose one.
+        // ⚠️ Through `resolve_uid_path`, the SAME helper `load_scene_into_tree`
+        // used — not a second copy of the uid-plus-fallback logic, which would
+        // be free to drift from it and resolve a different file than the one
+        // actually instanced.
+        let packed = FileAccess::read_file_string(&resolve_uid_path(&main_scene))
+            .ok()
+            .and_then(|text| PackedScene::from_tscn(&text).ok());
+        tree.set_current_scene(root, packed);
+    }
 
     // (4b) Attach the scenes' GDScripts.
     //
@@ -615,6 +686,94 @@ pub fn resolve_res_path(project_dir: &Path, res_path: &str) -> PathBuf {
     project_dir.join(relative)
 }
 
+/// Resolves a `uid://…` to the `res://` path it names, leaving anything else
+/// untouched.
+///
+/// ⚠️ Falls back to the INPUT when the uid is unregistered.
+/// `uid::ensure_path` returns an EMPTY string for an unknown uid (it wraps
+/// `get_id_path`, which Godot fails to `String()`), and an empty path would
+/// surface downstream as `failed to read scene ''` — an error naming nothing.
+/// Echoing the uid back keeps the eventual message pointing at what was asked
+/// for.
+fn resolve_uid_path(path_or_uid: &str) -> String {
+    let resolved = gdresource::uid::ensure_path(path_or_uid);
+    if resolved.is_empty() {
+        return path_or_uid.to_string();
+    }
+    resolved
+}
+
+/// Populates `uid::global_registry()` from the project's UID sources, as Godot's
+/// `ResourceUID::load_from_cache` does at startup (`core/io/resource_uid.cpp`).
+///
+/// Two sources, both of which a real 4.4+ project has:
+///
+/// * `res://.godot/uid_cache.bin` — read through [`FileAccess`] so a mounted
+///   `.pck` serves it exactly as a loose project does.
+/// * `*.uid` sidecars next to scripts and shaders, which the editor writes
+///   per-asset and which are not in the cache for a freshly-cloned project.
+///
+/// Every failure is ignored on purpose: a project with no UIDs at all is
+/// completely normal, and booting must not depend on the cache existing.
+fn load_uid_registry(project_root: &Path) {
+    if let Ok(bytes) = FileAccess::read_file_bytes("res://.godot/uid_cache.bin") {
+        if let Ok(mut registry) = gdresource::uid::global_registry().lock() {
+            let _ = registry.load_from_cache_bytes(&bytes);
+        }
+    }
+    register_uid_sidecars(project_root);
+}
+
+/// Registers every `*.uid` sidecar under `project_root` against its source
+/// asset's `res://` path.
+///
+/// 🔑 Registers a `res://` path, NOT a filesystem path. `uid.rs`'s own
+/// `load_uid_sidecar_file` strips `.uid` from the path it was handed, so feeding
+/// it a filesystem path registers `/tmp/xyz/icon.svg` — which no consumer ever
+/// looks up, because every consumer asks with `res://icon.svg`. The mapping has
+/// to be keyed the way it will be queried.
+fn register_uid_sidecars(project_root: &Path) {
+    // Depth-bounded: a project tree is shallow, and a bound means a symlink
+    // cycle cannot hang boot.
+    fn walk(dir: &Path, root: &Path, depth: usize) {
+        if depth > 12 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // `.godot` holds the cache itself and the import artifacts, not
+                // source assets; skipping it also skips the biggest directory.
+                if path.file_name().is_some_and(|n| n == ".godot") {
+                    continue;
+                }
+                walk(&path, root, depth + 1);
+                continue;
+            }
+            if path.extension().is_some_and(|e| e == "uid") {
+                let Ok(content) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                // `foo.gd.uid` describes `foo.gd`.
+                let Some(source) = path.to_str().and_then(|s| s.strip_suffix(".uid")) else {
+                    continue;
+                };
+                let Ok(relative) = Path::new(source).strip_prefix(root) else {
+                    continue;
+                };
+                let res_path = format!("res://{}", relative.to_string_lossy());
+                if let Ok(mut registry) = gdresource::uid::global_registry().lock() {
+                    registry.register_uid_sidecar(res_path, &content);
+                }
+            }
+        }
+    }
+    walk(project_root, project_root, 0);
+}
+
 /// Instantiates one autoload under `parent`, returning its node id. Scene
 /// autoloads (`.tscn`/`.scn`) are instanced; other (script) autoloads become a
 /// bare `Node` carrying the script path. Either way the node is renamed to the
@@ -624,11 +783,18 @@ fn instantiate_autoload(
     parent: NodeId,
     entry: &AutoloadEntry,
 ) -> Result<NodeId, String> {
-    let node_id = if entry.path.ends_with(".tscn") || entry.path.ends_with(".scn") {
-        load_scene_into_tree(tree, parent, &entry.path)?
+    // 🔑 Resolved BEFORE the extension test, not inside `load_scene_into_tree`
+    // (pat-mgixk.55). A `uid://…` has no `.tscn` suffix, so testing the raw
+    // string would classify a uid SCENE autoload as a script autoload and
+    // silently add a bare `Node` carrying the uid as its script path — a wrong
+    // tree rather than an error. Resolving one hop earlier is what makes both
+    // autoload kinds work from a uid.
+    let autoload_path = resolve_uid_path(&entry.path);
+    let node_id = if autoload_path.ends_with(".tscn") || autoload_path.ends_with(".scn") {
+        load_scene_into_tree(tree, parent, &autoload_path)?
     } else {
         let mut node = Node::new(entry.name.clone(), "Node");
-        node.set_property("script", Variant::String(entry.path.clone()));
+        node.set_property("script", Variant::String(autoload_path.clone()));
         tree.add_child(parent, node)
             .map_err(|e| format!("failed to add autoload '{}': {e}", entry.name))?
     };
@@ -645,6 +811,26 @@ fn load_scene_into_tree(
     parent: NodeId,
     res_path: &str,
 ) -> Result<NodeId, String> {
+    // `run/main_scene` is a `uid://…` in any project the Godot 4.6 editor saved
+    // (pat-mgixk.55), so resolve before reading. A plain `res://` path passes
+    // through untouched.
+    let res_path = &resolve_uid_path(res_path);
+    // Then follow a `<path>.remap` redirect (pat-mgixk.56).
+    //
+    // 🔑 An export with `convert_text_resources_to_binary` (the default) leaves
+    // only `res://main.tscn.remap` in the pack, pointing at the converted file
+    // under `res://.godot/exported/`. So a shipped game's `run/main_scene` names
+    // a path the pack does not contain, and the read below fails outright
+    // without this hop.
+    //
+    // AFTER the uid resolution, matching `_path_remap`, which calls
+    // `ResourceUID::ensure_path` and only then tests for `.remap`
+    // (`resource_loader.cpp:1286-1287`). The other order would look for
+    // `uid://abc.remap`, which never exists.
+    //
+    // Scene autoloads reach this through `instantiate_autoload`, so they follow
+    // the same redirect.
+    let res_path = &gdresource::importers::remap_path(res_path);
     // Pack-aware: `FileAccess::read_file_string` serves a mounted `.pck` before
     // disk, so a packed and a loose project take the identical load path
     // (pat-0q2kx.134). The `res://` path is used in errors rather than a

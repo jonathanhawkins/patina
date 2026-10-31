@@ -389,6 +389,27 @@ struct ReplicationState {
     clock_ms: u64,
 }
 
+/// A scene change queued for the next frame boundary (pat-mgixk.62).
+///
+/// 🔑 An enum, not just a `PackedScene`, because Godot defers **every** scene
+/// change — `change_scene_to_packed`, `change_scene_to_node` and
+/// `unload_current_scene` all go through `_flush_scene_change`
+/// (`scene/main/scene_tree.cpp:1647-1740`). Previously only
+/// `change_scene_to_file` was deferred, so a script calling either of the others
+/// had its own node freed underneath it mid-callback.
+#[derive(Debug)]
+enum PendingSceneChange {
+    /// Instance this scene as the new current scene.
+    Packed(crate::packed_scene::PackedScene),
+    /// Adopt this already-built node as the new current scene.
+    ///
+    /// Boxed because a `Node` is far larger than the other variants and this
+    /// enum is stored inline in `SceneTree`.
+    Node(Box<Node>),
+    /// Free the current scene and load nothing.
+    Unload,
+}
+
 /// One-shot timer created by [`SceneTree::create_timer`] (Godot SceneTreeTimer).
 #[derive(Debug, Clone)]
 pub struct SceneTreeTimer {
@@ -775,7 +796,7 @@ pub struct SceneTree {
     /// applied at the next [`process_deferred_scene_change`] — Godot defers the
     /// swap to the frame boundary so the calling script's own scene is not
     /// freed mid-execution (pat-nzgdu.85).
-    pending_scene: Option<crate::packed_scene::PackedScene>,
+    pending_scene: Option<PendingSceneChange>,
     /// Set by [`quit`](Self::quit); the runner/editor polls
     /// [`should_quit`](Self::should_quit) to stop its loop.
     should_quit: bool,
@@ -2938,6 +2959,19 @@ impl SceneTree {
             parent.receive_notification(NOTIFICATION_CHILD_ORDER_CHANGED);
         }
 
+        // Godot emits `child_order_changed` on the parent whenever its child
+        // list changes — add, remove, move and reparent (`node.cpp:576, :1696,
+        // :1767`). Registered in our ClassDB but never emitted, so a UI that
+        // rebuilds itself from the child order never heard about it
+        // (pat-mgixk.64).
+        //
+        // 🔑 Emitted at EVERY site that delivers
+        // `NOTIFICATION_CHILD_ORDER_CHANGED` — there are four (`add_child`,
+        // `remove_child`, `reparent`, `move_child`) — because the notification
+        // and the signal are the same event and wiring only some of them is how
+        // a listener ends up firing for an add but not a move.
+        self.emit_signal(parent_id, "child_order_changed", &[]);
+
         let should_enter_tree = self
             .nodes
             .get(&parent_id)
@@ -3034,6 +3068,18 @@ impl SceneTree {
         if let Some(node) = self.nodes.get_mut(&id) {
             node.receive_notification(NOTIFICATION_UNPARENTED);
         }
+        // pat-mgixk.64: `tree_exited` after detachment, as in `remove_child`.
+        //
+        // ⚠️ Placement is load-bearing in BOTH directions here. It has to be
+        // after the detach above (a listener may read `get_parent()`), and
+        // before the loop below erases these nodes from `self.nodes` — once a
+        // node is gone, `emit_signal` has no source to emit from and the signal
+        // would silently vanish. `removed` is already the bottom-up subtree.
+        if should_exit_tree {
+            for &nid in &removed {
+                self.emit_signal(nid, "tree_exited", &[]);
+            }
+        }
 
         // Remove all collected nodes from the arena and group index.
         for &nid in &removed {
@@ -3105,6 +3151,26 @@ impl SceneTree {
         self.trace_record(parent, TraceEventType::Notification, "CHILD_ORDER_CHANGED");
         if let Some(parent_node) = self.nodes.get_mut(&parent) {
             parent_node.receive_notification(NOTIFICATION_CHILD_ORDER_CHANGED);
+        }
+        // pat-mgixk.64, as in `add_child`.
+        self.emit_signal(parent, "child_order_changed", &[]);
+
+        // 🔑 `tree_exited` fires AFTER the node is detached (`node.cpp:401`),
+        // which is what distinguishes it from `tree_exiting` (emitted top-down
+        // BEFORE the exit notifications, in `LifecycleManager::exit_tree`). A
+        // listener on `tree_exited` is entitled to see `get_parent() == null`,
+        // so emitting it any earlier would be the wrong signal.
+        //
+        // ⚠️ Emitted for the WHOLE detached subtree, not just the child: every
+        // one of those nodes left the tree, which is what Godot's
+        // `_propagate_exit_tree` does. Gated on `should_exit_tree` so detaching
+        // an already-outside-the-tree node stays silent.
+        if should_exit_tree {
+            let mut gone = Vec::new();
+            self.collect_subtree_top_down(child, &mut gone);
+            for id in gone {
+                self.emit_signal(id, "tree_exited", &[]);
+            }
         }
 
         Ok(())
@@ -3227,6 +3293,10 @@ impl SceneTree {
         if let Some(parent) = self.nodes.get_mut(&new_parent_id) {
             parent.receive_notification(NOTIFICATION_CHILD_ORDER_CHANGED);
         }
+        // pat-mgixk.64, as in `add_child`. The NEW parent is the one whose child
+        // list changed here; the old parent's change is emitted by the detach
+        // path this function runs first.
+        self.emit_signal(new_parent_id, "child_order_changed", &[]);
 
         // ...and `add_child` propagates ENTER_TREE top-down then READY bottom-up,
         // gated on the NEW parent being in the tree -- the same condition
@@ -3300,6 +3370,8 @@ impl SceneTree {
         if let Some(parent) = self.nodes.get_mut(&parent_id) {
             parent.receive_notification(NOTIFICATION_CHILD_ORDER_CHANGED);
         }
+        // pat-mgixk.64, as in `add_child`.
+        self.emit_signal(parent_id, "child_order_changed", &[]);
 
         Ok(())
     }
@@ -4046,6 +4118,12 @@ impl SceneTree {
         node.set_name(name);
         let root = self.root_id();
         self.emit_signal(root, "node_renamed", &[]);
+        // ⚠️ `node_renamed` above is the SceneTree-level signal, emitted on the
+        // root. Godot also emits `Node.renamed` on the node itself
+        // (`node.cpp:1462`), and that is the one a script connects to watch a
+        // particular node. Only the tree-level one existed, so
+        // `child.renamed.connect(..)` never fired (pat-mgixk.64).
+        self.emit_signal(id, "renamed", &[]);
         true
     }
 
@@ -8617,36 +8695,84 @@ impl SceneTree {
         self.pending_deletions.len()
     }
 
-    /// Replaces the current scene by removing all children of the root node
-    /// and instancing the given [`PackedScene`] under root.
+    /// Frees ONLY the current scene, leaving every other child of `/root`
+    /// untouched.
     ///
-    /// This mirrors Godot's `SceneTree.change_scene_to_packed()`.
+    /// 🔑 This is the whole of pat-mgixk.62's P0. All three scene-change
+    /// entry points used to remove **every child of root** — and autoloads are
+    /// root children (`autoload.rs:189/203`), so `change_scene_to_file` deleted
+    /// every singleton in the project. Godot frees only `current_scene`
+    /// (`scene/main/scene_tree.cpp:1647-1740`): an autoload outlives any number
+    /// of scene changes, which is the entire point of autoloads.
+    ///
+    /// ⚠️ `take()`, so `current_scene` reads null while the change is in
+    /// progress — Godot's `_change_scene` nulls it before the new scene exists.
+    ///
+    /// Does nothing when no scene is current, which is also Godot: with
+    /// `current_scene == nullptr` there is nothing to free, and the new scene is
+    /// simply added. That is what makes `change_scene_to_packed` on a fresh tree
+    /// behave as it always has.
+    fn free_current_scene(&mut self) {
+        let Some(current) = self.current_scene_id.take() else {
+            return;
+        };
+        let mut subtree = Vec::new();
+        self.collect_subtree_top_down(current, &mut subtree);
+        for &nid in &subtree {
+            self.scripts.remove(&nid);
+            self.signal_stores.remove(&nid);
+            self.animation_players.remove(&nid);
+            self.animation_trees.remove(&nid);
+        }
+        let _ = self.remove_node(current);
+        self.process_deletions();
+    }
+
+    /// Emits `SceneTree.scene_changed` on the root, the way `process_frame` is
+    /// emitted (`main_loop.rs`). Registered in the ClassDB as a `SceneTree`
+    /// signal with no arguments and never emitted until pat-mgixk.62.
+    fn emit_scene_changed(&mut self) {
+        let root = self.root_id;
+        self.emit_signal(root, "scene_changed", &[]);
+    }
+
+    /// Records the scene the boot path instanced as the running one, so
+    /// `current_scene` is non-null from the first frame and
+    /// `reload_current_scene` has a source.
+    ///
+    /// 🔑 Needed because `current_scene_id` was previously assigned ONLY by the
+    /// change-scene functions, so a freshly booted project had a null
+    /// `get_tree().current_scene` and `reload_current_scene()` failed with "No
+    /// packed scene source" — on the scene the game was visibly running.
+    ///
+    /// Takes both halves in one call on purpose: two setters would let a caller
+    /// set the id and forget the source, which is exactly the state that made
+    /// reload fail.
+    pub fn set_current_scene(
+        &mut self,
+        id: NodeId,
+        source: Option<crate::packed_scene::PackedScene>,
+    ) {
+        self.current_scene_id = Some(id);
+        self.current_packed_scene = source;
+    }
+
+    /// Replaces the current scene with the given [`PackedScene`], immediately.
+    ///
+    /// Mirrors Godot's `SceneTree.change_scene_to_packed()` apply step. Only
+    /// [`free_current_scene`](Self::free_current_scene)'s scene is removed;
+    /// autoloads and every other root child survive.
+    ///
+    /// ⚠️ Stays IMMEDIATE and keeps returning the new root's id, because it is
+    /// the apply primitive the deferred channel calls — and because callers
+    /// (including the editor and `core_node_methods`'s fixture) need the id
+    /// back. The *script-facing* deferral lives in
+    /// [`queue_change_scene_to_packed`](Self::queue_change_scene_to_packed).
     pub fn change_scene_to_packed(
         &mut self,
         scene: &crate::packed_scene::PackedScene,
     ) -> EngineResult<NodeId> {
-        // Collect direct children of root (snapshot to avoid borrow issues).
-        let children: Vec<NodeId> = self
-            .get_node(self.root_id)
-            .map(|root| root.children().to_vec())
-            .unwrap_or_default();
-
-        // Remove each child subtree (this fires exit_tree, unparented, etc.).
-        for child_id in children {
-            // Also clean up scripts for the subtree.
-            let mut subtree = Vec::new();
-            self.collect_subtree_top_down(child_id, &mut subtree);
-            for &nid in &subtree {
-                self.scripts.remove(&nid);
-                self.signal_stores.remove(&nid);
-                self.animation_players.remove(&nid);
-                self.animation_trees.remove(&nid);
-            }
-            let _ = self.remove_node(child_id);
-        }
-
-        // Process any pending deletions.
-        self.process_deletions();
+        self.free_current_scene();
 
         // Remember the packed scene for reload_current_scene().
         self.current_packed_scene = Some(scene.clone());
@@ -8654,6 +8780,7 @@ impl SceneTree {
         // Instance the new scene under root.
         let id = crate::packed_scene::add_packed_scene_to_tree(self, self.root_id, scene)?;
         self.current_scene_id = Some(id);
+        self.emit_scene_changed();
         Ok(id)
     }
 
@@ -8673,31 +8800,14 @@ impl SceneTree {
     /// Unlike `change_scene_to_packed`, this clears the packed scene source,
     /// so `reload_current_scene` will fail afterward.
     pub fn change_scene_to_node(&mut self, node: Node) -> EngineResult<NodeId> {
-        // Remove existing children of root.
-        let children: Vec<NodeId> = self
-            .get_node(self.root_id)
-            .map(|root| root.children().to_vec())
-            .unwrap_or_default();
-
-        for child_id in children {
-            let mut subtree = Vec::new();
-            self.collect_subtree_top_down(child_id, &mut subtree);
-            for &nid in &subtree {
-                self.scripts.remove(&nid);
-                self.signal_stores.remove(&nid);
-                self.animation_players.remove(&nid);
-                self.animation_trees.remove(&nid);
-            }
-            let _ = self.remove_node(child_id);
-        }
-
-        self.process_deletions();
+        self.free_current_scene();
 
         // Clear packed source — reload won't work after this.
         self.current_packed_scene = None;
 
         let id = self.add_child(self.root_id, node)?;
         self.current_scene_id = Some(id);
+        self.emit_scene_changed();
         Ok(id)
     }
 
@@ -8711,7 +8821,7 @@ impl SceneTree {
         let resolved = gdcore::resolve_path(path)?;
         let source = std::fs::read_to_string(&resolved)?;
         let scene = crate::packed_scene::PackedScene::from_tscn(&source)?;
-        self.pending_scene = Some(scene);
+        self.pending_scene = Some(PendingSceneChange::Packed(scene));
         Ok(())
     }
 
@@ -8720,9 +8830,37 @@ impl SceneTree {
     /// frame by `MainLoop::step` for Godot's end-of-frame deferred timing.
     pub fn process_deferred_scene_change(&mut self) -> EngineResult<Option<NodeId>> {
         match self.pending_scene.take() {
-            Some(scene) => Ok(Some(self.change_scene_to_packed(&scene)?)),
+            Some(PendingSceneChange::Packed(scene)) => {
+                Ok(Some(self.change_scene_to_packed(&scene)?))
+            }
+            Some(PendingSceneChange::Node(node)) => Ok(Some(self.change_scene_to_node(*node)?)),
+            Some(PendingSceneChange::Unload) => {
+                self.unload_current_scene();
+                // No new scene root to report: `unload` deliberately loads
+                // nothing, so `None` here means "nothing became current", not
+                // "nothing happened". `has_pending_scene_change` going false is
+                // what records that the unload ran.
+                Ok(None)
+            }
             None => Ok(None),
         }
+    }
+
+    /// Queues a [`PackedScene`] swap for the next frame boundary — the deferred
+    /// form of [`change_scene_to_packed`](Self::change_scene_to_packed), and
+    /// what a script calling `get_tree().change_scene_to_packed(..)` gets.
+    pub fn queue_change_scene_to_packed(&mut self, scene: crate::packed_scene::PackedScene) {
+        self.pending_scene = Some(PendingSceneChange::Packed(scene));
+    }
+
+    /// Queues a `change_scene_to_node` for the next frame boundary.
+    pub fn queue_change_scene_to_node(&mut self, node: Node) {
+        self.pending_scene = Some(PendingSceneChange::Node(Box::new(node)));
+    }
+
+    /// Queues an `unload_current_scene` for the next frame boundary.
+    pub fn queue_unload_current_scene(&mut self) {
+        self.pending_scene = Some(PendingSceneChange::Unload);
     }
 
     /// Whether a deferred scene change is queued (a `change_scene_to_file` call
@@ -8735,24 +8873,15 @@ impl SceneTree {
     /// `SceneTree.unload_current_scene()`. Removes every child of root (firing
     /// exit_tree and cleaning up their scripts/signals/animation players) and
     /// clears the current-scene and packed-source state.
+    /// ⚠️ Does NOT emit `scene_changed`. Godot emits that from
+    /// `_flush_scene_change` when a NEW scene becomes current;
+    /// `unload_current_scene` only frees, so a handler that reads
+    /// `current_scene` would receive null.
     pub fn unload_current_scene(&mut self) {
-        let children: Vec<NodeId> = self
-            .get_node(self.root_id)
-            .map(|root| root.children().to_vec())
-            .unwrap_or_default();
-        for child_id in children {
-            let mut subtree = Vec::new();
-            self.collect_subtree_top_down(child_id, &mut subtree);
-            for &nid in &subtree {
-                self.scripts.remove(&nid);
-                self.signal_stores.remove(&nid);
-                self.animation_players.remove(&nid);
-                self.animation_trees.remove(&nid);
-            }
-            let _ = self.remove_node(child_id);
-        }
-        self.process_deletions();
+        self.free_current_scene();
         self.current_packed_scene = None;
+        // `free_current_scene` already took it; restated so the postcondition is
+        // readable at this level and holds even when nothing was current.
         self.current_scene_id = None;
     }
 
@@ -9822,11 +9951,46 @@ impl SceneTree {
             members.reverse();
         }
         let deferred = flags & GROUP_CALL_DEFERRED != 0;
+        let unique = flags & GROUP_CALL_UNIQUE != 0;
         for id in members {
             if deferred {
+                // GROUP_CALL_UNIQUE coalesces an identical pending call rather
+                // than queueing a second one, so a handler that fires twice in
+                // a frame produces one effect (Godot's
+                // `SceneTree::call_group_flagsp`, GROUP_CALL_UNIQUE). The flag
+                // used to be accepted and ignored, which is the worst of the
+                // three options: the caller believes it asked for coalescing.
+                //
+                // ⚠️ Identity is (node, method, ARGS) — not just (node, method).
+                // Coalescing on the name alone would drop a second
+                // `call_deferred("add_child", other_child)`, which is a
+                // different effect, not a duplicate of the first.
+                if unique
+                    && self.pending_deferred_calls.iter().any(|queued| {
+                        queued.node_id == id
+                            && queued.method == method
+                            && queued.args.as_slice() == args
+                    })
+                {
+                    continue;
+                }
                 self.call_deferred(id, method, args);
-            } else if self.scripts.contains_key(&id) {
-                self.call_script_with_access(id, method, args);
+            } else {
+                // pat-mgixk.63: `call_object_method` instead of the old
+                // `if self.scripts.contains_key(..) { call_script_with_access }`.
+                //
+                // 🔑 This is Godot's `Object::callp` order — try the script, then
+                // the ClassDB native method — and it is a strict SUPERSET of what
+                // was here, not a change in behaviour for scripted nodes:
+                // `call_script_with_access` is a one-line wrapper around
+                // `call_script_method`, which `call_object_method` calls FIRST.
+                // What it adds is the two cases that silently did nothing:
+                // a node with NO script, and a node whose script does not define
+                // the method (`call_script_method` returns `None` there, so the
+                // native table is reached). Without it,
+                // `get_tree().call_group("enemies", "queue_free")` over
+                // script-less enemies was a no-op.
+                self.call_object_method(id, method, args);
             }
         }
     }
@@ -9834,10 +9998,36 @@ impl SceneTree {
     /// Godot `SceneTree.notify_group(group, what)` — deliver a notification to
     /// every member.
     pub fn notify_group(&mut self, group: &str, what: gdobject::notification::Notification) {
-        for id in self.nodes_in_group_ordered(group) {
+        self.notify_group_flags(GROUP_CALL_DEFAULT, group, what);
+    }
+
+    /// Godot `SceneTree.notify_group_flags(flags, group, what)`.
+    ///
+    /// ⚠️ `GROUP_CALL_DEFERRED` is NOT honoured here and is documented rather
+    /// than silently swallowed: the deferred queue carries method calls
+    /// (`DeferredCall { node_id, method, args }`), and a notification is not a
+    /// method call, so deferring one needs a queue that does not exist yet. A
+    /// caller passing it gets the immediate behaviour. `GROUP_CALL_REVERSE` is
+    /// honoured.
+    pub fn notify_group_flags(
+        &mut self,
+        flags: u32,
+        group: &str,
+        what: gdobject::notification::Notification,
+    ) {
+        let mut members = self.nodes_in_group_ordered(group);
+        if flags & GROUP_CALL_REVERSE != 0 {
+            members.reverse();
+        }
+        for id in members {
             if let Some(node) = self.nodes.get_mut(&id) {
                 node.receive_notification(what);
             }
+            // pat-mgixk.63: the script's `_notification` was NEVER reached —
+            // this only wrote the node's own notification log, which nothing a
+            // game can observe reads. So `get_tree().notify_group("g", 9999)`
+            // ran to completion and did nothing, with no error.
+            self.notify_script(id, what.code() as i64);
         }
     }
 

@@ -447,6 +447,56 @@ pub fn is_polygon_path_finder_handle(raw: u64) -> bool {
 /// The engine crate (`gdscene`) implements this trait on an accessor that wraps
 /// a raw pointer to the `SceneTree`, breaking the circular borrow that would
 /// otherwise prevent a script from calling back into the tree during execution.
+// ---------------------------------------------------------------------------
+// SceneTree script handle (pat-mgixk.59)
+// ---------------------------------------------------------------------------
+
+/// Tag for the reserved `SceneTree` object id.
+///
+/// 🔑 `get_viewport()` and `get_window()` return REAL node ids — Patina's tree
+/// root is a `Window`, which is also a `Viewport` — so they need no handle.
+/// `get_tree()` does: there is no SceneTree *node* to name, and Godot scripts
+/// nonetheless treat the result as an object (`var t = get_tree()`,
+/// `t.paused = true`, `get_tree().node_added.connect(f)`).
+///
+/// The interpreter already routes any `ObjectId` receiver through
+/// `SceneAccess::call_node_method` / `get_node_property` / `set_node_property`,
+/// so a tagged id dispatches with no new trait method — the same trick
+/// `WORLD_2D_HANDLE` uses for `get_world_2d()`.
+///
+/// ⚠️ `0x9E` was picked by enumerating every `*_TAG`/`*_HANDLE` constant in the
+/// workspace; the 59 in use are 0x10-0x12, 0x1A, 0x1B, 0x33, 0x48, 0x4D, 0x53,
+/// 0x57, 0x5B-0x62, 0x6D, 0x6E, 0x71-0x74, 0x77, 0x78, 0xA1-0xA7, 0xB9,
+/// 0xC1-0xC5, 0xCA, 0xCF, 0xDA, 0xE0-0xEF, 0xFA and 0xFF. A collision would
+/// make one handle silently dispatch as the other.
+const SCENE_TREE_TAG: u64 = 0x9E00_0000_0000_0000;
+
+/// `get_tree()`'s return value.
+pub const SCENE_TREE_HANDLE: u64 = SCENE_TREE_TAG | 0x01;
+
+/// Whether `id` is the reserved `SceneTree` handle rather than a node.
+pub fn is_scene_tree_handle(id: u64) -> bool {
+    id == SCENE_TREE_HANDLE
+}
+
+/// The `SceneTree` signals a script can connect to or `await`.
+///
+/// ⚠️ All four are emitted on the tree ROOT by `MainLoop`/`SceneTree`, not on a
+/// separate SceneTree object — `main_loop.rs` emits `process_frame` and
+/// `physics_frame` on `tree.root_id()`. So the `Signal` values handed out for
+/// these must name the root, or `.connect` would land somewhere the emission
+/// never reaches and `await` would hang forever.
+/// ⚠️ **Only the names something actually EMITS.** Godot's SceneTree also has
+/// `node_removed`, `tree_changed` and `tree_process_mode_changed`; a grep across
+/// `gdscene` and `gdscript-interop` finds no emitter for any of the three, and
+/// `node_added` is emitted at `scene_tree.rs:2952` while the others are not
+/// emitted anywhere. Listing them here would make
+/// `get_tree().tree_changed.connect(f)` succeed and then never fire — a silent
+/// wrong answer, which is strictly worse than the loud `Nil` a script gets for
+/// an unknown property. Add each name here in the same change that adds its
+/// emitter.
+pub const SCENE_TREE_SIGNALS: &[&str] = &["process_frame", "physics_frame", "node_added"];
+
 pub trait SceneAccess {
     /// Resolve a node by path relative to `from`.
     fn get_node(&self, from: u64, path: &str) -> Option<u64>;
@@ -1568,6 +1618,26 @@ pub trait SceneAccess {
     /// hosts that do not dispatch input events (pat-0q2kx.91).
     fn is_input_handled(&self) -> bool {
         false
+    }
+
+    // -- Viewport / Window objects (pat-mgixk.59) ---------------------------
+    //
+    // `get_viewport()` and `get_window()` return REAL NODES in Patina — the
+    // root `Window` is both — so these answer an id the existing `ObjectId`
+    // receiver path can dispatch on, rather than a synthetic handle. Only
+    // `get_tree()` needs a reserved handle, because there is no SceneTree node.
+
+    /// The node's enclosing `Viewport` — Godot `Node.get_viewport()`.
+    fn node_viewport(&self, _node: u64) -> Option<u64> {
+        None
+    }
+
+    /// The node's enclosing `Window` — Godot `Node.get_window()`.
+    ///
+    /// Distinct from [`node_viewport`](Self::node_viewport): a `SubViewport` is a
+    /// `Viewport` but not a `Window`, which is the whole reason Godot has both.
+    fn node_window(&self, _node: u64) -> Option<u64> {
+        None
     }
 
     /// Returns `true` if any key mapped to `action` is currently held.
