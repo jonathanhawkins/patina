@@ -14481,7 +14481,11 @@ pub fn register_2d_classes() {
                     PropertyInfo::new("speed_scale", Variant::Float(1.0))
                         .with_accessors("get_speed_scale", "set_speed_scale"),
                 )
-                .property(PropertyInfo::new("playing", Variant::Bool(false)))
+                // ⚠️ No `playing` property: Godot 4 removed it (playback is
+                // `play()`/`stop()`/`is_playing()`). Patina keeps its playback
+                // flag in the node bag internally; advertising it made the
+                // inspector show, and the saver write, a property Godot 4.6.1
+                // does not have (classdb_godot461_members.json).
                 .property(
                     PropertyInfo::new("centered", Variant::Bool(true))
                         .with_accessors("is_centered", "set_centered"),

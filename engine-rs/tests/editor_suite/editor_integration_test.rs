@@ -442,166 +442,55 @@ fn inspector_round_trip() {
         "seed my_flag set failed: {head_set_flag}"
     );
 
-    // Fetch the inspector view. Must expose CORS + application/json and
-    // return the fixed set of category buckets.
-    let resp = http_get_raw(port, &format!("/api/inspector?node_id={main_id}"));
-    let (head, _) = split_response(&resp);
-    assert!(head.contains("200 OK"), "inspector GET failed: {head}");
-    assert!(
-        head.contains("Access-Control-Allow-Origin: *"),
-        "CORS header required for browser client: {head}"
-    );
-    assert!(
-        head.to_ascii_lowercase()
-            .contains("content-type: application/json"),
-        "inspector endpoint must return JSON: {head}"
-    );
-
-    let payload = parse_json_body(&resp);
-    assert_eq!(
-        payload.get("id").and_then(|v| v.as_u64()),
-        Some(main_id),
-        "inspector payload must echo node id"
-    );
-    assert_eq!(
-        payload.get("name").and_then(|v| v.as_str()),
-        Some("Main"),
-        "inspector payload must echo node name"
-    );
-    assert_eq!(
-        payload.get("class").and_then(|v| v.as_str()),
-        Some("Node3D"),
-        "inspector payload must echo node class"
-    );
-    let categories = payload
-        .get("categories")
-        .and_then(|v| v.as_object())
-        .expect("inspector payload missing categories object");
-    for label in ["Transform", "Rendering", "Physics", "Script", "Misc"] {
+    // Fetch the inspector view the browser editor actually uses: select the
+    // node, then `GET /api/selected` (rewritten 2026-11-03 — the old body
+    // asked for an `/api/inspector` with Transform/Rendering/Physics/Script/
+    // Misc buckets that Godot's inspector does not use; Godot groups by class
+    // section and property group, which the client does from this list).
+    let sel = http_post_raw(port, "/api/node/select", &format!(r#"{{"node_id":{main_id}}}"#));
+    assert!(split_response(&sel).0.contains("200 OK"), "select failed");
+    let fetch = || {
+        let resp = http_get_raw(port, "/api/selected");
+        let (head, _) = split_response(&resp);
+        assert!(head.contains("200 OK"), "inspector GET failed: {head}");
+        assert!(head.contains("Access-Control-Allow-Origin: *"), "CORS header required: {head}");
         assert!(
-            categories.get(label).and_then(|v| v.as_array()).is_some(),
-            "inspector payload missing category '{label}': {payload}"
+            head.to_ascii_lowercase().contains("content-type: application/json"),
+            "inspector endpoint must return JSON: {head}"
         );
-    }
+        parse_json_body(&resp)
+    };
+    let prop = |payload: &serde_json::Value, name: &str| -> serde_json::Value {
+        payload["properties"]
+            .as_array()
+            .expect("properties list")
+            .iter()
+            .find(|e| e["name"] == name)
+            .unwrap_or_else(|| panic!("inspector missing `{name}`: {payload}"))
+            .clone()
+    };
+    let nums = |v: &serde_json::Value| -> Vec<f64> {
+        v["value"]["value"].as_array().map(|a| a.iter().filter_map(|x| x.as_f64()).collect()).unwrap_or_default()
+    };
 
-    // Transform bucket must contain `position` with the Vector3 we set.
-    let transform = categories
-        .get("Transform")
-        .and_then(|v| v.as_array())
-        .unwrap();
-    let position = transform
-        .iter()
-        .find(|e| e.get("name").and_then(|n| n.as_str()) == Some("position"))
-        .unwrap_or_else(|| {
-            panic!("Transform bucket missing 'position': {transform:?}")
-        });
-    assert_eq!(
-        position.get("type").and_then(|v| v.as_str()),
-        Some("Vector3"),
-        "position entry must report Vector3 type"
-    );
-    let pos_value = position
-        .get("value")
-        .and_then(|v| v.get("value"))
-        .and_then(|v| v.as_array())
-        .expect("position entry value array missing");
-    let pos_nums: Vec<f64> = pos_value
-        .iter()
-        .filter_map(|v| v.as_f64())
-        .collect();
-    assert_eq!(
-        pos_nums,
-        vec![1.0, 2.0, 3.0],
-        "position must round-trip through inspector"
-    );
+    let payload = fetch();
+    assert_eq!(payload["id"].as_u64(), Some(main_id), "inspector payload must echo node id");
+    assert_eq!(payload["name"], "Main");
+    assert_eq!(payload["class"], "Node3D");
+    let position = prop(&payload, "position");
+    assert_eq!(position["type"], "Vector3", "position entry must report Vector3 type");
+    assert_eq!(nums(&position), vec![1.0, 2.0, 3.0], "position must round-trip");
+    // A property the class does not declare is still shown, not dropped.
+    let flag = prop(&payload, "my_flag");
+    assert_eq!(flag["value"]["value"], true, "my_flag must round-trip: {flag}");
 
-    // Misc bucket must contain `my_flag` — confirms uncategorized names land
-    // in Misc instead of being dropped.
-    let misc = categories.get("Misc").and_then(|v| v.as_array()).unwrap();
-    let flag = misc
-        .iter()
-        .find(|e| e.get("name").and_then(|n| n.as_str()) == Some("my_flag"))
-        .unwrap_or_else(|| panic!("Misc bucket missing 'my_flag': {misc:?}"));
-    assert_eq!(
-        flag.get("type").and_then(|v| v.as_str()),
-        Some("Bool"),
-        "my_flag entry must report Bool type"
-    );
-    assert_eq!(
-        flag.get("value")
-            .and_then(|v| v.get("value"))
-            .and_then(|v| v.as_bool()),
-        Some(true),
-        "my_flag must round-trip through inspector"
-    );
-
-    // Write a new position and confirm the next inspector fetch reflects it.
+    // Write a new position and confirm the next fetch reflects it.
     let set_pos_2 = format!(
         r#"{{"node_id":{main_id},"property":"position","value":{{"type":"Vector3","value":[7.0,8.0,9.0]}}}}"#
     );
     let resp_set_2 = http_post_raw(port, "/api/property/set", &set_pos_2);
-    let (head_set_2, _) = split_response(&resp_set_2);
-    assert!(
-        head_set_2.contains("200 OK"),
-        "second position set failed: {head_set_2}"
-    );
-
-    let resp2 = http_get_raw(port, &format!("/api/inspector?node_id={main_id}"));
-    let payload2 = parse_json_body(&resp2);
-    let transform2 = payload2
-        .get("categories")
-        .and_then(|v| v.get("Transform"))
-        .and_then(|v| v.as_array())
-        .expect("categories.Transform missing on second fetch");
-    let position2 = transform2
-        .iter()
-        .find(|e| e.get("name").and_then(|n| n.as_str()) == Some("position"))
-        .expect("position missing on second fetch");
-    let pos2_nums: Vec<f64> = position2
-        .get("value")
-        .and_then(|v| v.get("value"))
-        .and_then(|v| v.as_array())
-        .unwrap()
-        .iter()
-        .filter_map(|v| v.as_f64())
-        .collect();
-    assert_eq!(
-        pos2_nums,
-        vec![7.0, 8.0, 9.0],
-        "inspector must reflect live property updates for the React panel"
-    );
-
-    // A missing `node_id` query parameter must fall back to the server's
-    // currently selected node. When nothing is selected, the endpoint must
-    // surface 404 so the client can distinguish "no selection" from a live
-    // payload.
-    let resp_none = http_get_raw(port, "/api/inspector");
-    let none_str = String::from_utf8_lossy(&resp_none);
-    assert!(
-        none_str.contains("404"),
-        "inspector without node_id and no selection must 404, got: {none_str}"
-    );
-
-    // After selecting Main, the fallback path must return the same payload.
-    let select_body = format!(r#"{{"node_id":{main_id}}}"#);
-    let resp_select = http_post_raw(port, "/api/node/select", &select_body);
-    let (head_select, _) = split_response(&resp_select);
-    assert!(
-        head_select.contains("200 OK"),
-        "node select failed: {head_select}"
-    );
-    let resp_fallback = http_get_raw(port, "/api/inspector");
-    let (head_fb, _) = split_response(&resp_fallback);
-    assert!(
-        head_fb.contains("200 OK"),
-        "inspector fallback GET failed: {head_fb}"
-    );
-    let payload_fb = parse_json_body(&resp_fallback);
-    assert_eq!(
-        payload_fb.get("id").and_then(|v| v.as_u64()),
-        Some(main_id),
-        "fallback payload must target the currently selected node"
-    );
+    assert!(split_response(&resp_set_2).0.contains("200 OK"), "second position set failed");
+    assert_eq!(nums(&prop(&fetch(), "position")), vec![7.0, 8.0, 9.0]);
 
     handle.stop();
 }
@@ -1245,7 +1134,7 @@ fn script_editor_round_trip() {
 fn make_asset_browser_server() -> (EditorServerHandle, u16, TempDir) {
     let dir = TempDir::new().unwrap();
     // Create project structure
-    fs::write(dir.path().join("project.godot"), "[gd_resource]").unwrap();
+    fs::write(dir.path().join("project.godot"), "[application]\nconfig/name=\"AssetBrowser\"\n").unwrap();
     fs::create_dir_all(dir.path().join("scenes")).unwrap();
     fs::write(dir.path().join("scenes/main.tscn"), "[gd_scene]").unwrap();
     fs::write(dir.path().join("scenes/player.tscn"), "[gd_scene]").unwrap();
@@ -1272,441 +1161,72 @@ fn make_asset_browser_server() -> (EditorServerHandle, u16, TempDir) {
     (handle, port, dir)
 }
 
-/// Exercises the full asset browser panel lifecycle:
+/// The FileSystem dock lifecycle against the editor's REAL routes
+/// (`/api/project/open`, `/api/filesystem/dir|tree|favorite`,
+/// `/api/asset/drop_to_viewport`).
 ///
-/// 1. Refresh — scan the project filesystem.
-/// 2. Read state — verify entries, filter, favorites, selection.
-/// 3. Expand/collapse directories.
-/// 4. Filter entries by text.
-/// 5. Select and navigate to files.
-/// 6. Manage favorites.
-/// 7. Drag-and-drop lifecycle: start, validate, drop, cancel.
+/// Rewritten 2026-11-03: the old body drove an `/api/asset_browser/*` family
+/// (refresh / toggle_expand / filter / drag_start …) that was never built; the
+/// browser editor's FileSystem dock talks to the routes below, which mirror
+/// Godot's dock (directory listing, favourites, drag a resource into the 2D
+/// viewport).
 #[test]
 fn asset_browser() {
-    let (handle, port, _dir) = make_asset_browser_server();
+    let (handle, port, dir) = make_asset_browser_server();
+    let txt = |b: Vec<u8>| String::from_utf8_lossy(&b).to_string();
+    let open = txt(http_post_raw(
+        port,
+        "/api/project/open",
+        &serde_json::json!({ "path": dir.path().display().to_string() }).to_string(),
+    ));
+    assert!(open.contains("200 OK"), "project/open failed: {open}");
 
-    // ── 1. Initial state should have no entries (not yet refreshed). ──
-    let resp = http_get_raw(port, "/api/asset_browser");
-    let (head, _) = split_response(&resp);
-    assert!(head.contains("200 OK"), "GET /api/asset_browser failed: {head}");
-    let state = parse_json_body(&resp);
-    let entries = state.get("entries").and_then(|v| v.as_array()).unwrap();
-    assert!(
-        entries.is_empty(),
-        "before refresh, entries should be empty: {state}"
-    );
-    assert_eq!(
-        state.get("is_dragging").and_then(|v| v.as_bool()),
-        Some(false),
-    );
-
-    // ── 2. Refresh — scan the filesystem. ──
-    let resp = http_post_raw(port, "/api/asset_browser/refresh", "{}");
-    let (head, _) = split_response(&resp);
-    assert!(head.contains("200 OK"), "refresh failed: {head}");
+    // 1. Root listing shows every folder and project.godot.
+    let resp = http_get_raw(port, "/api/filesystem/dir?path=res://");
+    assert!(txt(resp.clone()).contains("200 OK"), "dir listing failed: {}", txt(resp.clone()));
     let body = parse_json_body(&resp);
-    let count = body.get("count").and_then(|v| v.as_u64()).unwrap();
-    // We created: project.godot + main.tscn + player.tscn + player.gd +
-    //             icon.png + bg.jpg + bgm.ogg + tree.glb = 8 files
-    assert!(
-        count >= 8,
-        "expected at least 8 files after scan, got {count}"
-    );
-
-    // ── 3. After refresh, root-level entries should appear. ──
-    let resp = http_get_raw(port, "/api/asset_browser");
-    let state = parse_json_body(&resp);
-    let entries = state.get("entries").and_then(|v| v.as_array()).unwrap();
-    assert!(
-        !entries.is_empty(),
-        "after refresh, entries should not be empty: {state}"
-    );
-    // Root level should have directories (audio, models, scenes, scripts, textures)
-    // and the project.godot file.
-    let dir_names: Vec<&str> = entries
+    let names: Vec<String> = body["entries"]
+        .as_array()
+        .expect("entries")
         .iter()
-        .filter(|e| e.get("is_directory").and_then(|v| v.as_bool()) == Some(true))
-        .filter_map(|e| e.get("name").and_then(|v| v.as_str()))
+        .filter_map(|e| e["name"].as_str().map(str::to_string))
         .collect();
-    assert!(
-        dir_names.contains(&"scenes"),
-        "should have 'scenes' directory: {dir_names:?}"
-    );
-    assert!(
-        dir_names.contains(&"textures"),
-        "should have 'textures' directory: {dir_names:?}"
-    );
+    for want in ["scenes", "scripts", "textures", "audio", "models"] {
+        assert!(names.iter().any(|n| n == want), "root must list `{want}`: {names:?}");
+    }
 
-    // ── 4. Expand a directory — "scenes" should reveal its children. ──
-    let scenes_idx = entries
-        .iter()
-        .position(|e| e.get("name").and_then(|v| v.as_str()) == Some("scenes"))
-        .expect("scenes directory not found in entries");
+    // 2. A sub-directory lists its files.
+    let scenes = txt(http_get_raw(port, "/api/filesystem/dir?path=res://scenes"));
+    assert!(scenes.contains("main.tscn") && scenes.contains("player.tscn"), "{scenes}");
 
-    let resp = http_post_raw(
+    // 3. Favourites round-trip.
+    let add = parse_json_body(&http_post_raw(
         port,
-        "/api/asset_browser/toggle_expand",
-        &format!(r#"{{"index":{scenes_idx}}}"#),
-    );
-    let (head, _) = split_response(&resp);
-    assert!(
-        head.contains("200 OK"),
-        "toggle_expand failed: {head}"
-    );
-    let body = parse_json_body(&resp);
-    let new_count = body
-        .get("entry_count")
-        .and_then(|v| v.as_u64())
-        .unwrap();
-    assert!(
-        new_count > entries.len() as u64,
-        "expanding scenes should increase entry count (was {}, now {new_count})",
-        entries.len()
-    );
-
-    // Verify expanded state shows scene files
-    let resp = http_get_raw(port, "/api/asset_browser");
-    let state = parse_json_body(&resp);
-    let entries = state.get("entries").and_then(|v| v.as_array()).unwrap();
-    let scene_files: Vec<&str> = entries
-        .iter()
-        .filter(|e| {
-            e.get("icon").and_then(|v| v.as_str()) == Some("scene")
-        })
-        .filter_map(|e| e.get("name").and_then(|v| v.as_str()))
-        .collect();
-    assert!(
-        scene_files.contains(&"main.tscn"),
-        "expanded scenes dir should show main.tscn: {scene_files:?}"
-    );
-    assert!(
-        scene_files.contains(&"player.tscn"),
-        "expanded scenes dir should show player.tscn: {scene_files:?}"
-    );
-
-    // ── 5. Collapse the directory. ──
-    // Re-read to get the current scenes index (may have shifted)
-    let scenes_idx = entries
-        .iter()
-        .position(|e| e.get("name").and_then(|v| v.as_str()) == Some("scenes"))
-        .expect("scenes directory not found");
-    let resp = http_post_raw(
+        "/api/filesystem/favorite",
+        r#"{"path":"res://scenes/main.tscn","action":"add"}"#,
+    ));
+    assert_eq!(add["is_favorite"], true, "{add}");
+    let rm = parse_json_body(&http_post_raw(
         port,
-        "/api/asset_browser/toggle_expand",
-        &format!(r#"{{"index":{scenes_idx}}}"#),
-    );
-    let body = parse_json_body(&resp);
-    let collapsed_count = body.get("entry_count").and_then(|v| v.as_u64()).unwrap();
-    assert!(
-        collapsed_count < new_count,
-        "collapsing should reduce entries (was {new_count}, now {collapsed_count})"
-    );
+        "/api/filesystem/favorite",
+        r#"{"path":"res://scenes/main.tscn","action":"remove"}"#,
+    ));
+    assert_eq!(rm["is_favorite"], false, "{rm}");
 
-    // ── 6. Filter entries. ──
-    let resp = http_post_raw(
+    // 4. The recursive tree reaches nested files.
+    let tree = txt(http_get_raw(port, "/api/filesystem/tree?root=res://"));
+    assert!(tree.contains("icon.png") && tree.contains("tree.glb"), "{tree}");
+
+    // 5. Drag a texture into the viewport: Godot creates a Sprite2D for it.
+    let scene = parse_json_body(&http_get_raw(port, "/api/scene"));
+    let parent = scene["nodes"]["children"][0]["id"].as_u64().expect("Main id");
+    let drop = parse_json_body(&http_post_raw(
         port,
-        "/api/asset_browser/filter",
-        r#"{"filter":"main"}"#,
-    );
-    let (head, _) = split_response(&resp);
-    assert!(head.contains("200 OK"), "filter failed: {head}");
-    let body = parse_json_body(&resp);
-    assert!(body.get("ok").and_then(|v| v.as_bool()) == Some(true));
-
-    // Verify filter is applied
-    let resp = http_get_raw(port, "/api/asset_browser");
-    let state = parse_json_body(&resp);
-    assert_eq!(
-        state.get("filter").and_then(|v| v.as_str()),
-        Some("main"),
-        "filter should be 'main': {state}"
-    );
-    let entries = state.get("entries").and_then(|v| v.as_array()).unwrap();
-    let file_names: Vec<&str> = entries
-        .iter()
-        .filter(|e| e.get("is_directory").and_then(|v| v.as_bool()) != Some(true))
-        .filter_map(|e| e.get("name").and_then(|v| v.as_str()))
-        .collect();
-    assert!(
-        file_names.iter().all(|n| n.to_lowercase().contains("main")),
-        "all non-dir entries should match 'main' filter: {file_names:?}"
-    );
-
-    // Clear filter
-    let resp = http_post_raw(
-        port,
-        "/api/asset_browser/filter",
-        r#"{"filter":""}"#,
-    );
-    let body = parse_json_body(&resp);
-    assert!(body.get("ok").and_then(|v| v.as_bool()) == Some(true));
-
-    // ── 7. Select an entry. ──
-    let resp = http_post_raw(
-        port,
-        "/api/asset_browser/select",
-        r#"{"index":0}"#,
-    );
-    let body = parse_json_body(&resp);
-    assert!(body.get("ok").and_then(|v| v.as_bool()) == Some(true));
-
-    let resp = http_get_raw(port, "/api/asset_browser");
-    let state = parse_json_body(&resp);
-    assert_eq!(
-        state.get("selected_index").and_then(|v| v.as_u64()),
-        Some(0),
-        "selected_index should be 0 after selection: {state}"
-    );
-
-    // Deselect
-    let resp = http_post_raw(
-        port,
-        "/api/asset_browser/select",
-        r#"{"index":null}"#,
-    );
-    let body = parse_json_body(&resp);
-    assert!(body.get("ok").and_then(|v| v.as_bool()) == Some(true));
-    let resp = http_get_raw(port, "/api/asset_browser");
-    let state = parse_json_body(&resp);
-    assert!(
-        state.get("selected_index").is_some(),
-        "selected_index field should exist: {state}"
-    );
-
-    // ── 8. Favorites management. ──
-    let resp = http_post_raw(
-        port,
-        "/api/asset_browser/favorite",
-        r#"{"path":"res://scenes/main.tscn","add":true}"#,
-    );
-    let body = parse_json_body(&resp);
-    assert_eq!(body.get("ok").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(body.get("changed").and_then(|v| v.as_bool()), Some(true));
-
-    // Adding same favorite again should return changed=false
-    let resp = http_post_raw(
-        port,
-        "/api/asset_browser/favorite",
-        r#"{"path":"res://scenes/main.tscn","add":true}"#,
-    );
-    let body = parse_json_body(&resp);
-    assert_eq!(body.get("changed").and_then(|v| v.as_bool()), Some(false));
-
-    // Verify favorites list
-    let resp = http_get_raw(port, "/api/asset_browser");
-    let state = parse_json_body(&resp);
-    let favs = state.get("favorites").and_then(|v| v.as_array()).unwrap();
-    assert_eq!(favs.len(), 1);
-    assert_eq!(favs[0].as_str(), Some("res://scenes/main.tscn"));
-
-    // Remove favorite
-    let resp = http_post_raw(
-        port,
-        "/api/asset_browser/favorite",
-        r#"{"path":"res://scenes/main.tscn","add":false}"#,
-    );
-    let body = parse_json_body(&resp);
-    assert_eq!(body.get("changed").and_then(|v| v.as_bool()), Some(true));
-
-    let resp = http_get_raw(port, "/api/asset_browser");
-    let state = parse_json_body(&resp);
-    let favs = state.get("favorites").and_then(|v| v.as_array()).unwrap();
-    assert!(favs.is_empty(), "favorites should be empty after removal");
-
-    // ── 9. Navigate to a file (expands parents, selects target). ──
-    let resp = http_post_raw(
-        port,
-        "/api/asset_browser/navigate",
-        r#"{"path":"res://scripts/player.gd"}"#,
-    );
-    let (head, _) = split_response(&resp);
-    assert!(head.contains("200 OK"), "navigate failed: {head}");
-    let body = parse_json_body(&resp);
-    assert!(body.get("ok").and_then(|v| v.as_bool()) == Some(true));
-    let nav_idx = body.get("selected_index").and_then(|v| v.as_u64());
-    assert!(nav_idx.is_some(), "navigate should select the target: {body}");
-
-    // Verify the selected entry is player.gd
-    let resp = http_get_raw(port, "/api/asset_browser");
-    let state = parse_json_body(&resp);
-    let entries = state.get("entries").and_then(|v| v.as_array()).unwrap();
-    let sel_idx = state
-        .get("selected_index")
-        .and_then(|v| v.as_u64())
-        .unwrap() as usize;
-    let selected_entry = &entries[sel_idx];
-    assert_eq!(
-        selected_entry.get("name").and_then(|v| v.as_str()),
-        Some("player.gd"),
-        "navigate should select player.gd: {selected_entry}"
-    );
-    assert_eq!(
-        selected_entry.get("icon").and_then(|v| v.as_str()),
-        Some("script"),
-        "player.gd should have script icon: {selected_entry}"
-    );
-
-    // ── 10. Drag-and-drop: start → validate → drop ──
-    // Start drag from a scene file
-    let resp = http_post_raw(
-        port,
-        "/api/asset_browser/drag_start",
-        r#"{"res_path":"res://scenes/player.tscn"}"#,
-    );
-    let body = parse_json_body(&resp);
-    assert_eq!(body.get("ok").and_then(|v| v.as_bool()), Some(true));
-    assert_eq!(
-        body.get("is_dragging").and_then(|v| v.as_bool()),
-        Some(true)
-    );
-
-    // Verify is_dragging in state
-    let resp = http_get_raw(port, "/api/asset_browser");
-    let state = parse_json_body(&resp);
-    assert_eq!(
-        state.get("is_dragging").and_then(|v| v.as_bool()),
-        Some(true),
-        "is_dragging should be true during drag: {state}"
-    );
-
-    // Validate drop onto 2D viewport — scene file is valid here
-    let resp = http_post_raw(
-        port,
-        "/api/asset_browser/drag_validate",
-        r#"{"target":"viewport_2d","x":100,"y":200}"#,
-    );
-    let body = parse_json_body(&resp);
-    assert_eq!(
-        body.get("can_drop").and_then(|v| v.as_bool()),
-        Some(true),
-        "scene should be droppable on viewport_2d: {body}"
-    );
-
-    // Execute the drop
-    let resp = http_post_raw(port, "/api/asset_browser/drop", "{}");
-    let body = parse_json_body(&resp);
-    assert_eq!(
-        body.get("ok").and_then(|v| v.as_bool()),
-        Some(true),
-        "drop should succeed: {body}"
-    );
-    assert_eq!(
-        body.get("res_path").and_then(|v| v.as_str()),
-        Some("res://scenes/player.tscn"),
-    );
-
-    // After drop, should no longer be dragging
-    let resp = http_get_raw(port, "/api/asset_browser");
-    let state = parse_json_body(&resp);
-    assert_eq!(
-        state.get("is_dragging").and_then(|v| v.as_bool()),
-        Some(false),
-        "should not be dragging after drop: {state}"
-    );
-
-    // ── 11. Drag-and-drop validation: invalid drop target ──
-    // Start drag with a script file
-    let resp = http_post_raw(
-        port,
-        "/api/asset_browser/drag_start",
-        r#"{"res_path":"res://scripts/player.gd"}"#,
-    );
-    let body = parse_json_body(&resp);
-    assert_eq!(body.get("ok").and_then(|v| v.as_bool()), Some(true));
-
-    // Validate against viewport — scripts can't be dropped on viewport
-    let resp = http_post_raw(
-        port,
-        "/api/asset_browser/drag_validate",
-        r#"{"target":"viewport_2d","x":0,"y":0}"#,
-    );
-    let body = parse_json_body(&resp);
-    assert_eq!(
-        body.get("can_drop").and_then(|v| v.as_bool()),
-        Some(false),
-        "script should NOT be droppable on viewport: {body}"
-    );
-
-    // Drop should fail since target is invalid
-    let resp = http_post_raw(port, "/api/asset_browser/drop", "{}");
-    let body = parse_json_body(&resp);
-    assert_eq!(
-        body.get("ok").and_then(|v| v.as_bool()),
-        Some(false),
-        "drop of script on viewport should fail: {body}"
-    );
-
-    // ── 12. Drag cancel ──
-    let resp = http_post_raw(
-        port,
-        "/api/asset_browser/drag_start",
-        r#"{"res_path":"res://textures/icon.png"}"#,
-    );
-    let body = parse_json_body(&resp);
-    assert_eq!(body.get("ok").and_then(|v| v.as_bool()), Some(true));
-
-    let resp = http_post_raw(port, "/api/asset_browser/drag_cancel", "{}");
-    let body = parse_json_body(&resp);
-    assert_eq!(body.get("ok").and_then(|v| v.as_bool()), Some(true));
-
-    let resp = http_get_raw(port, "/api/asset_browser");
-    let state = parse_json_body(&resp);
-    assert_eq!(
-        state.get("is_dragging").and_then(|v| v.as_bool()),
-        Some(false),
-        "should not be dragging after cancel: {state}"
-    );
-
-    // ── 13. Drag texture to inspector property (valid). ──
-    let resp = http_post_raw(
-        port,
-        "/api/asset_browser/drag_start",
-        r#"{"res_path":"res://textures/icon.png"}"#,
-    );
-    let body = parse_json_body(&resp);
-    assert_eq!(body.get("ok").and_then(|v| v.as_bool()), Some(true));
-
-    let resp = http_post_raw(
-        port,
-        "/api/asset_browser/drag_validate",
-        r#"{"target":"inspector","node_id":1,"property_name":"texture"}"#,
-    );
-    let body = parse_json_body(&resp);
-    assert_eq!(
-        body.get("can_drop").and_then(|v| v.as_bool()),
-        Some(true),
-        "texture should be droppable on texture property: {body}"
-    );
-
-    let resp = http_post_raw(port, "/api/asset_browser/drop", "{}");
-    let body = parse_json_body(&resp);
-    assert_eq!(body.get("ok").and_then(|v| v.as_bool()), Some(true));
-
-    // ── 14. Drag scene to scene tree (valid). ──
-    let resp = http_post_raw(
-        port,
-        "/api/asset_browser/drag_start",
-        r#"{"res_path":"res://scenes/main.tscn"}"#,
-    );
-    let body = parse_json_body(&resp);
-    assert_eq!(body.get("ok").and_then(|v| v.as_bool()), Some(true));
-
-    let resp = http_post_raw(
-        port,
-        "/api/asset_browser/drag_validate",
-        r#"{"target":"scene_tree","parent_node_id":1,"sibling_index":-1}"#,
-    );
-    let body = parse_json_body(&resp);
-    assert_eq!(
-        body.get("can_drop").and_then(|v| v.as_bool()),
-        Some(true),
-        "scene should be droppable on scene tree: {body}"
-    );
-
-    // Cancel instead of drop to test interleaved operations
-    let resp = http_post_raw(port, "/api/asset_browser/drag_cancel", "{}");
-    let body = parse_json_body(&resp);
-    assert_eq!(body.get("ok").and_then(|v| v.as_bool()), Some(true));
+        "/api/asset/drop_to_viewport",
+        &format!(r#"{{"asset_path":"res://textures/icon.png","asset_type":"texture","parent_id":{parent}}}"#),
+    ));
+    assert_eq!(drop["node_class"], "Sprite2D", "{drop}");
+    assert_eq!(drop["name"], "icon");
 
     handle.stop();
 }

@@ -957,3 +957,39 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/ObjectResponse"
+  "/api/tileset/terrain_set/add":
+    post:
+      summary: Add a TileSet terrain set (mode).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/tileset/terrain/add":
+    post:
+      summary: Add a terrain to a terrain set.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/tileset/tile/peering":
+    post:
+      summary: Map a peering-bit mask to an atlas tile.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/tilemap/terrain_paint":
+    post:
+      summary: Connect-mode terrain painting.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/tilemap/pattern/create":
+    post:
+      summary: Capture a TileMapPattern from a rect.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/tilemap/pattern/paint":
+    post:
+      summary: Stamp a captured pattern.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"

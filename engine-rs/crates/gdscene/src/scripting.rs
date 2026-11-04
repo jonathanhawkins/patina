@@ -208,6 +208,21 @@ pub fn attach_subtree_scripts_from_res(tree: &mut SceneTree, subtree_root: NodeI
     attached
 }
 
+/// An AnimatedSprite2D's current animation name, or Godot's `"default"`.
+///
+/// ⚠️ Accepts a `StringName` as well as a `String`. A Godot 4 `.tscn` writes
+/// `animation = &"right"` (a StringName), and scripts assign `&"right"` too;
+/// matching only `String` made `play()` fall back to `"default"` — a clip the
+/// scene does not have — so the sprite froze on frame 0 (Dodge the Creeps'
+/// player never animated). `scene_tree`'s frame advance already took both.
+fn current_sprite_animation(n: &crate::node::Node) -> String {
+    match n.get_property("animation") {
+        Variant::String(s) if !s.is_empty() => s,
+        Variant::StringName(s) if !s.as_str().is_empty() => s.as_str().to_string(),
+        _ => "default".to_string(),
+    }
+}
+
 pub struct GDScriptNodeInstance {
     interpreter: Interpreter,
     instance: ClassInstance,
@@ -8584,19 +8599,35 @@ impl SceneAccess for SceneTreeAccessor {
             return false;
         };
         let clip = if name.is_empty() {
-            match n.get_property("animation") {
-                Variant::String(s) if !s.is_empty() => s,
-                _ => "default".to_string(),
-            }
+            current_sprite_animation(n)
         } else {
             name.to_string()
         };
         let last = crate::scene_tree::sprite_frames_from_node(n)
             .map(|f| f.frame_count(&clip).saturating_sub(1))
             .unwrap_or(0);
+        // Godot's `play()` (animated_sprite_2d.cpp:494-513) only rewinds when
+        // the animation CHANGES, or when replaying a clip that already ran to
+        // its end. Re-calling `play()` on the clip that is running keeps the
+        // playhead — the usual `if moving: play()` every `_process` pattern.
+        // Rewinding unconditionally pinned Dodge the Creeps' player to frame 0.
+        let same_clip = clip == current_sprite_animation(n);
+        let frame = match n.get_property("frame") {
+            Variant::Int(f) => f,
+            _ => 0,
+        };
+        let playing = matches!(n.get_property("playing"), Variant::Bool(true));
+        let finished = !playing && if from_end { frame == 0 } else { frame == last as i64 };
+        let keep_playhead = same_clip && !finished;
         let Some(n) = self.tree_mut().get_node_mut(nid) else {
             return false;
         };
+        if keep_playhead {
+            n.set_property("playing", Variant::Bool(true));
+            let speed = if custom_speed == 0.0 { 1.0 } else { custom_speed };
+            n.set_property("speed_scale", Variant::Float(speed));
+            return true;
+        }
         n.set_property("animation", Variant::String(clip));
         n.set_property(
             "frame",
@@ -8626,10 +8657,7 @@ impl SceneAccess for SceneTreeAccessor {
             return false;
         };
         let clip = if name.is_empty() {
-            match n.get_property("animation") {
-                Variant::String(s) if !s.is_empty() => s,
-                _ => "default".to_string(),
-            }
+            current_sprite_animation(n)
         } else {
             name.to_string()
         };
@@ -8704,10 +8732,7 @@ impl SceneAccess for SceneTreeAccessor {
         let Some(n) = self.tree().get_node(nid) else {
             return false;
         };
-        let anim = match n.get_property("animation") {
-            Variant::String(s) if !s.is_empty() => s,
-            _ => "default".to_string(),
-        };
+        let anim = current_sprite_animation(n);
         let idx = frame.max(0) as usize;
         let hold = crate::scene_tree::sprite_frames_from_node(n)
             .and_then(|f| f.animation(&anim).map(|a| a.frame_seconds(idx)))

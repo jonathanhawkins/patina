@@ -29,6 +29,17 @@ const CORE_CLASSES: &[&str] = &[
     "Timer",
     "TileMap",
     "CPUParticles2D",
+    "LineEdit",
+    "Panel",
+    "TextureRect",
+    "ColorRect",
+    "HBoxContainer",
+    "VBoxContainer",
+    "TileMapLayer",
+    "AnimatedSprite2D",
+    "AudioStreamPlayer",
+    "CanvasLayer",
+    "RayCast2D",
 ];
 
 /// Emit ClassDB metadata for each core class.

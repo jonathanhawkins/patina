@@ -1337,81 +1337,11 @@ fn probe_variant_types_valid() {
 // 16. Reverse coverage: Patina methods found in probe
 // ===========================================================================
 
-#[test]
-fn patina_methods_in_probe() {
-    let _g = setup();
-    register_patina_surfaces();
-    let probes = load_probe_signatures();
-
-    let mut total = 0usize;
-    let mut found = 0usize;
-
-    for probe in &probes {
-        let patina_methods = get_method_list(&probe.class);
-        let probe_method_names: Vec<&str> = probe.methods.iter().map(|m| m.name.as_str()).collect();
-
-        for pm in &patina_methods {
-            total += 1;
-            if probe_method_names.contains(&pm.name.as_str()) {
-                found += 1;
-            }
-        }
-    }
-
-    let pct = if total > 0 {
-        (found as f64 / total as f64 * 100.0).round() as u32
-    } else {
-        0
-    };
-
-    eprintln!("  Patina→Probe method coverage: {found}/{total} ({pct}%)");
-
-    // Most Patina methods should exist in probe (we only register real Godot methods)
-    assert!(
-        pct >= 80,
-        "patina→probe method coverage {pct}% below 80% threshold"
-    );
-}
 
 // ===========================================================================
 // 17. Reverse coverage: Patina properties found in probe
 // ===========================================================================
 
-#[test]
-fn patina_properties_in_probe() {
-    let _g = setup();
-    register_patina_surfaces();
-    let probes = load_probe_signatures();
-
-    let mut total = 0usize;
-    let mut found = 0usize;
-
-    for probe in &probes {
-        let patina_props = get_property_list(&probe.class);
-        let probe_prop_names: Vec<&str> =
-            probe.properties.iter().map(|p| p.name.as_str()).collect();
-
-        for pp in &patina_props {
-            total += 1;
-            if probe_prop_names.contains(&pp.name.as_str()) {
-                found += 1;
-            }
-        }
-    }
-
-    let pct = if total > 0 {
-        (found as f64 / total as f64 * 100.0).round() as u32
-    } else {
-        0
-    };
-
-    eprintln!("  Patina→Probe property coverage: {found}/{total} ({pct}%)");
-
-    assert!(
-        pct >= 70,
-        "patina→probe property coverage {pct}% below 70% threshold"
-    );
-}
 
 // ===========================================================================
 // 18. Each probe class has a non-empty parent
@@ -2232,3 +2162,75 @@ fn probe_api_relevant_methods_have_correct_args() {
         }
     }
 }
+
+// ===========================================================================
+// Patina's REAL ClassDB vs a fresh Godot 4.6.1 capture
+// ===========================================================================
+//
+// Rewritten 2026-11-03. The old two checks compared `register_patina_surfaces`
+// — a hand-written stand-in built inside this file, with wrong arities
+// (`add_child` = 1 arg; Godot's is 3) — against a partial probe, so they
+// measured neither engine. These compare the members the REAL `gdobject`
+// ClassDB registers on each class (own, not inherited) with what Godot 4.6.1
+// reports for that class (`fixtures/oracle_outputs/classdb_godot461_members.json`,
+// captured headless via `ClassDB.class_get_*_list`).
+
+fn godot461_members() -> serde_json::Value {
+    let path = format!("{}/../fixtures/oracle_outputs/classdb_godot461_members.json", env!("CARGO_MANIFEST_DIR"));
+    serde_json::from_str(&std::fs::read_to_string(&path).expect("godot member capture")).expect("json")
+}
+
+/// (found, total, non-Godot names) for each member Patina registers on a
+/// captured class that Godot also exposes on that class (own or inherited).
+fn real_classdb_coverage(kind: &str) -> (usize, usize, Vec<String>) {
+    gdobject::class_db::register_all_classes();
+    let godot = godot461_members();
+    let classes = godot["classes"].as_object().expect("classes");
+    let (mut found, mut total, mut extra) = (0, 0, Vec::new());
+    for (class, g) in classes {
+        let Some(info) = gdobject::class_db::get_class_info(class) else { continue };
+        let names: Vec<String> = if kind == "methods" {
+            info.methods.iter().map(|m| m.name.clone()).collect()
+        } else {
+            info.properties.iter().map(|p| p.name.clone()).collect()
+        };
+        let known: Vec<&str> = g[kind].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+        for n in names {
+            total += 1;
+            if known.contains(&n.as_str()) {
+                found += 1;
+            } else {
+                extra.push(format!("{class}.{n}"));
+            }
+        }
+    }
+    (found, total, extra)
+}
+
+#[test]
+fn patina_methods_in_probe() {
+    let _g = setup();
+    let (found, total, extra) = real_classdb_coverage("methods");
+    let pct = found * 100 / total.max(1);
+    eprintln!("  Real ClassDB methods that are Godot 4.6.1 API: {found}/{total} ({pct}%)");
+    eprintln!("  Not in Godot for that class: {extra:?}");
+    assert!(total > 0, "the real ClassDB must register methods on the captured classes");
+    assert!(pct >= THRESHOLD_METHODS, "only {pct}% of registered methods are real Godot API: {extra:?}");
+}
+
+#[test]
+fn patina_properties_in_probe() {
+    let _g = setup();
+    let (found, total, extra) = real_classdb_coverage("properties");
+    let pct = found * 100 / total.max(1);
+    eprintln!("  Real ClassDB properties that are Godot 4.6.1 API: {found}/{total} ({pct}%)");
+    eprintln!("  Not in Godot for that class: {extra:?}");
+    assert!(total > 0, "the real ClassDB must register properties on the captured classes");
+    assert!(pct >= THRESHOLD_PROPERTIES, "only {pct}% of registered properties are real Godot API: {extra:?}");
+}
+
+// Measured 2026-11-03: 119/119 methods, 365/365 properties after removing the
+// Godot-3 `AnimatedSprite2D.playing`. Keep at 100: any registered member that
+// is not Godot API for its class is a parity bug, and the message lists it.
+const THRESHOLD_METHODS: usize = 100;
+const THRESHOLD_PROPERTIES: usize = 100;

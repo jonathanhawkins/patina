@@ -152,7 +152,14 @@ fn compat_matrix_oracle_parity_shows_current_metrics() {
     let n = oracle_scene_count();
     let files = std::fs::read_dir(repo_root().join("fixtures/oracle_outputs"))
         .unwrap()
-        .filter(|e| e.as_ref().map_or(false, |e| e.path().extension().map_or(false, |x| x == "json")))
+        // Oracle outputs only: skip dot-files (`.pre_repin_snapshot.json` is a
+        // repin backup, not an output).
+        .filter(|e| {
+            e.as_ref().map_or(false, |e| {
+                !e.file_name().to_string_lossy().starts_with('.')
+                    && e.path().extension().map_or(false, |x| x == "json")
+            })
+        })
         .count();
     assert!(
         content.contains(&format!("{n} oracle scenes")) && content.contains(&format!("{files} oracle output files")),

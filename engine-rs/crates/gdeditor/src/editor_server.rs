@@ -477,6 +477,23 @@ pub struct EditorState {
     /// `tile_map_data` (pat-0q2kx.75). Without this the toolbar's Flip/Rot
     /// buttons would post a value the server dropped on the floor.
     pub tile_alternatives: HashMap<NodeId, HashMap<(i32, i32), i32>>,
+    /// Per-cell ATLAS coordinates, beside `tile_alternatives` for the same
+    /// reason: `TileGrid` holds only source ids, so the coordinates terrain
+    /// painting and pattern stamping choose would otherwise be dropped on
+    /// write-back and every cell would reload as atlas (0,0) (pat-mgixk.112).
+    /// Stored as `(source_id, atlas_x, atlas_y)`: an entry is honoured only
+    /// while the cell still holds that source, so a later plain paint / fill
+    /// over a terrain cell can never inherit its stale atlas coords.
+    pub tile_atlas_coords: HashMap<NodeId, HashMap<(i32, i32), (i32, i32, i32)>>,
+    /// The TileSet's terrain sets (Godot `TileSet.terrain_set_*`), each with
+    /// its terrains and peering-bit → tile mapping.
+    pub terrain_sets: Vec<gdscene::tilemap::TerrainSet>,
+    /// Which terrain each painted cell carries, per layer — the state Connect
+    /// mode recomputes neighbour bitmasks from.
+    pub terrain_maps: HashMap<NodeId, gdscene::tilemap::TerrainMap>,
+    /// Captured `TileMapPattern`s: (width, height, cells as
+    /// (dx, dy, source_id, atlas_x, atlas_y)).
+    pub tile_patterns: Vec<(i32, i32, Vec<(i32, i32, i32, i32, i32)>)>,
     /// Currently active editor mode: "2d", "3d", or "script".
     pub editor_mode: String,
     /// The editor mode that was active before Play switched to the game view.
@@ -989,6 +1006,10 @@ impl EditorState {
             gamepad_prev: HashMap::new(),
             tile_grid_store: gdscene::tilemap::TileGridStore::new_with_defaults(),
             tile_alternatives: HashMap::new(),
+            tile_atlas_coords: HashMap::new(),
+            terrain_sets: Vec::new(),
+            terrain_maps: HashMap::new(),
+            tile_patterns: Vec::new(),
             editor_mode: "2d".to_string(),
             pre_play_editor_mode: None,
             main_pane: crate::main_screen::MainPane::new(),
@@ -3265,6 +3286,12 @@ fn handle_connection(
         ("POST", "/api/tilemap/fill") => api_tilemap_fill(state, &req.body, &mut stream),
         ("POST", "/api/tilemap/line") => api_tilemap_line(state, &req.body, &mut stream),
         ("GET", "/api/tilemap/data") => api_tilemap_data(state, &req.query, &mut stream),
+        ("POST", "/api/tileset/terrain_set/add") => api_terrain_set_add(state, &req.body, &mut stream),
+        ("POST", "/api/tileset/terrain/add") => api_terrain_add(state, &req.body, &mut stream),
+        ("POST", "/api/tileset/tile/peering") => api_tile_peering(state, &req.body, &mut stream),
+        ("POST", "/api/tilemap/terrain_paint") => api_terrain_paint(state, &req.body, &mut stream),
+        ("POST", "/api/tilemap/pattern/create") => api_pattern_create(state, &req.body, &mut stream),
+        ("POST", "/api/tilemap/pattern/paint") => api_pattern_paint(state, &req.body, &mut stream),
         ("POST", "/api/tilemap/resize") => api_tilemap_resize(state, &req.body, &mut stream),
         ("GET", "/api/tilemap/tileset") => api_tilemap_tileset(state, &mut stream),
         // pat-s3rrv.65: TileSet atlas-source authoring. Unlike
@@ -12576,7 +12603,8 @@ fn file_type_for_ext(ext: &str) -> &str {
         "tres" => "Resource",
         "png" | "jpg" | "jpeg" | "webp" | "svg" => "Image",
         "wav" | "ogg" | "mp3" => "Audio",
-        "ttf" | "otf" => "Font",
+        "ttf" | "otf" | "woff" | "woff2" | "fnt" | "font" => "Font",
+        "glb" | "gltf" | "obj" | "fbx" | "dae" | "blend" => "Model",
         _ => "File",
     }
 }
@@ -12617,6 +12645,12 @@ fn scan_directory(
         }
 
         if path.is_dir() {
+            // Godot's EditorFileSystem skips a folder carrying `.gdignore` or a
+            // nested `project.godot` (editor_file_system.cpp:3455-3464), the
+            // same rule `EditorFileSystem::list_dir` applies.
+            if path.join(".gdignore").exists() || path.join("project.godot").exists() {
+                continue;
+            }
             let child_prefix = if prefix.is_empty() {
                 name.clone()
             } else {
@@ -12649,6 +12683,37 @@ fn scan_directory(
                     | "gdshader"
                     | "glsl"
                     | "cfg"
+                    // ⚠️ Every resource Godot's FileSystem dock shows. Audio,
+                    // models and fonts were missing, so a game's music and
+                    // meshes were invisible in the dock (and a folder holding
+                    // only them vanished) — while `file_type_for_ext` below
+                    // already knew how to label them.
+                    | "wav"
+                    | "ogg"
+                    | "mp3"
+                    | "glb"
+                    | "gltf"
+                    | "obj"
+                    | "fbx"
+                    | "dae"
+                    | "blend"
+                    | "ttf"
+                    | "otf"
+                    | "woff"
+                    | "woff2"
+                    | "fnt"
+                    | "font"
+                    | "res"
+                    | "scn"
+                    | "gdshaderinc"
+                    | "bmp"
+                    | "tga"
+                    | "exr"
+                    | "hdr"
+                    | "ktx"
+                    | "dds"
+                    | "json"
+                    | "csv"
             ) {
                 let file_path = if prefix.is_empty() {
                     format!("res://{}", name)
@@ -12805,6 +12870,12 @@ const CAPABILITIES: &[(&str, &str, &str, &str, &str)] = &[
     ("POST", "/api/filesystem/delete", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/filesystem/mkdir", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/script/save", "[]", "{\"path\":\"string\",\"source\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/tileset/terrain_set/add", "[]", "{\"mode\":\"string\"}", "{\"type\":\"object\",\"properties\":{\"terrain_set\":\"number\"}}"),
+    ("POST", "/api/tileset/terrain/add", "[]", "{\"terrain_set\":\"number\",\"id\":\"number\",\"name\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/tileset/tile/peering", "[]", "{\"terrain_set\":\"number\",\"terrain\":\"number\",\"bitmask\":\"number\",\"source_id\":\"number\",\"atlas_coords\":\"array\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/tilemap/terrain_paint", "[]", "{\"node_id\":\"number\",\"terrain_set\":\"number\",\"terrain\":\"number\",\"cells\":\"array\"}", "{\"type\":\"object\",\"properties\":{\"cells\":\"array\"}}"),
+    ("POST", "/api/tilemap/pattern/create", "[]", "{\"node_id\":\"number\",\"rect\":\"array\"}", "{\"type\":\"object\",\"properties\":{\"pattern\":\"number\",\"size\":\"array\"}}"),
+    ("POST", "/api/tilemap/pattern/paint", "[]", "{\"node_id\":\"number\",\"pattern\":\"number\",\"at\":\"array\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/asset/drop_to_viewport", "[]", "{\"asset_path\":\"string\",\"asset_type\":\"string\",\"parent_id\":\"number\",\"viewport_x\":\"number?\",\"viewport_y\":\"number?\"}", "{\"type\":\"object\",\"properties\":{\"node_id\":\"number\",\"node_class\":\"string\",\"name\":\"string\"}}"),
     ("POST", "/api/script/validate", "[]", "{\"content\":\"string\"}", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\",\"diagnostics\":\"array\"}}"),
     ("POST", "/api/script/highlight", "[]", "{\"content\":\"string\"}", "{\"type\":\"object\",\"properties\":{\"spans\":\"array\"}}"),
@@ -20847,6 +20918,7 @@ fn writeback_tile_grid(state: &mut EditorState, nid: NodeId) {
     // cell's transform bits. A cell whose tile has since been erased drops its
     // alternative with it, because the record is not emitted at all.
     let alts = state.tile_alternatives.get(&nid);
+    let atlas = state.tile_atlas_coords.get(&nid);
     let mut cells: std::collections::HashMap<gdcore::math::Vector2i, gdscene::tilemap::TileData> =
         std::collections::HashMap::new();
     for y in 0..grid.height {
@@ -20856,7 +20928,14 @@ fn writeback_tile_grid(state: &mut EditorState, nid: NodeId) {
                 continue;
             }
             let (cx, cy) = (x as i32, y as i32);
-            let mut data = gdscene::tilemap::TileData::new(t);
+            let mut data = match atlas.and_then(|m| m.get(&(cx, cy))).filter(|e| e.0 == t) {
+                Some(&(_, ax, ay)) => gdscene::tilemap::TileData::with_atlas(
+                    t,
+                    gdcore::math::Vector2i::new(ax, ay),
+                    0,
+                ),
+                None => gdscene::tilemap::TileData::new(t),
+            };
             if let Some(a) = alts.and_then(|m| m.get(&(cx, cy))) {
                 data.alternative_id = *a;
             }
@@ -20871,6 +20950,11 @@ fn writeback_tile_grid(state: &mut EditorState, nid: NodeId) {
 
 /// Records (or clears) the transform bits a paint placed on a cell.
 fn set_tile_alternative(state: &mut EditorState, nid: NodeId, x: i32, y: i32, alternative: i32) {
+    // A plain paint / erase / line rewrites this cell: any atlas coords a
+    // terrain paint or pattern stamp chose for it no longer apply.
+    if let Some(m) = state.tile_atlas_coords.get_mut(&nid) {
+        m.remove(&(x, y));
+    }
     let per_node = state.tile_alternatives.entry(nid).or_default();
     if alternative == 0 {
         // Not stored as 0: an absent entry and a zero entry mean the same thing,
@@ -21189,9 +21273,258 @@ fn api_tilemap_data(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut T
         }
     };
     match s.tile_grid_store.get(nid) {
-        Some(g) => send_json(stream, &g.to_json().to_string()),
+        Some(g) => {
+            let mut v = g.to_json();
+            // Per-cell atlas coords, decoded from the node's OWN
+            // `tile_map_data` — the round trip, not an editor-side cache.
+            let mut atlas = serde_json::Map::new();
+            if let Some(Variant::PackedByteArray(bytes)) =
+                s.scene_tree.get_node(nid).map(|n| n.get_property("tile_map_data"))
+            {
+                for (cell, data) in gdscene::tilemap::decode_tile_map_data(&bytes) {
+                    atlas.insert(
+                        format!("{},{}", cell.x, cell.y),
+                        serde_json::json!([data.atlas_coords.x, data.atlas_coords.y]),
+                    );
+                }
+            }
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("atlas_coords".to_string(), serde_json::Value::Object(atlas));
+            }
+            send_json(stream, &v.to_string())
+        }
         None => send_error(stream, 404, "no tilemap data"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Terrains (Godot TileSet terrain sets + Connect painting) and patterns
+// (pat-mgixk.112). The solver is `gdscene::tilemap::paint_terrain`; these
+// routes are the editor around it.
+// ---------------------------------------------------------------------------
+
+fn terrain_mode_from(name: &str) -> Option<gdscene::tilemap::TerrainMode> {
+    use gdscene::tilemap::TerrainMode as M;
+    // Godot's TileSet.TerrainMode names (and its integer values 0/1/2).
+    match name {
+        "match_corners_and_sides" | "0" => Some(M::MatchCornersAndSides),
+        "match_corners" | "1" => Some(M::MatchCorners),
+        "match_sides" | "2" => Some(M::MatchSides),
+        _ => None,
+    }
+}
+
+fn json_i32(p: &serde_json::Value, key: &str) -> Option<i32> {
+    p.get(key).and_then(|v| v.as_i64()).map(|v| v as i32)
+}
+
+fn json_pair(v: &serde_json::Value) -> Option<(i32, i32)> {
+    let a = v.as_array()?;
+    Some((a.first()?.as_i64()? as i32, a.get(1)?.as_i64()? as i32))
+}
+
+/// `POST /api/tileset/terrain_set/add` — `{"mode"}` → `{"terrain_set": idx}`.
+fn api_terrain_set_add(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = parse_json_body(body).unwrap_or(serde_json::Value::Null);
+    let mode_name = match p.get("mode") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Number(n)) => n.to_string(),
+        _ => "match_corners_and_sides".to_string(),
+    };
+    let Some(mode) = terrain_mode_from(&mode_name) else {
+        send_error(stream, 400, "unknown terrain mode");
+        return;
+    };
+    let mut s = state.lock().unwrap();
+    s.terrain_sets.push(gdscene::tilemap::TerrainSet::new(mode));
+    let idx = s.terrain_sets.len() - 1;
+    send_json(stream, &serde_json::json!({"terrain_set": idx}).to_string());
+}
+
+/// `POST /api/tileset/terrain/add` — `{"terrain_set","id","name"}`.
+fn api_terrain_add(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = parse_json_body(body).unwrap_or(serde_json::Value::Null);
+    let (Some(set), Some(id)) = (json_i32(&p, "terrain_set"), json_i32(&p, "id")) else {
+        send_error(stream, 400, "missing terrain_set or id");
+        return;
+    };
+    let name = p.get("name").and_then(|v| v.as_str()).unwrap_or("Terrain").to_string();
+    let mut s = state.lock().unwrap();
+    let Some(ts) = s.terrain_sets.get_mut(set as usize) else {
+        send_error(stream, 404, "no such terrain set");
+        return;
+    };
+    ts.add_terrain(gdscene::tilemap::TerrainType::new(id, name));
+    send_json(stream, &serde_json::json!({"ok": true, "terrain_set": set, "id": id}).to_string());
+}
+
+/// `POST /api/tileset/tile/peering` — paint a tile's peering bits:
+/// `{"terrain_set","terrain","bitmask","source_id","atlas_coords":[x,y]}`.
+fn api_tile_peering(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = parse_json_body(body).unwrap_or(serde_json::Value::Null);
+    let (Some(set), Some(terrain), Some(mask), Some(src), Some(atlas)) = (
+        json_i32(&p, "terrain_set"),
+        json_i32(&p, "terrain"),
+        json_i32(&p, "bitmask"),
+        json_i32(&p, "source_id"),
+        p.get("atlas_coords").and_then(json_pair),
+    ) else {
+        send_error(stream, 400, "missing terrain_set, terrain, bitmask, source_id or atlas_coords");
+        return;
+    };
+    if !(0..=255).contains(&mask) {
+        send_error(stream, 400, "bitmask out of range");
+        return;
+    }
+    let mut s = state.lock().unwrap();
+    let Some(t) = s.terrain_sets.get_mut(set as usize).and_then(|ts| ts.terrains.get_mut(&terrain)) else {
+        send_error(stream, 404, "no such terrain");
+        return;
+    };
+    t.add_tile(mask as u8, src, gdcore::math::Vector2i::new(atlas.0, atlas.1));
+    send_json(stream, &serde_json::json!({"ok": true}).to_string());
+}
+
+/// Writes `(cell, source, atlas)` placements into a layer's grid + atlas map.
+fn place_tiles(state: &mut EditorState, nid: NodeId, placed: &[((i32, i32), i32, (i32, i32))]) -> bool {
+    let Some(grid) = state.tile_grid_store.get_mut(nid) else {
+        return false;
+    };
+    for &((x, y), src, _) in placed {
+        grid.set(x, y, src);
+    }
+    let atlas = state.tile_atlas_coords.entry(nid).or_default();
+    for &((x, y), src, (ax, ay)) in placed {
+        atlas.insert((x, y), (src, ax, ay));
+    }
+    writeback_tile_grid(state, nid);
+    state.scene_modified = true;
+    true
+}
+
+/// `POST /api/tilemap/terrain_paint` — Connect-mode terrain painting:
+/// `{"node_id","terrain_set","terrain","cells":[[x,y],…]}`. Assigns the
+/// terrain, then re-resolves every painted cell AND every affected neighbour.
+fn api_terrain_paint(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = parse_json_body(body).unwrap_or(serde_json::Value::Null);
+    let (Some(nr), Some(set), Some(terrain)) = (
+        p.get("node_id").and_then(|v| v.as_u64()),
+        json_i32(&p, "terrain_set"),
+        json_i32(&p, "terrain"),
+    ) else {
+        send_error(stream, 400, "missing node_id, terrain_set or terrain");
+        return;
+    };
+    let cells: Vec<gdcore::math::Vector2i> = p
+        .get("cells")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(json_pair).map(|(x, y)| gdcore::math::Vector2i::new(x, y)).collect())
+        .unwrap_or_default();
+    let mut s = state.lock().unwrap();
+    let Some(nid) = find_node_by_raw_id(&s.scene_tree, nr) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+    let Some(ts) = s.terrain_sets.get(set as usize).cloned() else {
+        send_error(stream, 404, "no such terrain set");
+        return;
+    };
+    if ts.get_terrain(terrain).is_none() {
+        send_error(stream, 404, "no such terrain");
+        return;
+    }
+    let resolved = {
+        let map = s.terrain_maps.entry(nid).or_default();
+        gdscene::tilemap::paint_terrain(map, &ts, terrain, &cells)
+    };
+    let placed: Vec<((i32, i32), i32, (i32, i32))> = resolved
+        .iter()
+        .map(|(c, src, a)| ((c.x, c.y), *src, (a.x, a.y)))
+        .collect();
+    if !place_tiles(&mut s, nid, &placed) {
+        send_error(stream, 404, "no tilemap data");
+        return;
+    }
+    let out: Vec<serde_json::Value> = placed
+        .iter()
+        .map(|((x, y), src, (ax, ay))| serde_json::json!({"cell": [x, y], "source_id": src, "atlas_coords": [ax, ay]}))
+        .collect();
+    send_json(stream, &serde_json::json!({"cells": out}).to_string());
+}
+
+/// `POST /api/tilemap/pattern/create` — capture `{"node_id","rect":[x,y,w,h]}`
+/// as a `TileMapPattern` (source ids AND atlas coords) → `{"pattern","size"}`.
+fn api_pattern_create(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = parse_json_body(body).unwrap_or(serde_json::Value::Null);
+    let rect: Vec<i32> = p
+        .get("rect")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_i64()).map(|v| v as i32).collect())
+        .unwrap_or_default();
+    let (Some(nr), [rx, ry, rw, rh]) = (p.get("node_id").and_then(|v| v.as_u64()), rect.as_slice()) else {
+        send_error(stream, 400, "missing node_id or rect [x,y,w,h]");
+        return;
+    };
+    if *rw <= 0 || *rh <= 0 {
+        send_error(stream, 400, "rect must have a positive size");
+        return;
+    }
+    let mut s = state.lock().unwrap();
+    let Some(nid) = find_node_by_raw_id(&s.scene_tree, nr) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+    let Some(grid) = s.tile_grid_store.get(nid) else {
+        send_error(stream, 404, "no tilemap data");
+        return;
+    };
+    let atlas = s.tile_atlas_coords.get(&nid);
+    let mut cells = Vec::new();
+    for dy in 0..*rh {
+        for dx in 0..*rw {
+            let (x, y) = (rx + dx, ry + dy);
+            if let Some(src) = grid.get(x, y).filter(|&t| t != 0) {
+                let (ax, ay) = atlas
+                    .and_then(|m| m.get(&(x, y)))
+                    .filter(|e| e.0 == src)
+                    .map(|e| (e.1, e.2))
+                    .unwrap_or((0, 0));
+                cells.push((dx, dy, src, ax, ay));
+            }
+        }
+    }
+    s.tile_patterns.push((*rw, *rh, cells));
+    let idx = s.tile_patterns.len() - 1;
+    send_json(stream, &serde_json::json!({"pattern": idx, "size": [rw, rh]}).to_string());
+}
+
+/// `POST /api/tilemap/pattern/paint` — stamp `{"node_id","pattern","at":[x,y]}`.
+fn api_pattern_paint(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let p = parse_json_body(body).unwrap_or(serde_json::Value::Null);
+    let (Some(nr), Some(idx), Some((ox, oy))) = (
+        p.get("node_id").and_then(|v| v.as_u64()),
+        json_i32(&p, "pattern"),
+        p.get("at").and_then(json_pair),
+    ) else {
+        send_error(stream, 400, "missing node_id, pattern or at");
+        return;
+    };
+    let mut s = state.lock().unwrap();
+    let Some(nid) = find_node_by_raw_id(&s.scene_tree, nr) else {
+        send_error(stream, 404, "node not found");
+        return;
+    };
+    let Some((_, _, cells)) = s.tile_patterns.get(idx as usize).cloned() else {
+        send_error(stream, 404, "no such pattern");
+        return;
+    };
+    let placed: Vec<((i32, i32), i32, (i32, i32))> =
+        cells.iter().map(|&(dx, dy, src, ax, ay)| ((ox + dx, oy + dy), src, (ax, ay))).collect();
+    if !place_tiles(&mut s, nid, &placed) {
+        send_error(stream, 404, "no tilemap data");
+        return;
+    }
+    send_json(stream, &serde_json::json!({"ok": true, "cells": placed.len()}).to_string());
 }
 
 fn api_tilemap_resize(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
