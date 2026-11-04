@@ -993,3 +993,9 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/ObjectResponse"
+  "/api/tileset/terrain_sets":
+    get:
+      summary: List terrain sets, terrains and captured patterns.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"

@@ -90,6 +90,13 @@ fn main() {
         i += 1;
     }
 
+    // Root res:// at the project (the cwd) BEFORE parsing: an external
+    // `tile_set = ExtResource(...)` `.tres` is resolved through it during the
+    // parse, and without it the level's TileMapLayer kept the 16px default.
+    if let Ok(cwd) = std::env::current_dir() {
+        gdeditor::editor_server::apply_project_path_roots(&cwd.to_string_lossy());
+    }
+
     // Load the scene.
     let source = std::fs::read_to_string(&scene_path)
         .unwrap_or_else(|e| panic!("Failed to read {scene_path}: {e}"));

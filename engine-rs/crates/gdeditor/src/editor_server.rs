@@ -494,6 +494,12 @@ pub struct EditorState {
     /// Captured `TileMapPattern`s: (width, height, cells as
     /// (dx, dy, source_id, atlas_x, atlas_y)).
     pub tile_patterns: Vec<(i32, i32, Vec<(i32, i32, i32, i32, i32)>)>,
+    /// What each grid cell held when the editor last synced with the node's
+    /// `tile_map_data` — `(source, alternative, atlas)` per cell. The
+    /// write-back MERGES: only cells whose state differs from this baseline
+    /// are rewritten, so cells the dense grid cannot represent (negative
+    /// coords, TileSet source 0 — which the grid uses for "empty") survive.
+    pub tile_grid_baseline: HashMap<NodeId, HashMap<(i32, i32), (i32, i32, (i32, i32))>>,
     /// Currently active editor mode: "2d", "3d", or "script".
     pub editor_mode: String,
     /// The editor mode that was active before Play switched to the game view.
@@ -1010,6 +1016,7 @@ impl EditorState {
             terrain_sets: Vec::new(),
             terrain_maps: HashMap::new(),
             tile_patterns: Vec::new(),
+            tile_grid_baseline: HashMap::new(),
             editor_mode: "2d".to_string(),
             pre_play_editor_mode: None,
             main_pane: crate::main_screen::MainPane::new(),
@@ -3286,6 +3293,7 @@ fn handle_connection(
         ("POST", "/api/tilemap/fill") => api_tilemap_fill(state, &req.body, &mut stream),
         ("POST", "/api/tilemap/line") => api_tilemap_line(state, &req.body, &mut stream),
         ("GET", "/api/tilemap/data") => api_tilemap_data(state, &req.query, &mut stream),
+        ("GET", "/api/tileset/terrain_sets") => api_terrain_sets(state, &mut stream),
         ("POST", "/api/tileset/terrain_set/add") => api_terrain_set_add(state, &req.body, &mut stream),
         ("POST", "/api/tileset/terrain/add") => api_terrain_add(state, &req.body, &mut stream),
         ("POST", "/api/tileset/tile/peering") => api_tile_peering(state, &req.body, &mut stream),
@@ -10433,6 +10441,11 @@ fn api_load_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
         }
     };
 
+    // External resources (a `.tres` TileSet) resolve through `res://` while
+    // the scene is parsed, so root it at the project first.
+    if let Some(root) = state.lock().unwrap().project_root.clone() {
+        apply_project_path_roots(&root);
+    }
     let scene = match PackedScene::from_tscn(&source) {
         Ok(s) => s,
         Err(e) => {
@@ -12870,6 +12883,7 @@ const CAPABILITIES: &[(&str, &str, &str, &str, &str)] = &[
     ("POST", "/api/filesystem/delete", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/filesystem/mkdir", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/script/save", "[]", "{\"path\":\"string\",\"source\":\"string\"}", "{\"type\":\"object\"}"),
+    ("GET", "/api/tileset/terrain_sets", "[]", "null", "{\"type\":\"object\",\"properties\":{\"terrain_sets\":\"array\",\"patterns\":\"array\"}}"),
     ("POST", "/api/tileset/terrain_set/add", "[]", "{\"mode\":\"string\"}", "{\"type\":\"object\",\"properties\":{\"terrain_set\":\"number\"}}"),
     ("POST", "/api/tileset/terrain/add", "[]", "{\"terrain_set\":\"number\",\"id\":\"number\",\"name\":\"string\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/tileset/tile/peering", "[]", "{\"terrain_set\":\"number\",\"terrain\":\"number\",\"bitmask\":\"number\",\"source_id\":\"number\",\"atlas_coords\":\"array\"}", "{\"type\":\"object\"}"),
@@ -14227,6 +14241,7 @@ fn api_open_project(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         s.asset_browser = dock;
         s.texture_cache.set_project_root(root_str.clone());
         s.project_root = Some(root_str.clone());
+        apply_project_path_roots(&root_str);
         // Create-dialog favorites/recent follow the project, like Godot's
         // per-project settings dir.
         s.create_node_dialog
@@ -18011,12 +18026,7 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     // and ConfigFile could not reach the project or its save directory. Set
     // before the tree is built, because `_ready` is where scripts load things.
     if let Some(root) = state.project_root.clone() {
-        let user = gdplatform::os::user_data_dir();
-        let user_dir = (!user.starts_with("user://")).then(|| std::path::PathBuf::from(user));
-        if let Some(dir) = &user_dir {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        gdcore::set_path_roots(Some(std::path::PathBuf::from(root)), user_dir);
+        apply_project_path_roots(&root);
     }
     // The global RNG, before any script runs. Godot 4 randomizes it at startup,
     // so a game that never calls `randomize()` still differs run to run; a
@@ -20894,11 +20904,47 @@ fn ensure_tile_grid(state: &mut EditorState, nid: NodeId, x: i32, y: i32) {
             }
         }
         None => {
-            let g = gdscene::tilemap::TileGrid::new(
-                need_w.max(TILE_GRID_MIN),
-                need_h.max(TILE_GRID_MIN),
-            );
+            // 🔑 Seed from the layer's EXISTING tiles. An empty grid here made
+            // the next write-back replace `tile_map_data` with only the newly
+            // painted cells: one brush stroke on a loaded level erased the
+            // whole level (and every cell's atlas coords).
+            let existing = state
+                .scene_tree
+                .get_node(nid)
+                .and_then(|n| match n.get_property("tile_map_data") {
+                    Variant::PackedByteArray(b) => Some(gdscene::tilemap::decode_tile_map_data(&b)),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let (mut w, mut h) = (need_w.max(TILE_GRID_MIN), need_h.max(TILE_GRID_MIN));
+            for c in existing.keys() {
+                if c.x >= 0 && c.y >= 0 {
+                    w = w.max(c.x as usize + 1);
+                    h = h.max(c.y as usize + 1);
+                }
+            }
+            let mut g = gdscene::tilemap::TileGrid::new(w, h);
+            let mut baseline = HashMap::new();
+            for (c, d) in &existing {
+                // Source 0 and negative coords stay out of the grid: the merge
+                // leaves them untouched.
+                if c.x < 0 || c.y < 0 || d.source_id == 0 {
+                    continue;
+                }
+                g.set(c.x, c.y, d.source_id);
+                let atlas = (d.atlas_coords.x, d.atlas_coords.y);
+                state
+                    .tile_atlas_coords
+                    .entry(nid)
+                    .or_default()
+                    .insert((c.x, c.y), (d.source_id, atlas.0, atlas.1));
+                if d.alternative_id != 0 {
+                    state.tile_alternatives.entry(nid).or_default().insert((c.x, c.y), d.alternative_id);
+                }
+                baseline.insert((c.x, c.y), (d.source_id, d.alternative_id, atlas));
+            }
             state.tile_grid_store.insert(nid, g);
+            state.tile_grid_baseline.insert(nid, baseline);
         }
     }
 }
@@ -20914,34 +20960,57 @@ fn writeback_tile_grid(state: &mut EditorState, nid: NodeId) {
     let Some(grid) = state.tile_grid_store.get(nid) else {
         return;
     };
-    // Rebuild Godot's sparse cell map from the dense grid, re-attaching each
-    // cell's transform bits. A cell whose tile has since been erased drops its
-    // alternative with it, because the record is not emitted at all.
     let alts = state.tile_alternatives.get(&nid);
     let atlas = state.tile_atlas_coords.get(&nid);
-    let mut cells: std::collections::HashMap<gdcore::math::Vector2i, gdscene::tilemap::TileData> =
-        std::collections::HashMap::new();
+    // The editor's view of one cell: (source, alternative, atlas). An atlas
+    // entry is honoured only while the cell still holds that source.
+    let view = |cx: i32, cy: i32, t: i32| -> (i32, i32, (i32, i32)) {
+        let alt = alts.and_then(|m| m.get(&(cx, cy))).copied().unwrap_or(0);
+        let a = atlas
+            .and_then(|m| m.get(&(cx, cy)))
+            .filter(|e| e.0 == t)
+            .map(|e| (e.1, e.2))
+            .unwrap_or((0, 0));
+        (t, alt, a)
+    };
+    // 🔑 MERGE onto the node's current cells rather than rebuild from the
+    // dense grid: a cell the grid cannot represent (negative coords, source 0
+    // = the grid's "empty") or did not change keeps its authored record.
+    let mut cells = state
+        .scene_tree
+        .get_node(nid)
+        .and_then(|n| match n.get_property("tile_map_data") {
+            Variant::PackedByteArray(b) => Some(gdscene::tilemap::decode_tile_map_data(&b)),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let baseline = state.tile_grid_baseline.get(&nid);
+    let mut new_baseline = HashMap::new();
     for y in 0..grid.height {
         for x in 0..grid.width {
+            let (cx, cy) = (x as i32, y as i32);
             let t = grid.cells[y * grid.width + x];
-            if t == 0 {
+            let now = if t == 0 { (0, 0, (0, 0)) } else { view(cx, cy, t) };
+            let before = baseline.and_then(|b| b.get(&(cx, cy))).copied().unwrap_or((0, 0, (0, 0)));
+            if t != 0 {
+                new_baseline.insert((cx, cy), now);
+            }
+            if now == before {
                 continue;
             }
-            let (cx, cy) = (x as i32, y as i32);
-            let mut data = match atlas.and_then(|m| m.get(&(cx, cy))).filter(|e| e.0 == t) {
-                Some(&(_, ax, ay)) => gdscene::tilemap::TileData::with_atlas(
-                    t,
-                    gdcore::math::Vector2i::new(ax, ay),
-                    0,
-                ),
-                None => gdscene::tilemap::TileData::new(t),
-            };
-            if let Some(a) = alts.and_then(|m| m.get(&(cx, cy))) {
-                data.alternative_id = *a;
+            let key = gdcore::math::Vector2i::new(cx, cy);
+            if t == 0 {
+                cells.remove(&key);
+            } else {
+                let (_, alt, (ax, ay)) = now;
+                cells.insert(
+                    key,
+                    gdscene::tilemap::TileData::with_atlas(t, gdcore::math::Vector2i::new(ax, ay), alt),
+                );
             }
-            cells.insert(gdcore::math::Vector2i::new(cx, cy), data);
         }
     }
+    state.tile_grid_baseline.insert(nid, new_baseline);
     let bytes = gdscene::tilemap::encode_tile_map_data(&cells);
     if let Some(node) = state.scene_tree.get_node_mut(nid) {
         node.set_property("tile_map_data", Variant::PackedByteArray(bytes));
@@ -21323,6 +21392,44 @@ fn json_pair(v: &serde_json::Value) -> Option<(i32, i32)> {
     Some((a.first()?.as_i64()? as i32, a.get(1)?.as_i64()? as i32))
 }
 
+/// `GET /api/tileset/terrain_sets` — every terrain set (mode, terrains with
+/// their mapped peering bitmasks) plus captured patterns, for the Terrains
+/// panel to rebuild from server state.
+fn api_terrain_sets(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    use gdscene::tilemap::TerrainMode as M;
+    let s = state.lock().unwrap();
+    let sets: Vec<serde_json::Value> = s
+        .terrain_sets
+        .iter()
+        .enumerate()
+        .map(|(i, ts)| {
+            let mode = match ts.mode {
+                M::MatchCornersAndSides => "match_corners_and_sides",
+                M::MatchCorners => "match_corners",
+                M::MatchSides => "match_sides",
+            };
+            let mut terrains: Vec<serde_json::Value> = ts
+                .terrains
+                .values()
+                .map(|t| {
+                    let mut masks: Vec<u8> = t.bitmask_tiles.keys().copied().collect();
+                    masks.sort_unstable();
+                    serde_json::json!({"id": t.id, "name": t.name, "bitmasks": masks})
+                })
+                .collect();
+            terrains.sort_by_key(|t| t["id"].as_i64());
+            serde_json::json!({"terrain_set": i, "mode": mode, "terrains": terrains})
+        })
+        .collect();
+    let patterns: Vec<serde_json::Value> = s
+        .tile_patterns
+        .iter()
+        .enumerate()
+        .map(|(i, (w, h, cells))| serde_json::json!({"pattern": i, "size": [w, h], "cells": cells.len()}))
+        .collect();
+    send_json(stream, &serde_json::json!({"terrain_sets": sets, "patterns": patterns}).to_string());
+}
+
 /// `POST /api/tileset/terrain_set/add` — `{"mode"}` → `{"terrain_set": idx}`.
 fn api_terrain_set_add(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let p = parse_json_body(body).unwrap_or(serde_json::Value::Null);
@@ -21387,6 +21494,17 @@ fn api_tile_peering(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
 
 /// Writes `(cell, source, atlas)` placements into a layer's grid + atlas map.
 fn place_tiles(state: &mut EditorState, nid: NodeId, placed: &[((i32, i32), i32, (i32, i32))]) -> bool {
+    let is_layer = state
+        .scene_tree
+        .get_node(nid)
+        .is_some_and(|n| matches!(n.class_name(), "TileMapLayer" | "TileMap"));
+    if !is_layer {
+        return false;
+    }
+    // A layer loaded from a scene has no editor grid until something paints:
+    // create it SEEDED from its tiles, sized to cover every placement.
+    let (mx, my) = placed.iter().fold((0, 0), |(a, b), &((x, y), _, _)| (a.max(x), b.max(y)));
+    ensure_tile_grid(state, nid, mx, my);
     let Some(grid) = state.tile_grid_store.get_mut(nid) else {
         return false;
     };
@@ -21589,9 +21707,22 @@ fn api_tilemap_tileset(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) 
         }
     };
     let tiles: Vec<serde_json::Value> = ts.tile_ids_sorted().iter().filter_map(|&id| { let t = ts.get_tile(id)?; Some(serde_json::json!({"id":t.id,"name":t.name,"color":format!("#{:02X}{:02X}{:02X}",(t.color.r*255.0) as u8,(t.color.g*255.0) as u8,(t.color.b*255.0) as u8),"collision":t.collision})) }).collect();
+    // 🔑 The CELL SIZE is the selected layer's own TileSet `tile_size` when it
+    // has one (flattened onto the node at load). The palette's default 16px
+    // made every viewport click on a real 64px TileSet land four cells away
+    // from the cursor — off-screen on the platformer demo's level.
+    let layer_size = s
+        .selected_node
+        .and_then(|id| s.scene_tree.get_node(id))
+        .and_then(|n| match n.get_property(gdscene::tilemap::TILE_SET_TILE_SIZE) {
+            Variant::Vector2i(v) if v.x > 0 && v.y > 0 => Some((v.x as f32, v.y as f32)),
+            Variant::Vector2(v) if v.x > 0.0 && v.y > 0.0 => Some((v.x, v.y)),
+            _ => None,
+        });
+    let (cw, ch) = layer_size.unwrap_or((ts.cell_size.x as f32, ts.cell_size.y as f32));
     send_json(
         stream,
-        &serde_json::json!({"cell_size":[ts.cell_size.x,ts.cell_size.y],"tiles":tiles}).to_string(),
+        &serde_json::json!({"cell_size":[cw,ch],"tiles":tiles}).to_string(),
     );
 }
 
@@ -24576,6 +24707,23 @@ fn api_open_scene_tab(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
             tab_id, s.active_tab_index
         ),
     );
+}
+
+/// Roots gdcore's process-wide `res://` (and `user://`) at the editor's
+/// project. Loading a scene resolves its external resources through these
+/// roots — a `tile_set = ExtResource(...)` `.tres` is read via `res://` while
+/// the scene is parsed — so they must be set before ANY scene load, not just
+/// at Play. Only Play used to set them, so a scene opened for EDITING kept an
+/// unresolved TileSet: the layer reported the 16px default tile size and
+/// every viewport click on the platformer demo's 64px level painted four
+/// cells away from the cursor, with no atlas sources in the TileSet panel.
+pub fn apply_project_path_roots(root: &str) {
+    let user = gdplatform::os::user_data_dir();
+    let user_dir = (!user.starts_with("user://")).then(|| std::path::PathBuf::from(user));
+    if let Some(dir) = &user_dir {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    gdcore::set_path_roots(Some(std::path::PathBuf::from(root)), user_dir);
 }
 
 /// Loads and instantiates a `.tscn` from `path` into a fresh `SceneTree`.

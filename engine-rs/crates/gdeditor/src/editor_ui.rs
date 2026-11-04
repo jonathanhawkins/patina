@@ -2608,7 +2608,11 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
              panel + paint tool, editor/plugins/tiles/). Shown only when a
              TileMapLayer/TileMap node is selected; the palette is built from
              GET /api/tilemap/tileset and painting POSTs /api/tilemap/paint. -->
-        <div id="tilemap-palette" style="display:none;position:absolute;top:40px;right:8px;width:184px;max-height:60%;overflow:auto;background:var(--panel-bg,#252525);border:1px solid var(--border,#111);border-radius:4px;padding:6px;z-index:6;font-size:11px;">
+        <div id="tilemap-palette" style="display:none;position:absolute;top:40px;right:8px;width:184px;max-height:60%;overflow-y:auto;overflow-x:hidden;background:var(--panel-bg,#252525);border:1px solid var(--border,#111);border-radius:4px;padding:6px;z-index:6;font-size:11px;">
+          <!-- The palette is 184px wide: let every row wrap and every input
+               shrink, or a too-wide row (the Atlas Source rows were 223px)
+               makes the panel scroll sideways whenever a control is focused. -->
+          <style>#tilemap-palette div[style*="display:flex"]{flex-wrap:wrap}#tilemap-palette input,#tilemap-palette select{min-width:0;max-width:100%;box-sizing:border-box}</style>
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
             <span style="font-weight:bold;">TileSet</span>
             <button id="tilemap-paint-toggle" title="Toggle tile paint mode: when on, clicking the 2D viewport paints the active tile." style="font-size:10px;">Paint: off</button>
@@ -2623,6 +2627,39 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
             <button class="tile-tool" data-tool="rect" title="Rectangle (drag a filled rectangle)">&#9645;</button>
             <button class="tile-tool" data-tool="line" title="Line (drag a straight run of cells)">&#9585;</button>
             <button class="tile-tool" data-tool="picker" title="Picker (adopt the tile under the cursor)">&#128167;</button>
+            <button class="tile-tool" data-tool="terrain" title="Terrain (Connect mode): paint the selected terrain; neighbours re-resolve">&#9638;</button>
+            <button class="tile-tool" data-tool="pattern" title="Pattern: stamp the selected pattern at the cell">&#9641;</button>
+          </div>
+          <!-- pat-mgixk.112: Godot's TileSet terrain sets (TileSet.terrain_set_*)
+               and the tiles editor's Terrains / Patterns tabs. A terrain's
+               peering bitmask maps to the ACTIVE tile at the atlas coords below. -->
+          <div id="terrain-editor" style="margin-bottom:6px;border-top:1px solid var(--border,#111);padding-top:5px;">
+            <div style="font-weight:bold;margin-bottom:3px;">Terrains</div>
+            <div style="display:flex;gap:3px;margin-bottom:3px;">
+              <select id="terrain-mode" title="Terrain mode for a new set" style="font-size:10px;flex:1;min-width:0;">
+                <option value="match_corners_and_sides">Corners and Sides</option>
+                <option value="match_corners">Corners</option>
+                <option value="match_sides">Sides</option>
+              </select>
+              <button id="terrain-set-add" title="Add a terrain set">+ Set</button>
+            </div>
+            <!-- One control group per row: the palette is 184px wide, and a
+                 three-control row clipped its button off the panel. -->
+            <select id="terrain-set" title="Terrain set" style="font-size:10px;width:100%;margin-bottom:3px;"></select>
+            <div style="display:flex;gap:3px;margin-bottom:3px;">
+              <input id="terrain-name" placeholder="terrain name" style="flex:1;min-width:0;font-size:10px;">
+              <button id="terrain-add" title="Add a terrain to the set">+ Terrain</button>
+            </div>
+            <select id="terrain-type" title="Terrain to paint" style="font-size:10px;width:100%;margin-bottom:3px;"></select>
+            <div style="display:flex;gap:3px;margin-bottom:3px;">
+              <input id="terrain-bitmask" type="number" min="0" max="255" value="0" title="Peering bitmask (MatchSides: T=1 R=2 B=4 L=8)" style="flex:1;min-width:0;font-size:10px;">
+              <button id="terrain-peering" title="Map this peering bitmask to the active tile at the atlas coords below">Peering</button>
+            </div>
+            <div style="display:flex;gap:3px;align-items:center;">
+              <button id="pattern-capture" title="Capture the last Rectangle-tool drag as a pattern">Capture</button>
+              <select id="pattern-select" title="Pattern to stamp" style="font-size:10px;flex:1;min-width:0;"></select>
+            </div>
+            <div id="terrain-status" style="opacity:0.7;margin-top:2px;overflow-wrap:anywhere;"></div>
           </div>
           <div style="display:flex;gap:3px;align-items:center;margin-bottom:5px;">
             <button id="tilemap-flip-h" title="Flip the placed tile horizontally (Godot alternative-tile flag)">Flip H</button>
@@ -7189,6 +7226,14 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     refreshSubEditorHandles();
   }
 
+  // The WORLD point under a viewport event: the inverse of the server's
+  // `scene_renderer::camera_offset_with_zoom_pan` (what its own picking uses).
+  function viewportWorldAt(e) {
+    var c = viewportCoords(e);
+    var w = viewportImg.naturalWidth, h = viewportImg.naturalHeight;
+    return { x: (c.x - viewOriginX(w)) / viewportZoom, y: (c.y - viewOriginY(h)) / viewportZoom };
+  }
+
   function viewportCoords(e) {
     var rect = viewportImg.getBoundingClientRect();
     var scaleX = viewportImg.naturalWidth / rect.width;
@@ -7615,6 +7660,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       })(tiles[i]);
     }
     buildTileSetEditor();
+    refreshTerrainPanel();
   }
 
   // pat-s3rrv.65: the TileSet atlas-source editor.
@@ -7836,11 +7882,15 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     if (lbl) lbl.textContent = 'alt ' + tileAlternative;
   }
 
-  // The grid cell under a viewport event.
+  // The grid cell under a viewport event. 🔑 `viewportCoords` is IMAGE
+  // pixels; a cell is a WORLD position over the tile size. Dividing the raw
+  // pixel by the tile size was right only at 100% zoom, zero pan and a scene
+  // whose bounds centre on the origin — on the platformer demo's level at 64%
+  // a click painted three cells up and left of the cursor.
   function tileCellAtEvent(e) {
-    var c = viewportCoords(e);
+    var w = viewportWorldAt(e);
     var cs = tilesetCellSize > 0 ? tilesetCellSize : 16;
-    return { x: Math.floor(c.x / cs), y: Math.floor(c.y / cs) };
+    return { x: Math.floor(w.x / cs), y: Math.floor(w.y / cs) };
   }
 
   // Paint the active tile at the cell under a 2D viewport click, then refresh
@@ -7883,6 +7933,8 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     tileStrokeSeen = {};
     if (e.button === 2 || tileTool === 'erase') { tileStrokeSeen[cell.x + ',' + cell.y] = 1; await eraseTileAtEvent(e); return; }
     if (tileTool === 'picker') { await pickTileAtEvent(e); return; }
+    if (tileTool === 'terrain') { tileStrokeSeen[cell.x + ',' + cell.y] = 1; await terrainPaintCell(cell); return; }
+    if (tileTool === 'pattern') { await patternStampAt(cell); return; }
     if (tileTool === 'bucket') {
       await api('POST', '/api/tilemap/fill', { node_id: selectedNodeId, mode: 'bucket', x: cell.x, y: cell.y, tile_id: activeTileId });
       refreshViewport();
@@ -7896,11 +7948,12 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   // continuously while the button is held).
   async function tileToolMove(e) {
     if (!tileDragAnchor || !tileStrokeSeen) return;
-    if (tileTool !== 'paint' && tileTool !== 'erase' && e.button !== 2) return;
+    if (tileTool !== 'paint' && tileTool !== 'erase' && tileTool !== 'terrain' && e.button !== 2) return;
     var cell = tileCellAtEvent(e);
     var key = cell.x + ',' + cell.y;
     if (tileStrokeSeen[key]) return;
     tileStrokeSeen[key] = 1;
+    if (tileTool === 'terrain') { await terrainPaintCell(cell); return; }
     if (tileTool === 'erase') await eraseTileAtEvent(e); else await paintTileAtEvent(e);
   }
 
@@ -7912,6 +7965,9 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     if (!isTileMapNodeSelected()) return;
     var cell = tileCellAtEvent(e);
     if (tileTool === 'rect') {
+      // Remembered so "Capture" can turn the last rectangle into a pattern.
+      lastTileRect = [Math.min(anchor.x, cell.x), Math.min(anchor.y, cell.y),
+        Math.abs(cell.x - anchor.x) + 1, Math.abs(cell.y - anchor.y) + 1];
       // The rect route is atomic server-side, so the whole drag is ONE undo
       // entry rather than one per cell.
       await api('POST', '/api/tilemap/fill', { node_id: selectedNodeId, x1: anchor.x, y1: anchor.y, x2: cell.x, y2: cell.y, tile_id: activeTileId });
@@ -7922,7 +7978,86 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     }
   }
 
+  // --- Terrains & patterns (pat-mgixk.112) ---------------------------------
+  var lastTileRect = null;
+  function terrainStatus(msg) { var el = document.getElementById('terrain-status'); if (el) el.textContent = msg || ''; }
+  function selVal(id) { var el = document.getElementById(id); return el && el.value !== '' ? parseInt(el.value, 10) : null; }
+  async function refreshTerrainPanel() {
+    var d = await api('GET', '/api/tileset/terrain_sets');
+    if (!d) return;
+    var setSel = document.getElementById('terrain-set'), typeSel = document.getElementById('terrain-type'), patSel = document.getElementById('pattern-select');
+    if (!setSel || !typeSel || !patSel) return;
+    var keepSet = setSel.value, keepType = typeSel.value, keepPat = patSel.value;
+    setSel.innerHTML = '';
+    (d.terrain_sets || []).forEach(function(ts) {
+      var o = document.createElement('option'); o.value = ts.terrain_set; o.textContent = 'Set ' + ts.terrain_set + ' (' + ts.mode.replace(/_/g, ' ') + ')'; setSel.appendChild(o);
+    });
+    if (keepSet !== '' && setSel.querySelector('option[value="' + keepSet + '"]')) setSel.value = keepSet;
+    var cur = (d.terrain_sets || []).filter(function(ts) { return String(ts.terrain_set) === setSel.value; })[0];
+    typeSel.innerHTML = '';
+    ((cur && cur.terrains) || []).forEach(function(t) {
+      var o = document.createElement('option'); o.value = t.id; o.textContent = t.name + ' (' + t.bitmasks.length + ' tiles)'; typeSel.appendChild(o);
+    });
+    if (keepType !== '' && typeSel.querySelector('option[value="' + keepType + '"]')) typeSel.value = keepType;
+    patSel.innerHTML = '';
+    (d.patterns || []).forEach(function(p) {
+      var o = document.createElement('option'); o.value = p.pattern; o.textContent = 'Pattern ' + p.pattern + ' (' + p.size[0] + 'x' + p.size[1] + ')'; patSel.appendChild(o);
+    });
+    if (keepPat !== '' && patSel.querySelector('option[value="' + keepPat + '"]')) patSel.value = keepPat;
+  }
+  async function terrainPaintCell(cell) {
+    var set = selVal('terrain-set'), terrain = selVal('terrain-type');
+    if (set === null || terrain === null) { terrainStatus('Add a terrain set and a terrain first'); return; }
+    var r = await api('POST', '/api/tilemap/terrain_paint', { node_id: selectedNodeId, terrain_set: set, terrain: terrain, cells: [[cell.x, cell.y]] });
+    terrainStatus(r && r.cells ? ('Connect: ' + r.cells.length + ' cell(s) resolved') : 'Terrain paint failed');
+    refreshViewport();
+  }
+  async function patternStampAt(cell) {
+    var pat = selVal('pattern-select');
+    if (pat === null) { terrainStatus('Capture a pattern first'); return; }
+    var r = await api('POST', '/api/tilemap/pattern/paint', { node_id: selectedNodeId, pattern: pat, at: [cell.x, cell.y] });
+    terrainStatus(r && r.ok ? ('Stamped ' + r.cells + ' cell(s)') : 'Stamp failed');
+    refreshViewport();
+  }
+  function wireTerrainPanel() {
+    var on = function(id, fn) { var el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
+    on('terrain-set-add', async function() {
+      var mode = document.getElementById('terrain-mode').value;
+      var r = await api('POST', '/api/tileset/terrain_set/add', { mode: mode });
+      await refreshTerrainPanel();
+      if (r && r.terrain_set !== undefined) { document.getElementById('terrain-set').value = r.terrain_set; await refreshTerrainPanel(); }
+    });
+    on('terrain-add', async function() {
+      var set = selVal('terrain-set'); if (set === null) { terrainStatus('Add a terrain set first'); return; }
+      var cur = await api('GET', '/api/tileset/terrain_sets');
+      var ts = (cur.terrain_sets || []).filter(function(t) { return t.terrain_set === set; })[0];
+      var id = ts ? ts.terrains.length : 0;
+      var name = document.getElementById('terrain-name').value || ('Terrain ' + id);
+      await api('POST', '/api/tileset/terrain/add', { terrain_set: set, id: id, name: name });
+      await refreshTerrainPanel();
+      document.getElementById('terrain-type').value = id;
+    });
+    on('terrain-peering', async function() {
+      var set = selVal('terrain-set'), terrain = selVal('terrain-type');
+      if (set === null || terrain === null) { terrainStatus('Pick a terrain first'); return; }
+      var ax = parseInt(document.getElementById('tileset-tile-x').value || '0', 10), ay = parseInt(document.getElementById('tileset-tile-y').value || '0', 10);
+      var mask = parseInt(document.getElementById('terrain-bitmask').value || '0', 10);
+      var r = await api('POST', '/api/tileset/tile/peering', { terrain_set: set, terrain: terrain, bitmask: mask, source_id: activeTileId, atlas_coords: [ax, ay] });
+      terrainStatus(r && r.ok ? ('Mask ' + mask + ' -> tile ' + activeTileId + ' @ (' + ax + ',' + ay + ')') : 'Peering failed');
+      await refreshTerrainPanel();
+    });
+    on('pattern-capture', async function() {
+      if (!lastTileRect) { terrainStatus('Drag a rectangle with the Rectangle tool first'); return; }
+      var r = await api('POST', '/api/tilemap/pattern/create', { node_id: selectedNodeId, rect: lastTileRect });
+      await refreshTerrainPanel();
+      if (r && r.pattern !== undefined) { document.getElementById('pattern-select').value = r.pattern; terrainStatus('Captured ' + r.size[0] + 'x' + r.size[1]); }
+    });
+    var setSel = document.getElementById('terrain-set');
+    if (setSel) setSel.addEventListener('change', refreshTerrainPanel);
+  }
+
   function wireTileTools() {
+    wireTerrainPanel();
     var btns = document.querySelectorAll('.tile-tool');
     for (var i = 0; i < btns.length; i++) {
       (function(b) {
@@ -8492,13 +8627,11 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) {
         cursorEl.style.display = 'none'; return;
       }
-      var scaleX = viewportImg.naturalWidth / rect.width;
-      var scaleY = viewportImg.naturalHeight / rect.height;
-      var px = Math.round((e.clientX - rect.left) * scaleX);
-      var py = Math.round((e.clientY - rect.top) * scaleY);
-      // Convert pixel coords to world coords using zoom/pan
-      var wx = Math.round((px - viewportPanX) / viewportZoom);
-      var wy = Math.round((py - viewportPanY) / viewportZoom);
+      // World coords as the server frames them (zoom, pan AND the scene-bounds
+      // centre — the readout used to omit the centre and was off by it).
+      var wp = viewportWorldAt(e);
+      var wx = Math.round(wp.x);
+      var wy = Math.round(wp.y);
       cursorPosEl.textContent = '(' + wx + ', ' + wy + ')';
       cursorEl.style.display = '';
     });

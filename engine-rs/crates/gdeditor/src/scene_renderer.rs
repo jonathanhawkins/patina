@@ -600,6 +600,32 @@ fn instance_preview_items(
     out
 }
 
+/// Merges `previews` into the already-ordered `items` without reordering
+/// `items` itself (its control interleave is deliberate): each preview goes
+/// before the first item whose (canvas layer, z) is GREATER, so a preview on
+/// a lower CanvasLayer draws behind the scene and an equal-key one keeps the
+/// old drawn-last-within-its-key placement.
+fn merge_previews_by_layer_and_z(
+    items: Vec<crate::viewport_2d_render::Render2DItem>,
+    mut previews: Vec<crate::viewport_2d_render::Render2DItem>,
+) -> Vec<crate::viewport_2d_render::Render2DItem> {
+    if previews.is_empty() {
+        return items;
+    }
+    previews.sort_by_key(|p| (p.canvas_layer, p.z_index));
+    let mut out = Vec::with_capacity(items.len() + previews.len());
+    let mut pending = previews.into_iter().peekable();
+    for item in items {
+        let key = (item.canvas_layer, item.z_index);
+        while pending.peek().is_some_and(|p| (p.canvas_layer, p.z_index) < key) {
+            out.push(pending.next().unwrap());
+        }
+        out.push(item);
+    }
+    out.extend(pending);
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_scene_inner(
     tree: &SceneTree,
@@ -713,9 +739,17 @@ fn render_scene_inner_with_previews(
     // Interleaved at each Control's tree position — layer, then z, then tree
     // order, as Play does — rather than appended above everything.
     let mut items = crate::viewport_2d_render::merge_control_items(tree, items, control_items);
-    // Instanced sub-scene previews (see `render_scene_with_instance_previews`).
-    // Appended: the raster's stable (layer, z) sort places them.
-    items.extend(previews);
+    // Instanced sub-scene previews (see `render_scene_with_instance_previews`),
+    // merged in by (canvas layer, z).
+    //
+    // 🔑 NOT appended. The comment here used to say "the raster's stable
+    // (layer, z) sort places them" — there is no such sort: the ONLY
+    // `(canvas_layer, z_index)` sort is inside `build_runtime_render_list`, and
+    // `render_canvas_from_list` draws its list in the order given. So every
+    // preview drew on top of the whole edited scene: the platformer demo's
+    // instanced ParallaxBackground (CanvasLayer -100) covered its entire
+    // TileMapLayer, and the level looked like empty sky while editing.
+    let mut items = merge_previews_by_layer_and_z(items, previews);
     // The editor's view stands in for Play's Camera2D + window stretch.
     //
     // ⚠️ It MUST reuse the same `z` and `offset_*` the grid was drawn with
