@@ -20919,33 +20919,29 @@ fn is_tilemap_class(class_name: &str) -> bool {
     class_name == "TileMapLayer" || class_name == "TileMap"
 }
 
-/// Populates `tile_grid_store` from every tile layer in the current scene.
+/// Drops every tile layer's grid cache when a scene loads.
 ///
-/// Called on scene load, mirroring `sync_animations_from_scene`. Before this the
-/// store was never filled from a scene, so every paint into a freshly-opened
-/// `.tscn` hit `get_mut(nid) == None` and was silently discarded.
+/// ⚠️ It used to BUILD each grid here with `TileGrid::from_tile_map_data` —
+/// cells only, with no baseline and no atlas / alternative maps. The first
+/// write-back then saw every cell as changed and rewrote it from those empty
+/// maps, so ANY edit (even erasing one cell somewhere else) reset every
+/// flipped or rotated tile in a real level to alternative 0: the platformer
+/// demo lost the transform of 14 cells on its first erase. Grids are seeded
+/// lazily by [`ensure_tile_grid`], which records all three maps — every tool
+/// route calls it before touching the grid.
 fn sync_tile_grids_from_scene(state: &mut EditorState) {
     let mut ids = Vec::new();
     state
         .scene_tree
         .collect_subtree_top_down(state.scene_tree.root_id(), &mut ids);
-    for nid in ids {
-        let Some(node) = state.scene_tree.get_node(nid) else {
-            continue;
-        };
-        if !is_tilemap_class(node.class_name()) {
-            continue;
-        }
-        let Variant::PackedByteArray(bytes) = node.get_property("tile_map_data") else {
-            continue;
-        };
-        let (w, h) = gdscene::tilemap::tile_map_data_extent(&bytes);
-        // An empty layer still gets a canvas so the first paint lands somewhere.
-        let (w, h) = (w.max(TILE_GRID_MIN), h.max(TILE_GRID_MIN));
-        state.tile_grid_store.insert(
-            nid,
-            gdscene::tilemap::TileGrid::from_tile_map_data(&bytes, w, h),
-        );
+    // A reload can reuse node ids, so a cache from the previous scene must not
+    // survive into this one.
+    let stale: Vec<NodeId> = ids
+        .into_iter()
+        .chain(state.tile_grid_baseline.keys().copied().collect::<Vec<_>>())
+        .collect();
+    for nid in stale {
+        invalidate_tile_grid(state, nid);
     }
 }
 
@@ -21765,6 +21761,14 @@ fn api_pattern_create(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
         send_error(stream, 404, "node not found");
         return;
     };
+    // Seeded on demand (see `sync_tile_grids_from_scene`).
+    if s.tile_grid_store.get(nid).is_none()
+        && s.scene_tree.get_node(nid).is_some_and(|n| {
+            is_tilemap_class(n.class_name()) && matches!(n.get_property("tile_map_data"), Variant::PackedByteArray(_))
+        })
+    {
+        ensure_tile_grid(&mut s, nid, 0, 0);
+    }
     let Some(grid) = s.tile_grid_store.get(nid) else {
         send_error(stream, 404, "no tilemap data");
         return;

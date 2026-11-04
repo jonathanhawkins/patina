@@ -1,0 +1,12 @@
+{
+  "scene": "scenes/title.tscn",
+  "keys": "wait:800,Enter:300,wait:800,ArrowRight:1000,ArrowDown:1000",
+  "watch": ["/root/Main/Player:position"],
+  "audio": 3,
+  "min_fps": 45,
+  "max_audio_underruns": 0,
+  "expect": [
+    { "watch": "/root/Main/Player:position", "after": "ArrowRight:1000", "axis": 0, "change": "increase" },
+    { "watch": "/root/Main/Player:position", "after": "ArrowDown:1000", "axis": 1, "change": "increase" }
+  ]
+}

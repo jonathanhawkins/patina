@@ -48,6 +48,9 @@ pub trait GodotObject {
 /// `ObjectBase` stores the identity and property bag. Concrete object types
 /// embed this struct and delegate `GodotObject` methods to it, adding their
 /// own typed fields on top.
+/// Most notifications an object's log keeps (the oldest half is dropped at the cap).
+pub const OBJECT_NOTIFICATION_LOG_CAP: usize = 8192;
+
 #[derive(Debug, Clone)]
 pub struct ObjectBase {
     /// The unique instance ID, assigned at creation.
@@ -209,6 +212,11 @@ impl ObjectBase {
 
     /// Records a notification and returns a reference to the log.
     pub fn record_notification(&mut self, what: Notification) {
+        // Bounded like `gdscene::Node`'s log: drop the oldest half at the cap
+        // so a long-lived object cannot grow its log without end.
+        if self.notification_log.len() >= OBJECT_NOTIFICATION_LOG_CAP {
+            self.notification_log.drain(..OBJECT_NOTIFICATION_LOG_CAP / 2);
+        }
         self.notification_log.push(what);
     }
 

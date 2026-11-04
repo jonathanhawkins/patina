@@ -65,7 +65,31 @@ scripts/browser-playtest.mjs --url http://localhost:9400/editor \
 - Every DevTools call has a 30 s deadline and the whole run a budget (2 min +
   the steps + 4× the profile); on expiry it stops Play and exits 2, so a run
   can no longer sit silent for hours.
+- `--edit-steps "select:TileMapLayer,wait:1500"` acts in the EDIT view before
+  Play (expanding the scene tree to reach the row). Then every image the page
+  references is fetched; one that does not load is a problem. That is how a
+  404 on the tile palette's thumbnails shows up.
+- `--soak 180` keeps playing for that long after the steps and samples memory
+  and render time every 10 s. Growth above 10 MB/min, or render time up by
+  30% and 3 ms, is a problem. It caught two leaks the 5 s runs never could.
+- A 4xx from the editor's own `/api/` is a problem, not a warning.
+- The report records the editor's age and memory and the host load. It warns
+  when the editor is older than 1 h, holds more than 1.5 GB, or the load
+  exceeds the CPU count.
 - Exit status 0 = no problems, 1 = problems, 2 = could not run.
+
+### The gate: every real game, every time
+
+`node scripts/playtest-gate.mjs` runs each `games/<game>/playtest.json`
+scenario on a fresh release editor and judges it: `expect` rules (a watched
+value must increase, decrease or change across a step), errors, broken
+images, fps, `game-bound`/`render-bound`, audio underruns, and render time
+against `scripts/playtest-baselines.json`. Busy-host perf failures are re-run
+once, then reported INCONCLUSIVE (exit 3). `--file-beads` files one `br` bug
+per failing game; `--soak 180` adds the soak. Results go to
+`.playtest-gate/latest.json`, which the planner reads. Add a `playtest.json`
+to every new game in `games/`.
+
 - It launches its own headless Chrome (throwaway profile, free port) and kills
   only that one. The person's Chrome is never touched, and no extension is
   needed, which matters when Claude in Chrome isn't connected.

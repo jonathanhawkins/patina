@@ -19,6 +19,7 @@ mod subresource_inline_loading_test;
 mod subviewport_viewport_texture_test;
 mod test_scripts_frame_evolution_461_test;
 mod texture_atlas_sampling_parity_test;
+mod servers_bind_before_start_returns_test;
 mod texture_draw_sprite_parity_test;
 mod tilemap_editor_painting_test;
 mod tilemap_parity_test;

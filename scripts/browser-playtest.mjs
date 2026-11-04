@@ -31,6 +31,16 @@
 //   --min-fps <n>         frames shown per second below this is a problem (45)
 //   --profile <seconds>   also sample the editor process while playing and list
 //                         its hottest functions (macOS `sample`)
+//   --edit-steps <spec>   actions in the EDIT view before Play, comma-separated:
+//                         `select:<node name>` clicks that scene-tree row,
+//                         `wait:<ms>`. Every image the page then references is
+//                         fetched (e.g. tile palette thumbnails) — a broken one
+//                         is a problem
+//   --soak <seconds>      keep playing that long after the steps, sampling the
+//                         editor's render time and memory every 10 s; steady
+//                         growth in either is a problem
+//   --budget-ms <ms>      give up (exit 2, Play stopped) after this long
+//                         (default: 2 min + the steps + soak + 4x the profile)
 //   --out <dir>           screenshots and report.json (default: a temp dir)
 //   --cdp <port>          drive an already running Chrome's DevTools port
 //   --keep-running        leave the game running afterwards
@@ -67,6 +77,9 @@ function parseArgs(argv) {
     audio: 0,
     json: false,
     watch: [],
+    editSteps: '',
+    soak: 0,
+    budgetMs: 0,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -84,6 +97,9 @@ function parseArgs(argv) {
     else if (a === '--keep-running') opts.keepRunning = true;
     else if (a === '--audio') opts.audio = Number(value());
     else if (a === '--json') opts.json = true;
+    else if (a === '--edit-steps') opts.editSteps = value();
+    else if (a === '--soak') opts.soak = Number(value());
+    else if (a === '--budget-ms') opts.budgetMs = Number(value());
     else if (a === '-h' || a === '--help') {
       console.log(usage());
       process.exit(0);
@@ -253,6 +269,25 @@ function editorPid(port) {
   }
 }
 
+// How long the editor process has run and how much memory it holds. A
+// long-lived editor misleads a measurement: one that had played for 6.5 hours
+// rendered the platformer at 25 ms a frame where a fresh one took 15 ms.
+function processInfo(pid) {
+  if (!pid) return null;
+  try {
+    const [etime, rss] = execFileSync('ps', ['-o', 'etime=,rss=', '-p', String(pid)], { stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString().trim().split(/\s+/);
+    // etime is [[dd-]hh:]mm:ss
+    const [days, rest] = etime.includes('-') ? etime.split('-') : ['0', etime];
+    const parts = rest.split(':').map(Number);
+    while (parts.length < 3) parts.unshift(0);
+    const age_s = Number(days) * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2];
+    return { pid: Number(pid), age_s, rss_mb: Math.round(Number(rss) / 1024) };
+  } catch {
+    return null;
+  }
+}
+
 // Waiting in the kernel is not work: these are the idle leaves of a sample.
 const IDLE = /^(__semwait_signal|semaphore_|__psynch_|mach_msg|__workq_kernreturn|kevent|__select|__accept|__recvfrom|__recvmsg|__read_nocancel|read|__ulock_wait|_pthread_cond_wait|__sigsuspend|__wait4|poll|__poll)/;
 
@@ -316,7 +351,7 @@ async function main() {
   // A whole-run deadline on top of the per-call ones: the run's own waits
   // (key steps, profile, settle) plus generous slack. On expiry Play is
   // stopped so the editor is not left running a game nobody watches.
-  const budgetMs = 120000 + steps.reduce((a, s) => a + (s.ms || 0), 0) + (opts.profile || 0) * 1000 * 4;
+  const budgetMs = opts.budgetMs || 120000 + steps.reduce((a, s) => a + (s.ms || 0), 0) + (opts.soak || 0) * 1000 + (opts.profile || 0) * 1000 * 4;
   setTimeout(async () => {
     console.error(`browser-playtest: no result after ${Math.round(budgetMs / 1000)}s — giving up`);
     try { await fetch(`${api}/api/runtime/stop`, { method: 'POST' }); } catch {}
@@ -328,6 +363,20 @@ async function main() {
     url: opts.url, build: before.build || 'unknown', keys: opts.keys, problems: [], warnings: [],
     frames: [], http_errors: [], exceptions: [], console_errors: [], steps: [],
   };
+  const pid = editorPid(editorUrl.port || 80);
+  report.editor_process = processInfo(pid);
+  if (report.editor_process?.age_s > 3600) {
+    report.warnings.push(`the editor has been running ${Math.round(report.editor_process.age_s / 3600)} h — restart it before trusting a timing (scripts/editor-bg.sh start …)`);
+  }
+  if (report.editor_process?.rss_mb > 1536) {
+    report.warnings.push(`the editor holds ${report.editor_process.rss_mb} MB — restart it before trusting a timing`);
+  }
+  // Other work on the host slows every number here; record it so a reader (and
+  // the gate) can tell a regression from a busy machine.
+  report.host = { load1: +os.loadavg()[0].toFixed(2), cpus: os.cpus().length };
+  if (report.host.load1 > report.host.cpus) {
+    report.warnings.push(`host load ${report.host.load1} exceeds ${report.host.cpus} CPUs — frame rates are not representative`);
+  }
   const urls = new Map();
   const sizes = [];
   tab.on((msg) => {
@@ -375,6 +424,54 @@ async function main() {
     };
     report.screenshots = [await shot('start')];
 
+    // Edit-view actions, then: does every image the page references load?
+    for (const raw of opts.editSteps.split(',').map((x) => x.trim()).filter(Boolean)) {
+      const at = raw.indexOf(':');
+      const [kind, arg] = at < 0 ? [raw, ''] : [raw.slice(0, at), raw.slice(at + 1)];
+      if (kind === 'wait') await sleep(Number(arg));
+      else if (kind === 'select') {
+        // Expand collapsed rows (one depth per pass) until the node shows.
+        let ok = false;
+        for (let pass = 0; pass < 8 && !ok; pass++) {
+          ok = await tab.evaluate(`(() => {
+            const want = ${JSON.stringify(arg)};
+            const hit = [...document.querySelectorAll('#scene-tree .tree-name')].find((e) => e.textContent.trim() === want);
+            if (hit) { (hit.closest('.tree-row') || hit).click(); return true; }
+            for (const t of document.querySelectorAll('#scene-tree .tree-toggle')) {
+              if (t.textContent === '\u25B6') t.click();
+            }
+            return false;
+          })()`);
+          await sleep(300);
+        }
+        if (!ok) report.problems.push(`edit step ${raw}: no scene-tree row named "${arg}" (expand its parent?)`);
+        await sleep(800);
+      } else report.problems.push(`unknown edit step "${raw}" (want select:<name> or wait:<ms>)`);
+    }
+    report.images = await tab.evaluate(`(async () => {
+      const seen = new Set();
+      for (const el of document.querySelectorAll('img[src]')) seen.add(el.src);
+      for (const el of document.querySelectorAll('[style*="url("]')) {
+        const m = /url\\(["']?([^"')]+)["']?\\)/.exec(el.style.backgroundImage || '');
+        if (m) seen.add(new URL(m[1], location.href).href);
+      }
+      const same = [...seen].filter((u) => u.startsWith(location.origin) && !u.includes('/api/viewport'));
+      const out = [];
+      for (const u of same) {
+        try {
+          const r = await fetch(u);
+          out.push({ url: u.replace(location.origin, ''), status: r.status, type: r.headers.get('content-type') });
+        } catch (e) {
+          out.push({ url: u.replace(location.origin, ''), status: 0, type: String(e) });
+        }
+      }
+      return out;
+    })()`);
+    const brokenImages = report.images.filter((i) => i.status !== 200 || !/^image\//.test(i.type || ''));
+    if (brokenImages.length) {
+      report.problems.push(`${brokenImages.length} of ${report.images.length} image(s) on the page do not load: ${brokenImages.slice(0, 3).map((i) => `${i.status} ${i.url}`).join(', ')}`);
+    }
+
     // Editor-log entries from here on are this run's (a second of slack for
     // clock granularity); earlier ones belong to whoever played before.
     const playStart = Date.now() - 1000;
@@ -393,7 +490,6 @@ async function main() {
     let sampler = null;
     const sampleFile = path.join(out, 'sample.txt');
     if (opts.profile > 0) {
-      const pid = editorPid(editorUrl.port || 80);
       if (process.platform !== 'darwin') report.warnings.push('--profile needs macOS `sample`; skipped');
       else if (!pid) report.warnings.push(`--profile: no process is listening on port ${editorUrl.port}`);
       else {
@@ -469,6 +565,35 @@ async function main() {
       for (const w of report.watch) w.values.push({ after: step.label, value: await readWatch(w.watch) });
     }
     const scriptEnd = Date.now();
+
+    // Soak: keep playing and watch for growth that a short run cannot show.
+    if (opts.soak > 0) {
+      report.soak = [];
+      const t0 = Date.now();
+      while (Date.now() - t0 < opts.soak * 1000) {
+        const st = await status();
+        const pi = processInfo(pid);
+        report.soak.push({ t_s: Math.round((Date.now() - t0) / 1000), render_ms: st?.render_ms ?? null, sim_fps: st?.sim_fps ?? null, rss_mb: pi?.rss_mb ?? null });
+        await sleep(10000);
+      }
+      // Ignore the first 30 s (texture cache, allocator warm-up).
+      const warm = report.soak.filter((x) => x.t_s >= 30 && x.rss_mb != null);
+      if (warm.length >= 3) {
+        const a = warm[0], b = warm[warm.length - 1];
+        const minutes = Math.max(1 / 60, (b.t_s - a.t_s) / 60);
+        report.soak_rss_mb_per_min = +((b.rss_mb - a.rss_mb) / minutes).toFixed(1);
+        const third = Math.max(1, Math.floor(warm.length / 3));
+        const mean = (xs) => xs.reduce((p, x) => p + (x.render_ms || 0), 0) / xs.length;
+        report.soak_render_ms = [+mean(warm.slice(0, third)).toFixed(1), +mean(warm.slice(-third)).toFixed(1)];
+        if (report.soak_rss_mb_per_min > 10) {
+          report.problems.push(`memory grew ${report.soak_rss_mb_per_min} MB/min over a ${opts.soak} s soak (${a.rss_mb} → ${b.rss_mb} MB)`);
+        }
+        const [early, late] = report.soak_render_ms;
+        if (late > early * 1.3 && late - early > 3) {
+          report.problems.push(`render time grew over the soak: ${early} → ${late} ms`);
+        }
+      }
+    }
     for (const w of report.watch) {
       const readable = w.values.map((v) => v.value).filter((v) => !v.startsWith('('));
       if (readable.length >= 2 && new Set(readable).size === 1) {
@@ -579,7 +704,11 @@ async function main() {
     if (refused.length) report.problems.push(`${refused.length} request(s) refused with 429: ${[...new Set(refused.map((e) => e.request))].join(', ')}`);
     const broken = report.http_errors.filter((e) => e.status >= 500);
     if (broken.length) report.problems.push(`${broken.length} server error(s): ${[...new Set(broken.map((e) => `${e.status} ${e.request}`))].join(', ')}`);
-    const other = report.http_errors.filter((e) => e.status !== 429 && e.status < 500);
+    // A 4xx from the editor's own API is a broken feature, not noise: the tile
+    // palette's thumbnails 404'd for weeks as a mere warning.
+    const apiMissing = report.http_errors.filter((e) => e.status >= 400 && e.status < 500 && e.status !== 429 && / \/api\//.test(e.request));
+    if (apiMissing.length) report.problems.push(`${apiMissing.length} editor API request(s) failed: ${[...new Set(apiMissing.map((e) => `${e.status} ${e.request}`))].slice(0, 4).join(', ')}`);
+    const other = report.http_errors.filter((e) => e.status !== 429 && e.status < 500 && !apiMissing.includes(e));
     if (other.length) report.warnings.push(`${other.length} 4xx response(s): ${[...new Set(other.map((e) => `${e.status} ${e.request}`))].join(', ')}`);
     if (report.exceptions.length) report.problems.push(`${report.exceptions.length} uncaught page exception(s): ${report.exceptions[0]}`);
     if (report.console_errors.length) report.problems.push(`${report.console_errors.length} console error(s): ${report.console_errors[0]}`);

@@ -89,3 +89,6 @@ storage.sqlite3-wal
 
 # Orchestrator red check (apps/orchestrator/crate/src/wiring.rs): isolated tree snapshot
 .orchestrator/redcheck/
+
+# playtest gate run reports (scripts/playtest-gate.mjs)
+.playtest-gate/

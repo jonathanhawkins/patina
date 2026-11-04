@@ -136,6 +136,9 @@ fn variant_as_i64(value: &Variant) -> Option<i64> {
 // Node
 // ---------------------------------------------------------------------------
 
+/// Most notifications a node's log keeps (see [`Node::receive_notification`]).
+pub const NOTIFICATION_LOG_CAP: usize = 8192;
+
 /// A scene-tree node, analogous to Godot's `Node` class.
 ///
 /// Nodes form a tree hierarchy managed by a [`SceneTree`](crate::scene_tree::SceneTree).
@@ -702,7 +705,18 @@ impl Node {
     // -- notifications ------------------------------------------------------
 
     /// Records a notification (called by lifecycle manager).
+    ///
+    /// ⚠️ Bounded: once the log holds [`NOTIFICATION_LOG_CAP`] entries the
+    /// oldest half is dropped. Every frame delivers PROCESS/PHYSICS_PROCESS
+    /// (and their INTERNAL_ twins) to every node, and the log used to keep all
+    /// of them: the platformer demo's 491 nodes grew the editor by ~45 MB a
+    /// minute of Play, without end. Readers (tests, the runner's oracle dump,
+    /// `rewind_for_redispatch`) look at short runs or recent entries, which the
+    /// newest `CAP / 2`..`CAP` entries always cover.
     pub fn receive_notification(&mut self, what: Notification) {
+        if self.notification_log.len() >= NOTIFICATION_LOG_CAP {
+            self.notification_log.drain(..NOTIFICATION_LOG_CAP / 2);
+        }
         self.notification_log.push(what);
     }
 

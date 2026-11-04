@@ -25,6 +25,15 @@ Parse the JSON. Extract `open` and `in_progress` counts from the `groups` array.
   ```
   Then stop — do not run steps 1–6.
 
+0b. **Real-game gate input** (runs even when step 0 skips the cycle). The planner's own analysis only sees tests and criteria, never a real game played in the browser. Every bug the 2026-11-04 platformer import found (Play ran the wrong scene, a per-node log and a script call-stack leak, Play rasterizing under the editor lock, tiles losing their flip on the first edit) was invisible to it. The playtest gate is that input:
+```bash
+jq -r '.at, (.results[] | "\(.status) \(.game) \(.shown_fps // "-") fps")' .playtest-gate/latest.json 2>/dev/null || echo "NO GATE REPORT"
+```
+- No report, or `.at` older than 24 h: run `node scripts/playtest-gate.mjs --file-beads` (release editor already built; add `--build` only if `engine-rs/target/release/examples/editor` is missing). It plays every `games/<g>/playtest.json` scenario in headless Chrome and files one `br` bug per failing game (label `playtest-gate`, deduped by title). Exit 3 = only INCONCLUSIVE (host busy): log it, file nothing.
+- Report the counts in the planner log line: `gate: N pass / M fail / K inconclusive`.
+- Do NOT create beads for gate failures yourself: the gate already did, with the report path and a reproduce command. Do not re-file one that `br list --label playtest-gate --status open` already shows.
+- A new real game in `games/` without a `playtest.json` is a gap: create ONE bead to add its scenario (keys from its input map, at least one `expect` rule per control).
+
 1. **Run the planner binary with `--apply --heal`** to analyze, backfill broken legacy beads, AND create new beads in one shot. The binary itself runs `br create` + `br update --acceptance-criteria` per recommendation, and `--heal` scans existing open/in_progress beads, finds ones with missing/null `acceptance_criteria`, and backfills them by mapping their `[planner-key: ...]` markers to template acceptance text:
 ```bash
 /Users/bone/dev/games/patina/apps/orchestrator/crate/target/release/patina-orchestrator plan --apply --heal 2>&1 | tee /tmp/planner-apply.log
@@ -198,6 +207,7 @@ widget is absent. See `prd/EDITOR_PARITY_VISUAL_FIDELITY_METHODOLOGY.md`.
 
 - NEVER wrap `br search` (or `br ready`, `br count`, `br list`) in a python (or any) filter that defines its own match/dedup predicate. Use the shown `jq -r '.issues | length'` extractor and apply the integer rule (`>= 1` skip, `== 0` create).
 - NEVER inspect candidate titles to decide if a `br search` hit is "really" a duplicate — any hit is a duplicate, period.
+- The playtest gate (`scripts/playtest-gate.mjs`, step 0b) is NOT a Rust test run and is allowed; never pass it `--update-baselines` from the planner (baselines are set by a person after a deliberate perf change).
 - NEVER run the full Rust test suite (`cargo test`, `cargo nextest`, `rust_task.sh`) from the planner. The verifier lane is the sole builder. The planner reads the bead map + queue counts only.
 - NEVER skip the queue-health gate (Step 0) silently — always append the SKIPPED line to `prd/planner_log.md` so the cycle is auditable.
 - NEVER write a bead with literal placeholder text (`TITLE`, `PRIORITY`, `LABELS`, `KEY`, or `ACCEPTANCE`) appearing verbatim in any field. Always substitute the recommendation's real values from the JSON.

@@ -4440,6 +4440,12 @@ pub fn prepare_play_frame(
 }
 
 impl PreparedPlayFrame {
+    /// The items this frame draws, in draw order, after the camera and stretch
+    /// transforms — what a parity check holds the edit view against.
+    pub fn items(&self) -> &[Render2DItem] {
+        &self.items
+    }
+
     /// The tree-free half of [`render_play_frame`]: rasterize, shade, bars.
     pub fn rasterize(&self, texture_cache: &mut TextureCache) -> FrameBuffer {
         let mut fb = rasterize_render_list_with_groups_and_quality(

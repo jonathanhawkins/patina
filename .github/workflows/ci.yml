@@ -11,6 +11,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ── Playtest tools: browser-playtest deadlines + the gate's verdicts ─────
+  # Node only (no engine build). The browser-playing gate itself needs a
+  # release editor and Chrome, and runs from the planner / nightly instead.
+  playtest-tools:
+    name: Playtest tools
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Test the playtest tools
+        run: node --test scripts/tests/*.test.mjs
+
   # ── Rust: format check ────────────────────────────────────────────────────
   rust-fmt:
     name: Rust fmt

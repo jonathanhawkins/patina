@@ -10280,14 +10280,15 @@ impl Interpreter {
         // when profiling is off, which costs one relaxed atomic load. Bound to
         // a NAMED local on purpose — `let _ = ` would drop it here and time
         // nothing.
-        let _profile = ScriptCallTimer::start(name);
-        self.call_stack_frames.push(StackFrame {
-            function_name: name.to_string(),
-            source_location: Some(self.make_location()),
-        });
-        let prev_function = self.current_function.take();
-        self.current_function = Some(name.to_string());
-
+        // ⚠️ Every check that can return early runs BEFORE the frame is pushed.
+        // `call_self_func_or_native` tries a user function first and falls back
+        // to the native method on `UndefinedFunction`, so this lookup fails for
+        // every `move_and_slide()`, `is_on_floor()`, `get_node()` a script
+        // calls. It used to fail AFTER pushing a `StackFrame` and replacing
+        // `current_function`, and returned without undoing either: the
+        // platformer leaked ~22 frames a frame (481k live allocations after a
+        // few minutes of Play), `current_function` named the last native call,
+        // and every stack trace / `get_stack()` grew without end.
         let func = self.function_registry.get(name).cloned().ok_or_else(|| {
             RuntimeError::new(RuntimeErrorKind::UndefinedFunction(name.to_string()))
         })?;
@@ -10306,6 +10307,14 @@ impl Interpreter {
                 MAX_RECURSION_DEPTH,
             )));
         }
+
+        let _profile = ScriptCallTimer::start(name);
+        self.call_stack_frames.push(StackFrame {
+            function_name: name.to_string(),
+            source_location: Some(self.make_location()),
+        });
+        let prev_function = self.current_function.take();
+        self.current_function = Some(name.to_string());
         self.call_depth += 1;
 
         self.environment.push_frame_scope();

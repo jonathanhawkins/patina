@@ -1,0 +1,14 @@
+{
+  "scene": "level/level.tscn",
+  "edit_steps": "select:TileMapLayer,wait:1500",
+  "keys": "wait:1000,ArrowRight:1500,ArrowUp:300,wait:700,ArrowLeft:1500",
+  "watch": ["/root/Game/Level/Player:position"],
+  "audio": 3,
+  "min_fps": 45,
+  "max_audio_underruns": 0,
+  "expect": [
+    { "watch": "/root/Game/Level/Player:position", "after": "ArrowRight:1500", "axis": 0, "change": "increase" },
+    { "watch": "/root/Game/Level/Player:position", "after": "ArrowUp:300", "axis": 1, "change": "decrease" },
+    { "watch": "/root/Game/Level/Player:position", "after": "ArrowLeft:1500", "axis": 0, "change": "decrease" }
+  ]
+}

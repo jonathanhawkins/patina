@@ -492,11 +492,7 @@ pub fn render_scene_with_instance_previews(
     // lays them out inside the game rect — the edited scene's own and every
     // previewed sub-scene's alike. Anchoring to the editor panel stretched a
     // full-rect background over the whole view.
-    let layout_size = project_layout_size(project_root).unwrap_or(viewport_size);
-    let root = tree.root_id();
-    let control_items =
-        crate::viewport_2d_render::build_control_render_items_sourced(tree, root, layout_size);
-    let previews = instance_preview_items(tree, project_root, layout_size);
+    let (control_items, previews) = edit_view_inputs(tree, project_root, viewport_size);
     render_scene_inner_with_previews(
         tree,
         selected,
@@ -509,6 +505,55 @@ pub fn render_scene_with_instance_previews(
         control_items,
         previews,
     )
+}
+
+/// The Control items and instanced-scene previews the edit view adds to the
+/// tree's own canvas items (see [`render_scene_with_instance_previews`]).
+fn edit_view_inputs(
+    tree: &mut SceneTree,
+    project_root: &str,
+    viewport_size: Vector2,
+) -> (Vec<(crate::viewport_2d_render::Render2DItem, Option<NodeId>)>, Vec<crate::viewport_2d_render::Render2DItem>) {
+    // Root Controls anchor to the GAME's base resolution, as Godot's 2D editor
+    // lays them out inside the game rect — the edited scene's own and every
+    // previewed sub-scene's alike. Anchoring to the editor panel stretched a
+    // full-rect background over the whole view.
+    let layout_size = project_layout_size(project_root).unwrap_or(viewport_size);
+    let root = tree.root_id();
+    let control_items =
+        crate::viewport_2d_render::build_control_render_items_sourced(tree, root, layout_size);
+    let previews = instance_preview_items(tree, project_root, layout_size);
+    (control_items, previews)
+}
+
+/// The scene content the 2D edit view draws, in draw order, before the editor
+/// camera and the gizmos: the tree's canvas items with its Controls and
+/// instanced-scene previews merged in by (canvas layer, z). This is the exact
+/// list [`render_scene_with_instance_previews`] rasterizes, so a test can hold
+/// it against what Play draws — the edit view and Play disagreed three ways on
+/// the platformer demo (no TileSet at edit time, previews over everything,
+/// clicks on the wrong cell) and nothing compared them.
+pub fn edit_view_scene_items(
+    tree: &mut SceneTree,
+    project_root: &str,
+    width: u32,
+    height: u32,
+) -> Vec<crate::viewport_2d_render::Render2DItem> {
+    let viewport_size = Vector2::new(width.max(1) as f32, height.max(1) as f32);
+    let (control_items, previews) = edit_view_inputs(tree, project_root, viewport_size);
+    edit_scene_items(tree, control_items, previews)
+}
+
+/// [`edit_view_scene_items`] from already-built inputs: the one assembly both
+/// it and the renderer use.
+fn edit_scene_items(
+    tree: &SceneTree,
+    control_items: Vec<(crate::viewport_2d_render::Render2DItem, Option<NodeId>)>,
+    previews: Vec<crate::viewport_2d_render::Render2DItem>,
+) -> Vec<crate::viewport_2d_render::Render2DItem> {
+    let items = crate::viewport_2d_render::build_runtime_render_list(tree);
+    let items = crate::viewport_2d_render::merge_control_items(tree, items, control_items);
+    merge_previews_by_layer_and_z(items, previews)
 }
 
 /// The project's base resolution (`display/window/size/viewport_*`), or `None`
@@ -717,7 +762,6 @@ fn render_scene_inner_with_previews(
     // Control's size comes from `offset_*` resolved by the layout pass, so on
     // the immutable path a ColorRect is zero-sized and paints nothing.
     // `canvas_composite.rs:34` warns about exactly this.
-    let items = crate::viewport_2d_render::build_runtime_render_list(tree);
     // The themed Control pass, when the caller could supply it (see
     // `render_scene_with_zoom_pan_mut`). Empty for the immutable wrappers.
     //
@@ -738,7 +782,6 @@ fn render_scene_inner_with_previews(
     let controls_drawn = !control_items.is_empty();
     // Interleaved at each Control's tree position — layer, then z, then tree
     // order, as Play does — rather than appended above everything.
-    let mut items = crate::viewport_2d_render::merge_control_items(tree, items, control_items);
     // Instanced sub-scene previews (see `render_scene_with_instance_previews`),
     // merged in by (canvas layer, z).
     //
@@ -749,7 +792,9 @@ fn render_scene_inner_with_previews(
     // preview drew on top of the whole edited scene: the platformer demo's
     // instanced ParallaxBackground (CanvasLayer -100) covered its entire
     // TileMapLayer, and the level looked like empty sky while editing.
-    let mut items = merge_previews_by_layer_and_z(items, previews);
+    // `edit_scene_items` is the ONE assembly: the runtime list, then the
+    // Controls at their tree positions, then the previews by (layer, z).
+    let mut items = edit_scene_items(tree, control_items, previews);
     // The editor's view stands in for Play's Camera2D + window stretch.
     //
     // ⚠️ It MUST reuse the same `z` and `offset_*` the grid was drawn with

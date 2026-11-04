@@ -358,9 +358,16 @@ pub fn check_entry_point(
 pub enum RedVerdict {
     /// Nothing to revert (test-only or docs-only change) or disabled.
     Skipped(String),
-    /// With the change reverted, the acceptance test failed or no longer
-    /// compiled: it depends on the change.
+    /// With the change reverted, the acceptance test FAILED (an assertion,
+    /// panic or crash): it depends on the change's behaviour.
     Detected(String),
+    /// With the change reverted, the acceptance test no longer COMPILED. That
+    /// proves only that the test names a symbol the change added, not that any
+    /// assertion depends on the new behaviour, so it is not a pass: a test that
+    /// calls a new function and asserts nothing about it lands here too.
+    /// Does not block (a new API legitimately breaks the build without it), but
+    /// is logged as its own verdict rather than as `Detected`.
+    CompileOnly(String),
     /// With the change reverted, the acceptance test still passed.
     NotDetected(String),
     /// Could not decide; does not block.
@@ -377,7 +384,11 @@ pub fn classify_red_run(exit_ok: bool, output: &str) -> RedVerdict {
         };
     }
     if lower.contains("error[e") || lower.contains("could not compile") {
-        return RedVerdict::Detected("does not compile without the change".into());
+        return RedVerdict::CompileOnly(
+            "does not compile without the change — proves the test uses the change's API, \
+             not that an assertion depends on its behaviour"
+                .into(),
+        );
     }
     // A test binary that dies (stack overflow, abort, segfault) without the
     // change also proves the test depends on it.
@@ -706,6 +717,7 @@ pub fn red_check(
     let workdir = snap.join("engine-rs");
     let mut inconclusive = Vec::new();
     let mut not_detected = Vec::new();
+    let mut compile_only = Vec::new();
     for cmd in &runnable {
         let Some(snap_cmd) = snapshot_command(cmd, &target) else {
             inconclusive.push(format!("not a cargo command: {cmd}"));
@@ -716,6 +728,8 @@ pub fn red_check(
             Ok(Some((status, output))) => match classify_red_run(status.success(), &output) {
                 RedVerdict::Detected(why) => return RedVerdict::Detected(format!("{why}: {cmd}")),
                 RedVerdict::NotDetected(_) => not_detected.push(cmd.clone()),
+                // Keep looking: another command may fail on behaviour.
+                RedVerdict::CompileOnly(_) => compile_only.push(cmd.clone()),
                 RedVerdict::Inconclusive(why) => inconclusive.push(why),
                 RedVerdict::Skipped(why) => inconclusive.push(why),
             },
@@ -736,6 +750,15 @@ pub fn red_check(
              the path a game or the editor uses, so it fails without your change and passes \
              with it. Commands that passed on reverted code: {}",
             not_detected.join(" ; ")
+        ));
+    }
+    if !compile_only.is_empty() && not_detected.is_empty() {
+        return RedVerdict::CompileOnly(format!(
+            "the acceptance test only fails to COMPILE with the change reverted ({}): that \
+             proves it names the change's new API, not that an assertion depends on what the \
+             change does. Name the assertion that fails at the old behaviour in the \
+             completion's Red check: line",
+            compile_only.join(" ; ")
         ));
     }
     RedVerdict::Inconclusive(inconclusive.join("; "))
@@ -796,19 +819,32 @@ mod tests {
     }
 
     #[test]
-    fn red_run_failure_and_compile_error_are_detected() {
+    fn red_run_failure_is_detected_and_a_compile_error_is_compile_only() {
         assert!(matches!(
             classify_red_run(false, "thread 'x' panicked at src/a.rs:1\ntest result: FAILED."),
             RedVerdict::Detected(_)
         ));
         assert!(matches!(
             classify_red_run(false, "error[E0425]: cannot find function `foo`"),
-            RedVerdict::Detected(_)
+            RedVerdict::CompileOnly(_)
         ));
         assert!(matches!(
             classify_red_run(false, "        FAIL [   0.010s] gdscene::foo bar"),
             RedVerdict::Detected(_)
         ));
+    }
+
+    /// A compile failure is not proof: `could not compile` alone, with no
+    /// failing assertion, must never read as Detected — the red check used to
+    /// pass any test that merely called a function the change added.
+    #[test]
+    fn a_compile_failure_without_a_failing_assertion_is_not_detected() {
+        let out = "error[E0425]: cannot find function `prepare_play_frame` in module\n\
+                   error: could not compile `gdeditor` (test \"x\") due to 1 previous error";
+        match classify_red_run(false, out) {
+            RedVerdict::CompileOnly(why) => assert!(why.contains("API"), "{why}"),
+            other => panic!("a compile error must be CompileOnly, got {other:?}"),
+        }
     }
 
     #[test]
