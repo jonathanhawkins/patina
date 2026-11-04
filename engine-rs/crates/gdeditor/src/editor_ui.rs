@@ -7654,7 +7654,17 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         var sw = document.createElement('div');
         sw.className = 'tile-swatch' + (t.id === activeTileId ? ' active' : '');
         sw.title = (t.name || ('tile ' + t.id)) + ' (id ' + t.id + ')';
-        sw.style.cssText = 'width:22px;height:22px;border:2px solid ' + (t.id === activeTileId ? 'var(--accent,#5c9ded)' : 'transparent') + ';background:' + (t.color || '#888') + ';cursor:pointer;border-radius:2px;';
+        var bg = t.color || '#888';
+        // A TileSet source: draw its actual tile, scaled into the swatch.
+        if (t.texture && t.region) {
+          var k = 22 / Math.max(t.region[2], t.region[3]);
+          bg = 'url("/api/preview/file?path=' + encodeURIComponent(t.texture) + '") -' + (t.region[0] * k) + 'px -' + (t.region[1] * k) + 'px / auto no-repeat';
+          sw.dataset.region = t.region.join(',');
+          var im = new Image();
+          im.onload = function() { sw.style.backgroundSize = (im.naturalWidth * k) + 'px ' + (im.naturalHeight * k) + 'px'; };
+          im.src = '/api/preview/file?path=' + encodeURIComponent(t.texture);
+        }
+        sw.style.cssText = 'width:22px;height:22px;border:2px solid ' + (t.id === activeTileId ? 'var(--accent,#5c9ded)' : 'transparent') + ';background:' + bg + ';image-rendering:pixelated;cursor:pointer;border-radius:2px;';
         sw.addEventListener('click', function() { activeTileId = t.id; buildTilePalette(); });
         host.appendChild(sw);
       })(tiles[i]);
@@ -12709,9 +12719,11 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       if (typeof showFsToast === 'function') showFsToast('Changing the renderer requires restarting the editor.');
       this.value = 'forward_plus';
     });
+    // Play (F5) runs the project's MAIN scene, as Godot's does; Play Current
+    // Scene (F6) below runs the open one. They used to send the same request.
     document.getElementById('btn-play').addEventListener('click', async function() {
       if (runtimeRunning) return;
-      var r = await api('POST', '/api/runtime/play', { movie: movieMakerEnabled, audio: true });
+      var r = await api('POST', '/api/runtime/play', { movie: movieMakerEnabled, audio: true, scene: 'main' });
       if (r && r.ok) { runtimeRunning = true; runtimePaused = false; runtimeFrameCount = 0; logMessage('info', 'Play started (F5)'); enterGameViewOnPlay(); updatePlayButtonStates(); showPlayingOverlay(true); updateRuntimeStatusBar(); setRuntimeEditingDisabled(true); startRuntimePolling(); startGameInput(); }
     });
     document.getElementById('btn-pause').addEventListener('click', async function() {

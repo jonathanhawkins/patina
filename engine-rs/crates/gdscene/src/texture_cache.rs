@@ -20,6 +20,17 @@ pub struct TextureCache {
     cache: HashMap<String, Option<Texture2D>>,
     /// Project root directory for resolving `res://` paths.
     project_root: String,
+    /// Set on a [`lend_placeholder`](Self::lend_placeholder): every
+    /// `invalidate`/`clear` it sees, so [`adopt_newer`](Self::adopt_newer) can
+    /// replay them onto the cache that was lent out. `None` on a normal cache,
+    /// which therefore records nothing.
+    lent_changes: Option<LentChanges>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LentChanges {
+    cleared: bool,
+    invalidated: Vec<String>,
 }
 
 impl TextureCache {
@@ -28,7 +39,33 @@ impl TextureCache {
         Self {
             cache: HashMap::new(),
             project_root: project_root.into(),
+            lent_changes: None,
         }
+    }
+
+    /// The stand-in left in shared state while this cache is lent to a frame
+    /// that rasterizes off the editor lock: same project root, no entries, and
+    /// it records invalidations so none is lost when the real cache returns.
+    pub fn lend_placeholder(&self) -> Self {
+        let mut p = Self::new(self.project_root.clone());
+        p.lent_changes = Some(LentChanges::default());
+        p
+    }
+
+    /// Folds what `placeholder` (from [`lend_placeholder`](Self::lend_placeholder))
+    /// saw while this cache was lent out back into it: a new project root or a
+    /// `clear` empties this cache, each `invalidate` is replayed, and entries
+    /// loaded into the placeholder win over ours.
+    pub fn adopt_newer(&mut self, placeholder: TextureCache) {
+        let changes = placeholder.lent_changes.unwrap_or_default();
+        if changes.cleared || placeholder.project_root != self.project_root {
+            self.cache.clear();
+            self.project_root = placeholder.project_root;
+        }
+        for path in &changes.invalidated {
+            self.cache.remove(path);
+        }
+        self.cache.extend(placeholder.cache);
     }
 
     /// Returns the cached texture for the given resource path, loading it
@@ -97,11 +134,17 @@ impl TextureCache {
     /// Clears the entire cache, forcing textures to be reloaded on next access.
     pub fn clear(&mut self) {
         self.cache.clear();
+        if let Some(c) = self.lent_changes.as_mut() {
+            c.cleared = true;
+        }
     }
 
     /// Removes a specific entry from the cache.
     pub fn invalidate(&mut self, res_path: &str) {
         self.cache.remove(res_path);
+        if let Some(c) = self.lent_changes.as_mut() {
+            c.invalidated.push(res_path.to_string());
+        }
     }
 
     /// Returns the project root path.
@@ -116,7 +159,7 @@ impl TextureCache {
     /// project re-roots the editor).
     pub fn set_project_root(&mut self, project_root: impl Into<String>) {
         self.project_root = project_root.into();
-        self.cache.clear();
+        self.clear();
     }
 
     /// Inserts a texture directly into the cache (useful for testing).

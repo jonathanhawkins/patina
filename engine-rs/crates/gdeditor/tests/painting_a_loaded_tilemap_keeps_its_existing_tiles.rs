@@ -206,3 +206,126 @@ fn the_edit_view_draws_the_level_tiles_in_front_of_an_instanced_parallax_backgro
          toggling the layer changed {shown} px with previews vs {control} px without"
     );
 }
+
+/// The palette must offer the selected layer's OWN TileSet, not the editor's
+/// built-in colour palette ("Ground", "Ice"…), and its thumbnails must load
+/// from the OPEN project — `/api/preview/file` resolved `res://` against the
+/// process cwd, so a project opened from the dock previewed nothing.
+#[test]
+fn the_palette_lists_the_selected_layers_tileset_sources_with_loadable_thumbnails() {
+    let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../games/platformer")
+        .canonicalize()
+        .expect("games/platformer fixture");
+    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let handle = EditorServerHandle::start(port, EditorState::new(SceneTree::new()));
+    std::thread::sleep(Duration::from_millis(100));
+    post(port, "/api/project/open", &format!(r#"{{"path":"{}"}}"#, project.display()));
+    post(port, "/api/scene/load", &format!(r#"{{"path":"{}"}}"#, project.join("level/level.tscn").display()));
+
+    // Edge: nothing selected → the editor's own palette.
+    assert_eq!(get(port, "/api/tilemap/tileset")["source"], "palette");
+
+    let id = {
+        let state = handle.state();
+        let s = state.lock().unwrap();
+        s.scene_tree
+            .all_nodes_in_tree_order()
+            .into_iter()
+            .find(|&n| s.scene_tree.get_node(n).is_some_and(|n| n.class_name() == "TileMapLayer"))
+            .unwrap()
+    };
+    post(port, "/api/node/select", &format!(r#"{{"node_id":{}}}"#, id.raw()));
+    let ts = get(port, "/api/tilemap/tileset");
+    assert_eq!(ts["source"], "tile_set", "{ts}");
+    let tiles = ts["tiles"].as_array().unwrap();
+    // tileset.tres declares sources 0..=19, every one a 64px region of tiles.webp.
+    assert_eq!(tiles.len(), 20, "{ts}");
+    let one = tiles.iter().find(|t| t["id"] == 1).unwrap();
+    assert_eq!(one["texture"], "res://level/tiles.webp");
+    assert_eq!(one["region"], serde_json::json!([256.0, 64.0, 64.0, 64.0]), "source 1 has margins (256,64)");
+    assert!(tiles.iter().all(|t| t["color"].is_null()), "no built-in palette entries mixed in");
+
+    // The thumbnail URL the page builds must serve the image from the project,
+    // even though this test process's cwd is the gdeditor crate.
+    let mut s = TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    s.write_all(b"GET /api/preview/file?path=res%3A%2F%2Flevel%2Ftiles.webp HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+    let mut raw = Vec::new();
+    let _ = s.read_to_end(&mut raw);
+    let head = String::from_utf8_lossy(&raw[..raw.len().min(300)]).to_string();
+    assert!(head.starts_with("HTTP/1.1 200") && head.contains("image/webp"), "thumbnail: {head}");
+    handle.stop();
+}
+
+/// TileSet source 0 (Godot's FIRST source) and negative coordinates are real
+/// cells, but the editor's dense grid uses 0 for "empty" and cannot index
+/// below zero — so terrain/pattern painting with source 0 and any paint left
+/// of x = 0 were silently dropped. Found terrain-painting the platformer
+/// demo's grass-top tile (source 0) in the browser: "2 cell(s) resolved",
+/// zero cells written.
+#[test]
+fn source_zero_and_negative_cells_paint_erase_and_undo() {
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    let mut layer = Node::new("Layer", "TileMapLayer");
+    // A TileSet declaring sources 0 and 1, so id 0 is a SOURCE, not "erase".
+    layer.set_property(gdscene::tilemap::TILE_SET_TILE_SIZE, Variant::Vector2i(Vector2i::new(16, 16)));
+    layer.set_property(gdscene::tilemap::TILE_SET_SOURCE_IDS, Variant::PackedInt32Array(vec![0, 1]));
+    let mut authored = HashMap::new();
+    authored.insert(Vector2i::new(3, 3), TileData::with_atlas(1, Vector2i::new(0, 0), 0));
+    layer.set_property("tile_map_data", Variant::PackedByteArray(encode_tile_map_data(&authored)));
+    let id = layer.id();
+    tree.add_child(root, layer).unwrap();
+    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let handle = EditorServerHandle::start(port, EditorState::new(tree));
+    std::thread::sleep(Duration::from_millis(100));
+    let cells = || {
+        let state = handle.state();
+        let s = state.lock().unwrap();
+        match s.scene_tree.get_node(id).unwrap().get_property("tile_map_data") {
+            Variant::PackedByteArray(b) => decode_tile_map_data(&b),
+            _ => HashMap::new(),
+        }
+    };
+    let n = id.raw();
+
+    // Pencil: source 0 at a normal cell, and source 1 at a negative one.
+    assert!(post(port, "/api/tilemap/paint", &format!(r#"{{"node_id":{n},"x":1,"y":1,"tile_id":0}}"#)).contains("200 OK"));
+    assert!(post(port, "/api/tilemap/paint", &format!(r#"{{"node_id":{n},"x":-4,"y":-2,"tile_id":1}}"#)).contains("200 OK"));
+    let c = cells();
+    assert_eq!(c.get(&Vector2i::new(1, 1)).map(|d| d.source_id), Some(0), "pencil with source 0 must PLACE it: {c:?}");
+    assert_eq!(c.get(&Vector2i::new(-4, -2)).map(|d| d.source_id), Some(1), "negative cell: {c:?}");
+    assert!(c.contains_key(&Vector2i::new(3, 3)), "the authored cell survives");
+
+    // A later grid-backed paint must not drop the direct writes.
+    post(port, "/api/tilemap/paint", &format!(r#"{{"node_id":{n},"x":5,"y":5,"tile_id":1}}"#));
+    let c = cells();
+    assert_eq!(c.len(), 4, "(1,1) src0, (-4,-2), (3,3), (5,5): {c:?}");
+
+    // Erase both unrepresentable cells.
+    post(port, "/api/tilemap/erase", &format!(r#"{{"node_id":{n},"x":1,"y":1}}"#));
+    post(port, "/api/tilemap/erase", &format!(r#"{{"node_id":{n},"x":-4,"y":-2}}"#));
+    let c = cells();
+    assert!(!c.contains_key(&Vector2i::new(1, 1)) && !c.contains_key(&Vector2i::new(-4, -2)), "{c:?}");
+    assert_eq!(c.len(), 2);
+
+    // Undo the last erase: the negative cell comes back.
+    post(port, "/api/undo", "{}");
+    assert_eq!(cells().get(&Vector2i::new(-4, -2)).map(|d| d.source_id), Some(1), "undo restores it");
+
+    // Terrain Connect with source 0 tiles (every side mask -> source 0, atlas (0,0)).
+    let r = post(port, "/api/tileset/terrain_set/add", r#"{"mode":"match_sides"}"#);
+    assert!(r.contains("200 OK"), "{r}");
+    post(port, "/api/tileset/terrain/add", r#"{"terrain_set":0,"id":0,"name":"grass"}"#);
+    for mask in 0..16 {
+        post(port, "/api/tileset/tile/peering", &format!(r#"{{"terrain_set":0,"terrain":0,"bitmask":{mask},"source_id":0,"atlas_coords":[0,0]}}"#));
+    }
+    let r = post(port, "/api/tilemap/terrain_paint", &format!(r#"{{"node_id":{n},"terrain_set":0,"terrain":0,"cells":[[-1,7],[0,7],[1,7]]}}"#));
+    assert!(r.contains("200 OK"), "{r}");
+    let c = cells();
+    for x in -1..=1 {
+        assert_eq!(c.get(&Vector2i::new(x, 7)).map(|d| d.source_id), Some(0), "terrain cell ({x},7) on source 0: {c:?}");
+    }
+    handle.stop();
+}

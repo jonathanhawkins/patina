@@ -3099,7 +3099,7 @@ fn handle_connection(
             api_visual_shader_connect(state, &req.body, &mut stream)
         }
         ("POST", "/api/project/open") => api_open_project(state, &req.body, &mut stream),
-        ("GET", "/api/preview/file") => api_get_file_preview(&req.query, &mut stream),
+        ("GET", "/api/preview/file") => api_get_file_preview(state, &req.query, &mut stream),
         ("GET", "/api/script") => api_get_script(state, &req.query, &mut stream),
         ("GET", "/api/assetlib/list") => api_get_assetlib_list(state, &mut stream),
         ("POST", "/api/assetlib/install") => api_assetlib_install(state, &req.body, &mut stream),
@@ -9798,6 +9798,7 @@ fn undo_one(state: &mut EditorState) -> Result<bool, String> {
         return Err(e.to_string());
     }
     let _ = cmd.undo_tilemap(&mut state.tile_grid_store);
+    invalidate_grid_after_history(state, &cmd);
     // Animation edits live in a second store, like tilemaps (pat-0q2kx.12).
     let _ = cmd.undo_animation(&mut state.animations);
     // ...and that store is not what a save reads. Undo has to put the clip back
@@ -9824,6 +9825,7 @@ fn redo_one(state: &mut EditorState) -> Result<bool, String> {
         return Err(e.to_string());
     }
     let _ = cmd.execute_tilemap(&mut state.tile_grid_store);
+    invalidate_grid_after_history(state, &cmd);
     let _ = cmd.execute_animation(&mut state.animations);
     // Mirror of `undo_one`: redo re-applies to the player as well as the map.
     if let EditorCommand::AnimationEdit { animation, .. } = &cmd {
@@ -14285,12 +14287,13 @@ fn api_open_project(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
 /// For scripts (.gd): returns JSON with first N lines of the file.
 /// For scenes (.tscn): returns JSON with node count and root type.
 /// For resources (.tres): returns JSON with resource type info.
-fn api_get_file_preview(query: &str, stream: &mut TcpStream) {
+fn api_get_file_preview(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
     let path = match query_param(query, "path") {
         Some(p) => {
-            // URL-decode the path (handle %20, etc.)
-            let decoded = p.replace("%20", " ").replace("%2F", "/");
-            decoded.replace("res://", "")
+            // Fully URL-decoded: decoding only %20/%2F left the `%3A` that
+            // `encodeURIComponent("res://…")` produces, so `res://` was never
+            // stripped and every encoded preview URL 404'd.
+            url_decode(&p).replace("res://", "")
         }
         None => {
             send_error(stream, 400, "missing path parameter");
@@ -14298,8 +14301,16 @@ fn api_get_file_preview(query: &str, stream: &mut TcpStream) {
         }
     };
 
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let full_path = cwd.join(&path);
+    // `res://` is the OPEN PROJECT, not the process's cwd: a project opened
+    // from the dock (`/api/project/open`) previewed nothing — every image 404'd.
+    let base = state
+        .lock()
+        .unwrap()
+        .project_root
+        .clone()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let full_path = base.join(&path);
 
     if !full_path.exists() {
         send_error(stream, 404, "file not found");
@@ -18041,7 +18052,34 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     // The run's game log starts BEFORE the tree is built: building attaches the
     // scripts, and a script that fails to load is reported into it.
     state.game_log.start_run();
+    // `{"scene":"main"}` is Godot's Play (F5): run `application/run/main_scene`,
+    // not the scene open in the editor (that is Play Current Scene, F6). Both
+    // buttons used to send the same request, so Play on the platformer demo
+    // with `level.tscn` open ran a level with NO player — the game's
+    // `game_singleplayer.tscn` is what adds it. The main scene is swapped in
+    // only for the build; the edited tree is restored before anything else
+    // reads it.
+    let want_main = parse_json_body(body)
+        .and_then(|v| v.get("scene").and_then(|s| s.as_str()).map(|s| s == "main"))
+        .unwrap_or(false);
+    let main_swap = if want_main {
+        project_settings
+            .as_ref()
+            .and_then(|ps| main_scene_for_play(&state, ps.main_scene()))
+    } else {
+        None
+    };
+    let saved_edit = main_swap.map(|(tree, file)| {
+        (
+            std::mem::replace(&mut state.scene_tree, tree),
+            std::mem::replace(&mut state.scene_file, Some(file)),
+        )
+    });
     let cloned = build_play_tree(&mut state, project_settings.as_ref());
+    if let Some((tree, file)) = saved_edit {
+        state.scene_tree = tree;
+        state.scene_file = file;
+    }
     // `_ready` has now run on THIS thread, so its `send_message` captures are in
     // this thread's buffer. Drain them here; the per-frame drain runs on the
     // driver thread and would never see them.
@@ -18147,6 +18185,33 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
 /// node in `all_nodes_in_tree_order()` — parent-first, so a parent's `_ready` ran
 /// before its children existed to it — and never dispatched `_enter_tree` at all
 /// (pat-0q2kx.46).
+/// The project's main scene as a fresh edit-shaped tree plus its absolute
+/// path, for Play (F5). `None` — play the open scene — when the project names
+/// no main scene, it cannot be loaded, or it IS the open scene.
+fn main_scene_for_play(state: &EditorState, main_scene: &str) -> Option<(SceneTree, String)> {
+    if main_scene.is_empty() {
+        return None;
+    }
+    let path = gdcore::resolve_path(main_scene).ok()?;
+    let canon = |p: &std::path::Path| p.canonicalize().ok();
+    let main = canon(&path)?;
+    let current = state.scene_file.as_ref().and_then(|f| {
+        let p = std::path::Path::new(f);
+        let abs = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            std::path::Path::new(state.project_root.as_deref().unwrap_or(".")).join(p)
+        };
+        canon(&abs)
+    });
+    if current.as_ref() == Some(&main) {
+        return None;
+    }
+    let file = main.to_string_lossy().to_string();
+    let tree = load_tree_from_path(&file).ok()?;
+    Some((tree, file))
+}
+
 pub fn build_play_tree(
     state: &mut EditorState,
     settings: Option<&gdcore::ProjectSettings>,
@@ -20894,6 +20959,103 @@ const TILE_GRID_MIN: usize = 32;
 /// cell to 0 and the layer looks exactly as it did. Godot's TileMapLayer has no
 /// bounds at all; this grid does, and silently dropping a paint outside them
 /// would be worse than a canvas that only ever grows.
+/// Drops the editor's dense-grid CACHE of a layer (grid, baseline, atlas and
+/// alternative maps). The node's `tile_map_data` is the truth; the next grid
+/// edit reseeds from it (`ensure_tile_grid`).
+fn invalidate_tile_grid(state: &mut EditorState, nid: NodeId) {
+    state.tile_grid_store.remove(nid);
+    state.tile_grid_baseline.remove(&nid);
+    state.tile_atlas_coords.remove(&nid);
+    state.tile_alternatives.remove(&nid);
+}
+
+/// A cell write the editor's dense grid cannot represent: TileSet source 0
+/// (the grid's "empty") or a negative coordinate.
+fn grid_cannot_hold(x: i32, y: i32, source: i32) -> bool {
+    x < 0 || y < 0 || source == 0
+}
+
+/// Whether the layer's own TileSet declares an atlas source `source` — then a
+/// paint with id 0 means "source 0", not "erase".
+fn layer_has_tile_source(state: &EditorState, nid: NodeId, source: i32) -> bool {
+    state.scene_tree.get_node(nid).is_some_and(|n| {
+        gdscene::tilemap::tile_set_source_ids(
+            &n.get_property(&format!("{}source_ids", gdscene::tilemap::TILE_SET_PREFIX)),
+        )
+        .contains(&source)
+    })
+}
+
+/// Writes cells STRAIGHT into the layer's `tile_map_data` — any coordinate,
+/// any source — as ONE undoable property change, then drops the grid cache.
+/// `None` erases the cell. 🔑 Terrain, pattern and the grid-unrepresentable
+/// pencil/erase cases go through here: routed through the dense grid, a cell
+/// on TileSet source 0 (Godot's first source — the platformer demo's grass
+/// top) was silently dropped, and so was every negative coordinate (that level
+/// spans x = -12..22).
+fn write_layer_cells(
+    state: &mut EditorState,
+    nid: NodeId,
+    writes: &[((i32, i32), Option<(i32, (i32, i32), i32)>)],
+) -> bool {
+    let Some(node) = state.scene_tree.get_node(nid) else {
+        return false;
+    };
+    if !matches!(node.class_name(), "TileMapLayer" | "TileMap") {
+        return false;
+    }
+    let mut cells = match node.get_property("tile_map_data") {
+        Variant::PackedByteArray(b) => gdscene::tilemap::decode_tile_map_data(&b),
+        _ => HashMap::new(),
+    };
+    // Fold any pending grid edits in first so none are lost with the cache.
+    if state.tile_grid_store.get(nid).is_some() {
+        writeback_tile_grid(state, nid);
+        if let Some(Variant::PackedByteArray(b)) =
+            state.scene_tree.get_node(nid).map(|n| n.get_property("tile_map_data"))
+        {
+            cells = gdscene::tilemap::decode_tile_map_data(&b);
+        }
+    }
+    for &((x, y), tile) in writes {
+        let key = gdcore::math::Vector2i::new(x, y);
+        match tile {
+            Some((src, (ax, ay), alt)) => {
+                cells.insert(
+                    key,
+                    gdscene::tilemap::TileData::with_atlas(src, gdcore::math::Vector2i::new(ax, ay), alt),
+                );
+            }
+            None => {
+                cells.remove(&key);
+            }
+        }
+    }
+    let mut cmd = EditorCommand::SetProperty {
+        node_id: nid,
+        property: "tile_map_data".to_string(),
+        new_value: Variant::PackedByteArray(gdscene::tilemap::encode_tile_map_data(&cells)),
+        old_value: Variant::Nil,
+    };
+    if cmd.execute(&mut state.scene_tree).is_err() {
+        return false;
+    }
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    invalidate_tile_grid(state, nid);
+    true
+}
+
+/// After undo/redo of a direct `tile_map_data` write, the grid cache is stale.
+fn invalidate_grid_after_history(state: &mut EditorState, cmd: &EditorCommand) {
+    if let EditorCommand::SetProperty { node_id, property, .. } = cmd {
+        if property == "tile_map_data" {
+            invalidate_tile_grid(state, *node_id);
+        }
+    }
+}
+
 fn ensure_tile_grid(state: &mut EditorState, nid: NodeId, x: i32, y: i32) {
     let need_w = if x >= 0 { x as usize + 1 } else { 0 };
     let need_h = if y >= 0 { y as usize + 1 } else { 0 };
@@ -21164,6 +21326,15 @@ fn api_tilemap_paint(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
             return;
         }
     };
+    if grid_cannot_hold(x, y, tid) && (tid != 0 || layer_has_tile_source(&s, nid, 0)) {
+        let ok = write_layer_cells(&mut s, nid, &[((x, y), Some((tid, (0, 0), alt)))]);
+        if ok {
+            send_json(stream, r#"{"ok":true}"#);
+        } else {
+            send_error(stream, 400, "not a TileMapLayer");
+        }
+        return;
+    }
     ensure_tile_grid(&mut s, nid, x, y);
     set_tile_alternative(&mut s, nid, x, y, alt);
     let mut cmd = EditorCommand::TileMapPaint {
@@ -21206,6 +21377,19 @@ fn api_tilemap_erase(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
             return;
         }
     };
+    // A cell the grid cannot hold (negative coords, or on source 0) is not in
+    // the grid at all, so "paint 0" there would erase nothing.
+    let held_outside_grid = s.scene_tree.get_node(nid).is_some_and(|n| match n.get_property("tile_map_data") {
+        Variant::PackedByteArray(b) => gdscene::tilemap::decode_tile_map_data(&b)
+            .get(&gdcore::math::Vector2i::new(x, y))
+            .is_some_and(|d| grid_cannot_hold(x, y, d.source_id)),
+        _ => false,
+    });
+    if held_outside_grid || x < 0 || y < 0 {
+        write_layer_cells(&mut s, nid, &[((x, y), None)]);
+        send_json(stream, r#"{"ok":true}"#);
+        return;
+    }
     ensure_tile_grid(&mut s, nid, x, y);
     // An erased cell must not keep the flip/rotate of whatever used to be there,
     // or repainting it would silently inherit the old transform.
@@ -21333,7 +21517,7 @@ fn api_tilemap_data(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut T
         send_error(stream, 400, "missing node_id");
         return;
     }
-    let s = state.lock().unwrap();
+    let mut s = state.lock().unwrap();
     let nid = match find_node_by_raw_id(&s.scene_tree, nr) {
         Some(id) => id,
         None => {
@@ -21341,6 +21525,17 @@ fn api_tilemap_data(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut T
             return;
         }
     };
+    // The grid is a cache of the layer's `tile_map_data` (dropped after a
+    // direct cell write, never built for a layer only loaded): reseed it from
+    // the node rather than answer "no tilemap data" for a layer that has tiles.
+    if s.tile_grid_store.get(nid).is_none()
+        && s.scene_tree.get_node(nid).is_some_and(|n| {
+            matches!(n.class_name(), "TileMapLayer" | "TileMap")
+                && matches!(n.get_property("tile_map_data"), Variant::PackedByteArray(_))
+        })
+    {
+        ensure_tile_grid(&mut s, nid, 0, 0);
+    }
     match s.tile_grid_store.get(nid) {
         Some(g) => {
             let mut v = g.to_json();
@@ -21494,30 +21689,8 @@ fn api_tile_peering(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
 
 /// Writes `(cell, source, atlas)` placements into a layer's grid + atlas map.
 fn place_tiles(state: &mut EditorState, nid: NodeId, placed: &[((i32, i32), i32, (i32, i32))]) -> bool {
-    let is_layer = state
-        .scene_tree
-        .get_node(nid)
-        .is_some_and(|n| matches!(n.class_name(), "TileMapLayer" | "TileMap"));
-    if !is_layer {
-        return false;
-    }
-    // A layer loaded from a scene has no editor grid until something paints:
-    // create it SEEDED from its tiles, sized to cover every placement.
-    let (mx, my) = placed.iter().fold((0, 0), |(a, b), &((x, y), _, _)| (a.max(x), b.max(y)));
-    ensure_tile_grid(state, nid, mx, my);
-    let Some(grid) = state.tile_grid_store.get_mut(nid) else {
-        return false;
-    };
-    for &((x, y), src, _) in placed {
-        grid.set(x, y, src);
-    }
-    let atlas = state.tile_atlas_coords.entry(nid).or_default();
-    for &((x, y), src, (ax, ay)) in placed {
-        atlas.insert((x, y), (src, ax, ay));
-    }
-    writeback_tile_grid(state, nid);
-    state.scene_modified = true;
-    true
+    let writes: Vec<_> = placed.iter().map(|&(c, src, atlas)| (c, Some((src, atlas, 0)))).collect();
+    write_layer_cells(state, nid, &writes)
 }
 
 /// `POST /api/tilemap/terrain_paint` — Connect-mode terrain painting:
@@ -21720,9 +21893,42 @@ fn api_tilemap_tileset(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) 
             _ => None,
         });
     let (cw, ch) = layer_size.unwrap_or((ts.cell_size.x as f32, ts.cell_size.y as f32));
+    // 🔑 The palette offers the selected layer's OWN TileSet when it has one:
+    // one swatch per atlas source, showing the region a paint with that source
+    // places (atlas (0,0)). It used to list the editor's built-in colour
+    // palette ("Ground", "Ice"…) for every layer, so on the platformer demo the
+    // swatch labelled "Ice" painted the level's purple rock fill.
+    let layer_tiles: Option<Vec<serde_json::Value>> = s
+        .selected_node
+        .and_then(|id| s.scene_tree.get_node(id))
+        .and_then(|n| {
+            let ids = gdscene::tilemap::tile_set_source_ids(
+                &n.get_property(&format!("{}source_ids", gdscene::tilemap::TILE_SET_PREFIX)),
+            );
+            let set = gdscene::tilemap::tile_set_from_properties(|k| n.get_property(k), &ids)?;
+            let mut ids = ids;
+            ids.sort_unstable();
+            let out: Vec<serde_json::Value> = ids
+                .iter()
+                .filter_map(|&sid| {
+                    let src = set.sources.get(&sid)?;
+                    let r = src.tile_region(gdcore::math::Vector2i::new(0, 0));
+                    let file = src.texture_path.rsplit('/').next().unwrap_or(&src.texture_path);
+                    Some(serde_json::json!({
+                        "id": sid,
+                        "name": format!("{file} #{sid}"),
+                        "texture": src.texture_path,
+                        "region": [r.position.x, r.position.y, r.size.x, r.size.y],
+                    }))
+                })
+                .collect();
+            (!out.is_empty()).then_some(out)
+        });
+    let source = if layer_tiles.is_some() { "tile_set" } else { "palette" };
+    let tiles = layer_tiles.unwrap_or(tiles);
     send_json(
         stream,
-        &serde_json::json!({"cell_size":[cw,ch],"tiles":tiles}).to_string(),
+        &serde_json::json!({"cell_size":[cw,ch],"tiles":tiles,"source":source}).to_string(),
     );
 }
 

@@ -4338,6 +4338,51 @@ pub fn render_play_frame(
     texture_cache: &mut TextureCache,
     settings: &gdcore::project_settings::ProjectSettings,
 ) -> FrameBuffer {
+    prepare_play_frame(tree, width, height, texture_cache, settings).rasterize(texture_cache)
+}
+
+/// One Play frame with everything it reads from the [`SceneTree`] already
+/// gathered: the half of [`render_play_frame`] that needs the tree, so the
+/// half that does not — the rasterizer, which is nearly all of a frame's
+/// cost — can run without it.
+///
+/// 🔑 Why this split exists: the web editor rendered the whole frame while
+/// holding the editor-state lock, and the game loop needs that same lock to
+/// step. On the platformer demo a 995×843 frame took 12–17 ms to rasterize,
+/// so the game thread spent a third of each 16.7 ms tick blocked
+/// ("game-bound: 53 of 60 frames stepped"), and the audio feed it drives ran
+/// dry. The editor now calls [`prepare_play_frame`] under the lock and
+/// [`PreparedPlayFrame::rasterize`] after releasing it.
+///
+/// [`render_play_frame`] is exactly `prepare_play_frame(..).rasterize(..)`,
+/// so both paths draw the same pixels.
+#[derive(Debug, Clone)]
+pub struct PreparedPlayFrame {
+    items: Vec<Render2DItem>,
+    groups: Vec<CanvasGroup2D>,
+    surfaces: Vec<Option<gdrender2d::light2d::SurfaceSample>>,
+    lights: Vec<gdrender2d::light2d::Light2D>,
+    occluders: Vec<gdrender2d::light2d::LightOccluder2D>,
+    light_masks: Vec<u32>,
+    canvas_modulate: Option<Color>,
+    window: crate::viewport::RootWindow,
+    width: u32,
+    height: u32,
+    clear: Color,
+    quality: CanvasQuality,
+}
+
+/// The tree half of [`render_play_frame`]; see [`PreparedPlayFrame`].
+///
+/// Takes the texture cache because the noise bake and the normal/specular
+/// surface pass write into or read from it, and both read the tree.
+pub fn prepare_play_frame(
+    tree: &mut SceneTree,
+    width: u32,
+    height: u32,
+    texture_cache: &mut TextureCache,
+    settings: &gdcore::project_settings::ProjectSettings,
+) -> PreparedPlayFrame {
     let viewport_size = Vector2::new(width.max(1) as f32, height.max(1) as f32);
     // The window here is the Play surface's rect, not the project's configured
     // one, so the project's base resolution stretches to whatever size the host
@@ -4360,22 +4405,69 @@ pub fn render_play_frame(
     }
     apply_stretch_transform(&mut items, window.stretch_transform());
 
-    let quality = CanvasQuality::from_project_settings(settings);
-    // The viewport clears to the PROJECT's `rendering/environment/defaults/
-    // default_clear_color` (Godot's 0.3 grey only when unset). The fixed grey
-    // ignored it, so Pong's near-black (0.106, 0.106, 0.125) showed as a grey
-    // band wherever an expanded viewport reached past the authored background.
-    let mut fb = render_canvas_from_list(
-        tree,
-        &items,
+    // What `render_canvas_from_list` reads from the tree, in its order.
+    let groups = collect_canvas_groups(tree);
+    bake_noise_textures(tree, texture_cache);
+    let surfaces = canvas_surface_buffer(tree, &items, width, height, Some(texture_cache));
+    let lights = crate::light2d_scene::collect_lights_2d(tree);
+    let (occluders, light_masks) = if lights.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        (
+            crate::light2d_scene::collect_occluders_2d(tree),
+            item_light_mask_buffer(tree, width, height),
+        )
+    };
+
+    PreparedPlayFrame {
+        items,
+        groups,
+        surfaces,
+        lights,
+        occluders,
+        light_masks,
+        canvas_modulate: crate::light2d_scene::collect_canvas_modulate(tree),
+        window,
         width,
         height,
-        settings.default_clear_color(),
-        Some(texture_cache),
-        &quality,
-    );
-    paint_black_bars(&mut fb, &window);
-    fb
+        // The viewport clears to the PROJECT's `rendering/environment/defaults/
+        // default_clear_color` (Godot's 0.3 grey only when unset). The fixed grey
+        // ignored it, so Pong's near-black (0.106, 0.106, 0.125) showed as a grey
+        // band wherever an expanded viewport reached past the authored background.
+        clear: settings.default_clear_color(),
+        quality: CanvasQuality::from_project_settings(settings),
+    }
+}
+
+impl PreparedPlayFrame {
+    /// The tree-free half of [`render_play_frame`]: rasterize, shade, bars.
+    pub fn rasterize(&self, texture_cache: &mut TextureCache) -> FrameBuffer {
+        let mut fb = rasterize_render_list_with_groups_and_quality(
+            &self.items,
+            &self.groups,
+            self.width,
+            self.height,
+            self.clear,
+            Some(texture_cache),
+            &self.quality,
+        );
+        // `shade_runtime_canvas_with_surfaces`, from the gathered inputs.
+        if !self.lights.is_empty() {
+            gdrender2d::light2d::apply_lights_with_surfaces(
+                &mut fb,
+                &self.light_masks,
+                &self.surfaces,
+                &self.lights,
+                &self.occluders,
+                gdrender2d::light2d::CanvasAmbient::default(),
+            );
+        }
+        if let Some(color) = self.canvas_modulate {
+            crate::light2d_scene::apply_canvas_modulate(&mut fb, color);
+        }
+        paint_black_bars(&mut fb, &self.window);
+        fb
+    }
 }
 
 /// Paints the letter/pillarbox bars a `keep`-aspect stretch leaves around the

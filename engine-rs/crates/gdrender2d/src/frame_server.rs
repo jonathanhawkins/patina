@@ -189,9 +189,22 @@ pub fn start(port: u16) -> FrameServerHandle {
         running: AtomicBool::new(true),
     });
 
+    // Bind HERE, before returning: binding on the server thread let `start`
+    // return while the port was still closed, so a caller connecting right
+    // away got ConnectionRefused whenever the host was busy (a 150 ms sleep in
+    // space_shooter_live_test failed at load average 30).
+    let listener = match TcpListener::bind(format!("0.0.0.0:{port}")) {
+        Ok(l) => Some(l),
+        Err(e) => {
+            tracing::error!("Failed to bind frame server on port {port}: {e}");
+            None
+        }
+    };
     let state_clone = Arc::clone(&state);
     let thread = thread::spawn(move || {
-        run_server(state_clone, port);
+        if let Some(listener) = listener {
+            run_server(state_clone, listener);
+        }
     });
 
     FrameServerHandle {
@@ -200,14 +213,7 @@ pub fn start(port: u16) -> FrameServerHandle {
     }
 }
 
-fn run_server(state: Arc<SharedState>, port: u16) {
-    let listener = match TcpListener::bind(format!("0.0.0.0:{port}")) {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!("Failed to bind frame server on port {port}: {e}");
-            return;
-        }
-    };
+fn run_server(state: Arc<SharedState>, listener: TcpListener) {
     listener
         .set_nonblocking(true)
         .expect("failed to set non-blocking");
@@ -469,6 +475,20 @@ mod tests {
     fn free_port() -> u16 {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.local_addr().unwrap().port()
+    }
+
+    /// `start` returns with the port already listening: a connect straight
+    /// after it, with no sleep and no retry, must succeed. Binding used to
+    /// happen on the server thread, so this raced and lost under host load.
+    #[test]
+    fn start_returns_with_the_port_already_listening() {
+        for _ in 0..20 {
+            let port = free_port();
+            let handle = start(port);
+            let connected = TcpStream::connect(format!("127.0.0.1:{port}"));
+            handle.stop();
+            assert!(connected.is_ok(), "connect right after start: {connected:?}");
+        }
     }
 
     fn connect_with_retry(port: u16) -> TcpStream {

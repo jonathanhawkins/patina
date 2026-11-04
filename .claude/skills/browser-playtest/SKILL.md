@@ -60,6 +60,11 @@ scripts/browser-playtest.mjs --url http://localhost:9400/editor \
   bindings) so the keys you send do something.
 - `--profile N` samples the editor process for N seconds (macOS `sample`) and
   lists the hottest non-idle functions. Use it when `render_ms` is high.
+  ⚠️ `sample` slows the editor (56 → 31 frames/s on the platformer), so a
+  profiled run's frame rate is only a warning; judge fps on a plain run.
+- Every DevTools call has a 30 s deadline and the whole run a budget (2 min +
+  the steps + 4× the profile); on expiry it stops Play and exits 2, so a run
+  can no longer sit silent for hours.
 - Exit status 0 = no problems, 1 = problems, 2 = could not run.
 - It launches its own headless Chrome (throwaway profile, free port) and kills
   only that one. The person's Chrome is never touched, and no extension is

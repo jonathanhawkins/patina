@@ -63,6 +63,14 @@ enum RenderJob {
     },
     /// Software-rendered 2D viewport (already rasterized under the lock).
     Cpu(gdrender2d::FrameBuffer),
+    /// A running 2D game, gathered from the tree under the lock and rasterized
+    /// OFF it (see `PreparedPlayFrame`), so the game loop keeps stepping while
+    /// the frame draws. The texture cache travels with it and goes back into
+    /// the state afterwards.
+    Canvas(
+        gdeditor::viewport_2d_render::PreparedPlayFrame,
+        gdscene::texture_cache::TextureCache,
+    ),
 }
 
 fn main() {
@@ -246,7 +254,7 @@ fn main() {
             // `advance_running_main_loop` runs (output, debugger, profiler).
             // It only renders now.
             let render_started = std::time::Instant::now();
-            let job = {
+            let job = 'job: {
                 let mut state = handle.state().lock().unwrap();
                 // Render at the panel's real size (reported by the browser via
                 // /api/viewport/resize) so the frame fills the viewport instead
@@ -418,13 +426,19 @@ fn main() {
                                 .run_project_settings
                                 .as_ref()
                                 .unwrap_or(&st.project_settings);
-                            gdeditor::viewport_2d_render::render_play_frame(
+                            let prepared = gdeditor::viewport_2d_render::prepare_play_frame(
                                 ml.tree_mut(),
                                 rw,
                                 rh,
                                 &mut st.texture_cache,
                                 settings,
-                            )
+                            );
+                            // Lend the cache to the off-lock raster. What stays
+                            // behind keeps the project root, which handlers read
+                            // from the cache (`project_root()`).
+                            let placeholder = st.texture_cache.lend_placeholder();
+                            let cache = std::mem::replace(&mut st.texture_cache, placeholder);
+                            break 'job RenderJob::Canvas(prepared, cache);
                         }
                         // No running MainLoop: fall back to the edited scene, as
                         // this branch always has, so pressing Play on a scene
@@ -464,6 +478,18 @@ fn main() {
                 }
                 // 2D running scene: canvas rasterizer, full-quality publish.
                 RenderJob::Cpu(fb) => handle.update_frame(fb),
+                RenderJob::Canvas(prepared, mut cache) => {
+                    let fb = prepared.rasterize(&mut cache);
+                    {
+                        let mut st = handle.state().lock().unwrap();
+                        // Whatever the placeholder saw while the frame drew (a
+                        // project opened, a texture invalidated or loaded by a
+                        // handler) is newer than the lent cache.
+                        let placeholder = std::mem::replace(&mut st.texture_cache, cache);
+                        st.texture_cache.adopt_newer(placeholder);
+                    }
+                    handle.update_frame(fb);
+                }
             }
             handle.note_render_time(render_started.elapsed());
         } else {
@@ -661,6 +687,9 @@ fn main() {
                     }
                     // 2D path: the float FrameBuffer encodes BMP (+ PNG on settle).
                     RenderJob::Cpu(fb) => handle.update_frame_ex(fb, full_quality),
+                    // Only the running-game branch above builds this; the idle
+                    // viewport rasterizes under the lock.
+                    RenderJob::Canvas(..) => unreachable!("the idle viewport never defers a raster"),
                 }
                 last_render_at = std::time::Instant::now();
                 last_frame_lowres = this_lowres;

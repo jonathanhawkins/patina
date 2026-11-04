@@ -215,9 +215,17 @@ async function openTab(port) {
       for (const l of listeners) l(msg);
     }
   });
-  const send = (method, params = {}) => new Promise((resolve) => {
+  // Every DevTools call gets a deadline: one call Chrome never answers (a
+  // screenshot or an awaited evaluate under heavy load) otherwise left the
+  // whole run waiting forever — a --profile run once sat silent for 6.5 hours
+  // with the game still playing in the editor.
+  const send = (method, params = {}, timeoutMs = 30000) => new Promise((resolve, reject) => {
     const id = nextId++;
-    pending.set(id, resolve);
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(`Chrome did not answer ${method} within ${timeoutMs / 1000}s`));
+    }, timeoutMs);
+    pending.set(id, (msg) => { clearTimeout(timer); resolve(msg); });
     ws.send(JSON.stringify({ id, method, params }));
   });
   const evaluate = async (expression) => {
@@ -305,6 +313,16 @@ async function main() {
 
   const chrome = opts.cdp ? { port: opts.cdp, cleanup: () => {} } : await launchChrome();
   process.on('SIGINT', () => { chrome.cleanup(); process.exit(2); });
+  // A whole-run deadline on top of the per-call ones: the run's own waits
+  // (key steps, profile, settle) plus generous slack. On expiry Play is
+  // stopped so the editor is not left running a game nobody watches.
+  const budgetMs = 120000 + steps.reduce((a, s) => a + (s.ms || 0), 0) + (opts.profile || 0) * 1000 * 4;
+  setTimeout(async () => {
+    console.error(`browser-playtest: no result after ${Math.round(budgetMs / 1000)}s — giving up`);
+    try { await fetch(`${api}/api/runtime/stop`, { method: 'POST' }); } catch {}
+    chrome.cleanup();
+    process.exit(2);
+  }, budgetMs).unref();
   const tab = await openTab(chrome.port);
   const report = {
     url: opts.url, build: before.build || 'unknown', keys: opts.keys, problems: [], warnings: [],
@@ -378,7 +396,13 @@ async function main() {
       const pid = editorPid(editorUrl.port || 80);
       if (process.platform !== 'darwin') report.warnings.push('--profile needs macOS `sample`; skipped');
       else if (!pid) report.warnings.push(`--profile: no process is listening on port ${editorUrl.port}`);
-      else sampler = spawn('sample', [pid, String(opts.profile), '-file', sampleFile], { stdio: 'ignore' });
+      else {
+        // Capture the exit NOW: awaiting `on('exit')` after the key steps hung
+        // forever whenever the profile was shorter than the steps, because
+        // `sample` had already exited and the event fired with no listener.
+        const proc = spawn('sample', [pid, String(opts.profile), '-file', sampleFile], { stdio: 'ignore' });
+        sampler = new Promise((r) => { proc.on('exit', r); proc.on('error', r); });
+      }
     }
 
     // The watched properties, read straight from the running game.
@@ -453,7 +477,7 @@ async function main() {
         report.warnings.push(`${w.watch} was never readable: ${w.values[0]?.value ?? 'no steps ran'}`);
       }
     }
-    if (sampler) await new Promise((r) => sampler.on('exit', r));
+    if (sampler) await sampler;
 
     // What the player got.
     const unique = (frames) => new Set(frames.map((f, i) => f.seq ?? `#${i}`)).size;
@@ -542,7 +566,15 @@ async function main() {
 
     // Verdict.
     if (!played.length) report.problems.push('the page received no frames while the game ran');
-    else if (report.shown_fps < opts.minFps) report.problems.push(`shown ${report.shown_fps} frames/s, below --min-fps ${opts.minFps}`);
+    else if (report.shown_fps < opts.minFps) {
+      const msg = `shown ${report.shown_fps} frames/s, below --min-fps ${opts.minFps}`;
+      // `sample` suspends the editor to walk its stacks every millisecond, so a
+      // profiled run is slower than the game is: on the platformer demo the
+      // same build showed 56 frames/s plain and 31 under --profile. Judge the
+      // rate on a run without it.
+      if (opts.profile > 0) report.warnings.push(`${msg} — measured under --profile, which slows the editor; re-run without it to judge the frame rate`);
+      else report.problems.push(msg);
+    }
     const refused = report.http_errors.filter((e) => e.status === 429);
     if (refused.length) report.problems.push(`${refused.length} request(s) refused with 429: ${[...new Set(refused.map((e) => e.request))].join(', ')}`);
     const broken = report.http_errors.filter((e) => e.status >= 500);
