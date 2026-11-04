@@ -185,6 +185,11 @@ paths:
         "200":
           $ref: "#/components/responses/ObjectResponse"
   /api/editor/mode:
+    post:
+      summary: POST /api/editor/mode (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
     get:
       summary: Return current editor mode.
       responses:
@@ -473,6 +478,482 @@ paths:
   /api/runtime/step:
     post:
       summary: Step the runtime one frame.
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/animation/tree":
+    get:
+      summary: GET /api/animation/tree (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/assetlib/list":
+    get:
+      summary: GET /api/assetlib/list (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/audio/buses":
+    get:
+      summary: GET /api/audio/buses (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/audio/peaks":
+    get:
+      summary: GET /api/audio/peaks (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/debug/info":
+    get:
+      summary: GET /api/debug/info (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/debug/state":
+    get:
+      summary: GET /api/debug/state (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/editor/layout":
+    get:
+      summary: GET /api/editor/layout (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+    post:
+      summary: POST /api/editor/layout (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/editor/main_view":
+    get:
+      summary: GET /api/editor/main_view (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/export/presets":
+    get:
+      summary: GET /api/export/presets (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+    post:
+      summary: POST /api/export/presets (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/filesystem/file_info":
+    get:
+      summary: GET /api/filesystem/file_info (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/history":
+    get:
+      summary: GET /api/history (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/import_settings":
+    get:
+      summary: GET /api/import_settings (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/logs":
+    get:
+      summary: GET /api/logs (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/monitors":
+    get:
+      summary: GET /api/monitors (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/monitors/frame_times":
+    get:
+      summary: GET /api/monitors/frame_times (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/profiler":
+    get:
+      summary: GET /api/profiler (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/runtime/audio":
+    get:
+      summary: GET /api/runtime/audio (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/script/goto":
+    get:
+      summary: GET /api/script/goto (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/script/templates":
+    get:
+      summary: GET /api/script/templates (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/shader_source":
+    get:
+      summary: GET /api/shader_source (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+    post:
+      summary: POST /api/shader_source (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/tileset/source":
+    get:
+      summary: GET /api/tileset/source (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+    post:
+      summary: POST /api/tileset/source (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/tileset/tile":
+    get:
+      summary: GET /api/tileset/tile (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/animation/tree/apply":
+    post:
+      summary: POST /api/animation/tree/apply (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/animation/tree/connect":
+    post:
+      summary: POST /api/animation/tree/connect (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/animation/tree/disconnect":
+    post:
+      summary: POST /api/animation/tree/disconnect (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/animation/tree/node/param":
+    post:
+      summary: POST /api/animation/tree/node/param (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/animation/tree/state/add":
+    post:
+      summary: POST /api/animation/tree/state/add (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/animation/tree/state/move":
+    post:
+      summary: POST /api/animation/tree/state/move (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/animation/tree/state/remove":
+    post:
+      summary: POST /api/animation/tree/state/remove (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/animation/tree/transition/add":
+    post:
+      summary: POST /api/animation/tree/transition/add (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/animation/tree/transition/remove":
+    post:
+      summary: POST /api/animation/tree/transition/remove (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/animation/tree/transition/set":
+    post:
+      summary: POST /api/animation/tree/transition/set (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/assetlib/download":
+    post:
+      summary: POST /api/assetlib/download (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/assetlib/install":
+    post:
+      summary: POST /api/assetlib/install (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/audio/bus/add":
+    post:
+      summary: POST /api/audio/bus/add (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/audio/bus/bypass":
+    post:
+      summary: POST /api/audio/bus/bypass (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/audio/bus/mute":
+    post:
+      summary: POST /api/audio/bus/mute (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/audio/bus/output":
+    post:
+      summary: POST /api/audio/bus/output (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/audio/bus/remove":
+    post:
+      summary: POST /api/audio/bus/remove (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/audio/bus/rename":
+    post:
+      summary: POST /api/audio/bus/rename (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/audio/bus/solo":
+    post:
+      summary: POST /api/audio/bus/solo (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/audio/bus/volume":
+    post:
+      summary: POST /api/audio/bus/volume (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/audio/effect/add":
+    post:
+      summary: POST /api/audio/effect/add (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/audio/effect/remove":
+    post:
+      summary: POST /api/audio/effect/remove (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/audio/effect/swap":
+    post:
+      summary: POST /api/audio/effect/swap (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/audio/effect/toggle":
+    post:
+      summary: POST /api/audio/effect/toggle (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/audio/layout/load":
+    post:
+      summary: POST /api/audio/layout/load (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/audio/layout/load_default":
+    post:
+      summary: POST /api/audio/layout/load_default (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/audio/layout/save":
+    post:
+      summary: POST /api/audio/layout/save (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/debug/network_autostart":
+    post:
+      summary: POST /api/debug/network_autostart (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/debug/network_clear":
+    post:
+      summary: POST /api/debug/network_clear (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/debug/network_profiler":
+    post:
+      summary: POST /api/debug/network_profiler (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/export/presets/delete":
+    post:
+      summary: POST /api/export/presets/delete (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/export/presets/update":
+    post:
+      summary: POST /api/export/presets/update (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/export/run":
+    post:
+      summary: POST /api/export/run (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/filesystem/display_mode":
+    post:
+      summary: POST /api/filesystem/display_mode (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/filesystem/duplicate":
+    post:
+      summary: POST /api/filesystem/duplicate (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/filesystem/favorite":
+    post:
+      summary: POST /api/filesystem/favorite (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/history/goto":
+    post:
+      summary: POST /api/history/goto (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/node/change_type":
+    post:
+      summary: POST /api/node/change_type (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/node/detach_script":
+    post:
+      summary: POST /api/node/detach_script (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/node/extend_script":
+    post:
+      summary: POST /api/node/extend_script (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/node/make_root":
+    post:
+      summary: POST /api/node/make_root (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/node/reparent_to_new":
+    post:
+      summary: POST /api/node/reparent_to_new (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/plugins/main_screen":
+    post:
+      summary: POST /api/plugins/main_screen (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/project/open":
+    post:
+      summary: POST /api/project/open (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/reimport":
+    post:
+      summary: POST /api/reimport (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/scene/tabs/open":
+    post:
+      summary: POST /api/scene/tabs/open (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/script/complete":
+    post:
+      summary: POST /api/script/complete (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/script/create":
+    post:
+      summary: POST /api/script/create (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/shader_validate":
+    post:
+      summary: POST /api/shader_validate (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/tileset/tile/data":
+    post:
+      summary: POST /api/tileset/tile/data (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/viewport/3d/box_select":
+    post:
+      summary: POST /api/viewport/3d/box_select (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/script/validate":
+    post:
+      summary: POST /api/script/validate (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/script/highlight":
+    post:
+      summary: POST /api/script/highlight (editor route; schema in /api/capabilities).
+      responses:
+        "200":
+          $ref: "#/components/responses/ObjectResponse"
+  "/api/asset/drop_to_viewport":
+    post:
+      summary: Drop a FileSystem asset onto the viewport, creating the matching node.
       responses:
         "200":
           $ref: "#/components/responses/ObjectResponse"

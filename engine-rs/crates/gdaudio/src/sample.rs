@@ -78,6 +78,22 @@ pub trait AudioOutputStream {
 
     /// Returns the number of output channels.
     fn channels(&self) -> u16;
+
+    /// The rate the MIXER should produce for this output. The device's own
+    /// rate ([`sample_rate`](Self::sample_rate)) unless the output resamples
+    /// internally — the web output takes the project's mix rate and converts
+    /// to the `AudioContext`'s rate itself, so feeding it at the context rate
+    /// would resample twice.
+    fn input_sample_rate(&self) -> u32 {
+        self.sample_rate()
+    }
+
+    /// Frames written but not yet played, when the output can tell — a real
+    /// device queue. `None` for sinks with no clock of their own (capture,
+    /// null), which the producer then feeds at the game's own pace.
+    fn queued_frames(&self) -> Option<usize> {
+        None
+    }
 }
 
 /// A null audio output that accepts but discards all samples.

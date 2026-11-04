@@ -4,6 +4,10 @@
 //! HTTP 403, and a request with an allowed `Origin` returns the matching
 //! `Access-Control-Allow-Origin` header.
 
+// The server's error envelope uses lower-case snake codes (`rate_limit`,
+// `not_found`, `path_sandbox`, `cors_origin` — pinned by
+// editor_error_envelope_test.rs); these tests predate it and asked for
+// `E_`-prefixed codes the server never emits.
 use gdeditor::editor_server::{
     CorsAllowlist, EditorServerHandle, EditorState, RateLimiter,
 };
@@ -99,7 +103,7 @@ fn origin_not_in_allowlist_is_rejected_with_403() {
     // Body should carry a machine-readable code so clients/SREs can match on it.
     let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
     assert!(
-        body.contains(r#""code":"E_CORS_ORIGIN""#),
+        body.contains(r#""code":"cors_origin""#),
         "403 body must include machine-readable code, got: {body}"
     );
     handle.stop();

@@ -58,8 +58,10 @@ func _notification(what):
         ml.tree()
             .get_script(main_id)
             .and_then(|s| s.get_property("log")),
-        Some(Variant::Int(1013171415)),
-        "script _notification must observe ENTER_TREE,READY,PROCESS,PAUSED,UNPAUSED in order",
+        // POST_ENTER_TREE (27) between ENTER_TREE and READY: Godot's
+        // `_propagate_ready` sends it to every node on every tree entry.
+        Some(Variant::Int(102713171415)),
+        "script _notification must observe ENTER_TREE,POST_ENTER_TREE,READY,PROCESS,PAUSED,UNPAUSED in order",
     );
 
     // PREDELETE (1) is delivered through the same SceneTree::notify_script path
@@ -70,7 +72,7 @@ func _notification(what):
         ml.tree()
             .get_script(main_id)
             .and_then(|s| s.get_property("log")),
-        Some(Variant::Int(101317141501)),
+        Some(Variant::Int(10271317141501)),
         "script _notification must observe PREDELETE (1)",
     );
 

@@ -726,12 +726,29 @@ impl ExportDialog {
             if let Some(v) = lookup(&opts, "patina/icon_path") {
                 preset.icon_path = v;
             }
-            // Everything in the options section that is not a `patina/` field is
-            // a platform custom property.
+            // Everything in the options section that this parser did not already
+            // consume into a dedicated field is a platform custom property.
+            //
+            // ⚠️ The exclusion is an explicit LIST, not `starts_with("patina/")`
+            // (pat-mgixk.109). The whole-namespace test also dropped
+            // `patina/wasm_path`, which the Web export needs: the writer above
+            // emits it, this parser threw it away, so the property could never
+            // survive a round trip through `export_presets.cfg` and
+            // `/api/export/run` always answered "web export needs a compiled
+            // wasm payload" no matter what the dialog stored. The intent here is
+            // only to avoid duplicating the four fields read above — naming them
+            // says exactly that, and a future `patina/…` property is kept by
+            // default instead of silently vanishing.
+            const CONSUMED_KEYS: [&str; 4] = [
+                "patina/app_name",
+                "patina/build_profile",
+                "patina/icon_path",
+                "patina/platform_id",
+            ];
             preset.custom_properties.clear();
             if let Some((_, entries)) = sections.iter().find(|(n, _)| n == &opts) {
                 for (k, v) in entries {
-                    if !k.starts_with("patina/") {
+                    if !CONSUMED_KEYS.contains(&k.as_str()) {
                         preset.custom_properties.insert(k.clone(), v.clone());
                     }
                 }

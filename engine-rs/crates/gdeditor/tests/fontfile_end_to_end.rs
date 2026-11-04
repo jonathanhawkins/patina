@@ -30,7 +30,12 @@ use gdvariant::Variant;
 use std::path::Path;
 
 /// The one face the repo ships, reached from the gdeditor crate root.
-const FONT_REL: &str = "../gdrender2d/test_assets/Cantarell-Regular.ttf";
+// ⚠️ NOT Cantarell: that file is byte-identical to the built-in default face
+// (`gdrender2d/assets/default_font.ttf`), so overriding with it could never
+// change a pixel and the "override differs from default" clause was red at
+// every commit once default text drew with the real face. See
+// `gdrender2d/test_assets/README.md`.
+const FONT_REL: &str = "../gdrender2d/test_assets/Xolonium-Regular.ttf";
 
 fn font_path() -> String {
     let p = Path::new(env!("CARGO_MANIFEST_DIR")).join(FONT_REL);

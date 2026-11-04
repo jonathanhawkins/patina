@@ -416,6 +416,12 @@ fn body_moving_in_via_velocity() {
         "linear_velocity",
         Variant::Vector2(Vector2::new(-200.0, 0.0)),
     );
+    // Straight in, no fall: under Godot's default 980 px/s² gravity this
+    // RigidBody2D drops ~70 px while covering the 75 px, passing UNDER the
+    // 20 px area — a correct miss that read as a broken overlap signal.
+    tree.get_node_mut(body_id)
+        .unwrap()
+        .set_property("gravity_scale", Variant::Float(0.0));
 
     let entered = Arc::new(AtomicUsize::new(0));
     let e = entered.clone();

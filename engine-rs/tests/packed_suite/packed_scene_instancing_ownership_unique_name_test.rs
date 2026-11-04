@@ -1520,15 +1520,17 @@ fn f5x4_unique_name_via_instance_with_subscenes_isolated() {
 
     // In Godot, %UniqueName lookup searches the owner's scope.
     // Hero's owner is World, so from Hero, %GameTimer (World scope) resolves.
-    // %Health (owned by Hero) does NOT resolve from Hero itself — it's in
-    // Player's subscene scope, accessible from nodes owned by Hero.
+    // ⚠️ This asserted %Health does NOT resolve from Hero. Godot's `Node::get_node_or_null` checks the CURRENT node's
+    // `owned_unique_nodes` FIRST and only then its owner's
+    // (`scene/main/node.cpp:1930-1934`). An instance root OWNS its inner
+    // scene's unique nodes, so from it the INNER name resolves.
     assert!(
         tree.get_node_relative(hero, "%GameTimer").is_some(),
         "Hero's owner is World, so %GameTimer should resolve in World scope"
     );
     assert!(
-        tree.get_node_relative(hero, "%Health").is_none(),
-        "%Health is in Player scope (owned by Hero), not accessible from Hero's owner scope (World)"
+        tree.get_node_relative(hero, "%Health").is_some(),
+        "Hero owns %Health (Player scope), and Godot checks Hero's own unique names first"
     );
 
     // From a child owned by Hero (e.g., Health itself), %Health should resolve
@@ -1621,11 +1623,16 @@ text = "outer_status"
 
     // From Nested (scene root, owned by Outer), %Status resolves in Outer's
     // scope, so it finds Outer's %Status — matching Godot's owner-based scoping.
+    // ⚠️ This asserted Outer's %Status. Godot's `Node::get_node_or_null` checks the CURRENT node's
+    // `owned_unique_nodes` FIRST and only then its owner's
+    // (`scene/main/node.cpp:1930-1934`). An instance root OWNS its inner
+    // scene's unique nodes, so from it the INNER name resolves.
     let nested_lookup = tree.get_node_relative(nested, "%Status").unwrap();
-    assert_eq!(
+    assert_ne!(
         nested_lookup, outer_status,
-        "Nested's owner is Outer, so %Status from Nested resolves in Outer's scope"
+        "Nested owns Inner's %Status, which Godot checks before Nested's owner"
     );
+    assert_eq!(tree.get_node(nested_lookup).unwrap().owner(), Some(nested));
 
     // From a child INSIDE Inner's scope (owned by Nested), %Status should
     // resolve to Inner's own %Status.

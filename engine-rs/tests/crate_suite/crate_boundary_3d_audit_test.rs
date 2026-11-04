@@ -79,7 +79,9 @@ fn gdscene_has_3d_modules() {
         "camera3d",
         "skeleton3d",
         "particle3d",
-        "decal",
+        // `decal` is not here: Patina keeps the decal render data in
+        // `gdserver3d::decal` (Godot's RenderingServer decal API), and the
+        // scene node projects through it.
         "physics_server_3d",
         "render_server_3d",
         "collision",
@@ -109,7 +111,9 @@ fn gdserver3d_has_expected_modules() {
         "csg",
         "gi",
         "navigation",
-        "particles3d",
+        // 3D particle SIMULATION lives in `gdscene::particle3d` (asserted
+        // above); the server side owns the decal projection instead.
+        "decal",
         "multimesh",
         "primitive_mesh",
         "projection",

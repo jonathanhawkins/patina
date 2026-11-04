@@ -60,7 +60,7 @@ A subsystem may only claim runtime parity when an **app-level test drives it thr
 | Scene System | `gdscene` | **Measured** | 959 + integration | 37 | ~90% | `gdscene` units (959), `golden_tests`, `instancing_ownership_test`, `packed_scene_edge_cases_test`, `frame_processing_semantics_test` |
 | GDScript Interop | `gdscript-interop` | **Measured** | 464 + integration | — | ~85% | `gdscript_interop` units (464), `demo_scenes_test` |
 | Trace Parity | `gdscene` | **Measured** | integration | 23 | — | `trace_parity_test`, `multi_scene_trace_parity_test`, `frame_trace_test` |
-| Oracle Parity | `gdscene` | **Measured** | integration | 115 oracle outputs | 100% | `oracle_parity_test`, `oracle_regression_test` — measured against Godot 4.6.1 |
+| Oracle Parity | `gdscene` | **Measured** | integration | 119 oracle outputs | 100% | `oracle_parity_test`, `oracle_regression_test` — measured against Godot 4.6.1 |
 | 2D Rendering | `gdrender2d` | **Measured** | 168 + integration | 64 | Golden-based | `gdrender2d` units (168), `render_pipeline`, `render_golden_test` |
 | 2D Rendering Server | `gdserver2d` | **Measured** | 108 | — | Measured | `gdserver2d` units (108) — draw ordering, canvas, sprite server |
 | 2D Physics | `gdphysics2d` | **Measured** | 111 + integration | 17 | Deterministic | `gdphysics2d` units (111), `physics_integration_test` |
@@ -123,7 +123,7 @@ until the real ENet + Godot command layout is bound.
 | Scene System | 959 unit tests + integration; hierarchy, lifecycle, instancing, packed scenes, frame processing; 37 scene goldens |
 | GDScript Interop | 464 unit tests + integration; tokenizer, parser, interpreter, built-ins, bindings |
 | Trace Parity | Integration tests against 23 trace goldens (patina vs upstream mock) |
-| Oracle Parity | Integration tests against 115 oracle output files (Godot 4.6.1); 100% property parity |
+| Oracle Parity | Integration tests against 119 oracle output files (Godot 4.6.1); 100% property parity in the 9-scene report |
 | 2D Rendering | 168 unit tests + integration + 64 render goldens (pixel-level comparison) |
 | 2D Rendering Server | 108 unit tests; draw ordering, canvas, sprite server |
 | 2D Physics | 111 unit tests + integration + 17 physics goldens (deterministic trace comparison) |
@@ -153,9 +153,9 @@ until the real ENet + Godot command layout is bound.
 
 ## Oracle Parity Summary
 
-Measured against **Godot 4.6.1** (v4.6.1.stable.official.14d19694e) — 21+ oracle scenes measured, 115 oracle output files, 71 property comparisons:
+Measured against **Godot 4.6.1** (v4.6.1.stable.official.14d19694e). Re-measured 2026-11-03 after the oracle outputs were regenerated with a local Godot 4.6.1: **45 oracle scenes** have a Godot property capture (`fixtures/oracle_outputs/*_properties.json`, 119 oracle output files in all), and the property-parity report (`oracle_regression_test::golden_all_scenes_property_parity_report`) compares 9 golden scenes, 71 property comparisons:
 
-- **Overall**: 100% (71/71 property comparisons match — all parity gaps closed)
+- **Overall**: 100% (71/71 property comparisons match in the 9-scene parity report)
 - **Node structure**: 100% (all nodes present with correct names/classes across all measured scenes)
 - **Explicit properties**: 100% for all measured scenes (positions, collision masks, modulate all match)
 - **Script-exported properties**: Closed — all script-exported variables verified across space_shooter, test_scripts, and other scenes

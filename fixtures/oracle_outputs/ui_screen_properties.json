@@ -8,52 +8,11 @@
 					"name": "Background",
 					"path": "/root/UIRoot/Background",
 					"properties": {
-						"anchor_bottom": {
-							"class_type": "",
-							"hint": 1,
-							"type": "float",
-							"value": 1.0
-						},
-						"anchor_right": {
-							"class_type": "",
-							"hint": 1,
-							"type": "float",
-							"value": 1.0
-						},
-						"anchors_preset": {
-							"class_type": "",
-							"hint": 2,
-							"type": "int",
-							"value": 15
-						},
-						"color": {
-							"class_type": "",
-							"hint": 0,
-							"type": "Color",
-							"value": {
-								"a": 1.0,
-								"b": 0.180000007152557,
-								"g": 0.119999997317791,
-								"r": 0.119999997317791
-							}
-						},
-						"grow_horizontal": {
-							"class_type": "",
-							"hint": 2,
-							"type": "int",
-							"value": 2
-						},
-						"grow_vertical": {
-							"class_type": "",
-							"hint": 2,
-							"type": "int",
-							"value": 2
-						},
 						"layout_mode": {
 							"class_type": "",
 							"hint": 2,
 							"type": "int",
-							"value": 1
+							"value": 0
 						}
 					}
 				},
@@ -70,12 +29,6 @@
 									"hint": 2,
 									"type": "int",
 									"value": 2
-								},
-								"stretch_mode": {
-									"class_type": "",
-									"hint": 2,
-									"type": "int",
-									"value": 5
 								}
 							}
 						},
@@ -85,12 +38,6 @@
 							"name": "Title",
 							"path": "/root/UIRoot/VBoxContainer/Title",
 							"properties": {
-								"horizontal_alignment": {
-									"class_type": "",
-									"hint": 2,
-									"type": "int",
-									"value": 1
-								},
 								"layout_mode": {
 									"class_type": "",
 									"hint": 2,
@@ -101,7 +48,7 @@
 									"class_type": "",
 									"hint": 18,
 									"type": "String",
-									"value": "Welcome to Patina"
+									"value": "Game Title"
 								}
 							}
 						},
@@ -121,7 +68,7 @@
 									"class_type": "",
 									"hint": 18,
 									"type": "String",
-									"value": "Start Game"
+									"value": "Start"
 								}
 							}
 						},
@@ -170,77 +117,11 @@
 					"name": "VBoxContainer",
 					"path": "/root/UIRoot/VBoxContainer",
 					"properties": {
-						"anchor_bottom": {
-							"class_type": "",
-							"hint": 1,
-							"type": "float",
-							"value": 0.5
-						},
-						"anchor_left": {
-							"class_type": "",
-							"hint": 1,
-							"type": "float",
-							"value": 0.5
-						},
-						"anchor_right": {
-							"class_type": "",
-							"hint": 1,
-							"type": "float",
-							"value": 0.5
-						},
-						"anchor_top": {
-							"class_type": "",
-							"hint": 1,
-							"type": "float",
-							"value": 0.5
-						},
-						"anchors_preset": {
-							"class_type": "",
-							"hint": 2,
-							"type": "int",
-							"value": 8
-						},
-						"grow_horizontal": {
-							"class_type": "",
-							"hint": 2,
-							"type": "int",
-							"value": 2
-						},
-						"grow_vertical": {
-							"class_type": "",
-							"hint": 2,
-							"type": "int",
-							"value": 2
-						},
 						"layout_mode": {
 							"class_type": "",
 							"hint": 2,
 							"type": "int",
-							"value": 1
-						},
-						"offset_bottom": {
-							"class_type": "",
-							"hint": 1,
-							"type": "float",
-							"value": 150.0
-						},
-						"offset_left": {
-							"class_type": "",
-							"hint": 1,
-							"type": "float",
-							"value": -200.0
-						},
-						"offset_right": {
-							"class_type": "",
-							"hint": 1,
-							"type": "float",
-							"value": 200.0
-						},
-						"offset_top": {
-							"class_type": "",
-							"hint": 1,
-							"type": "float",
-							"value": -150.0
+							"value": 0
 						}
 					}
 				}
@@ -249,36 +130,7 @@
 			"name": "UIRoot",
 			"path": "/root/UIRoot",
 			"properties": {
-				"anchor_bottom": {
-					"class_type": "",
-					"hint": 1,
-					"type": "float",
-					"value": 1.0
-				},
-				"anchor_right": {
-					"class_type": "",
-					"hint": 1,
-					"type": "float",
-					"value": 1.0
-				},
-				"anchors_preset": {
-					"class_type": "",
-					"hint": 2,
-					"type": "int",
-					"value": 15
-				},
-				"grow_horizontal": {
-					"class_type": "",
-					"hint": 2,
-					"type": "int",
-					"value": 2
-				},
-				"grow_vertical": {
-					"class_type": "",
-					"hint": 2,
-					"type": "int",
-					"value": 2
-				}
+
 			}
 		}
 	],

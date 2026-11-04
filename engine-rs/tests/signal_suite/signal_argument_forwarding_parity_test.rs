@@ -569,14 +569,15 @@ fn nested_bind_stacks_args() {
         bound_args: vec![Variant::Int(200)],
     };
 
-    // Outer bind resolves: [signal_args..., 200]
-    // But bind only looks at its own level, not recursively.
-    // Godot's bind() is the same: bind().bind() creates two layers.
+    // Godot (`callable_bind.cpp:141-150`): the OUTER bind appends 200 and calls
+    // the inner callable, which appends 100 — so both layers apply, outer
+    // first: `[0, 200, 100]`. (This test used to claim only the outer layer
+    // applied, which is not what `CallableCustomBind::call` does.)
     let resolved = bind2.resolve_args(&[Variant::Int(0)]);
     assert_eq!(
         resolved,
-        vec![Variant::Int(0), Variant::Int(200)],
-        "outer bind applies its own bound_args"
+        vec![Variant::Int(0), Variant::Int(200), Variant::Int(100)],
+        "each bind layer appends, outer before inner"
     );
 
     // inner_callable should unwrap to the Method.
@@ -606,12 +607,14 @@ fn nested_unbind_wrapping_bind() {
         unbind_count: 1,
     };
 
-    // Unbound resolves first: drops 1 trailing arg from call_args
+    // Godot (`callable_bind.cpp:251-257`): the outer unbind drops 1 trailing
+    // arg and calls the inner callable, whose bind then appends "extra". The
+    // inner layer is NOT skipped — this test used to claim it was.
     let resolved = unbound.resolve_args(&[Variant::Int(1), Variant::Int(2), Variant::Int(3)]);
     assert_eq!(
         resolved,
-        vec![Variant::Int(1), Variant::Int(2)],
-        "outer unbind drops trailing arg, inner bind not applied at this level"
+        vec![Variant::Int(1), Variant::Int(2), Variant::String("extra".into())],
+        "outer unbind drops the trailing arg, then the inner bind appends"
     );
 }
 

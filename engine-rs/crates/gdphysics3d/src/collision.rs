@@ -61,8 +61,19 @@ pub fn test_sphere_sphere(
     let dist_sq = diff.length_squared();
     let min_dist = radius_a + radius_b;
 
-    if dist_sq >= min_dist * min_dist || dist_sq < f32::EPSILON {
+    if dist_sq >= min_dist * min_dist {
         return CollisionResult3D::NONE;
+    }
+    // Coincident centres are the DEEPEST overlap, not none: Godot's SAT test
+    // (`_collision_sphere_sphere`) cannot separate on a zero axis. Pick an
+    // arbitrary axis so the normal stays finite. Treating it as no contact
+    // made a point query at a sphere's exact centre miss the sphere.
+    if dist_sq < f32::EPSILON {
+        return CollisionResult3D {
+            colliding: true,
+            normal: Vector3::new(0.0, 1.0, 0.0),
+            depth: min_dist,
+        };
     }
 
     let dist = dist_sq.sqrt();
@@ -1556,6 +1567,14 @@ fn epa<F: Fn(Vector3) -> Vector3>(support: &F, simplex: &[Vector3]) -> Collision
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coincident_spheres_collide_at_full_depth() {
+        let r = test_sphere_sphere(Vector3::ZERO, 1.0, Vector3::ZERO, 0.5);
+        assert!(r.colliding);
+        assert!((r.depth - 1.5).abs() < 1e-6);
+        assert!(r.normal.length_squared() > 0.99, "normal must be finite and unit");
+    }
 
     #[test]
     fn sphere_sphere_overlap() {

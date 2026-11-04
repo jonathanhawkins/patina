@@ -105,7 +105,9 @@ fn make_friction_decel() -> SceneTree {
     floor.set_property("friction", Variant::Float(1.0));
     let floor_id = tree.add_child(root, floor).unwrap();
     let mut sf = Node::new("Shape", "CollisionShape2D");
-    sf.set_property("half_extents", Variant::Vector2(Vector2::new(500.0, 5.0)));
+    // Godot 4 rectangles author `size` (full extents); `half_extents` is
+    // read by nothing, which made this floor a zero-size shape.
+    sf.set_property("size", Variant::Vector2(Vector2::new(1000.0, 10.0)));
     tree.add_child(floor_id, sf).unwrap();
 
     tree
@@ -130,7 +132,7 @@ fn make_static_blocking() -> SceneTree {
     floor.set_property("position", Variant::Vector2(Vector2::new(0.0, 50.0)));
     let floor_id = tree.add_child(root, floor).unwrap();
     let mut sf = Node::new("Shape", "CollisionShape2D");
-    sf.set_property("half_extents", Variant::Vector2(Vector2::new(100.0, 10.0)));
+    sf.set_property("size", Variant::Vector2(Vector2::new(200.0, 20.0)));
     tree.add_child(floor_id, sf).unwrap();
 
     tree

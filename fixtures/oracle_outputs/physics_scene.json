@@ -290,10 +290,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -387,7 +384,7 @@
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 3
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -469,7 +466,7 @@
 									},
 									"mass": {
 										"type": "float",
-										"value": 5.0
+										"value": 1.0
 									},
 									"material": {
 										"type": "Object",
@@ -500,7 +497,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 200.0,
-											"y": 100.816215515137
+											"y": 50.8162117004395
 										}
 									},
 									"process_mode": {
@@ -687,10 +684,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "CircleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::CircleShape2D_circ1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -784,7 +778,7 @@
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 3
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -807,7 +801,7 @@
 									},
 									"continuous_cd": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"custom_integrator": {
 										"type": "bool",
@@ -831,7 +825,7 @@
 									},
 									"gravity_scale": {
 										"type": "float",
-										"value": 1.5
+										"value": 1.0
 									},
 									"inertia": {
 										"type": "float",
@@ -857,7 +851,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 48.959171295166
+											"y": 32.6394462585449
 										}
 									},
 									"lock_rotation": {
@@ -897,7 +891,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 400.0,
-											"y": 51.2243194580078
+											"y": 50.8162117004395
 										}
 									},
 									"process_mode": {
@@ -1069,8 +1063,8 @@
 											"scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 8.0,
-													"y": 0.5
+													"x": 1.0,
+													"y": 1.0
 												}
 											},
 											"self_modulate": {
@@ -1084,10 +1078,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -1150,11 +1141,11 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 0
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -1212,7 +1203,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 300.0,
-											"y": 400.0
+											"y": 300.0
 										}
 									},
 									"process_mode": {
@@ -1380,7 +1371,7 @@
 											"scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 20.0,
+													"x": 1.0,
 													"y": 1.0
 												}
 											},
@@ -1395,10 +1386,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -1477,7 +1465,7 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 4
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
@@ -1556,7 +1544,7 @@
 									},
 									"monitorable": {
 										"type": "bool",
-										"value": false
+										"value": true
 									},
 									"monitoring": {
 										"type": "bool",
@@ -1716,7 +1704,7 @@
 												"type": "Vector2",
 												"value": {
 													"x": 0.0,
-													"y": 500.0
+													"y": 0.0
 												}
 											},
 											"process_mode": {
@@ -1757,10 +1745,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "WorldBoundaryShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::WorldBoundaryShape2D_bnd1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -1823,11 +1808,11 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 0
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -1884,8 +1869,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 0.0,
-											"y": 0.0
+											"x": 400.0,
+											"y": 500.0
 										}
 									},
 									"process_mode": {
@@ -2879,10 +2864,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -2976,7 +2958,7 @@
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 3
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -3049,7 +3031,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 65.1701812744141
+											"y": 48.9183807373047
 										}
 									},
 									"lock_rotation": {
@@ -3058,7 +3040,7 @@
 									},
 									"mass": {
 										"type": "float",
-										"value": 5.0
+										"value": 1.0
 									},
 									"material": {
 										"type": "Object",
@@ -3089,7 +3071,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 200.0,
-											"y": 102.71768951416
+											"y": 51.631519317627
 										}
 									},
 									"process_mode": {
@@ -3276,10 +3258,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "CircleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::CircleShape2D_circ1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -3373,7 +3352,7 @@
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 3
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -3396,7 +3375,7 @@
 									},
 									"continuous_cd": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"custom_integrator": {
 										"type": "bool",
@@ -3420,7 +3399,7 @@
 									},
 									"gravity_scale": {
 										"type": "float",
-										"value": 1.5
+										"value": 1.0
 									},
 									"inertia": {
 										"type": "float",
@@ -3446,7 +3425,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 97.7552719116211
+											"y": 48.9183807373047
 										}
 									},
 									"lock_rotation": {
@@ -3486,7 +3465,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 400.0,
-											"y": 54.0765342712402
+											"y": 51.631519317627
 										}
 									},
 									"process_mode": {
@@ -3658,8 +3637,8 @@
 											"scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 8.0,
-													"y": 0.5
+													"x": 1.0,
+													"y": 1.0
 												}
 											},
 											"self_modulate": {
@@ -3673,10 +3652,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -3739,11 +3715,11 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 0
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -3801,7 +3777,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 300.0,
-											"y": 400.0
+											"y": 300.0
 										}
 									},
 									"process_mode": {
@@ -3969,7 +3945,7 @@
 											"scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 20.0,
+													"x": 1.0,
 													"y": 1.0
 												}
 											},
@@ -3984,10 +3960,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -4066,7 +4039,7 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 4
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
@@ -4145,7 +4118,7 @@
 									},
 									"monitorable": {
 										"type": "bool",
-										"value": false
+										"value": true
 									},
 									"monitoring": {
 										"type": "bool",
@@ -4305,7 +4278,7 @@
 												"type": "Vector2",
 												"value": {
 													"x": 0.0,
-													"y": 500.0
+													"y": 0.0
 												}
 											},
 											"process_mode": {
@@ -4346,10 +4319,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "WorldBoundaryShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::WorldBoundaryShape2D_bnd1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -4412,11 +4382,11 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 0
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -4473,8 +4443,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 0.0,
-											"y": 0.0
+											"x": 400.0,
+											"y": 500.0
 										}
 									},
 									"process_mode": {
@@ -5468,10 +5438,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -5565,7 +5532,7 @@
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 3
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -5638,7 +5605,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 65.1701812744141
+											"y": 48.9183807373047
 										}
 									},
 									"lock_rotation": {
@@ -5647,7 +5614,7 @@
 									},
 									"mass": {
 										"type": "float",
-										"value": 5.0
+										"value": 1.0
 									},
 									"material": {
 										"type": "Object",
@@ -5678,7 +5645,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 200.0,
-											"y": 102.71768951416
+											"y": 51.631519317627
 										}
 									},
 									"process_mode": {
@@ -5865,10 +5832,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "CircleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::CircleShape2D_circ1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -5962,7 +5926,7 @@
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 3
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -5985,7 +5949,7 @@
 									},
 									"continuous_cd": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"custom_integrator": {
 										"type": "bool",
@@ -6009,7 +5973,7 @@
 									},
 									"gravity_scale": {
 										"type": "float",
-										"value": 1.5
+										"value": 1.0
 									},
 									"inertia": {
 										"type": "float",
@@ -6035,7 +5999,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 97.7552719116211
+											"y": 48.9183807373047
 										}
 									},
 									"lock_rotation": {
@@ -6075,7 +6039,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 400.0,
-											"y": 54.0765342712402
+											"y": 51.631519317627
 										}
 									},
 									"process_mode": {
@@ -6247,8 +6211,8 @@
 											"scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 8.0,
-													"y": 0.5
+													"x": 1.0,
+													"y": 1.0
 												}
 											},
 											"self_modulate": {
@@ -6262,10 +6226,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -6328,11 +6289,11 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 0
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -6390,7 +6351,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 300.0,
-											"y": 400.0
+											"y": 300.0
 										}
 									},
 									"process_mode": {
@@ -6558,7 +6519,7 @@
 											"scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 20.0,
+													"x": 1.0,
 													"y": 1.0
 												}
 											},
@@ -6573,10 +6534,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -6655,7 +6613,7 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 4
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
@@ -6734,7 +6692,7 @@
 									},
 									"monitorable": {
 										"type": "bool",
-										"value": false
+										"value": true
 									},
 									"monitoring": {
 										"type": "bool",
@@ -6894,7 +6852,7 @@
 												"type": "Vector2",
 												"value": {
 													"x": 0.0,
-													"y": 500.0
+													"y": 0.0
 												}
 											},
 											"process_mode": {
@@ -6935,10 +6893,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "WorldBoundaryShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::WorldBoundaryShape2D_bnd1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -7001,11 +6956,11 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 0
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -7062,8 +7017,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 0.0,
-											"y": 0.0
+											"x": 400.0,
+											"y": 500.0
 										}
 									},
 									"process_mode": {
@@ -8057,10 +8012,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -8154,7 +8106,7 @@
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 3
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -8227,7 +8179,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 65.1701812744141
+											"y": 48.9183807373047
 										}
 									},
 									"lock_rotation": {
@@ -8236,7 +8188,7 @@
 									},
 									"mass": {
 										"type": "float",
-										"value": 5.0
+										"value": 1.0
 									},
 									"material": {
 										"type": "Object",
@@ -8267,7 +8219,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 200.0,
-											"y": 102.71768951416
+											"y": 51.631519317627
 										}
 									},
 									"process_mode": {
@@ -8454,10 +8406,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "CircleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::CircleShape2D_circ1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -8551,7 +8500,7 @@
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 3
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -8574,7 +8523,7 @@
 									},
 									"continuous_cd": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"custom_integrator": {
 										"type": "bool",
@@ -8598,7 +8547,7 @@
 									},
 									"gravity_scale": {
 										"type": "float",
-										"value": 1.5
+										"value": 1.0
 									},
 									"inertia": {
 										"type": "float",
@@ -8624,7 +8573,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 97.7552719116211
+											"y": 48.9183807373047
 										}
 									},
 									"lock_rotation": {
@@ -8664,7 +8613,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 400.0,
-											"y": 54.0765342712402
+											"y": 51.631519317627
 										}
 									},
 									"process_mode": {
@@ -8836,8 +8785,8 @@
 											"scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 8.0,
-													"y": 0.5
+													"x": 1.0,
+													"y": 1.0
 												}
 											},
 											"self_modulate": {
@@ -8851,10 +8800,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -8917,11 +8863,11 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 0
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -8979,7 +8925,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 300.0,
-											"y": 400.0
+											"y": 300.0
 										}
 									},
 									"process_mode": {
@@ -9147,7 +9093,7 @@
 											"scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 20.0,
+													"x": 1.0,
 													"y": 1.0
 												}
 											},
@@ -9162,10 +9108,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -9244,7 +9187,7 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 4
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
@@ -9323,7 +9266,7 @@
 									},
 									"monitorable": {
 										"type": "bool",
-										"value": false
+										"value": true
 									},
 									"monitoring": {
 										"type": "bool",
@@ -9483,7 +9426,7 @@
 												"type": "Vector2",
 												"value": {
 													"x": 0.0,
-													"y": 500.0
+													"y": 0.0
 												}
 											},
 											"process_mode": {
@@ -9524,10 +9467,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "WorldBoundaryShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::WorldBoundaryShape2D_bnd1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -9590,11 +9530,11 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 0
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -9651,8 +9591,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 0.0,
-											"y": 0.0
+											"x": 400.0,
+											"y": 500.0
 										}
 									},
 									"process_mode": {
@@ -10646,10 +10586,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -10743,7 +10680,7 @@
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 3
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -10825,7 +10762,7 @@
 									},
 									"mass": {
 										"type": "float",
-										"value": 5.0
+										"value": 1.0
 									},
 									"material": {
 										"type": "Object",
@@ -10856,7 +10793,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 200.0,
-											"y": 102.71768951416
+											"y": 52.7176895141602
 										}
 									},
 									"process_mode": {
@@ -11043,10 +10980,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "CircleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::CircleShape2D_circ1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -11140,7 +11074,7 @@
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 3
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -11163,7 +11097,7 @@
 									},
 									"continuous_cd": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"custom_integrator": {
 										"type": "bool",
@@ -11187,7 +11121,7 @@
 									},
 									"gravity_scale": {
 										"type": "float",
-										"value": 1.5
+										"value": 1.0
 									},
 									"inertia": {
 										"type": "float",
@@ -11213,7 +11147,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 97.7552719116211
+											"y": 65.1701812744141
 										}
 									},
 									"lock_rotation": {
@@ -11253,7 +11187,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 400.0,
-											"y": 54.0765342712402
+											"y": 52.7176895141602
 										}
 									},
 									"process_mode": {
@@ -11425,8 +11359,8 @@
 											"scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 8.0,
-													"y": 0.5
+													"x": 1.0,
+													"y": 1.0
 												}
 											},
 											"self_modulate": {
@@ -11440,10 +11374,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -11506,11 +11437,11 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 0
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -11568,7 +11499,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 300.0,
-											"y": 400.0
+											"y": 300.0
 										}
 									},
 									"process_mode": {
@@ -11736,7 +11667,7 @@
 											"scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 20.0,
+													"x": 1.0,
 													"y": 1.0
 												}
 											},
@@ -11751,10 +11682,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -11833,7 +11761,7 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 4
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
@@ -11912,7 +11840,7 @@
 									},
 									"monitorable": {
 										"type": "bool",
-										"value": false
+										"value": true
 									},
 									"monitoring": {
 										"type": "bool",
@@ -12072,7 +12000,7 @@
 												"type": "Vector2",
 												"value": {
 													"x": 0.0,
-													"y": 500.0
+													"y": 0.0
 												}
 											},
 											"process_mode": {
@@ -12113,10 +12041,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "WorldBoundaryShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::WorldBoundaryShape2D_bnd1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -12179,11 +12104,11 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 0
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -12240,8 +12165,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 0.0,
-											"y": 0.0
+											"x": 400.0,
+											"y": 500.0
 										}
 									},
 									"process_mode": {
@@ -13235,10 +13160,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -13332,7 +13254,7 @@
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 3
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -13405,7 +13327,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 81.3948974609375
+											"y": 65.1701812744141
 										}
 									},
 									"lock_rotation": {
@@ -13414,7 +13336,7 @@
 									},
 									"mass": {
 										"type": "float",
-										"value": 5.0
+										"value": 1.0
 									},
 									"material": {
 										"type": "Object",
@@ -13445,7 +13367,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 200.0,
-											"y": 104.074272155762
+											"y": 52.7176895141602
 										}
 									},
 									"process_mode": {
@@ -13632,10 +13554,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "CircleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::CircleShape2D_circ1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -13729,7 +13648,7 @@
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 3
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -13752,7 +13671,7 @@
 									},
 									"continuous_cd": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"custom_integrator": {
 										"type": "bool",
@@ -13776,7 +13695,7 @@
 									},
 									"gravity_scale": {
 										"type": "float",
-										"value": 1.5
+										"value": 1.0
 									},
 									"inertia": {
 										"type": "float",
@@ -13802,7 +13721,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 122.092346191406
+											"y": 65.1701812744141
 										}
 									},
 									"lock_rotation": {
@@ -13842,7 +13761,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 400.0,
-											"y": 56.1114082336426
+											"y": 52.7176895141602
 										}
 									},
 									"process_mode": {
@@ -14014,8 +13933,8 @@
 											"scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 8.0,
-													"y": 0.5
+													"x": 1.0,
+													"y": 1.0
 												}
 											},
 											"self_modulate": {
@@ -14029,10 +13948,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -14095,11 +14011,11 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 0
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -14157,7 +14073,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 300.0,
-											"y": 400.0
+											"y": 300.0
 										}
 									},
 									"process_mode": {
@@ -14325,7 +14241,7 @@
 											"scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 20.0,
+													"x": 1.0,
 													"y": 1.0
 												}
 											},
@@ -14340,10 +14256,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -14422,7 +14335,7 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 4
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
@@ -14501,7 +14414,7 @@
 									},
 									"monitorable": {
 										"type": "bool",
-										"value": false
+										"value": true
 									},
 									"monitoring": {
 										"type": "bool",
@@ -14661,7 +14574,7 @@
 												"type": "Vector2",
 												"value": {
 													"x": 0.0,
-													"y": 500.0
+													"y": 0.0
 												}
 											},
 											"process_mode": {
@@ -14702,10 +14615,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "WorldBoundaryShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::WorldBoundaryShape2D_bnd1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -14768,11 +14678,11 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 0
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -14829,8 +14739,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 0.0,
-											"y": 0.0
+											"x": 400.0,
+											"y": 500.0
 										}
 									},
 									"process_mode": {
@@ -15824,10 +15734,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -15921,7 +15828,7 @@
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 3
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -16003,7 +15910,7 @@
 									},
 									"mass": {
 										"type": "float",
-										"value": 5.0
+										"value": 1.0
 									},
 									"material": {
 										"type": "Object",
@@ -16034,7 +15941,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 200.0,
-											"y": 104.074272155762
+											"y": 54.0742721557617
 										}
 									},
 									"process_mode": {
@@ -16221,10 +16128,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "CircleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::CircleShape2D_circ1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -16318,7 +16222,7 @@
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 3
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -16341,7 +16245,7 @@
 									},
 									"continuous_cd": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"custom_integrator": {
 										"type": "bool",
@@ -16365,7 +16269,7 @@
 									},
 									"gravity_scale": {
 										"type": "float",
-										"value": 1.5
+										"value": 1.0
 									},
 									"inertia": {
 										"type": "float",
@@ -16391,7 +16295,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 122.092346191406
+											"y": 81.3948974609375
 										}
 									},
 									"lock_rotation": {
@@ -16431,7 +16335,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 400.0,
-											"y": 56.1114082336426
+											"y": 54.0742721557617
 										}
 									},
 									"process_mode": {
@@ -16603,8 +16507,8 @@
 											"scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 8.0,
-													"y": 0.5
+													"x": 1.0,
+													"y": 1.0
 												}
 											},
 											"self_modulate": {
@@ -16618,10 +16522,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -16684,11 +16585,11 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 0
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -16746,7 +16647,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 300.0,
-											"y": 400.0
+											"y": 300.0
 										}
 									},
 									"process_mode": {
@@ -16914,7 +16815,7 @@
 											"scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 20.0,
+													"x": 1.0,
 													"y": 1.0
 												}
 											},
@@ -16929,10 +16830,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -17011,7 +16909,7 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 4
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
@@ -17090,7 +16988,7 @@
 									},
 									"monitorable": {
 										"type": "bool",
-										"value": false
+										"value": true
 									},
 									"monitoring": {
 										"type": "bool",
@@ -17250,7 +17148,7 @@
 												"type": "Vector2",
 												"value": {
 													"x": 0.0,
-													"y": 500.0
+													"y": 0.0
 												}
 											},
 											"process_mode": {
@@ -17291,10 +17189,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "WorldBoundaryShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::WorldBoundaryShape2D_bnd1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -17357,11 +17252,11 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 0
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -17418,8 +17313,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 0.0,
-											"y": 0.0
+											"x": 400.0,
+											"y": 500.0
 										}
 									},
 									"process_mode": {
@@ -18413,10 +18308,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -18510,7 +18402,7 @@
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 3
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -18592,7 +18484,7 @@
 									},
 									"mass": {
 										"type": "float",
-										"value": 5.0
+										"value": 1.0
 									},
 									"material": {
 										"type": "Object",
@@ -18623,7 +18515,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 200.0,
-											"y": 104.074272155762
+											"y": 54.0742721557617
 										}
 									},
 									"process_mode": {
@@ -18810,10 +18702,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "CircleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::CircleShape2D_circ1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -18907,7 +18796,7 @@
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 3
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -18930,7 +18819,7 @@
 									},
 									"continuous_cd": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"custom_integrator": {
 										"type": "bool",
@@ -18954,7 +18843,7 @@
 									},
 									"gravity_scale": {
 										"type": "float",
-										"value": 1.5
+										"value": 1.0
 									},
 									"inertia": {
 										"type": "float",
@@ -18980,7 +18869,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 122.092346191406
+											"y": 81.3948974609375
 										}
 									},
 									"lock_rotation": {
@@ -19020,7 +18909,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 400.0,
-											"y": 56.1114082336426
+											"y": 54.0742721557617
 										}
 									},
 									"process_mode": {
@@ -19192,8 +19081,8 @@
 											"scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 8.0,
-													"y": 0.5
+													"x": 1.0,
+													"y": 1.0
 												}
 											},
 											"self_modulate": {
@@ -19207,10 +19096,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -19273,11 +19159,11 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 0
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -19335,7 +19221,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 300.0,
-											"y": 400.0
+											"y": 300.0
 										}
 									},
 									"process_mode": {
@@ -19503,7 +19389,7 @@
 											"scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 20.0,
+													"x": 1.0,
 													"y": 1.0
 												}
 											},
@@ -19518,10 +19404,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -19600,7 +19483,7 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 4
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
@@ -19679,7 +19562,7 @@
 									},
 									"monitorable": {
 										"type": "bool",
-										"value": false
+										"value": true
 									},
 									"monitoring": {
 										"type": "bool",
@@ -19839,7 +19722,7 @@
 												"type": "Vector2",
 												"value": {
 													"x": 0.0,
-													"y": 500.0
+													"y": 0.0
 												}
 											},
 											"process_mode": {
@@ -19880,10 +19763,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "WorldBoundaryShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::WorldBoundaryShape2D_bnd1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -19946,11 +19826,11 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 0
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -20007,8 +19887,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 0.0,
-											"y": 0.0
+											"x": 400.0,
+											"y": 500.0
 										}
 									},
 									"process_mode": {
@@ -21002,10 +20882,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -21099,7 +20976,7 @@
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 3
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -21181,7 +21058,7 @@
 									},
 									"mass": {
 										"type": "float",
-										"value": 5.0
+										"value": 1.0
 									},
 									"material": {
 										"type": "Object",
@@ -21212,7 +21089,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 200.0,
-											"y": 105.700813293457
+											"y": 55.700813293457
 										}
 									},
 									"process_mode": {
@@ -21399,10 +21276,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "CircleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::CircleShape2D_circ1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -21496,7 +21370,7 @@
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 3
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -21519,7 +21393,7 @@
 									},
 									"continuous_cd": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"custom_integrator": {
 										"type": "bool",
@@ -21543,7 +21417,7 @@
 									},
 									"gravity_scale": {
 										"type": "float",
-										"value": 1.5
+										"value": 1.0
 									},
 									"inertia": {
 										"type": "float",
@@ -21569,7 +21443,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 146.388870239258
+											"y": 97.5925750732422
 										}
 									},
 									"lock_rotation": {
@@ -21609,7 +21483,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 400.0,
-											"y": 58.5512237548828
+											"y": 55.700813293457
 										}
 									},
 									"process_mode": {
@@ -21781,8 +21655,8 @@
 											"scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 8.0,
-													"y": 0.5
+													"x": 1.0,
+													"y": 1.0
 												}
 											},
 											"self_modulate": {
@@ -21796,10 +21670,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -21862,11 +21733,11 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 0
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -21924,7 +21795,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 300.0,
-											"y": 400.0
+											"y": 300.0
 										}
 									},
 									"process_mode": {
@@ -22092,7 +21963,7 @@
 											"scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 20.0,
+													"x": 1.0,
 													"y": 1.0
 												}
 											},
@@ -22107,10 +21978,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -22189,7 +22057,7 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 4
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
@@ -22268,7 +22136,7 @@
 									},
 									"monitorable": {
 										"type": "bool",
-										"value": false
+										"value": true
 									},
 									"monitoring": {
 										"type": "bool",
@@ -22428,7 +22296,7 @@
 												"type": "Vector2",
 												"value": {
 													"x": 0.0,
-													"y": 500.0
+													"y": 0.0
 												}
 											},
 											"process_mode": {
@@ -22469,10 +22337,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "WorldBoundaryShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::WorldBoundaryShape2D_bnd1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -22535,11 +22400,11 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 0
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -22596,8 +22461,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 0.0,
-											"y": 0.0
+											"x": 400.0,
+											"y": 500.0
 										}
 									},
 									"process_mode": {
@@ -23591,10 +23456,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -23688,7 +23550,7 @@
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 3
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -23770,7 +23632,7 @@
 									},
 									"mass": {
 										"type": "float",
-										"value": 5.0
+										"value": 1.0
 									},
 									"material": {
 										"type": "Object",
@@ -23801,7 +23663,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 200.0,
-											"y": 105.700813293457
+											"y": 55.700813293457
 										}
 									},
 									"process_mode": {
@@ -23988,10 +23850,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "CircleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::CircleShape2D_circ1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -24085,7 +23944,7 @@
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 3
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -24108,7 +23967,7 @@
 									},
 									"continuous_cd": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"custom_integrator": {
 										"type": "bool",
@@ -24132,7 +23991,7 @@
 									},
 									"gravity_scale": {
 										"type": "float",
-										"value": 1.5
+										"value": 1.0
 									},
 									"inertia": {
 										"type": "float",
@@ -24158,7 +24017,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 146.388870239258
+											"y": 97.5925750732422
 										}
 									},
 									"lock_rotation": {
@@ -24198,7 +24057,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 400.0,
-											"y": 58.5512237548828
+											"y": 55.700813293457
 										}
 									},
 									"process_mode": {
@@ -24370,8 +24229,8 @@
 											"scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 8.0,
-													"y": 0.5
+													"x": 1.0,
+													"y": 1.0
 												}
 											},
 											"self_modulate": {
@@ -24385,10 +24244,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -24451,11 +24307,11 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 0
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -24513,7 +24369,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 300.0,
-											"y": 400.0
+											"y": 300.0
 										}
 									},
 									"process_mode": {
@@ -24681,7 +24537,7 @@
 											"scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 20.0,
+													"x": 1.0,
 													"y": 1.0
 												}
 											},
@@ -24696,10 +24552,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "RectangleShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -24778,7 +24631,7 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 4
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
@@ -24857,7 +24710,7 @@
 									},
 									"monitorable": {
 										"type": "bool",
-										"value": false
+										"value": true
 									},
 									"monitoring": {
 										"type": "bool",
@@ -25017,7 +24870,7 @@
 												"type": "Vector2",
 												"value": {
 													"x": 0.0,
-													"y": 500.0
+													"y": 0.0
 												}
 											},
 											"process_mode": {
@@ -25058,10 +24911,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "WorldBoundaryShape2D",
-													"_resource_path": "res://real_godot/physics_scene.tscn::WorldBoundaryShape2D_bnd1"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -25124,11 +24974,11 @@
 									},
 									"collision_layer": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"collision_mask": {
 										"type": "int",
-										"value": 0
+										"value": 1
 									},
 									"collision_priority": {
 										"type": "float",
@@ -25185,8 +25035,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 0.0,
-											"y": 0.0
+											"x": 400.0,
+											"y": 500.0
 										}
 									},
 									"process_mode": {
@@ -25894,7 +25744,7 @@
 		}
 	],
 	"frames_captured": 10,
-	"generated_at": "2026-03-20T13:39:37",
+	"generated_at": "2026-11-03T18:34:30",
 	"notification_trace": [],
 	"properties": {
 		"children": [
@@ -26182,10 +26032,7 @@
 									},
 									"shape": {
 										"type": "Object",
-										"value": {
-											"_resource_class": "RectangleShape2D",
-											"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-										}
+										"value": null
 									},
 									"show_behind_parent": {
 										"type": "bool",
@@ -26279,7 +26126,7 @@
 							},
 							"collision_mask": {
 								"type": "int",
-								"value": 3
+								"value": 1
 							},
 							"collision_priority": {
 								"type": "float",
@@ -26361,7 +26208,7 @@
 							},
 							"mass": {
 								"type": "float",
-								"value": 5.0
+								"value": 1.0
 							},
 							"material": {
 								"type": "Object",
@@ -26392,7 +26239,7 @@
 								"type": "Vector2",
 								"value": {
 									"x": 200.0,
-									"y": 105.700813293457
+									"y": 55.700813293457
 								}
 							},
 							"process_mode": {
@@ -26579,10 +26426,7 @@
 									},
 									"shape": {
 										"type": "Object",
-										"value": {
-											"_resource_class": "CircleShape2D",
-											"_resource_path": "res://real_godot/physics_scene.tscn::CircleShape2D_circ1"
-										}
+										"value": null
 									},
 									"show_behind_parent": {
 										"type": "bool",
@@ -26676,7 +26520,7 @@
 							},
 							"collision_mask": {
 								"type": "int",
-								"value": 3
+								"value": 1
 							},
 							"collision_priority": {
 								"type": "float",
@@ -26699,7 +26543,7 @@
 							},
 							"continuous_cd": {
 								"type": "int",
-								"value": 1
+								"value": 0
 							},
 							"custom_integrator": {
 								"type": "bool",
@@ -26723,7 +26567,7 @@
 							},
 							"gravity_scale": {
 								"type": "float",
-								"value": 1.5
+								"value": 1.0
 							},
 							"inertia": {
 								"type": "float",
@@ -26749,7 +26593,7 @@
 								"type": "Vector2",
 								"value": {
 									"x": 0.0,
-									"y": 146.388870239258
+									"y": 97.5925750732422
 								}
 							},
 							"lock_rotation": {
@@ -26789,7 +26633,7 @@
 								"type": "Vector2",
 								"value": {
 									"x": 400.0,
-									"y": 58.5512237548828
+									"y": 55.700813293457
 								}
 							},
 							"process_mode": {
@@ -26961,8 +26805,8 @@
 									"scale": {
 										"type": "Vector2",
 										"value": {
-											"x": 8.0,
-											"y": 0.5
+											"x": 1.0,
+											"y": 1.0
 										}
 									},
 									"self_modulate": {
@@ -26976,10 +26820,7 @@
 									},
 									"shape": {
 										"type": "Object",
-										"value": {
-											"_resource_class": "RectangleShape2D",
-											"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-										}
+										"value": null
 									},
 									"show_behind_parent": {
 										"type": "bool",
@@ -27042,11 +26883,11 @@
 							},
 							"collision_layer": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"collision_mask": {
 								"type": "int",
-								"value": 0
+								"value": 1
 							},
 							"collision_priority": {
 								"type": "float",
@@ -27104,7 +26945,7 @@
 								"type": "Vector2",
 								"value": {
 									"x": 300.0,
-									"y": 400.0
+									"y": 300.0
 								}
 							},
 							"process_mode": {
@@ -27272,7 +27113,7 @@
 									"scale": {
 										"type": "Vector2",
 										"value": {
-											"x": 20.0,
+											"x": 1.0,
 											"y": 1.0
 										}
 									},
@@ -27287,10 +27128,7 @@
 									},
 									"shape": {
 										"type": "Object",
-										"value": {
-											"_resource_class": "RectangleShape2D",
-											"_resource_path": "res://real_godot/physics_scene.tscn::RectangleShape2D_rect1"
-										}
+										"value": null
 									},
 									"show_behind_parent": {
 										"type": "bool",
@@ -27369,7 +27207,7 @@
 							},
 							"collision_layer": {
 								"type": "int",
-								"value": 4
+								"value": 1
 							},
 							"collision_mask": {
 								"type": "int",
@@ -27448,7 +27286,7 @@
 							},
 							"monitorable": {
 								"type": "bool",
-								"value": false
+								"value": true
 							},
 							"monitoring": {
 								"type": "bool",
@@ -27608,7 +27446,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 500.0
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -27649,10 +27487,7 @@
 									},
 									"shape": {
 										"type": "Object",
-										"value": {
-											"_resource_class": "WorldBoundaryShape2D",
-											"_resource_path": "res://real_godot/physics_scene.tscn::WorldBoundaryShape2D_bnd1"
-										}
+										"value": null
 									},
 									"show_behind_parent": {
 										"type": "bool",
@@ -27715,11 +27550,11 @@
 							},
 							"collision_layer": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"collision_mask": {
 								"type": "int",
-								"value": 0
+								"value": 1
 							},
 							"collision_priority": {
 								"type": "float",
@@ -27776,8 +27611,8 @@
 							"position": {
 								"type": "Vector2",
 								"value": {
-									"x": 0.0,
-									"y": 0.0
+									"x": 400.0,
+									"y": 500.0
 								}
 							},
 							"process_mode": {

@@ -330,6 +330,19 @@ fn dump_node_json(tree: &SceneTree, id: NodeId) -> Value {
             props.insert(key.clone(), to_json(value));
         }
     }
+    // `layout_mode` is a computed getter in Godot (control.cpp:938), never a
+    // stored value Patina could find in `properties()`. The oracle compares
+    // it with a DETACHED instance's read, which is UNCONTROLLED (3), so every
+    // Control with a Control parent reports it — even at POSITION (0).
+    if gdscene::control::node_is_control(tree, id) {
+        let mode = gdscene::control::layout_mode(tree, id);
+        if mode != 3 {
+            props.insert(
+                "layout_mode".to_string(),
+                to_json(&gdvariant::Variant::Int(mode)),
+            );
+        }
+    }
 
     // Collect script variables if a script is attached.
     // Script variables are also merged into properties, matching Godot's
@@ -781,6 +794,15 @@ fn main() {
         .parent()
         .unwrap_or(Path::new("."))
         .to_path_buf();
+    // The same directory is the `res://` root: scripts and autoloads already
+    // resolve against it, and without it `res://` instanced sub-scenes (and any
+    // `load("res://…")`) could not be read in a loose-scene run.
+    if gdcore::file_access::project_root().is_none() {
+        gdcore::file_access::set_path_roots(
+            Some(project_dir.clone()),
+            gdcore::file_access::user_root(),
+        );
+    }
 
     // Enable event tracing before any lifecycle runs so both autoload and
     // main-scene _ready callbacks are captured.
@@ -796,22 +818,46 @@ fn main() {
         tracing::info!(count = autoloads.len(), "instantiated project autoloads");
     }
 
-    // Instance the main scene under /root.
-    let scene_root_id = match add_packed_scene_to_tree(&mut tree, root_id, &packed_scene) {
+    // Instance the main scene under /root the way Godot's
+    // `PackedScene::instantiate()` + `add_child` does: build the whole subtree
+    // DETACHED (every `instance=` sub-scene expanded), attach its scripts, then
+    // hand the root to ONE `add_child`, which propagates ENTER_TREE top-down and
+    // READY bottom-up exactly once. Mounting under the live root and then
+    // calling `LifecycleManager::enter_tree` again entered and readied every
+    // node TWICE (`ENTER_TREE`/`_ready` x2 in every `--event-trace`).
+    gdscene::packed_scene::begin_subscene_session();
+    let scene_root_id = match gdscene::packed_scene::instance_packed_scene_detached(
+        &mut tree,
+        &packed_scene,
+        &gdscene::packed_scene::load_scene_from_res,
+    ) {
         Ok(id) => id,
         Err(e) => {
             eprintln!("Error instancing scene: {e}",);
             process::exit(1);
         }
     };
-
-    // Attach GDScript files to main-scene nodes that have _script_path.
-    // Autoload nodes already carry their scripts and are skipped by attach_scripts.
-    attach_scripts(&mut tree, &project_dir);
-
-    // Run main-scene lifecycle: enter_tree + ready.
-    LifecycleManager::enter_tree(&mut tree, scene_root_id);
-
+    // Pack/`res://`-root reader first, then the project-directory resolver
+    // (which also finds a fixture project nested above the scene's folder).
+    gdscene::scripting::attach_subtree_scripts_from_res(&mut tree, scene_root_id);
+    project_boot::attach_subtree_scripts(&mut tree, scene_root_id, &project_dir);
+    let Some(scene_root) = tree.take_node(scene_root_id) else {
+        eprintln!("Error instancing scene: detached scene root vanished");
+        process::exit(1);
+    };
+    if let Err(e) = tree.add_child(root_id, scene_root) {
+        eprintln!("Error instancing scene: {e}");
+        process::exit(1);
+    }
+    // `add_child` only propagates the lifecycle under a parent already inside
+    // the tree; enter explicitly otherwise (never both).
+    if !tree
+        .get_node(scene_root_id)
+        .is_some_and(|n| n.is_inside_tree())
+    {
+        LifecycleManager::enter_tree(&mut tree, scene_root_id);
+    }
+    gdscene::packed_scene::finish_attached_scene(&mut tree, scene_root_id);
     tracing::info!(node_count = tree.node_count(), "scene instanced");
 
     // Create the main loop and run frames.

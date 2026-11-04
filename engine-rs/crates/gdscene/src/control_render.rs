@@ -253,13 +253,30 @@ pub fn control_draw_items_themed(
     node_themes: &std::collections::HashMap<NodeId, Theme>,
     viewport_size: Vector2,
 ) -> Vec<ControlDrawItem> {
+    control_draw_items_themed_sourced(tree, root, theme, node_themes, viewport_size)
+        .into_iter()
+        .map(|(item, _)| item)
+        .collect()
+}
+
+/// [`control_draw_items_themed`], each primitive paired with the node that
+/// drew it — what a caller needs to place the primitives in the node's real
+/// canvas layer, z and tree order rather than above everything.
+pub fn control_draw_items_themed_sourced(
+    tree: &mut SceneTree,
+    root: NodeId,
+    theme: &Theme,
+    node_themes: &std::collections::HashMap<NodeId, Theme>,
+    viewport_size: Vector2,
+) -> Vec<(ControlDrawItem, Option<NodeId>)> {
     let mut viewport = Viewport::new(
         viewport_size.x.max(1.0) as u32,
         viewport_size.y.max(1.0) as u32,
         Color::new(0.0, 0.0, 0.0, 0.0),
     );
     let mut fonts: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
-    render_control_tree_with_fonts(
+    let mut sources: std::collections::HashMap<u64, NodeId> = std::collections::HashMap::new();
+    render_control_tree_sourced(
         tree,
         root,
         theme,
@@ -267,13 +284,16 @@ pub fn control_draw_items_themed(
         &mut viewport,
         viewport_size,
         &mut fonts,
+        &mut sources,
     );
 
-    let mut out = Vec::new();
+    let mut out: Vec<ControlDrawItem> = Vec::new();
+    let mut tags: Vec<Option<NodeId>> = Vec::new();
     // `get_sorted_items` orders by z, which the walk assigned in pre-order, so
     // the flattened stream is already in paint order.
     for item in viewport.get_sorted_items() {
         let z = item.z_index;
+        let source = sources.get(&item.id.0).copied();
         for command in &item.commands {
             match command {
                 DrawCommand::DrawRect {
@@ -355,6 +375,8 @@ pub fn control_draw_items_themed(
                 _ => {}
             }
         }
+        // Every primitive this canvas item produced belongs to its node.
+        tags.resize(out.len(), source);
     }
     // pat-s3rrv.72: the open popup paints LAST so it composites above every
     // control, which is what a Popup<-Window does in Godot. Appended after the
@@ -418,7 +440,9 @@ pub fn control_draw_items_themed(
         }
     }
 
-    out
+    // Popup overlays above belong to no single node.
+    tags.resize(out.len(), None);
+    out.into_iter().zip(tags).collect()
 }
 
 /// Renders the Control subtree rooted at `root` into `viewport`.
@@ -465,6 +489,31 @@ pub fn render_control_tree_with_fonts(
     viewport_size: Vector2,
     fonts: &mut std::collections::HashMap<u64, String>,
 ) {
+    render_control_tree_sourced(
+        tree,
+        root,
+        theme,
+        node_themes,
+        viewport,
+        viewport_size,
+        fonts,
+        &mut std::collections::HashMap::new(),
+    );
+}
+
+/// [`render_control_tree_with_fonts`] that also records which node each canvas
+/// item draws (`CanvasItemId` -> `NodeId`).
+#[allow(clippy::too_many_arguments)]
+pub fn render_control_tree_sourced(
+    tree: &mut SceneTree,
+    root: NodeId,
+    theme: &Theme,
+    node_themes: &std::collections::HashMap<NodeId, Theme>,
+    viewport: &mut Viewport,
+    viewport_size: Vector2,
+    fonts: &mut std::collections::HashMap<u64, String>,
+    sources: &mut std::collections::HashMap<u64, NodeId>,
+) {
     let mut order: u64 = 0;
     render_node(
         tree,
@@ -478,6 +527,7 @@ pub fn render_control_tree_with_fonts(
         None,
         false,
         fonts,
+        sources,
     );
 }
 
@@ -848,6 +898,7 @@ fn render_node(
     clip: Option<Rect2>,
     parent_is_container: bool,
     fonts: &mut std::collections::HashMap<u64, String>,
+    sources: &mut std::collections::HashMap<u64, NodeId>,
 ) {
     // Godot's `CanvasItem.visible`: a hidden node draws nothing, and neither do
     // its descendants (`CanvasItem::_propagate_visibility_changed`). This walk
@@ -907,8 +958,8 @@ fn render_node(
         // solve reads `min_size` (pat-s3rrv.74). No-op for every class but
         // RichTextLabel, and for a RichTextLabel that has not opted in.
         if class_of(tree, node_id) == "RichTextLabel" {
-            let fs = theme
-                .get_font_size("RichTextLabel", "font_size")
+            let fs = font_size_override(tree, node_id, "font_size")
+                .or_else(|| theme.get_font_size("RichTextLabel", "font_size"))
                 .unwrap_or(RICHTEXT_DEFAULT_FONT_SIZE);
             apply_richtext_fit_content(tree, node_id, fs);
         }
@@ -943,6 +994,10 @@ fn render_node(
         if let Some(path) = font_override_path(tree, node_id) {
             fonts.insert(seq + 1, path);
         }
+        // The node this item draws, for the same reason: it is what lets the
+        // caller give the primitives the node's REAL canvas layer, z and tree
+        // position instead of a blanket "above every Node2D".
+        sources.insert(seq + 1, node_id);
         // Pre-order sequence as z so children (added later) paint on top.
         item.z_index = seq as i32;
         item.clip_rect = clip;
@@ -999,6 +1054,7 @@ fn render_node(
                 clip,
                 is_container,
                 fonts,
+                sources,
             );
         }
 
@@ -1011,6 +1067,7 @@ fn render_node(
                 let seq = *order;
                 *order += 1;
                 let mut bars = CanvasItem::new(CanvasItemId(seq + 1));
+                sources.insert(seq + 1, node_id);
                 bars.z_index = seq as i32;
                 bars.clip_rect = clip;
                 bars.commands = commands;
@@ -1032,6 +1089,7 @@ fn render_node(
                 clip,
                 false,
                 fonts,
+                sources,
             );
         }
     }
@@ -1148,6 +1206,24 @@ pub fn font_override_path(tree: &SceneTree, node_id: NodeId) -> Option<String> {
     string_prop(tree, node_id, "__extres__theme_override_fonts/font")
         .or_else(|| string_prop(tree, node_id, "theme_override_fonts/font"))
         .filter(|p| !p.is_empty() && !p.starts_with("ExtResource("))
+}
+
+/// The node's own `theme_override_font_sizes/<name>`, if it sets one.
+///
+/// Godot's `Control::get_theme_font_size` checks this BEFORE the Theme
+/// (`scene/gui/control.cpp`), exactly as the colour and font overrides here
+/// already do. The draw code read the Theme only, so a Label or Button
+/// authoring `theme_override_font_sizes/font_size = 60` — the official Dodge
+/// the Creeps HUD — drew at the theme's 16px.
+pub fn font_size_override(tree: &SceneTree, node_id: NodeId, name: &str) -> Option<i64> {
+    match tree
+        .get_node(node_id)?
+        .get_property(&format!("theme_override_font_sizes/{name}"))
+    {
+        Variant::Int(i) if i > 0 => Some(i),
+        Variant::Float(f) if f > 0.0 => Some(f as i64),
+        _ => None,
+    }
 }
 
 /// Formats a SpinBox's value the way Godot's embedded LineEdit shows it.
@@ -1288,6 +1364,21 @@ pub(crate) fn measure_text_px(text: &str, font_size: f32) -> f32 {
         return 0.0;
     }
     builtin_face().measure_line(text, font_size.max(1.0))
+}
+
+/// Width of `text` at `font_size` px in the face a control actually DRAWS with:
+/// its `theme_override_fonts/font` when that loads, else the built-in face.
+///
+/// 🔑 Centring and wrapping are only right when measured in the drawn face.
+/// Layout measured every string in the built-in face while the rasterizer drew
+/// a custom `FontFile` (Dodge the Creeps' Xolonium), so a centred title sat
+/// left of centre and a button's label ran off its right edge.
+pub fn measure_text_px_in(text: &str, font_size: f32, font_path: Option<&str>) -> f32 {
+    font_path
+        .and_then(|path| {
+            crate::canvas_render::measure_with_override_font(path, text, font_size.max(1.0))
+        })
+        .unwrap_or_else(|| measure_text_px(text, font_size))
 }
 
 /// Line height at an exact `font_size` in pixels (pat-s3rrv.37).
@@ -2125,7 +2216,6 @@ fn layout_label_lines(
     // which is the prerequisite for this function emitting a pixel `font_size`
     // on its ControlDrawItem::Text (the family-(c) change). Without it, the emit
     // site at the end of this function had no access to the real size at all.
-    let scale = text_scale(font_size);
     use gdrender2d::text_layout::{align_offset, break_lines_word, ellipsis_word_count, HAlign};
 
     // Godot: AUTOWRAP_OFF 0, ARBITRARY 1, WORD 2, WORD_SMART 3.
@@ -2140,9 +2230,15 @@ fn layout_label_lines(
     // Godot: NONE 0, TRIM_CHAR 1, TRIM_WORD 2, ELLIPSIS 3, WORD_ELLIPSIS 4.
     let overrun = int_prop(tree, node_id, "text_overrun_behavior").unwrap_or(0);
 
-    let space = space_advance(scale);
+    // Measured in the face the label is DRAWN with (see `measure_text_px_in`).
+    // This used the 5x7 placeholder's widths and cell height, which matched
+    // neither face the rasterizer has drawn with since pat-mgixk.66, so every
+    // centred or right-aligned label was offset by the difference.
+    let font_path = font_override_path(tree, node_id);
+    let measure = |s: &str| measure_text_px_in(s, font_size as f32, font_path.as_deref());
+    let space = measure(" ");
     let max_width = rect.size.x;
-    let line_height = (GLYPH_H + GLYPH_GAP) * scale as f32;
+    let line_height = line_height_px(font_size as f32);
 
     let mut out = Vec::new();
     // The row this paragraph starts on, so paragraphs stack instead of
@@ -2165,7 +2261,7 @@ fn layout_label_lines(
             row_base += 1;
             continue;
         }
-        let widths: Vec<f32> = words.iter().map(|w| text_width(w, scale)).collect();
+        let widths: Vec<f32> = words.iter().map(|w| measure(w)).collect();
 
         // Wrapping is off unless the node asks for it, matching Godot's default.
         let lines = if autowrap == 0 {
@@ -2189,7 +2285,7 @@ fn layout_label_lines(
             let ellipsis_requested = matches!(overrun, 3 | 4);
             if ellipsis_requested && line_width > max_width {
                 let ell = "...";
-                let ell_w = text_width(ell, scale);
+                let ell_w = measure(ell);
                 let widths_slice = &widths[line.start..line.end];
                 if let Some(keep) = ellipsis_word_count(widths_slice, space, max_width, ell_w) {
                     slice.truncate(keep);
@@ -2861,7 +2957,9 @@ fn draw_control(
                 let font_color = color_prop(tree, node_id, "theme_override_colors/font_color")
                     .or_else(|| theme.get_color("Button", "font_color"))
                     .unwrap_or(Color::new(0.875, 0.875, 0.875, 1.0));
-                let font_size = theme.get_font_size("Button", "font_size").unwrap_or(16);
+                let font_size = font_size_override(tree, node_id, "font_size")
+                    .or_else(|| theme.get_font_size("Button", "font_size"))
+                    .unwrap_or(16);
                 // 🔑 The REAL font's advances, not the 5x7 placeholder
                 // (pat-mgixk.66). `text_width` charges every glyph a flat 5px
                 // and `text_scale` quantises the size, so font_size 16 and 20
@@ -2869,7 +2967,11 @@ fn draw_control(
                 // font nobody drew. Now that the rasterizer paints this text
                 // with `builtin_face`, centring has to use the same metrics or
                 // the label sits off-centre by the difference between them.
-                let tw = measure_text_px(&text, font_size as f32);
+                let tw = measure_text_px_in(
+                    &text,
+                    font_size as f32,
+                    font_override_path(tree, node_id).as_deref(),
+                );
                 let th = line_height_px(font_size as f32);
                 // Centre the label within the button rect.
                 let position = Vector2::new(
@@ -2897,7 +2999,9 @@ fn draw_control(
                     // near-white as Button; the underline, not a colour, is what
                     // marks it as a link.
                     .unwrap_or(Color::new(0.875, 0.875, 0.875, 1.0));
-                let font_size = theme.get_font_size("LinkButton", "font_size").unwrap_or(16);
+                let font_size = font_size_override(tree, node_id, "font_size")
+                    .or_else(|| theme.get_font_size("LinkButton", "font_size"))
+                    .unwrap_or(16);
                 // `scale` survives for the underline THICKNESS only; the width
                 // and height below come from the real face (pat-mgixk.66).
                 let scale = text_scale(font_size);
@@ -2906,7 +3010,11 @@ fn draw_control(
                 // would leave the rule visibly shorter or longer than the text
                 // the rasterizer now draws. The underline is the consumer that
                 // makes this measurement load-bearing for a LinkButton.
-                let tw = measure_text_px(&text, font_size as f32);
+                let tw = measure_text_px_in(
+                    &text,
+                    font_size as f32,
+                    font_override_path(tree, node_id).as_deref(),
+                );
                 let glyph_h = line_height_px(font_size as f32);
                 // ⚠️ Drawn at the rect's top-left, NOT centred like `"Button"`.
                 // A LinkButton has no stylebox and its minimum size is the text
@@ -3122,7 +3230,9 @@ fn draw_control(
                     // with 16 rather than inheriting.
                     int_prop(tree, node_id, "__ls__font_size").unwrap_or(16)
                 } else {
-                    theme.get_font_size("Label", "font_size").unwrap_or(16)
+                    font_size_override(tree, node_id, "font_size")
+                        .or_else(|| theme.get_font_size("Label", "font_size"))
+                        .unwrap_or(16)
                 };
                 // `scale` is no longer computed here — `layout_label_lines` now
                 // takes the pixel font size and derives it internally
@@ -3299,8 +3409,8 @@ fn draw_control(
             let font_color = theme
                 .get_color("RichTextLabel", "default_color")
                 .unwrap_or(Color::WHITE);
-            let font_size = theme
-                .get_font_size("RichTextLabel", "font_size")
+            let font_size = font_size_override(tree, node_id, "font_size")
+                .or_else(|| theme.get_font_size("RichTextLabel", "font_size"))
                 .unwrap_or(RICHTEXT_DEFAULT_FONT_SIZE);
             let scale = text_scale(font_size);
             // Effects are pure functions of elapsed time, which the label
@@ -3453,13 +3563,114 @@ fn draw_control(
                 }
             }
         }
+        // A LineEdit draws its background, then the selection band, then the
+        // text (masked when `secret`), then the caret — Godot's paint order in
+        // `LineEdit::_notification(NOTIFICATION_DRAW)`. Empty text falls back to
+        // `placeholder_text` in the dimmer placeholder colour. pat-0q2kx.87. Restored after a RichTextLabel rewrite
+        // (checkpoint 79c9f0c) overwrote this arm, so every LineEdit drew NOTHING —
+        // no box, text or caret — while still typing and emitting signals.
+        "LineEdit" => {
+            if let Some(sb) = theme.get_stylebox("LineEdit", "normal") {
+                out.extend(sb.draw(rect));
+            } else {
+                let bg = stylebox_bg(theme, "LineEdit", "normal", Color::new(0.1, 0.1, 0.1, 1.0));
+                out.push(DrawCommand::DrawRect {
+                    rect,
+                    color: bg,
+                    filled: true,
+                });
+            }
+
+            let font_size = theme.get_font_size("LineEdit", "font_size").unwrap_or(16);
+            let scale = text_scale(font_size);
+            let glyph_h = GLYPH_H * scale as f32;
+            // Vertically centre the single line, as Godot does.
+            let baseline_y = rect.position.y + (rect.size.y - glyph_h) * 0.5;
+
+            // The displayed string is the masked one; the caret and selection
+            // are measured against it so a `secret` field's caret still lands
+            // between mask glyphs rather than between the real characters.
+            let shown = crate::line_edit::display_text(tree, node_id);
+
+            // x offset of a caret sitting *before* character `column`.
+            let caret_x = |column: usize| -> f32 {
+                if column == 0 {
+                    return rect.position.x;
+                }
+                let prefix: String = shown.chars().take(column).collect();
+                rect.position.x + text_width(&prefix, scale) + GLYPH_GAP * scale as f32
+            };
+
+            if let Some((begin, end)) = crate::line_edit::selection(tree, node_id) {
+                let x0 = caret_x(begin);
+                let x1 = caret_x(end);
+                if x1 > x0 {
+                    let selection_color = theme
+                        .get_color("LineEdit", "selection_color")
+                        .unwrap_or(Color::new(0.3, 0.45, 0.7, 1.0));
+                    out.push(DrawCommand::DrawRect {
+                        rect: Rect2::new(
+                            Vector2::new(x0, baseline_y),
+                            Vector2::new(x1 - x0, glyph_h),
+                        ),
+                        color: selection_color,
+                        filled: true,
+                    });
+                }
+            }
+
+            if shown.is_empty() {
+                let placeholder =
+                    string_prop(tree, node_id, "placeholder_text").unwrap_or_default();
+                if !placeholder.is_empty() {
+                    let color = theme
+                        .get_color("LineEdit", "font_placeholder_color")
+                        .unwrap_or(Color::new(0.6, 0.6, 0.6, 1.0));
+                    out.push(DrawCommand::DrawString {
+                        text: placeholder,
+                        position: Vector2::new(rect.position.x, baseline_y),
+                        color,
+                        font_size: font_size.max(1) as u32,
+                    });
+                }
+            } else {
+                let font_color = color_prop(tree, node_id, "theme_override_colors/font_color")
+                    .or_else(|| theme.get_color("LineEdit", "font_color"))
+                    .unwrap_or(Color::WHITE);
+                out.push(DrawCommand::DrawString {
+                    text: shown.clone(),
+                    position: Vector2::new(rect.position.x, baseline_y),
+                    color: font_color,
+                    font_size: font_size.max(1) as u32,
+                });
+            }
+
+            // Godot only paints the caret while the field holds focus, so an
+            // unfocused LineEdit must not sprout one.
+            if tree.focus_owner() == Some(node_id) {
+                let caret_color = theme
+                    .get_color("LineEdit", "caret_color")
+                    .unwrap_or(Color::WHITE);
+                let x = caret_x(crate::line_edit::caret_column(tree, node_id));
+                out.push(DrawCommand::DrawRect {
+                    rect: Rect2::new(
+                        Vector2::new(x, baseline_y),
+                        Vector2::new(scale.max(1) as f32, glyph_h),
+                    ),
+                    color: caret_color,
+                    filled: true,
+                });
+            }
+        }
         "TextEdit" | "CodeEdit" => {
             let text = string_prop(tree, node_id, "text").unwrap_or_default();
             if !text.is_empty() {
                 let font_color = color_prop(tree, node_id, "theme_override_colors/font_color")
                     .or_else(|| theme.get_color("TextEdit", "font_color"))
                     .unwrap_or(Color::WHITE);
-                let font_size = theme.get_font_size("TextEdit", "font_size").unwrap_or(16);
+                let font_size = font_size_override(tree, node_id, "font_size")
+                    .or_else(|| theme.get_font_size("TextEdit", "font_size"))
+                    .unwrap_or(16);
                 let scale = text_scale(font_size);
                 let keyword_dict = tree
                     .get_node(node_id)
@@ -3878,7 +4089,9 @@ fn draw_control(
             }
             let text = string_prop(tree, node_id, "text").unwrap_or_default();
             if !text.is_empty() {
-                let font_size = theme.get_font_size("CheckBox", "font_size").unwrap_or(16);
+                let font_size = font_size_override(tree, node_id, "font_size")
+                    .or_else(|| theme.get_font_size("CheckBox", "font_size"))
+                    .unwrap_or(16);
                 let scale = text_scale(font_size);
                 let th = GLYPH_H * scale as f32;
                 out.push(DrawCommand::DrawString {
@@ -3912,8 +4125,8 @@ fn draw_control(
             let font_color = theme
                 .get_color("OptionButton", "font_color")
                 .unwrap_or(Color::new(0.875, 0.875, 0.875, 1.0));
-            let font_size = theme
-                .get_font_size("OptionButton", "font_size")
+            let font_size = font_size_override(tree, node_id, "font_size")
+                .or_else(|| theme.get_font_size("OptionButton", "font_size"))
                 .unwrap_or(16);
             let scale = text_scale(font_size);
             // Godot's `OptionButton::_select` mirrors the chosen item's label
@@ -3988,7 +4201,9 @@ fn draw_control(
             let font_color_off = theme
                 .get_color("ItemList", "font_disabled_color")
                 .unwrap_or(Color::new(0.5, 0.5, 0.5, 1.0));
-            let font_size = theme.get_font_size("ItemList", "font_size").unwrap_or(16);
+            let font_size = font_size_override(tree, node_id, "font_size")
+                .or_else(|| theme.get_font_size("ItemList", "font_size"))
+                .unwrap_or(16);
             let scale = text_scale(font_size);
             let th = GLYPH_H * scale as f32;
             let list = crate::item_views::load_item_list(tree, node_id);
@@ -4045,7 +4260,9 @@ fn draw_control(
             let font_color = color_prop(tree, node_id, "theme_override_colors/font_color")
                 .or_else(|| theme.get_color("Tree", "font_color"))
                 .unwrap_or(Color::new(0.875, 0.875, 0.875, 1.0));
-            let font_size = theme.get_font_size("Tree", "font_size").unwrap_or(16);
+            let font_size = font_size_override(tree, node_id, "font_size")
+                .or_else(|| theme.get_font_size("Tree", "font_size"))
+                .unwrap_or(16);
             let scale = text_scale(font_size);
             let th = GLYPH_H * scale as f32;
 
@@ -4242,10 +4459,14 @@ fn draw_control(
                 // ⚠️ `get_font_size`/`get_color` on `Theme`, NOT the
                 // `*_or` pair — those live on `ThemeDB` (theme.rs:658-693) and
                 // the names are close enough to read as interchangeable.
-                let font_size = theme
-                    .get_font_size("FoldableContainer", "title_font_size")
+                let font_size = font_size_override(tree, node_id, "title_font_size")
+                    .or_else(|| theme.get_font_size("FoldableContainer", "title_font_size"))
                     .unwrap_or(16);
-                let text_w = measure_text_px(&title, font_size as f32);
+                let text_w = measure_text_px_in(
+                    &title,
+                    font_size as f32,
+                    font_override_path(tree, node_id).as_deref(),
+                );
                 let pad = crate::control::FOLDABLE_TITLE_H_PADDING;
                 // Godot's `HorizontalAlignment`: LEFT 0, CENTER 1, RIGHT 2,
                 // FILL 3. FILL has nothing to stretch for a single run, so it
@@ -4426,12 +4647,22 @@ mod tests {
         render_control_tree(&mut tree, id, &theme, &mut vp, Vector2::new(128.0, 64.0));
 
         let cmds = &vp.get_sorted_items()[0].commands;
-        assert_eq!(cmds.len(), 2, "button = bg rect + text");
-        assert!(matches!(
-            cmds[0],
-            DrawCommand::DrawRect { filled: true, .. }
-        ));
-        match &cmds[1] {
+        // The default button style is a ROUNDED StyleBoxFlat (Godot's default
+        // theme), drawn as 3 bands + 4 corner discs — so "the bg" is several
+        // commands, followed by the text. Its union must be the button rect.
+        let (bg, text) = cmds.split_at(cmds.len() - 1);
+        assert!(!bg.is_empty(), "button = bg + text");
+        assert!(bg.iter().all(|c| matches!(
+            c,
+            DrawCommand::DrawRect { filled: true, .. } | DrawCommand::DrawCircle { .. }
+        )));
+        let bounds = rect_union(bg);
+        assert!(
+            (bounds.position - Vector2::ZERO).length() < 0.01
+                && (bounds.size - Vector2::new(100.0, 40.0)).length() < 0.01,
+            "the bg covers exactly the button rect, got {bounds:?}"
+        );
+        match &text[0] {
             DrawCommand::DrawString { text, position, .. } => {
                 assert_eq!(text, "OK");
                 assert!(position.x > 0.0 && position.x < 100.0);
@@ -4695,12 +4926,28 @@ mod tests {
         let items = vp.get_sorted_items();
         assert_eq!(items.len(), 2, "panel + button");
         // items sorted by z_index; panel (seq 0) first, button (seq 1) second.
-        match &items[1].commands[0] {
-            DrawCommand::DrawRect { rect, .. } => {
-                assert!((rect.position.x - 30.0).abs() < 0.01, "global x=30");
-                assert!((rect.position.y - 30.0).abs() < 0.01, "global y=30");
-            }
-            other => panic!("expected button DrawRect, got {other:?}"),
+        // The button's rounded bg is several bands; their UNION starts at the
+        // accumulated global position (10 + 20 = 30 on each axis).
+        let bounds = rect_union(&items[1].commands);
+        assert!((bounds.position.x - 30.0).abs() < 0.01, "global x=30, got {bounds:?}");
+        assert!((bounds.position.y - 30.0).abs() < 0.01, "global y=30, got {bounds:?}");
+    }
+
+    /// The bounding box of every filled rect and disc in `cmds`.
+    fn rect_union(cmds: &[DrawCommand]) -> Rect2 {
+        let (mut lo, mut hi) = (Vector2::new(f32::MAX, f32::MAX), Vector2::new(f32::MIN, f32::MIN));
+        for c in cmds {
+            let (a, b) = match c {
+                DrawCommand::DrawRect { rect, .. } => (rect.position, rect.position + rect.size),
+                DrawCommand::DrawCircle { center, radius, .. } => (
+                    *center - Vector2::new(*radius, *radius),
+                    *center + Vector2::new(*radius, *radius),
+                ),
+                _ => continue,
+            };
+            lo = Vector2::new(lo.x.min(a.x), lo.y.min(a.y));
+            hi = Vector2::new(hi.x.max(b.x), hi.y.max(b.y));
         }
+        Rect2::new(lo, hi - lo)
     }
 }

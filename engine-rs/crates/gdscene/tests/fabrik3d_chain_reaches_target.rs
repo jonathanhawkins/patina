@@ -171,7 +171,10 @@ fn unknown_modifier_classes_are_left_alone() {
     let mut tree = SceneTree::new();
     let (skel, b0, tip) = make_chain(&mut tree);
 
-    let mut m = Node::new("IK", "JacobianIK3D"); // a real Godot class, not wired
+    // A real Godot IK class (`scene/3d/spline_ik_3d.cpp`) with no solver here.
+    // ⚠️ Was `JacobianIK3D`, which pat-0q2kx.156 has since routed (to CCD, as a
+    // documented placeholder) — so the "unrouted" fixture solved and moved.
+    let mut m = Node::new("IK", "SplineIK3D");
     m.set_property("target_position", Variant::Vector3(Vector3::new(1.5, 1.0, 0.0)));
     m.set_property("root_bone", Variant::Int(b0 as i64));
     m.set_property("tip_bone", Variant::Int(tip as i64));

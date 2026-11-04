@@ -14,7 +14,7 @@ Scene              Total   Match   Parity   Name-cov        Tree
 animated_scene_3d     298     288    96.6%     100.0%    11/11  
 csg_composition      350     339    96.9%     100.0%    10/10  
 demo_2d               89      89   100.0%     100.0%     4/4   
-demo_3d              263     245    93.2%     100.0%     8/8   
+demo_3d              263     252    95.8%     100.0%     8/8   
 foggy_terrain_3d     361     349    96.7%     100.0%    12/12  
 hierarchy            101     100    99.0%     100.0%     4/4   
 hierarchy_3d         278     270    97.1%     100.0%    12/12  
@@ -40,12 +40,12 @@ Secondary: name-coverage 100.0% (5638/5638), scene-tree structure 100.0% (183/18
 === Per-class inspector parity (all scenes) ===
 Class                Nodes   Total   Match   Parity      Name
 ------------------------------------------------------------
-MeshInstance3D          32    1188    1152    97.0%    100.0%
+MeshInstance3D          32    1188    1156    97.3%    100.0%
 Node2D                  26     702     702   100.0%    100.0%
-DirectionalLight3D      10     440     389    88.4%    100.0%
-Camera3D                12     372     359    96.5%    100.0%
+DirectionalLight3D      10     440     390    88.6%    100.0%
+Camera3D                12     372     360    96.8%    100.0%
 StaticBody3D            12     372     372   100.0%    100.0%
-CollisionShape3D        18     360     341    94.7%    100.0%
+CollisionShape3D        18     360     342    95.0%    100.0%
 Node3D                  19     304     304   100.0%    100.0%
 RigidBody3D              5     255     255   100.0%    100.0%
 SpotLight3D              4     176     168    95.5%    100.0%
@@ -74,12 +74,12 @@ Marker3D                 1      17      17   100.0%    100.0%
 Timer                    1      13      13   100.0%    100.0%
 WorldEnvironment         1      11      11   100.0%    100.0%
 ------------------------------------------------------------
-CLASS MeshInstance3D 1188 1152 97.0%
+CLASS MeshInstance3D 1188 1156 97.3%
 CLASS Node2D 702 702 100.0%
-CLASS DirectionalLight3D 440 389 88.4%
-CLASS Camera3D 372 359 96.5%
+CLASS DirectionalLight3D 440 390 88.6%
+CLASS Camera3D 372 360 96.8%
 CLASS StaticBody3D 372 372 100.0%
-CLASS CollisionShape3D 360 341 94.7%
+CLASS CollisionShape3D 360 342 95.0%
 CLASS Node3D 304 304 100.0%
 CLASS RigidBody3D 255 255 100.0%
 CLASS SpotLight3D 176 168 95.5%
@@ -109,7 +109,7 @@ CLASS Timer 13 13 100.0%
 CLASS WorldEnvironment 11 11 100.0%
 
 === Deeper criterion: per-field disagreements (name-matched props) ===
-value:67  type_name:0  hint:0  hint_string:0  is_default:163
+value:60  type_name:0  hint:0  hint_string:0  is_default:156
   MeshInstance3D custom_aabb [value+is_default] x32
   CollisionShape3D debug_color [value+is_default] x18
   Camera3D near [is_default] x12
@@ -118,7 +118,6 @@ value:67  type_name:0  hint:0  hint_string:0  is_default:163
   DirectionalLight3D directional_shadow_split_2 [is_default] x10
   DirectionalLight3D shadow_bias [is_default] x10
   DirectionalLight3D shadow_transmittance_bias [is_default] x10
-  MeshInstance3D position [value+is_default] x4
   OmniLight3D shadow_bias [is_default] x4
   OmniLight3D shadow_transmittance_bias [is_default] x4
   SpotLight3D shadow_bias [is_default] x4
@@ -130,5 +129,6 @@ value:67  type_name:0  hint:0  hint_string:0  is_default:163
   Camera2D drag_left_margin [is_default] x2
   Camera2D drag_right_margin [is_default] x2
   Camera2D drag_top_margin [is_default] x2
+  BoneAttachment3D bone_name [is_default] x1
 
-OVERALL 5638 5475 97.1%
+OVERALL 5638 5482 97.2%

@@ -1499,7 +1499,7 @@
 									},
 									"spawn_timer": {
 										"type": "float",
-										"value": 0.116666666666667
+										"value": 0.0666666666666667
 									},
 									"texture_filter": {
 										"type": "int",
@@ -2618,7 +2618,7 @@
 									},
 									"spawn_timer": {
 										"type": "float",
-										"value": 0.121929
+										"value": 0.06938
 									},
 									"texture_filter": {
 										"type": "int",
@@ -3737,7 +3737,7 @@
 									},
 									"spawn_timer": {
 										"type": "float",
-										"value": 0.133333333333333
+										"value": 0.0825163333333333
 									},
 									"texture_filter": {
 										"type": "int",
@@ -4856,7 +4856,7 @@
 									},
 									"spawn_timer": {
 										"type": "float",
-										"value": 0.133492583338132
+										"value": 0.0849603333333333
 									},
 									"texture_filter": {
 										"type": "int",
@@ -5975,7 +5975,7 @@
 									},
 									"spawn_timer": {
 										"type": "float",
-										"value": 0.141825916671466
+										"value": 0.0929783333333333
 									},
 									"texture_filter": {
 										"type": "int",
@@ -7094,7 +7094,7 @@
 									},
 									"spawn_timer": {
 										"type": "float",
-										"value": 0.150159250004799
+										"value": 0.0988893333333333
 									},
 									"texture_filter": {
 										"type": "int",
@@ -8213,7 +8213,7 @@
 									},
 									"spawn_timer": {
 										"type": "float",
-										"value": 0.158492583338132
+										"value": 0.105644333333333
 									},
 									"texture_filter": {
 										"type": "int",
@@ -9332,7 +9332,7 @@
 									},
 									"spawn_timer": {
 										"type": "float",
-										"value": 0.164048138893688
+										"value": 0.11278719047619
 									},
 									"texture_filter": {
 										"type": "int",
@@ -10451,7 +10451,7 @@
 									},
 									"spawn_timer": {
 										"type": "float",
-										"value": 0.169603694449244
+										"value": 0.120277333333333
 									},
 									"texture_filter": {
 										"type": "int",
@@ -11194,7 +11194,7 @@
 		}
 	],
 	"frames_captured": 10,
-	"generated_at": "2026-03-20T13:39:50",
+	"generated_at": "2026-11-03T18:34:35",
 	"notification_trace": [],
 	"properties": {
 		"children": [
@@ -11572,7 +11572,7 @@
 							},
 							"spawn_timer": {
 								"type": "float",
-								"value": 0.169603694449244
+								"value": 0.120277333333333
 							},
 							"texture_filter": {
 								"type": "int",

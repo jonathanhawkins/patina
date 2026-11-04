@@ -1283,7 +1283,9 @@ fn editor_html_contains_debugger_monitors_tabs() {
     let (handle, port) = make_test_server();
     let resp = http_get(port, "/editor");
     assert!(resp.contains("data-tab=\"debugger\""));
-    assert!(resp.contains("data-tab=\"monitors\""));
+    // Monitors is a sub-tab of the Debugger panel, as in Godot (the strip
+    // Stack Trace / Errors / … / Monitors / …), not a top-level bottom tab.
+    assert!(resp.contains("data-dbgtab=\"monitors\""));
     assert!(resp.contains("monitor-graph-canvas"));
     assert!(resp.contains("debug-stack-frames"));
     handle.stop();

@@ -3,45 +3,6 @@
 		{
 			"children": [],
 			"class": "Node",
-			"name": "Oracle",
-			"path": "/root/Oracle",
-			"properties": {
-
-			}
-		},
-		{
-			"children": [
-				{
-					"children": [],
-					"class": "Node2D",
-					"name": "Mover",
-					"path": "/root/Root/Mover",
-					"properties": {
-						"position": {
-							"class_type": "",
-							"hint": 1,
-							"type": "Vector2",
-							"value": {
-								"x": 200.0,
-								"y": 100.0
-							}
-						},
-						"speed": {
-							"class_type": "",
-							"hint": 0,
-							"type": "float",
-							"value": 50.0
-						},
-						"total_moved": {
-							"class_type": "",
-							"hint": 0,
-							"type": "float",
-							"value": 0.0
-						}
-					}
-				}
-			],
-			"class": "Node2D",
 			"name": "Root",
 			"path": "/root/Root",
 			"properties": {
@@ -138,7 +99,7 @@
 			"class_type": "",
 			"hint": 0,
 			"type": "String",
-			"value": "test00"
+			"value": "Patina Fixtures"
 		},
 		"world_3d": {
 			"class_type": "World3D",

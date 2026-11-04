@@ -55,7 +55,10 @@ fn audio_effect_reverb_carries_its_eight_members() {
 /// that looks like a working feature.
 #[test]
 fn bone_attachment_defaults_to_no_bone() {
-    assert_eq!(own_count("BoneAttachment3D"), 5);
+    // Counted like RichTextLabel/CodeEdit (richtextlabel_and_codeedit_carry_godot_properties.rs): Patina expresses an `overrides=` member by re-declaring it, so it is in the OWN list, and the count is the doc XML's `<member>` total.
+    // doc/classes/BoneAttachment3D.xml: 6 members, 1 override
+    // (`physics_interpolation_mode`, overrides="Node").
+    assert_eq!(own_count("BoneAttachment3D"), 6);
     assert_eq!(own("BoneAttachment3D", "bone_idx"), Variant::Int(-1));
     assert_eq!(
         own("BoneAttachment3D", "bone_name"),

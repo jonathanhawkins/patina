@@ -653,6 +653,11 @@ fn node_then_packed_full_cleanup() {
     tree.add_child(scene, Node::new("A", "Node")).unwrap();
     tree.add_child(scene, Node::new("B", "Node")).unwrap();
     assert_eq!(tree.node_count(), 4);
+    // The starting scene must be the CURRENT scene: Godot's change_scene_* frees
+    // only `current_scene` (scene_tree.cpp `_flush_scene_change`) — other root
+    // children such as autoloads survive. These tests used to add it to root
+    // without making it current, relying on a free-every-root-child behaviour.
+    tree.set_current_scene(scene, None);
 
     tree.event_trace_mut().enable();
     tree.event_trace_mut().clear();

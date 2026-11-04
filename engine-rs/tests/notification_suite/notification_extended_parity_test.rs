@@ -722,20 +722,22 @@ fn notification_coverage_inventory() {
         (13, "READY"),                    // LifecycleManager::enter_tree (bottom-up)
         (14, "PAUSED"),                   // MainLoop::set_paused(true)
         (15, "UNPAUSED"),                 // MainLoop::set_paused(false)
-        (16, "CHILD_ORDER_CHANGED"),      // add_child / move_child / reparent
+        // Godot's values (scene/main/node.h); several were invented before.
+        (24, "CHILD_ORDER_CHANGED"),      // add_child / move_child / reparent
         (17, "PROCESS"),                  // MainLoop::step (per-frame)
-        (18, "PHYSICS_PROCESS"),          // MainLoop::step (physics tick)
-        (20, "PARENTED"),                 // add_child
-        (21, "UNPARENTED"),               // remove_node / reparent
-        (35, "INTERNAL_PROCESS"),         // MainLoop::step
-        (36, "INTERNAL_PHYSICS_PROCESS"), // MainLoop::step
+        (16, "PHYSICS_PROCESS"),          // MainLoop::step (physics tick)
+        (18, "PARENTED"),                 // add_child
+        (19, "UNPARENTED"),               // remove_node / reparent
+        (25, "INTERNAL_PROCESS"),         // MainLoop::step
+        (26, "INTERNAL_PHYSICS_PROCESS"), // MainLoop::step
+        (27, "POST_ENTER_TREE"),          // LifecycleManager::enter_tree
     ];
 
     // Documented gaps — constant defined but not auto-dispatched:
     let documented_gaps = [
-        (25, "INSTANCED"),  // Only from PackedScene instantiation, not add_child
-        (26, "DRAG_BEGIN"), // Requires UI input handling (not implemented)
-        (27, "DRAG_END"),   // Requires UI input handling (not implemented)
+        (20, "INSTANCED"),  // Only from PackedScene instantiation, not add_child
+        (21, "DRAG_BEGIN"), // Requires UI input handling (not implemented)
+        (22, "DRAG_END"),   // Requires UI input handling (not implemented)
         (30, "DRAW"),       // Requires CanvasItem draw phase (not auto-dispatched)
     ];
 
@@ -749,11 +751,11 @@ fn notification_coverage_inventory() {
         );
     }
 
-    // Total: 15 auto-dispatched + 4 gaps = 19 notification codes accounted for.
+    // Total: 16 auto-dispatched (POST_ENTER_TREE added) + 4 gaps = 20.
     assert_eq!(
         auto_dispatched.len() + documented_gaps.len(),
-        19,
-        "All 19 defined notification codes should be accounted for"
+        20,
+        "All 20 defined notification codes should be accounted for"
     );
 }
 

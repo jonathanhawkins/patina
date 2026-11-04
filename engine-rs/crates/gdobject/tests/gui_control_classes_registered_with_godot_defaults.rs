@@ -170,7 +170,16 @@ fn the_non_zero_defaults_match_godot() {
 #[test]
 fn the_shared_bases_are_abstract() {
     seed();
-    for base in ["Range", "Slider", "ScrollBar", "FlowContainer", "Separator"] {
+    // ⚠️ NOT Range: it is GDREGISTER_VIRTUAL_CLASS upstream
+    // (scene/register_scene_types.cpp:469), and a VIRTUAL class keeps its
+    // creation function — `ClassDB.instantiate("Range")` works in Godot.
+    assert!(
+        !get_class_info("Range").expect("Range info").is_abstract,
+        "Range is VIRTUAL (instantiable) in Godot, not ABSTRACT"
+    );
+    // Nor FlowContainer: `GDREGISTER_CLASS(FlowContainer)` upstream — it is a
+    // usable container in its own right (vertical flag).
+    for base in ["Slider", "ScrollBar", "Separator"] {
         let info = get_class_info(base).unwrap_or_else(|| panic!("{base} info"));
         assert!(
             info.is_abstract,

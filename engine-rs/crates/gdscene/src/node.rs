@@ -154,7 +154,11 @@ pub struct Node {
     /// Ordered list of child node IDs.
     children: Vec<NodeId>,
     /// Dynamic property storage (position, texture, etc.).
-    properties: HashMap<String, Variant>,
+    ///
+    /// FxHash rather than std's SipHash: keys are engine-chosen property
+    /// names (not attacker-controlled), and lookups here dominate per-frame
+    /// work. Iteration order was already unspecified (std seeds randomly).
+    properties: rustc_hash::FxHashMap<String, Variant>,
     /// Groups this node belongs to.
     groups: HashSet<String>,
     /// Log of notifications received (for testing / debugging).
@@ -221,7 +225,7 @@ impl Node {
             class_name: class_name.into(),
             parent: None,
             children: Vec::new(),
-            properties: HashMap::new(),
+            properties: rustc_hash::FxHashMap::default(),
             groups: HashSet::new(),
             notification_log: Vec::new(),
             meta: BTreeMap::new(),
@@ -253,7 +257,7 @@ impl Node {
             class_name: class_name.into(),
             parent: None,
             children: Vec::new(),
-            properties: HashMap::new(),
+            properties: rustc_hash::FxHashMap::default(),
             groups: HashSet::new(),
             notification_log: Vec::new(),
             meta: BTreeMap::new(),

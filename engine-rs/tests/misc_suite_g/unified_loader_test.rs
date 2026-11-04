@@ -41,16 +41,16 @@ fn load_accepts_res_path() {
 #[test]
 fn load_accepts_uid_reference() {
     let mut ul = UnifiedLoader::new(FakeLoader);
-    ul.register_uid_str("uid://player_uid", "res://player.tres");
+    ul.register_uid_str("uid://playeruid", "res://player.tres");
 
-    let res = ul.load("uid://player_uid").unwrap();
+    let res = ul.load("uid://playeruid").unwrap();
     assert_eq!(res.path, "res://player.tres");
 }
 
 #[test]
 fn load_uid_unknown_returns_error() {
     let mut ul = UnifiedLoader::new(FakeLoader);
-    assert!(ul.load("uid://unknown_ref").is_err());
+    assert!(ul.load("uid://unknownref").is_err());
 }
 
 // ===========================================================================
@@ -60,10 +60,10 @@ fn load_uid_unknown_returns_error() {
 #[test]
 fn path_and_uid_return_same_arc() {
     let mut ul = UnifiedLoader::new(FakeLoader);
-    ul.register_uid_str("uid://sword_ref", "res://weapons/sword.tres");
+    ul.register_uid_str("uid://swordref", "res://weapons/sword.tres");
 
     let by_path = ul.load("res://weapons/sword.tres").unwrap();
-    let by_uid = ul.load("uid://sword_ref").unwrap();
+    let by_uid = ul.load("uid://swordref").unwrap();
 
     assert!(
         Arc::ptr_eq(&by_path, &by_uid),
@@ -74,10 +74,10 @@ fn path_and_uid_return_same_arc() {
 #[test]
 fn uid_then_path_same_arc() {
     let mut ul = UnifiedLoader::new(FakeLoader);
-    ul.register_uid_str("uid://shield_ref", "res://items/shield.tres");
+    ul.register_uid_str("uid://shieldref", "res://items/shield.tres");
 
     // Load by UID first, then by path.
-    let by_uid = ul.load("uid://shield_ref").unwrap();
+    let by_uid = ul.load("uid://shieldref").unwrap();
     let by_path = ul.load("res://items/shield.tres").unwrap();
 
     assert!(Arc::ptr_eq(&by_uid, &by_path));
@@ -108,14 +108,14 @@ fn ext_resource_uid_resolution() {
     let mut ul = UnifiedLoader::new(FakeLoader);
 
     // Simulate what a scene parser would do: register ext_resource UIDs.
-    ul.register_uid_str("uid://script_movement", "res://scripts/movement.gd");
-    ul.register_uid_str("uid://texture_icon", "res://textures/icon.png");
+    ul.register_uid_str("uid://scriptmovement", "res://scripts/movement.gd");
+    ul.register_uid_str("uid://textureicon", "res://textures/icon.png");
 
     // Load scripts and textures via UID (as ext_resources would reference them).
-    let script = ul.load("uid://script_movement").unwrap();
+    let script = ul.load("uid://scriptmovement").unwrap();
     assert_eq!(script.path, "res://scripts/movement.gd");
 
-    let texture = ul.load("uid://texture_icon").unwrap();
+    let texture = ul.load("uid://textureicon").unwrap();
     assert_eq!(texture.path, "res://textures/icon.png");
 
     // Loading the same paths directly hits cache.
@@ -184,7 +184,7 @@ fn is_cached_reflects_state() {
 #[test]
 fn tres_parsed_uid_round_trips_through_unified() {
     // Parse a .tres in-memory to get its UID.
-    let source = r#"[gd_resource type="Theme" format=3 uid="uid://my_theme"]
+    let source = r#"[gd_resource type="Theme" format=3 uid="uid://mytheme"]
 
 [resource]
 name = "TestTheme"
@@ -198,14 +198,14 @@ name = "TestTheme"
     // Register the parsed UID in the unified loader.
     // Use the same uid:// string so the hash matches.
     let mut ul = UnifiedLoader::new(FakeLoader);
-    ul.register_uid_str("uid://my_theme", "res://themes/main.tres");
+    ul.register_uid_str("uid://mytheme", "res://themes/main.tres");
 
     // Load by uid:// through unified loader.
-    let res = ul.load("uid://my_theme").unwrap();
+    let res = ul.load("uid://mytheme").unwrap();
     assert_eq!(res.path, "res://themes/main.tres");
 
     // Verify the UID from parsing matches the UID from the string.
-    let uid_from_str = parse_uid_string("uid://my_theme");
+    let uid_from_str = parse_uid_string("uid://mytheme");
     assert_eq!(
         parsed.uid, uid_from_str,
         "parsed UID must match string-derived UID"
@@ -223,18 +223,28 @@ fn fixture_tscn_uid_registers_and_resolves() {
         .join("fixtures/scenes/test_scripts.tscn");
     let content = std::fs::read_to_string(&fixture_path).unwrap();
 
-    // Extract the uid from the first line.
     let first_line = content.lines().next().unwrap();
     assert!(
         first_line.contains("uid=\"uid://test_scripts\""),
         "fixture should have uid"
     );
 
-    // Register it and load through unified loader.
+    // ⚠️ That header UID is not one Godot can represent: `ResourceUID::
+    // text_to_id` (core/io/resource_uid.cpp:90) accepts only `a-z` and `0-9`
+    // after `uid://`, and returns INVALID_ID at the `_`. Godot therefore
+    // ignores it — the scene stays loadable by PATH — and this loader agrees.
     let mut ul = UnifiedLoader::new(FakeLoader);
     ul.register_uid_str("uid://test_scripts", fixture_path.to_str().unwrap());
+    assert!(
+        ul.load("uid://test_scripts").is_err(),
+        "an invalid UID resolves to nothing, as in Godot"
+    );
+    let res = ul.load(fixture_path.to_str().unwrap()).unwrap();
+    assert!(res.path.contains("test_scripts.tscn"));
 
-    let res = ul.load("uid://test_scripts").unwrap();
+    // A VALID uid for the same file registers and resolves.
+    ul.register_uid_str("uid://testscripts", fixture_path.to_str().unwrap());
+    let res = ul.load("uid://testscripts").unwrap();
     assert!(res.path.contains("test_scripts.tscn"));
 }
 

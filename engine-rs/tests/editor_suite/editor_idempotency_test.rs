@@ -72,14 +72,26 @@ fn http_post_idem(port: u16, path: &str, body: &str, key: Option<&str>) -> Strin
     http_raw(port, &req)
 }
 
-/// Count scene nodes by GETting /api/scene and inspecting the JSON. The
-/// concrete shape varies but every Patina scene reply carries a `nodes` array.
-fn scene_node_count(port: u16) -> usize {
+/// `/api/scene` answers `{"nodes": <ROOT node object>, ...}` — the root with
+/// its `id` and nested `children`, not a flat array. (This helper used to read
+/// `nodes` as an array, so every count was silently 0.)
+fn scene_root(port: u16) -> serde_json::Value {
     let resp = http_get(port, "/api/scene");
     let body = response_body(&resp);
     let v: serde_json::Value = serde_json::from_str(body)
         .unwrap_or_else(|e| panic!("/api/scene must return JSON, got: {body}\n{e}"));
-    v["nodes"].as_array().map(|a| a.len()).unwrap_or(0)
+    v["nodes"].clone()
+}
+
+/// Every node in the tree under (and including) the root.
+fn scene_node_count(port: u16) -> usize {
+    fn count(n: &serde_json::Value) -> usize {
+        1 + n["children"]
+            .as_array()
+            .map(|c| c.iter().map(count).sum())
+            .unwrap_or(0)
+    }
+    count(&scene_root(port))
 }
 
 #[test]
@@ -90,9 +102,14 @@ fn post_with_idempotency_key_replays_response_and_runs_handler_once() {
 
     let initial = scene_node_count(port);
 
-    // First POST: adds a child to the root (parent_id=0). The handler should
+    // First POST: adds a child to the root. The handler should
     // run, the response is cached for this Idempotency-Key.
-    let body = r#"{"parent_id":0,"name":"Spawned","class":"Node2D"}"#;
+    // `class_name` is the API's field (the capabilities table and every
+    // other caller); `class` was a typo that made the handler answer 400.
+    // The ROOT's real id: raw id 0 names no node, so `parent_id: 0` was a 404.
+    let root_id = scene_root(port)["id"].as_u64().expect("root id");
+    let body = format!(r#"{{"parent_id":{root_id},"name":"Spawned","class_name":"Node2D"}}"#);
+    let body = body.as_str();
     let first = http_post_idem(port, "/api/node/add", body, Some("idem-test-1"));
     assert_eq!(
         status_code(&first),

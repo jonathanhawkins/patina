@@ -494,6 +494,28 @@ pub enum Vec3Axis {
     Z,
 }
 
+/// Whether `(`/`)` and `[`/`]` pair up in one statement.
+fn brackets_balance(stmt: &str) -> bool {
+    let mut stack = Vec::new();
+    for c in stmt.chars() {
+        match c {
+            '(' | '[' => stack.push(c),
+            ')' => {
+                if stack.pop() != Some('(') {
+                    return false;
+                }
+            }
+            ']' => {
+                if stack.pop() != Some('[') {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    stack.is_empty()
+}
+
 /// Parses a Godot shader's `fragment()` function body into instructions.
 ///
 /// Returns an empty vec if no `fragment()` body is found or if the body
@@ -515,10 +537,14 @@ pub fn parse_fragment_body(source: &str) -> Vec<FragmentInstruction> {
             continue;
         }
 
-        if let Some(inst) = parse_fragment_statement(trimmed) {
-            instructions.push(inst);
-        } else {
-            skipped_any = true;
+        // A statement with unbalanced brackets is malformed, whatever prefix
+        // the lenient matcher recognises: `COLOR = vec4(1.0, 0.0;` used to be
+        // accepted as a SetColor, so the broken shader never reached the
+        // front end and its syntax error was never reported.
+        let balanced = brackets_balance(trimmed);
+        match parse_fragment_statement(trimmed).filter(|_| balanced) {
+            Some(inst) => instructions.push(inst),
+            None => skipped_any = true,
         }
     }
 
@@ -535,7 +561,13 @@ pub fn parse_fragment_body(source: &str) -> Vec<FragmentInstruction> {
     // one bogus instruction mask the whole shader. Letting the AST preempt the
     // matcher outright is the end state, but only once every built-in the
     // matcher implies is populated for the AST path.
-    if instructions.is_empty() || skipped_any {
+    //
+    // ⚠️ `skipped_any` alone, not `|| instructions.is_empty()`: every body the
+    // matcher failed on already sets `skipped_any`, so the extra clause only
+    // ever added the EMPTY body (`void fragment() {}`) — which then came back
+    // as a Program, made the WGSL translator report "constructs beyond the
+    // translator" for a shader that does nothing, and pushed it onto the CPU.
+    if skipped_any {
         if let Ok(program) = gdresource::shader_ast::parse_shader(source) {
             if program.function("fragment").is_some() {
                 return vec![FragmentInstruction::Program(Arc::new(program))];
@@ -2393,7 +2425,7 @@ void fragment() {
             wgsl.contains("textureSample(TEXTURE, TEXTURE_sampler, UV)"),
             "default COLOR should sample TEXTURE: {wgsl}"
         );
-        assert!(compiled.unsupported.is_empty());
+        assert!(compiled.unsupported.is_empty(), "{:?}", compiled.unsupported);
         assert_brace_balanced(&wgsl);
     }
 

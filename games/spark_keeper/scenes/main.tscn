@@ -1,0 +1,64 @@
+[gd_scene load_steps=5 format=3]
+
+[ext_resource type="Script" path="res://scripts/main.gd" id="1_main"]
+[ext_resource type="PackedScene" path="res://scenes/player.tscn" id="2_player"]
+[ext_resource type="Script" path="res://scripts/pulse_ring.gd" id="3_ring"]
+[ext_resource type="Material" path="res://shaders/background_material.tres" id="4_bg"]
+
+[node name="Main" type="Node2D"]
+script = ExtResource("1_main")
+
+[node name="Background" type="Polygon2D" parent="."]
+material = ExtResource("4_bg")
+color = Color(0.04, 0.03, 0.1, 1)
+polygon = PackedVector2Array(0, 0, 640, 0, 640, 360, 0, 360)
+uv = PackedVector2Array(0, 0, 1, 0, 1, 1, 0, 1)
+
+[node name="Border" type="Line2D" parent="."]
+points = PackedVector2Array(16, 16, 624, 16, 624, 344, 16, 344, 16, 16)
+width = 2.0
+default_color = Color(0.5, 0.4, 0.9, 0.6)
+
+[node name="Sparks" type="Node2D" parent="."]
+
+[node name="Glooms" type="Node2D" parent="."]
+
+[node name="Player" parent="." instance=ExtResource("2_player")]
+position = Vector2(320, 180)
+
+[node name="PulseRing" type="Node2D" parent="."]
+script = ExtResource("3_ring")
+
+[node name="SparkTimer" type="Timer" parent="."]
+wait_time = 1.5
+autostart = true
+
+[node name="GloomTimer" type="Timer" parent="."]
+wait_time = 3.0
+autostart = true
+
+[node name="HUD" type="CanvasLayer" parent="."]
+
+[node name="Bar" type="HBoxContainer" parent="HUD"]
+offset_left = 24.0
+offset_top = 22.0
+offset_right = 324.0
+offset_bottom = 42.0
+theme_override_constants/separation = 16
+
+[node name="Score" type="Label" parent="HUD/Bar"]
+layout_mode = 2
+text = "Sparks 0"
+
+[node name="Lives" type="Label" parent="HUD/Bar"]
+layout_mode = 2
+text = "Lives 3"
+
+[node name="Pulse" type="ProgressBar" parent="HUD/Bar"]
+custom_minimum_size = Vector2(90, 12)
+layout_mode = 2
+size_flags_vertical = 4
+max_value = 1.0
+step = 0.01
+value = 1.0
+show_percentage = false

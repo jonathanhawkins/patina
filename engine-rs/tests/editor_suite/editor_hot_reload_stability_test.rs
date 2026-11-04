@@ -13,7 +13,7 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
 
-use gdeditor::editor_server::{EditorServerHandle, EditorState};
+use gdeditor::editor_server::{EditorServerHandle, EditorState, RateLimiter};
 use gdscene::SceneTree;
 
 fn free_port() -> u16 {
@@ -113,7 +113,15 @@ fn editor_survives_1000_hot_reload_cycles_without_leaks() {
     // Start an in-process editor server.
     let port = free_port();
     let state = EditorState::new(SceneTree::new());
-    let handle = EditorServerHandle::start(port, state);
+    // A raised rate limit: this drives 1000 reloads as fast as the loop can,
+    // and the default 60 req/s abuse limiter (correctly) answered 429 by
+    // iteration ~57. The test is about leaks across reloads, not throughput.
+    let handle = EditorServerHandle::start_with_auth_and_limiter(
+        port,
+        state,
+        None,
+        RateLimiter::new(1_000_000),
+    );
     wait_for_server(port);
 
     // Seed a small, valid .tscn file to reload over and over.
@@ -234,7 +242,15 @@ fn editor_survives_1000_hot_reload_cycles_without_leaks() {
 fn single_hot_reload_increases_node_count() {
     let port = free_port();
     let state = EditorState::new(SceneTree::new());
-    let handle = EditorServerHandle::start(port, state);
+    // A raised rate limit: this drives 1000 reloads as fast as the loop can,
+    // and the default 60 req/s abuse limiter (correctly) answered 429 by
+    // iteration ~57. The test is about leaks across reloads, not throughput.
+    let handle = EditorServerHandle::start_with_auth_and_limiter(
+        port,
+        state,
+        None,
+        RateLimiter::new(1_000_000),
+    );
     wait_for_server(port);
 
     // Before loading, the scene tree is just the root node.

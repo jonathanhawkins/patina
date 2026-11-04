@@ -107,10 +107,18 @@ fn play_view_renders_controls_e2e() {
         items.iter().map(|i| &i.kind).collect::<Vec<_>>()
     );
 
-    // 2. UI paints above plain 2D nodes.
+    // 2. Each control item sits where its NODE sits in the canvas: its own
+    //    effective z and canvas layer (all defaults here), NOT a blanket floor
+    //    above every Node2D. Godot draws Controls and Node2Ds in one order —
+    //    layer, z, tree order — and the old `CONTROL_Z_BASE` floor painted a
+    //    full-rect background ColorRect over every sprite of a real game
+    //    (`gdscene/tests/controls_and_node2ds_share_one_canvas_order.rs`).
     assert!(
-        items.iter().all(|i| i.z_index >= CONTROL_Z_BASE),
-        "control items must carry the CONTROL_Z_BASE paint-order floor"
+        items
+            .iter()
+            .all(|i| i.z_index < CONTROL_Z_BASE && i.z_index == 0 && i.canvas_layer == 0),
+        "control items must carry their node's own z/layer: {:?}",
+        items.iter().map(|i| (i.z_index, i.canvas_layer)).collect::<Vec<_>>()
     );
 
     // 3. The container stacked its children instead of leaving them at the origin.

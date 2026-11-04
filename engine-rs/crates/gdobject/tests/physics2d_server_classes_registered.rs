@@ -45,7 +45,10 @@ fn the_2d_physics_server_singletons_are_registered() {
 fn the_server_singletons_are_not_instantiable() {
     setup();
 
-    for cls in ["PhysicsServer2D", "PhysicsServer2DManager"] {
+    // Only PhysicsServer2D: PhysicsServer2DManager is a plain
+    // `GDREGISTER_CLASS(PhysicsServer2DManager)` upstream
+    // (servers/register_server_types.cpp:278), so ClassDB can construct it.
+    for cls in ["PhysicsServer2D"] {
         assert!(
             instantiate(cls).is_none(),
             "{cls} has inst=false in Godot — ClassDB.instantiate must refuse it. \

@@ -36,7 +36,8 @@ fn classdb_registers_fogvolume() {
 fn classdb_fogvolume_inherits_node3d() {
     gdobject::class_db::register_3d_classes();
     let info = gdobject::class_db::get_class_info("FogVolume").unwrap();
-    assert_eq!(info.parent_class.as_str(), "Node3D");
+    // Godot: FogVolume : VisualInstance3D (doc/classes/FogVolume.xml).
+    assert_eq!(info.parent_class.as_str(), "VisualInstance3D");
 }
 
 #[test]
@@ -217,9 +218,11 @@ fn material_no_density_texture() {
 // ===========================================================================
 
 #[test]
-fn default_volume_ellipsoid_2x2x2() {
+fn default_volume_box_2x2x2() {
     let v = FogVolume::default();
-    assert_eq!(v.shape, FogVolumeShape::Ellipsoid);
+    // Godot's default shape is 3 = FOG_VOLUME_SHAPE_BOX (FogVolume.xml
+    // `default="3"`; rendering_server.h: ELLIPSOID, CONE, CYLINDER, BOX, WORLD).
+    assert_eq!(v.shape, FogVolumeShape::Box);
     assert!(approx(v.size.x, 2.0));
     assert!(approx(v.size.y, 2.0));
     assert!(approx(v.size.z, 2.0));

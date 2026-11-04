@@ -322,9 +322,15 @@ fn r6sku_navigation_obstacle_dynamic_blocking() {
     // Add large obstacle on the boundary between polygons.
     server.add_obstacle(NavigationObstacle2D::new(Vector2::new(10.0, 5.0), 6.0));
 
-    // Now path should be blocked.
+    // The path is NOT blocked: in Godot an obstacle "constrain[s] velocities
+    // of avoidance controlled agents" and only changes the MESH when
+    // `affect_navigation_mesh` is set and the mesh is rebaked
+    // (doc/classes/NavigationObstacle2D.xml). Path queries ignore it — agents
+    // steer around it through avoidance. This test used to expect the
+    // query itself to fail.
     let path2 = server.find_path(from, to);
-    assert!(path2.is_empty(), "path should be blocked by obstacle");
+    assert!(!path2.is_empty(), "an obstacle does not cut the path query");
+    assert_eq!(path2.first().copied(), Some(from));
 }
 
 // ===========================================================================
@@ -525,7 +531,12 @@ fn r6sku_ui_scene_transition_cleanup() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    add_packed_scene_to_tree(&mut tree, root, &packed_ui).unwrap();
+    // The starting scene must be the CURRENT scene: Godot's change_scene_* frees
+    // only `current_scene` (scene_tree.cpp `_flush_scene_change`) — other root
+    // children such as autoloads survive. These tests used to add it to root
+    // without making it current, relying on a free-every-root-child behaviour.
+    let _ = root;
+    tree.change_scene_to_packed(&packed_ui).unwrap();
     let mut main_loop = MainLoop::new(tree);
 
     // Step the UI scene.
@@ -842,7 +853,12 @@ fn r6sku_scene_transition_frame_count_continuity() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    add_packed_scene_to_tree(&mut tree, root, &packed_a).unwrap();
+    // The starting scene must be the CURRENT scene: Godot's change_scene_* frees
+    // only `current_scene` (scene_tree.cpp `_flush_scene_change`) — other root
+    // children such as autoloads survive. These tests used to add it to root
+    // without making it current, relying on a free-every-root-child behaviour.
+    let _ = root;
+    tree.change_scene_to_packed(&packed_a).unwrap();
     let mut main_loop = MainLoop::new(tree);
 
     main_loop.run_frames(50, DT);

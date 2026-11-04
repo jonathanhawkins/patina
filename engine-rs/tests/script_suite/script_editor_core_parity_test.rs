@@ -1032,9 +1032,13 @@ fn gutter_bookmark_navigation() {
 
     assert_eq!(gutter.next_bookmark(10), Some(30));
     assert_eq!(gutter.next_bookmark(30), Some(50));
-    assert_eq!(gutter.next_bookmark(50), None);
     assert_eq!(gutter.prev_bookmark(50), Some(30));
-    assert_eq!(gutter.prev_bookmark(10), None);
+    // Godot WRAPS: next from the last bookmark goes to the first, prev from
+    // the first goes to the last (CodeTextEditor::goto_next_bookmark /
+    // goto_prev_bookmark, editor/gui/code_editor.cpp:1784-1814). This used to
+    // expect `None` at both ends.
+    assert_eq!(gutter.next_bookmark(50), Some(10));
+    assert_eq!(gutter.prev_bookmark(10), Some(50));
 }
 
 #[test]

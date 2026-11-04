@@ -173,6 +173,10 @@ fn three_lambdas_each_capture_their_own_loop_variable() {
 /// carries the captured `msg` — using the single-expression form
 /// `lambda_captures_enclosing_locals` already proves.
 ///
+/// ⚠️ `add_user_signal("ping")` first: the parent is a script-less `Node`, and
+/// Godot 4 refuses to connect a signal the object does not have ("Attempt to
+/// connect nonexistent signal"), as the engine's connect pre-check now does.
+///
 /// ⚠️ Each lambda is also bound to a local before being connected rather than
 /// written inline in the argument list, which is the shape the sibling tests in
 /// this file prove. Nothing about the connection depends on that spelling.
@@ -192,6 +196,7 @@ func _ready():
     var msg = \"hi\"
     var bump = func(): self._note_hit()
     var store = func(): self._note_msg(msg)
+    get_parent().add_user_signal(\"ping\")
     get_parent().connect(\"ping\", bump)
     get_parent().connect(\"ping\", store)
     self.ran = true

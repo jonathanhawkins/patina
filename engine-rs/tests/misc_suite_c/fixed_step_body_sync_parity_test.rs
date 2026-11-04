@@ -4,9 +4,13 @@
 //!   - Each physics tick runs: sync_to_physics → step_physics → sync_from_physics
 //!   - Kinematic bodies (CharacterBody2D): external position writes on scene nodes
 //!     ARE synced to the physics world on the next sync_to_physics call.
-//!   - Rigid bodies (RigidBody2D): external position writes on scene nodes are
-//!     IGNORED — the physics engine is the source of truth; sync_from_physics
-//!     overwrites node properties with physics state.
+//!   - Rigid bodies (RigidBody2D): an external transform write TELEPORTS the
+//!     body. `CollisionObject2D` answers NOTIFICATION_TRANSFORM_CHANGED with
+//!     `body_set_state(BODY_STATE_TRANSFORM, global_transform)`
+//!     (scene/2d/physics/collision_object_2d.cpp:79-90), and
+//!     `set_linear_velocity` / `set_angular_velocity` write the server state
+//!     the same way; simulation then continues from the written state. These
+//!     tests used to require the write be discarded, which is not Godot.
 //!   - Static bodies (StaticBody2D): never receive writeback from sync_from_physics,
 //!     so external writes to static body node properties persist.
 //!   - Frame ordering is deterministic: all sync_to precedes step, step precedes
@@ -129,7 +133,7 @@ fn kinematic_external_position_write_synced_to_physics() {
 // ===========================================================================
 
 #[test]
-fn rigid_body_external_position_write_overwritten_by_physics() {
+fn rigid_body_external_position_write_teleports_the_body() {
     let (mut ml, rigid_id, _static_id, _kinematic_id) = setup_mixed_body_scene();
 
     // Step once to get a physics tick established.
@@ -139,20 +143,19 @@ fn rigid_body_external_position_write_overwritten_by_physics() {
     // Externally teleport the rigid body node to a far-away position.
     set_node_position(&mut ml, rigid_id, Vector2::new(9999.0, 9999.0));
 
-    // Step again — sync_from_physics should overwrite our external write.
+    // Step again — the write teleported the body, and one tick of motion
+    // (60 px/s right, gravity down) continues from there.
     ml.step(1.0 / 60.0);
     let pos_after_second = get_node_position(&ml, rigid_id);
+    let _ = pos_after_first;
 
-    // The rigid body should NOT be at (9999, 9999) — it should be near where
-    // physics would have placed it (original trajectory + integration).
     assert!(
-        pos_after_second.x < 200.0,
-        "rigid body must not retain external write of 9999; physics overwrites. got {pos_after_second:?}"
+        pos_after_second.x >= 9999.0 && pos_after_second.x < 9999.0 + 3.0,
+        "rigid body must be teleported to x=9999 then advance one tick: got {pos_after_second:?}"
     );
-    // Position should have advanced from the first tick position.
     assert!(
-        pos_after_second.x > pos_after_first.x - 1.0,
-        "rigid body should continue along physics trajectory: first={pos_after_first:?}, second={pos_after_second:?}"
+        pos_after_second.y >= 9999.0 && pos_after_second.y < 9999.0 + 3.0,
+        "rigid body y continues from the teleport under gravity: got {pos_after_second:?}"
     );
 }
 
@@ -355,6 +358,9 @@ fn rigid_zero_velocity_no_drift() {
     rigid.set_property("position", Variant::Vector2(Vector2::new(200.0, 200.0)));
     rigid.set_property("linear_velocity", Variant::Vector2(Vector2::ZERO));
     rigid.set_property("mass", Variant::Float(1.0));
+    // No velocity AND no gravity: under Godot's default 980 px/s² gravity a
+    // still RigidBody2D falls (~126 px in these 0.5 s), which is not drift.
+    rigid.set_property("gravity_scale", Variant::Float(0.0));
     let rigid_id = ml.tree_mut().add_child(root, rigid).unwrap();
     let mut s = Node::new("Shape", "CollisionShape2D");
     s.set_property("radius", Variant::Float(8.0));
@@ -378,7 +384,7 @@ fn rigid_zero_velocity_no_drift() {
 // ===========================================================================
 
 #[test]
-fn rigid_external_velocity_write_ignored_by_physics() {
+fn rigid_external_velocity_write_is_applied() {
     let (mut ml, rigid_id, _static_id, _kinematic_id) = setup_mixed_body_scene();
 
     // Step once.
@@ -399,7 +405,7 @@ fn rigid_external_velocity_write_ignored_by_physics() {
         Variant::Vector2(Vector2::new(99999.0, 99999.0)),
     );
 
-    // Step again — sync_from_physics overwrites velocity from physics engine.
+    // Step again — the written velocity is the body's velocity now.
     ml.step(1.0 / 60.0);
     let vel_after_second = match ml
         .tree()
@@ -411,15 +417,16 @@ fn rigid_external_velocity_write_ignored_by_physics() {
         _ => Vector2::ZERO,
     };
 
-    // Velocity should NOT be 99999 — physics engine state overrides.
+    let _ = vel_after_first;
+    // `set_linear_velocity` writes BODY_STATE_LINEAR_VELOCITY; one tick of
+    // gravity (980/60 ≈ 16.3 on y) is added on top.
     assert!(
-        vel_after_second.x < 1000.0,
-        "rigid body velocity must not retain external write; physics overwrites. got {vel_after_second:?}"
+        (vel_after_second.x - 99999.0).abs() < 1.0,
+        "the written x velocity is kept: got {vel_after_second:?}"
     );
-    // Velocity should be similar to first-tick velocity (no huge jump).
     assert!(
-        (vel_after_second.x - vel_after_first.x).abs() < 100.0,
-        "velocity should be continuous: first={vel_after_first:?}, second={vel_after_second:?}"
+        vel_after_second.y > 99999.0 && vel_after_second.y < 99999.0 + 20.0,
+        "the written y velocity plus one tick of gravity: got {vel_after_second:?}"
     );
 }
 
@@ -544,7 +551,7 @@ fn kinematic_external_rotation_write_synced() {
 // ===========================================================================
 
 #[test]
-fn rigid_body_external_rotation_write_overwritten() {
+fn rigid_body_external_rotation_write_teleports_the_body() {
     let (mut ml, rigid_id, _static_id, _kinematic_id) = setup_mixed_body_scene();
 
     ml.step(1.0 / 60.0);
@@ -557,7 +564,8 @@ fn rigid_body_external_rotation_write_overwritten() {
 
     ml.step(1.0 / 60.0);
 
-    // Physics should overwrite with its own state.
+    // The rotation teleports too (BODY_STATE_TRANSFORM carries it); with no
+    // angular velocity it stays put.
     let rot = match ml
         .tree()
         .get_node(rigid_id)
@@ -568,8 +576,8 @@ fn rigid_body_external_rotation_write_overwritten() {
         _ => 0.0,
     };
     assert!(
-        rot.abs() < 10.0,
-        "rigid body rotation must not retain external write of 99.0: got {rot}"
+        (rot - 99.0).abs() < 1e-3,
+        "rigid body rotation is teleported to 99.0: got {rot}"
     );
 }
 
@@ -590,11 +598,11 @@ fn simultaneous_external_writes_on_all_body_types() {
 
     ml.step(1.0 / 60.0);
 
-    // Rigid: external write overwritten by physics.
+    // Rigid: external write teleports, then one tick of motion.
     let rigid_pos = get_node_position(&ml, rigid_id);
     assert!(
-        rigid_pos.x < 300.0,
-        "rigid body external write must be overwritten: got {rigid_pos:?}"
+        rigid_pos.x >= 5000.0 && rigid_pos.x < 5003.0,
+        "rigid body external write must teleport it: got {rigid_pos:?}"
     );
 
     // Static: external write persists.

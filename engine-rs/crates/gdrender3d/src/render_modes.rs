@@ -79,40 +79,44 @@ pub fn blend_pixel(mode: BlendMode, src: Color, dst: Color) -> Color {
 ///
 /// ⚠️ **Screen space has Y growing DOWNWARD**, which inverts handedness against
 /// the usual y-up reading of this formula. `clip_to_screen` maps NDC with
-/// `y = (1 - ndc_y) * 0.5 * height`, so a FRONT face — counter-clockwise in NDC,
-/// the OpenGL/Godot/wgpu `FrontFace::Ccw` convention — comes out CLOCKWISE here
-/// and its signed area is **negative**. A back face is positive.
+/// `y = (1 - ndc_y) * 0.5 * height`, so a triangle that is CLOCKWISE as the
+/// camera sees it (y-up) comes out with a **positive** signed area here, and a
+/// counter-clockwise one with a negative area.
 ///
-/// The sign is therefore the opposite of what "positive = counter-clockwise =
-/// front-facing" would suggest, and reading it the y-up way is exactly the bug
-/// [`should_cull`] carried (pat-s3rrv.122).
+/// 🔑 Godot's FRONT face is the CLOCKWISE one: "Godot uses clockwise winding
+/// order for front faces of triangle primitive modes"
+/// (`doc/classes/ArrayMesh.xml:49`, repeated in `SurfaceTool.xml:28`). Every
+/// primitive ported from `primitive_meshes.cpp` (Plane, Quad, Sphere, Capsule,
+/// Cylinder, Torus, TubeTrail) is wound that way, and Godot's glTF importer
+/// swaps glTF's CCW indices to CW on import (`gltf_document.cpp:1488`). So a
+/// front face has a POSITIVE signed area here.
 pub fn signed_area(a: Vector2, b: Vector2, c: Vector2) -> f32 {
     (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)
 }
 
 /// Whether a screen-space triangle `(a, b, c)` should be culled under `mode`.
 ///
-/// ⚠️ The comparisons look backwards and are not: see [`signed_area`]. In the
-/// y-DOWN space the only caller works in (`renderer.rs`, on vertices straight
-/// out of `clip_to_screen`), a front face has a NEGATIVE signed area, so
-/// `Back` — Godot's default, which keeps front faces — must cull the positive
-/// ones (pat-s3rrv.122).
+/// In the y-DOWN space the only caller works in (`renderer.rs`, on vertices
+/// straight out of `clip_to_screen`), a Godot front face (clockwise as seen by
+/// the camera) has a POSITIVE signed area — see [`signed_area`] — so `Back`,
+/// Godot's default, culls the negative ones.
 ///
-/// Before this, `Back` culled every FRONT face and let the far side of a mesh
-/// draw instead. On a closed convex opaque mesh that is nearly invisible — the
-/// silhouette is identical and only the shading and UV direction change — which
-/// is why it survived: it shows up as a mirrored texture and a face lit by the
-/// wrong normal. The wgpu path never had it (`FrontFace::Ccw` +
-/// `Face::Back` in `wgpu_pipeline.rs`), so the two backends disagreed about
-/// which side of a mesh you were looking at.
+/// ⚠️ pat-s3rrv.122 had this inverted (front = counter-clockwise, the OpenGL
+/// convention), judged against `Mesh3D::cube`, whose X/Z faces were then wound
+/// CCW while its Y faces were CW. Under that rule every upstream-ported
+/// primitive was inside-out: a `PlaneMesh` floor seen from above was culled
+/// ENTIRELY (so every editor/Play test standing on one saw an empty frame),
+/// and spheres/cylinders drew their far halves. The cube and `BoxMesh` are now
+/// wound CW on all six faces, and the wgpu path uses `FrontFace::Cw`, so both
+/// backends agree with each other and with Godot's mesh data.
 ///
 /// A degenerate (zero-area) triangle is culled by both modes, as before.
 pub fn should_cull(a: Vector2, b: Vector2, c: Vector2, mode: CullMode) -> bool {
     let area = signed_area(a, b, c);
     match mode {
         CullMode::Disabled => false,
-        CullMode::Back => area >= 0.0,
-        CullMode::Front => area <= 0.0,
+        CullMode::Back => area <= 0.0,
+        CullMode::Front => area >= 0.0,
     }
 }
 
@@ -150,33 +154,33 @@ mod tests {
     // ⚠️ These are named for what they are TO THE RENDERER, not for the
     // handedness of the raw numbers. Screen Y grows downward, so the triangle
     // that looks counter-clockwise when read as ordinary y-up math is the one
-    // facing AWAY from the camera. Naming them `ccw`/`cw` is what let the
-    // inverted cull look correct for as long as it did (pat-s3rrv.122).
+    // that is CLOCKWISE to the camera — Godot's front face
+    // (`ArrayMesh.xml:49`).
 
-    // A FRONT-facing screen triangle: clockwise on screen, signed area < 0.
+    // A FRONT-facing screen triangle: Godot-clockwise, signed area > 0.
     fn screen_front() -> (Vector2, Vector2, Vector2) {
         (
             Vector2::new(0.0, 0.0),
-            Vector2::new(0.0, 1.0),
             Vector2::new(1.0, 0.0),
+            Vector2::new(0.0, 1.0),
         )
     }
-    // A BACK-facing screen triangle: counter-clockwise on screen, area > 0.
+    // A BACK-facing screen triangle: signed area < 0.
     fn screen_back() -> (Vector2, Vector2, Vector2) {
         (
             Vector2::new(0.0, 0.0),
-            Vector2::new(1.0, 0.0),
             Vector2::new(0.0, 1.0),
+            Vector2::new(1.0, 0.0),
         )
     }
 
     #[test]
     fn winding_sign_is_correct() {
         // Unchanged arithmetic, restated in the space it is used in: the
-        // BACK-facing triangle is the one with positive signed area.
-        let (a, b, c) = screen_back();
-        assert!(signed_area(a, b, c) > 0.0);
+        // FRONT-facing (Godot-clockwise) triangle has positive signed area.
         let (a, b, c) = screen_front();
+        assert!(signed_area(a, b, c) > 0.0);
+        let (a, b, c) = screen_back();
         assert!(signed_area(a, b, c) < 0.0);
     }
 

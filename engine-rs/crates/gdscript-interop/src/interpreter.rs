@@ -568,6 +568,69 @@ fn read_resource_source(path: &str) -> Option<String> {
 /// a mismatch there would read as a curve that forgets its points.
 const CURVE_POINTS: &str = "_points";
 
+/// The value `load(path)` / `preload(path)` hands a script for a resource
+/// that is not a script-backed `.tres`: a `.tres`/`.res` parsed off disk, a
+/// format-loaded asset (texture, audio, font…), or a typed placeholder — a
+/// `PackedScene` for a `.tscn`, which `instantiate()` reads back off its class.
+///
+/// `pub` so a scene-authored resource reaches a script in the SAME shape a
+/// `preload` would give it: an `@export var mob_scene: PackedScene` set in the
+/// `.tscn` (`mob_scene = ExtResource("2_50pww")`) used to arrive as that raw
+/// text, so `mob_scene.instantiate()` failed with "String.instantiate".
+pub fn load_resource_value(path: &str) -> Variant {
+    if path.ends_with(".tres") || path.ends_with(".res") {
+        if let Some(loaded) = load_text_resource(path) {
+            return Variant::Resource(Box::new(loaded));
+        }
+    }
+    // Everything else goes through the registered format
+    // loaders, which follow `.import` remaps and decode the
+    // file, so `load("res://icon.png").width` is the
+    // artifact's real extent rather than Nil (pat-s3rrv.4).
+    //
+    // Scenes stay on the placeholder path below: instancing
+    // reads `PackedScene` back off the `class_name`, and the
+    // tscn loader reports the root node's type instead.
+    if !(path.ends_with(".tscn") || path.ends_with(".scn")) {
+        if let Some(loaded) = load_via_format_loaders(path) {
+            return Variant::Resource(Box::new(loaded));
+        }
+    }
+    // Return a Resource variant with the path and inferred class name
+    let class_name = if path.ends_with(".tres") || path.ends_with(".res") {
+        "Resource"
+    } else if path.ends_with(".tscn") || path.ends_with(".scn") {
+        "PackedScene"
+    } else if path.ends_with(".png") || path.ends_with(".jpg") || path.ends_with(".svg") {
+        "Texture2D"
+    } else if path.ends_with(".wav") || path.ends_with(".ogg") {
+        "AudioStream"
+    } else if path.ends_with(".ttf") || path.ends_with(".otf") {
+        "Font"
+    } else if path.ends_with(".gd") {
+        "GDScript"
+    } else if path.ends_with(".gdshader") || path.ends_with(".gdshaderinc") {
+        "Shader"
+    } else {
+        "Resource"
+    };
+    // A `Shader` carries its source in `code` (pat-0q2kx.144).
+    // This used to hand back an EMPTY property bag, so
+    // `load("res://f.gdshader").code` was Nil and the file
+    // was never read at all.
+    let mut properties = HashMap::new();
+    if class_name == "Shader" {
+        if let Some(code) = read_resource_text(&path) {
+            properties.insert("code".to_string(), Variant::String(code));
+        }
+    }
+    Variant::Resource(Box::new(ResourceRef {
+        path: path.to_string(),
+        class_name: class_name.to_string(),
+        properties,
+    }))
+}
+
 fn load_text_resource(path: &str) -> Option<ResourceRef> {
     // Pack-first (pat-s3rrv.34): `load("res://theme.tres")` must work in an
     // exported game, where the file exists only inside the pack.
@@ -802,6 +865,9 @@ struct Environment {
     /// Parallel to `scopes`: names declared with `const` in each scope, which
     /// may not be reassigned.
     consts: Vec<std::collections::HashSet<String>>,
+    /// Parallel to `scopes`: whether the scope is the FIRST of a function
+    /// call's frame (pushed by [`Environment::push_frame_scope`]).
+    frame_starts: Vec<bool>,
 }
 
 impl Environment {
@@ -848,17 +914,46 @@ impl Environment {
         Self {
             scopes: vec![HashMap::new()],
             consts: vec![std::collections::HashSet::new()],
+            frame_starts: vec![true],
         }
     }
 
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
         self.consts.push(std::collections::HashSet::new());
+        self.frame_starts.push(false);
+    }
+
+    /// Opens a function call's FRAME: the first scope of a method or function
+    /// body. Popped by the same [`pop_scope`](Self::pop_scope) as any scope, so
+    /// every exit path that already unwinds its scopes unwinds this too.
+    fn push_frame_scope(&mut self) {
+        self.push_scope();
+        if let Some(last) = self.frame_starts.last_mut() {
+            *last = true;
+        }
     }
 
     fn pop_scope(&mut self) {
         self.scopes.pop();
         self.consts.pop();
+        self.frame_starts.pop();
+    }
+
+    /// Overwrites `name` in the innermost call frame's FIRST scope (where an
+    /// instance method seeds its members), if that scope holds it. A local
+    /// that shadows the member in a deeper scope is left alone.
+    fn set_in_frame_base(&mut self, name: &str, value: Variant) {
+        let start = self
+            .frame_starts
+            .iter()
+            .rposition(|is_start| *is_start)
+            .unwrap_or(0);
+        if let Some(scope) = self.scopes.get_mut(start) {
+            if let Some(slot) = scope.get_mut(name) {
+                *slot = value;
+            }
+        }
     }
 
     /// Define a new variable in the current (innermost) scope.
@@ -907,8 +1002,21 @@ impl Environment {
     /// instance property that was defined in an outer scope.
     fn is_shadowed_in_inner_scope(&self, name: &str) -> bool {
         let mut found_outer = false;
+        // 🔑 Only the CURRENT call frame counts. A call nested inside another
+        // stacks its scopes on top of the caller's, so walking the whole stack
+        // saw the callee's own seeded member scope as a SECOND definition and
+        // took the member for a shadowing local: a signal handler invoked
+        // re-entrantly — a script emitting its own signal, a callback from a
+        // node it called — wrote `n = n + 1` into a throwaway local and the
+        // member never changed. A caller's local `var n` likewise made a
+        // callee's bare `n = ...` write the caller's local.
+        let start = self
+            .frame_starts
+            .iter()
+            .rposition(|is_start| *is_start)
+            .unwrap_or(0);
         // Walk from outer to inner; if we find it twice, the inner one shadows.
-        for scope in &self.scopes {
+        for scope in &self.scopes[start..] {
             if scope.contains_key(name) {
                 if found_outer {
                     return true;
@@ -950,6 +1058,14 @@ enum ControlFlow {
 // Interpreter
 // ---------------------------------------------------------------------------
 
+static PRINT_STAMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// A process-wide, strictly increasing stamp for a printed line (0 is
+/// reserved for "unstamped").
+pub fn next_print_stamp() -> u64 {
+    PRINT_STAMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The result of running a GDScript program.
 #[derive(Debug, Clone)]
 pub struct InterpreterResult {
@@ -964,6 +1080,11 @@ pub struct Interpreter {
     environment: Environment,
     function_registry: HashMap<String, FuncDef>,
     output: Vec<String>,
+    /// One [`next_print_stamp`] per `output` line, recording WHEN it was
+    /// printed. Each script owns its own interpreter, so a host that drains
+    /// several of them needs these to put the lines back in the order they were
+    /// printed — Godot writes every print straight to one stdout.
+    output_stamps: Vec<u64>,
     /// Continuation frames captured while a suspension unwinds, innermost
     /// first. Drained by `park_coroutine` into the parked frame (pat-0q2kx.78).
     pending_continuation: Vec<crate::coroutine::ResumeFrame>,
@@ -976,6 +1097,11 @@ pub struct Interpreter {
     call_depth: usize,
     /// The current class instance when executing inside a class method.
     self_instance: Option<ClassInstance>,
+    /// Identity of the object the current instance-method frame runs on (the
+    /// `&mut ClassInstance` it was called with). Compared only, never
+    /// dereferenced: it is how a returning frame knows whether the frame it
+    /// returns to is the SAME object, whose view of `self` it must refresh.
+    self_instance_ptr: Option<*const ClassInstance>,
     /// Registry of known class definitions (for super lookup).
     class_registry: HashMap<String, ClassDef>,
     source_lines: Vec<String>,
@@ -1047,8 +1173,12 @@ impl Clone for Interpreter {
             environment: self.environment.clone(),
             function_registry: self.function_registry.clone(),
             output: self.output.clone(),
+            output_stamps: self.output_stamps.clone(),
             call_depth: self.call_depth,
             self_instance: self.self_instance.clone(),
+            // A separate interpreter runs separate frames: it does not inherit
+            // which object the original's current frame runs on.
+            self_instance_ptr: None,
             class_registry: self.class_registry.clone(),
             source_lines: self.source_lines.clone(),
             current_line: self.current_line,
@@ -1297,6 +1427,60 @@ pub struct ClassDef {
 /// `entry` — the values it saw on the way in. A key the frame never touched is
 /// left exactly as it stands, which is what lets the re-entrant handler's
 /// increment survive.
+impl Interpreter {
+    /// After an instance-method frame on `instance` returned to its caller:
+    /// when the caller's frame runs on the SAME object, refresh the caller's
+    /// view of the members this call changed — its `self` snapshot and the
+    /// member scope it seeded — so a read after the call sees them, as Godot's
+    /// live members do. A call on a different object changes nothing here.
+    ///
+    /// 🔑 Without this a script that triggered a re-entrant call on itself — it
+    /// emits its own signal, or calls a node that calls back — read its members
+    /// stale for the rest of the method: `hp -= 10; damaged.emit();
+    /// if hp <= 0:` judged the pre-handler value.
+    fn refresh_caller_view(
+        &mut self,
+        instance: &ClassInstance,
+        entry: &HashMap<String, Variant>,
+        returning_to: Option<*const ClassInstance>,
+    ) {
+        if returning_to != Some(instance as *const ClassInstance) {
+            return;
+        }
+        let changed: Vec<(String, Variant)> = instance
+            .properties
+            .iter()
+            .filter(|(k, v)| entry.get(*k) != Some(*v))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (name, value) in changed {
+            if let Some(outer) = self.self_instance.as_mut() {
+                outer.properties.insert(name.clone(), value.clone());
+            }
+            self.environment.set_in_frame_base(&name, value);
+        }
+    }
+}
+
+impl Interpreter {
+    /// After a script function returned: refresh the caller frame's seeded
+    /// view of every member the function changed (`self_instance` itself is
+    /// shared, so it is already current). See `call_user_func_impl`.
+    fn refresh_members_after_function(&mut self, entry: Option<&HashMap<String, Variant>>) {
+        let Some(entry) = entry else { return };
+        let Some(now) = self.self_instance.as_ref() else { return };
+        let changed: Vec<(String, Variant)> = now
+            .properties
+            .iter()
+            .filter(|(k, v)| entry.get(*k) != Some(*v))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (name, value) in changed {
+            self.environment.set_in_frame_base(&name, value);
+        }
+    }
+}
+
 fn merge_frame_property_writes(
     instance: &mut ClassInstance,
     updated: Option<&ClassInstance>,
@@ -1319,6 +1503,10 @@ pub struct ClassInstance {
     pub class_def: ClassDef,
     /// Instance variable values.
     pub properties: HashMap<String, Variant>,
+    /// The class chain's constants, evaluated once at instantiation, so a
+    /// constant read THROUGH an instance (`player.SPEED`, `$Hud.MAX`) answers
+    /// as it does in Godot instead of reading back null.
+    pub constants: HashMap<String, Variant>,
 }
 
 /// Which engine list a script extension was registered into (pat-s3rrv.229).
@@ -1368,7 +1556,34 @@ impl Interpreter {
     /// editor running a `@tool` script, pat-0q2kx.76) has no other way to reach
     /// the lines those calls printed.
     pub fn take_output(&mut self) -> Vec<String> {
+        self.output_stamps.clear();
         std::mem::take(&mut self.output)
+    }
+
+    /// [`take_output`](Self::take_output) with each line's print stamp, so a
+    /// host draining several interpreters can merge them chronologically.
+    pub fn take_output_stamped(&mut self) -> Vec<(u64, String)> {
+        let lines = std::mem::take(&mut self.output);
+        let stamps = std::mem::take(&mut self.output_stamps);
+        lines
+            .into_iter()
+            .enumerate()
+            .map(|(i, l)| (stamps.get(i).copied().unwrap_or(0), l))
+            .collect()
+    }
+
+    /// Appends one printed line and stamps it.
+    fn push_output(&mut self, line: String) {
+        // Keep the two vectors aligned even if `output` was trimmed elsewhere.
+        self.output_stamps.resize(self.output.len(), 0);
+        self.output.push(line);
+        self.output_stamps.push(next_print_stamp());
+    }
+
+    /// Drains the runtime error channel (see [`Self::errors`]) so a host can
+    /// surface each `push_error`/`push_warning`/`printerr` entry exactly once.
+    pub fn take_errors(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.errors)
     }
 
     /// Creates a new interpreter with an empty environment.
@@ -1377,10 +1592,12 @@ impl Interpreter {
             environment: Environment::new(),
             function_registry: HashMap::new(),
             output: Vec::new(),
+            output_stamps: Vec::new(),
             pending_continuation: Vec::new(),
             last_call_suspended: None,
             call_depth: 0,
             self_instance: None,
+            self_instance_ptr: None,
             class_registry: HashMap::new(),
 
             source_lines: Vec::new(),
@@ -1989,10 +2206,13 @@ impl Interpreter {
                     self.pending_await_bind = bind.clone();
                     return Ok(Some(ControlFlow::Suspend(target)));
                 }
-                // Non-awaitable value: Godot treats await on a non-signal as
-                // immediate; bind Nil if a target was requested (pat-nzgdu.6).
+                // Non-awaitable value: Godot does not suspend — it writes the
+                // awaited value ITSELF into the target and continues
+                // (gdscript_vm.cpp OPCODE_AWAIT: `*target = result`), so
+                // `var v = await 5` binds 5 and `await helper()` on a helper that
+                // never awaited binds its return value, not Nil.
                 if let Some(name) = bind {
-                    self.environment.define(name.clone(), Variant::Nil);
+                    self.environment.define(name.clone(), awaited);
                 }
                 Ok(None)
             }
@@ -2827,7 +3047,18 @@ impl Interpreter {
                     } else {
                         false
                     };
-                    if is_instance_prop || is_node_prop {
+                    // A member holding an OBJECT (`@onready var label = $Label`)
+                    // is a reference: `label.text = x` writes the object's own
+                    // property, exactly as it does through a local. Only a
+                    // value-type member (`velocity.x = 0`) needs the compound
+                    // read-modify-write, which refused an ObjectId with "cannot
+                    // assign member 'text' on ObjectId".
+                    let holds_object = self
+                        .self_instance
+                        .as_ref()
+                        .and_then(|inst| inst.properties.get(name.as_str()))
+                        .is_some_and(|v| matches!(v, Variant::ObjectId(_)));
+                    if (is_instance_prop || is_node_prop) && !holds_object {
                         return self.exec_compound_member_assignment(
                             &Expr::SelfRef,
                             name,
@@ -5833,6 +6064,32 @@ impl Interpreter {
                         return other == "WeakRef"
                             || gdobject::class_db::is_parent_class("WeakRef", other);
                     }
+                    // A live node: its class, or any ancestor of it — so
+                    // `body is CharacterBody2D` and `node as Node2D` work. Both
+                    // used to compare the VARIANT type ("Object"), so every
+                    // node failed every class test and every `as` cast to a
+                    // node class produced null.
+                    if let Some(class) = self
+                        .scene_access
+                        .as_ref()
+                        .and_then(|access| access.get_class(oid.raw()))
+                    {
+                        if class == other || gdobject::class_db::is_parent_class(&class, other) {
+                            return true;
+                        }
+                    }
+                    // A SCRIPT class: `body is Player`, `x as Bullet`. Godot's
+                    // `is` walks the attached script's inheritance as well as
+                    // the native class's; only the latter was checked, so
+                    // every cast to a `class_name` produced null — the
+                    // official 2D Platformer demo's coin pickup
+                    // (`(body as Player).coin_collected.emit()`) and gun
+                    // (`instantiate() as Bullet`) both failed on it.
+                    if let Some(access) = self.scene_access.as_ref() {
+                        if access.script_class_chain(oid.raw()).iter().any(|n| n == other) {
+                            return true;
+                        }
+                    }
                 }
                 if let Variant::Resource(r) = v {
                     // Exact class, or any ancestor of it. The inheritance walk
@@ -5957,8 +6214,12 @@ impl Interpreter {
             | "is_action_released"
             | "get_action_strength"
             | "get_action_raw_strength" => {
+                // Godot types the action as a StringName, so `&"jump"` and
+                // `"jump"` are both an action name — the official demos write
+                // `is_action_pressed(&"toggle_fullscreen")`.
                 let action = match args.first() {
                     Some(Variant::String(s)) => s.clone(),
+                    Some(Variant::StringName(s)) => s.as_str().to_string(),
                     _ => {
                         return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                             "InputEvent.{method}() takes an action name"
@@ -6843,8 +7104,12 @@ impl Interpreter {
                     .iter()
                     .map(|a| self.display_variant(a))
                     .collect::<Vec<_>>();
-                let text = line.join(" ");
-                self.output.push(text.clone());
+                // NO separator: Godot's `print` is `print_line(join_string(..))`
+                // and `join_string` concatenates (core/variant/
+                // variant_utility.cpp:1153) — `print("x=", 1)` is "x=1". Only
+                // `prints` inserts spaces and `printt` tabs.
+                let text = line.concat();
+                self.push_output(text.clone());
                 // Every printed line goes through the engine's loggers in Godot
                 // (`core/io/logger.h`), so a script `extends Logger` registered
                 // with OS.add_logger() sees this one (pat-s3rrv.229).
@@ -7566,55 +7831,7 @@ impl Interpreter {
                                 return Ok(Some(Variant::Resource(Box::new(loaded))));
                             }
                         }
-                        // Everything else goes through the registered format
-                        // loaders, which follow `.import` remaps and decode the
-                        // file, so `load("res://icon.png").width` is the
-                        // artifact's real extent rather than Nil (pat-s3rrv.4).
-                        //
-                        // Scenes stay on the placeholder path below: instancing
-                        // reads `PackedScene` back off the `class_name`, and the
-                        // tscn loader reports the root node's type instead.
-                        if !(path.ends_with(".tscn") || path.ends_with(".scn")) {
-                            if let Some(loaded) = load_via_format_loaders(path) {
-                                return Ok(Some(Variant::Resource(Box::new(loaded))));
-                            }
-                        }
-                        // Return a Resource variant with the path and inferred class name
-                        let class_name = if path.ends_with(".tres") || path.ends_with(".res") {
-                            "Resource"
-                        } else if path.ends_with(".tscn") || path.ends_with(".scn") {
-                            "PackedScene"
-                        } else if path.ends_with(".png")
-                            || path.ends_with(".jpg")
-                            || path.ends_with(".svg")
-                        {
-                            "Texture2D"
-                        } else if path.ends_with(".wav") || path.ends_with(".ogg") {
-                            "AudioStream"
-                        } else if path.ends_with(".ttf") || path.ends_with(".otf") {
-                            "Font"
-                        } else if path.ends_with(".gd") {
-                            "GDScript"
-                        } else if path.ends_with(".gdshader") || path.ends_with(".gdshaderinc") {
-                            "Shader"
-                        } else {
-                            "Resource"
-                        };
-                        // A `Shader` carries its source in `code` (pat-0q2kx.144).
-                        // This used to hand back an EMPTY property bag, so
-                        // `load("res://f.gdshader").code` was Nil and the file
-                        // was never read at all.
-                        let mut properties = HashMap::new();
-                        if class_name == "Shader" {
-                            if let Some(code) = read_resource_text(&path) {
-                                properties.insert("code".to_string(), Variant::String(code));
-                            }
-                        }
-                        Ok(Some(Variant::Resource(Box::new(ResourceRef {
-                            path: path.clone(),
-                            class_name: class_name.to_string(),
-                            properties,
-                        }))))
+                        Ok(Some(load_resource_value(path)))
                     }
                     // If already a Resource, pass through
                     Variant::Resource(_) => Ok(Some(args[0].clone())),
@@ -8030,7 +8247,7 @@ impl Interpreter {
             "print_stack" => {
                 for f in self.call_stack_frames.clone() {
                     let line = f.source_location.as_ref().map(|l| l.line).unwrap_or(0);
-                    self.output.push(format!(
+                    self.push_output(format!(
                         "  at function: {} (line {})",
                         f.function_name, line
                     ));
@@ -8096,8 +8313,7 @@ impl Interpreter {
                 // reseed the wrong one and leave the script-visible stream
                 // unchanged, which is the whole observable behaviour of
                 // `randomize()`.
-                let seed = gdcore::rng::randomize();
-                set_random_seed((seed & i64::MAX as u64) as i64);
+                randomize_global_rng();
                 Ok(Some(Variant::Nil))
             }
             "rand_from_seed" => {
@@ -8182,8 +8398,14 @@ impl Interpreter {
                         "get_node() takes 1 argument".into(),
                     )));
                 }
+                // Godot's parameter is a NodePath; scripts pass a String, a
+                // NodePath literal (`get_node(^"Path/To")`, as the official
+                // demos do) or a StringName. Only `String` used to be accepted,
+                // so a `^"..."` lookup was a type error.
                 let path = match &args[0] {
                     Variant::String(s) => s.clone(),
+                    Variant::NodePath(p) => p.to_string(),
+                    Variant::StringName(s) => s.as_str().to_string(),
                     _ => {
                         return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                             "get_node() argument must be a string".into(),
@@ -9517,7 +9739,7 @@ impl Interpreter {
             "prints" => {
                 let line: Vec<String> = args.iter().map(|a| format!("{a}")).collect();
                 let text = line.join(" ");
-                self.output.push(text.clone());
+                self.push_output(text.clone());
                 // Same stream as `print`, so a Logger that saw one and not the
                 // other would be a hole rather than a design (pat-s3rrv.229).
                 self.fan_out_to_script_loggers(&text);
@@ -9525,7 +9747,7 @@ impl Interpreter {
             }
             "printt" => {
                 let line: Vec<String> = args.iter().map(|a| format!("{a}")).collect();
-                self.output.push(line.join("\t"));
+                self.push_output(line.join("\t"));
                 Ok(Some(Variant::Nil))
             }
             "printerr" => {
@@ -9537,14 +9759,13 @@ impl Interpreter {
             "print_rich" => {
                 // Concatenate then strip BBCode tags (headless has no console).
                 let joined: String = args.iter().map(|a| format!("{a}")).collect();
-                self.output.push(strip_bbcode(&joined));
+                self.push_output(strip_bbcode(&joined));
                 Ok(Some(Variant::Nil))
             }
             "print_debug" => {
                 let joined: String = args.iter().map(|a| format!("{a}")).collect();
                 let func = self.current_function.as_deref().unwrap_or("GDScript");
-                self.output
-                    .push(format!("{joined}\n   At: {func}:{}", self.current_line));
+                self.push_output(format!("{joined}\n   At: {func}:{}", self.current_line));
                 Ok(Some(Variant::Nil))
             }
             "push_error" => {
@@ -9587,7 +9808,7 @@ impl Interpreter {
                 if let Some(last) = self.output.last_mut() {
                     last.push_str(&joined);
                 } else {
-                    self.output.push(joined);
+                    self.push_output(joined);
                 }
                 Ok(Some(Variant::Nil))
             }
@@ -10087,7 +10308,7 @@ impl Interpreter {
         }
         self.call_depth += 1;
 
-        self.environment.push_scope();
+        self.environment.push_frame_scope();
         for (i, param) in func.params.iter().enumerate() {
             let val = if i < args.len() {
                 args[i].clone()
@@ -10104,6 +10325,22 @@ impl Interpreter {
             let val = coerce_param_value(&func, i, val)?;
             self.environment.define(param.clone(), val);
         }
+        // 🔑 Members seeded into THIS frame (a parameter of the same name
+        // shadows its member), so a bare name resolves to the member and never
+        // to a CALLER's local: GDScript has no dynamic scoping. Lookups walked
+        // every scope outward, so a caller's `var n` was what a callee's `n`
+        // read — and wrote. The body gets its own scope above the seed, as an
+        // instance method's does, so the callee's own `var n` still shadows.
+        let member_entry: Option<HashMap<String, Variant>> =
+            self.self_instance.as_ref().map(|inst| inst.properties.clone());
+        if let Some(members) = &member_entry {
+            for (name, value) in members {
+                if !func.params.iter().any(|p| p == name) {
+                    self.environment.define(name.clone(), value.clone());
+                }
+            }
+        }
+        self.environment.push_scope();
 
         let mut return_val = Variant::Nil;
         let body = func.body.clone();
@@ -10134,6 +10371,8 @@ impl Interpreter {
                 // the panel shows come off the live environment.
                 self.publish_debug_pause(name, stmt_line, remaining_lines);
                 self.environment.pop_scope();
+                self.environment.pop_scope();
+                self.refresh_members_after_function(member_entry.as_ref());
                 self.call_depth -= 1;
                 self.current_function = prev_function;
                 self.call_stack_frames.pop();
@@ -10150,6 +10389,8 @@ impl Interpreter {
                 Ok(flow) => flow,
                 Err(err) => {
                     self.environment.pop_scope();
+                    self.environment.pop_scope();
+                    self.refresh_members_after_function(member_entry.as_ref());
                     self.call_depth -= 1;
                     self.current_function = prev_function;
                     self.call_stack_frames.pop();
@@ -10165,6 +10406,8 @@ impl Interpreter {
                     let remaining = body[i + 1..].to_vec();
                     self.park_coroutine(remaining, target, name, false);
                     self.environment.pop_scope();
+                    self.environment.pop_scope();
+                    self.refresh_members_after_function(member_entry.as_ref());
                     self.call_depth -= 1;
                     self.current_function = prev_function;
                     self.call_stack_frames.pop();
@@ -10177,6 +10420,8 @@ impl Interpreter {
         }
 
         self.environment.pop_scope();
+        self.environment.pop_scope();
+        self.refresh_members_after_function(member_entry.as_ref());
         self.call_depth -= 1;
         self.current_function = prev_function;
         self.call_stack_frames.pop();
@@ -12586,9 +12831,15 @@ impl Interpreter {
     }
 
     /// Extracts a string action-name argument for an `Input.*` method.
+    ///
+    /// Godot types every one of these as `StringName`, and idiomatic Godot 4
+    /// code passes a StringName literal — `Input.is_action_pressed(&"move_up")`,
+    /// as in the official demo projects. Accepting only `String` made each such
+    /// call a type error, so a game's movement code failed every frame.
     fn input_action_arg<'a>(method: &str, arg: &'a Variant) -> Result<&'a str, RuntimeError> {
         match arg {
             Variant::String(s) => Ok(s.as_str()),
+            Variant::StringName(s) => Ok(s.as_str()),
             _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
                 "Input.{method}() argument must be a string"
             )))),
@@ -13606,6 +13857,62 @@ impl Interpreter {
         if let Variant::StringName(sn) = obj {
             let as_string = Variant::String(sn.as_str().to_string());
             return self.call_method_on(&as_string, method, args, object_expr);
+        }
+        // 🔑 The Object/Node methods whose FIRST parameter Godot types as a
+        // `StringName` (or a `NodePath`) take a literal of that type in idiomatic
+        // Godot 4 code — `$Shape.set_deferred(&"disabled", true)`,
+        // `node.call(&"start")`, `get_node(^"A/B")` — and every one of their arms
+        // below matched only `Variant::String`, so each was a type error. The
+        // official Dodge the Creeps demo hit `set_deferred` on its first
+        // collision. Normalised here, for the NAME argument only: a value
+        // argument keeps its own type, so `set("animation", &"run")` still
+        // stores a StringName.
+        if let (Variant::ObjectId(_), Some(first)) = (obj, args.first()) {
+            const NAME_FIRST: &[&str] = &[
+                "get",
+                "set",
+                "set_deferred",
+                "call",
+                "call_deferred",
+                "callv",
+                "has_method",
+                "has_signal",
+                "connect",
+                "disconnect",
+                "is_connected",
+                "emit_signal",
+                "add_user_signal",
+                "has_user_signal",
+                "get_signal_connection_list",
+                "add_to_group",
+                "remove_from_group",
+                "is_in_group",
+                "get_meta",
+                "set_meta",
+                "has_meta",
+                "remove_meta",
+            ];
+            const PATH_FIRST: &[&str] = &[
+                "get_node",
+                "get_node_or_null",
+                "has_node",
+                "get_indexed",
+                "set_indexed",
+            ];
+            let text = match first {
+                Variant::StringName(sn)
+                    if NAME_FIRST.contains(&method) || PATH_FIRST.contains(&method) =>
+                {
+                    Some(sn.as_str().to_string())
+                }
+                Variant::NodePath(np) if PATH_FIRST.contains(&method) => Some(np.to_string()),
+                _ => None,
+            };
+            if let Some(text) = text {
+                let mut owned = args.to_vec();
+                owned[0] = Variant::String(text);
+                return self.call_method_on(obj, method, &owned, object_expr);
+            }
         }
         // FileAccess / DirAccess / ConfigFile handle methods.
         if let Variant::ObjectId(oid) = obj {
@@ -17747,6 +18054,62 @@ impl Interpreter {
                 self.input_event_method(res_ref, method, args)
             }
             Variant::Resource(res_ref) => match method {
+                // `SpriteFrames`' read API (`doc/classes/SpriteFrames.xml`), over
+                // the `animations` array the scene stores — one Dictionary per
+                // clip: `{name, speed, loop, frames}`. Dodge the Creeps picks a
+                // random mob look with
+                // `Array($AnimatedSprite2D.sprite_frames.get_animation_names())`;
+                // with no such method the spawn's `_ready` died every time.
+                "get_animation_names" | "has_animation" | "get_frame_count"
+                | "get_animation_speed" | "get_animation_loop"
+                    if res_ref.class_name == "SpriteFrames" =>
+                {
+                    let clips: Vec<gdvariant::SharedDictionary> = match res_ref.properties.get("animations") {
+                        Some(Variant::Array(a)) => a
+                            .to_vec()
+                            .into_iter()
+                            .filter_map(|v| match v {
+                                Variant::Dictionary(d) => Some(d),
+                                _ => None,
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    let name_of = |d: &gdvariant::SharedDictionary| match d.get("name") {
+                        Some(Variant::StringName(n)) => n.as_str().to_string(),
+                        Some(Variant::String(n)) => n.clone(),
+                        _ => String::new(),
+                    };
+                    let wanted = match args.first() {
+                        Some(Variant::String(n)) => Some(n.clone()),
+                        Some(Variant::StringName(n)) => Some(n.as_str().to_string()),
+                        _ => None,
+                    };
+                    let clip = wanted
+                        .as_deref()
+                        .and_then(|w| clips.iter().find(|d| name_of(d) == w));
+                    Ok(match method {
+                        // Godot returns them in the resource's own order.
+                        "get_animation_names" => Variant::PackedStringArray(
+                            clips.iter().map(name_of).collect(),
+                        ),
+                        "has_animation" => Variant::Bool(clip.is_some()),
+                        "get_frame_count" => Variant::Int(match clip.and_then(|d| d.get("frames")) {
+                            Some(Variant::Array(f)) => f.len() as i64,
+                            _ => 0,
+                        }),
+                        "get_animation_speed" => match clip.and_then(|d| d.get("speed")) {
+                            Some(Variant::Float(f)) => Variant::Float(f),
+                            Some(Variant::Int(i)) => Variant::Float(i as f64),
+                            // SpriteFrames' default clip speed.
+                            _ => Variant::Float(5.0),
+                        },
+                        _ => Variant::Bool(!matches!(
+                            clip.and_then(|d| d.get("loop")),
+                            Some(Variant::Bool(false))
+                        )),
+                    })
+                }
                 // `Shader.get_shader_uniform_list()` (pat-0q2kx.144). Godot
                 // returns one Dictionary per declared uniform; `grep` for this
                 // method across the workspace previously returned ZERO.
@@ -19213,6 +19576,42 @@ impl Interpreter {
                             return Ok(value);
                         }
                     }
+                    // A bare `set_axis_velocity(..)` is `self.set_axis_velocity(..)`
+                    // in GDScript, but the interpreter's own native-method arms
+                    // (`call_method_on`'s ObjectId surface) were only reachable
+                    // through the dotted spelling — the bare one stopped at the
+                    // scene's `call_node_method` and raised "method not found".
+                    // Try the same dispatch the dotted call uses; keep the
+                    // original error if it does not know the method either.
+                    //
+                    // ⚠️ Guarded against re-entry: for a method neither side
+                    // knows, `call_method_on(self, ..)` routes back into this
+                    // function, and without the guard that recursion overflowed
+                    // the stack instead of raising "method not found".
+                    thread_local! {
+                        static IN_SELF_FALLBACK: std::cell::Cell<bool> =
+                            const { std::cell::Cell::new(false) };
+                    }
+                    if IN_SELF_FALLBACK.with(|f| f.get()) {
+                        return Err(e);
+                    }
+                    let receiver = Variant::ObjectId(gdcore::id::ObjectId::from_raw(id));
+                    IN_SELF_FALLBACK.with(|f| f.set(true));
+                    let attempt = self.call_method_on(&receiver, name, args, &Expr::SelfRef);
+                    IN_SELF_FALLBACK.with(|f| f.set(false));
+                    match attempt {
+                        Ok(value) => return Ok(value),
+                        Err(inner)
+                            if !matches!(
+                                inner.kind,
+                                RuntimeErrorKind::UndefinedFunction(_)
+                                    | RuntimeErrorKind::TypeError(_)
+                            ) =>
+                        {
+                            return Err(inner)
+                        }
+                        Err(_) => {}
+                    }
                 }
                 Err(e)
             }
@@ -19826,6 +20225,49 @@ impl Interpreter {
         &mut self,
         class_def: &ClassDef,
     ) -> Result<ClassInstance, RuntimeError> {
+        // Member initialisers see the class's constants and enums, and every
+        // member declared above them, as in Godot (`var lives := START_LIVES`).
+        // They used to be evaluated in whatever scope happened to be current,
+        // so a script initialising a member from its own `const` failed to
+        // load with "undefined variable" — and an autoload that did so was
+        // added to the tree without its script, silently.
+        self.environment.push_scope();
+        let built = self.instantiate_class_in_scope(class_def);
+        self.environment.pop_scope();
+        built
+    }
+
+    fn instantiate_class_in_scope(
+        &mut self,
+        class_def: &ClassDef,
+    ) -> Result<ClassInstance, RuntimeError> {
+        let mut constants = HashMap::new();
+        for def in Self::class_chain_root_first(class_def) {
+            for (name, expr) in &def.constants {
+                // Best-effort: a constant this scope cannot evaluate (one that
+                // needs scene access, say) is simply not seeded here, exactly
+                // as before initialisers could see constants; the method-call
+                // path evaluates it again when it is used. Failing the whole
+                // instantiation on it would stop a script that used to load
+                // from attaching at all.
+                let Ok(val) = self.eval_expr(expr) else {
+                    continue;
+                };
+                crate::container_typing::freeze_const_value(&val);
+                constants.insert(name.clone(), val.clone());
+                self.environment.define_const(name.clone(), val);
+            }
+            for (enum_name, variants) in &def.enums {
+                let mut dict = Dictionary::new();
+                let mut pairs: Vec<(&String, &i64)> = variants.iter().collect();
+                pairs.sort_by_key(|(name, value)| (**value, (*name).clone()));
+                for (variant_name, value) in pairs {
+                    dict.insert(Variant::String(variant_name.clone()), Variant::Int(*value));
+                }
+                self.environment
+                    .define_const(enum_name.clone(), Variant::Dictionary(dict.into()));
+            }
+        }
         let mut properties = HashMap::new();
         // Base first, so a derived `var` of the same name overwrites the
         // inherited one (pat-mgixk.21). Before this, a script extending another
@@ -19856,12 +20298,14 @@ impl Interpreter {
                         (None, None) => Variant::Nil,
                     }
                 };
+                self.environment.define(var.name.clone(), val.clone());
                 properties.insert(var.name.clone(), val);
             }
         }
         Ok(ClassInstance {
             class_def: class_def.clone(),
             properties,
+            constants,
         })
     }
 
@@ -19906,7 +20350,14 @@ impl Interpreter {
 
         let mut first_error: Option<RuntimeError> = None;
         for (name, expr) in pending {
-            match self.eval_expr(&expr) {
+            // 🔑 Evaluated with the instance installed as `self`, ONE AT A
+            // TIME, so an initializer sees every earlier `@onready` var's
+            // resolved value — Godot runs them in declaration order inside
+            // `implicit_ready`. `@onready var gun = sprite.get_node(^"Gun")`
+            // after `@onready var sprite := $Sprite2D` (the official 2D
+            // Platformer demo's player) read `sprite` as its pre-ready Nil, so
+            // `gun` came out Nil and the first shot raised.
+            match self.resume_with_instance_self(instance, |i| i.eval_expr(&expr)) {
                 Ok(value) => {
                     instance.properties.insert(name, value);
                 }
@@ -20210,6 +20661,9 @@ impl Interpreter {
 
         let prev_self = self.self_instance.take();
         self.self_instance = Some(instance.clone());
+        let prev_ptr = self
+            .self_instance_ptr
+            .replace(instance as *const ClassInstance);
         let entry_props = instance.properties.clone();
         // `super()` has to know WHICH method it is inside, and this is the only
         // place that knows. `call_user_func_impl` records this for script-level
@@ -20230,7 +20684,7 @@ impl Interpreter {
             }
         }
 
-        self.environment.push_scope();
+        self.environment.push_frame_scope();
         for (i, param) in func.params.iter().enumerate() {
             let val = if i < args.len() {
                 args[i].clone()
@@ -20317,6 +20771,8 @@ impl Interpreter {
                 self.environment.pop_scope();
                 self.environment.pop_scope();
                 self.self_instance = prev_self;
+                self.self_instance_ptr = prev_ptr;
+                self.refresh_caller_view(instance, &entry_props, prev_ptr);
                 self.current_function = prev_function;
                 self.call_depth -= 1;
                 return Ok(Variant::Nil);
@@ -20349,6 +20805,8 @@ impl Interpreter {
                     );
                     self.environment.pop_scope();
                     self.self_instance = prev_self;
+                    self.self_instance_ptr = prev_ptr;
+                    self.refresh_caller_view(instance, &entry_props, prev_ptr);
                     self.current_function = prev_function;
                     self.call_depth -= 1;
                     return Err(err);
@@ -20371,6 +20829,8 @@ impl Interpreter {
                     self.environment.pop_scope();
                     self.environment.pop_scope();
                     self.self_instance = prev_self;
+                    self.self_instance_ptr = prev_ptr;
+                    self.refresh_caller_view(instance, &entry_props, prev_ptr);
                     self.current_function = prev_function;
                     self.call_depth -= 1;
                     return Ok(Variant::Nil);
@@ -20386,6 +20846,8 @@ impl Interpreter {
 
         self.environment.pop_scope();
         self.self_instance = prev_self;
+        self.self_instance_ptr = prev_ptr;
+        self.refresh_caller_view(instance, &entry_props, prev_ptr);
         self.current_function = prev_function;
         self.call_depth -= 1;
         Ok(return_val)
@@ -20458,7 +20920,7 @@ impl Interpreter {
                     args.len()
                 ))));
             }
-            self.environment.push_scope();
+            self.environment.push_frame_scope();
             for (i, param) in func.params.iter().enumerate() {
                 let val = if i < args.len() {
                     args[i].clone()
@@ -23427,6 +23889,19 @@ fn lcg_step(state: i64) -> i64 {
         & i64::MAX
 }
 
+/// Reseeds the script-visible global RNG from entropy — what Godot 4 does at
+/// startup (`Main::setup` randomizes the global generator), and what
+/// `randomize()` does from a script. Returns the seed it chose.
+///
+/// 🔑 Patina's generator started at a fixed 42 and nothing randomized it at
+/// boot, so every run of every game drew the SAME sequence: Dodge the Creeps
+/// spawned identical enemies in identical places every time it was played.
+pub fn randomize_global_rng() -> i64 {
+    let seed = (gdcore::rng::randomize() & i64::MAX as u64) as i64;
+    set_random_seed(seed);
+    seed
+}
+
 /// Sets the global RNG seed (Godot `seed()`).
 pub fn set_random_seed(seed: i64) {
     RNG_STATE.store(seed, std::sync::atomic::Ordering::Relaxed);
@@ -24766,7 +25241,7 @@ static ENGINE_SINGLETONS: OnceLock<Mutex<HashMap<String, Variant>>> = OnceLock::
 /// The first five are Godot's `MultiplayerAPI` connection signals; the last
 /// three are `SceneMultiplayer`'s. Kept as one list because Patina emits all
 /// eight from the same per-frame drain.
-const MULTIPLAYER_SIGNALS: &[&str] = &[
+pub const MULTIPLAYER_SIGNALS: &[&str] = &[
     "peer_connected",
     "peer_disconnected",
     "connected_to_server",
@@ -26470,6 +26945,12 @@ fn call_displayserver_static(method: &str, args: &[Variant]) -> Result<Variant, 
         "clipboard_has" => Ok(Variant::Bool(
             DISPLAY_CLIPBOARD.with(|c| !c.borrow().is_empty()),
         )),
+        // The X11/Wayland PRIMARY selection. Godot implements it only on
+        // LinuxBSD; every other DisplayServer inherits the base no-op
+        // (display_server.cpp: `clipboard_get_primary` returns "", the setter
+        // does nothing) — which is what a Patina game sees.
+        "clipboard_get_primary" => Ok(Variant::String(String::new())),
+        "clipboard_set_primary" => Ok(Variant::Nil),
         // -- Text-to-speech (SpeechSynthesis on web; recorded here) --------
         "tts_speak" => {
             let text = match args.first() {
@@ -31636,8 +32117,11 @@ fn call_websocket_peer_instance(
                 Ok(Variant::Nil)
             }
             "get_ready_state" => Ok(Variant::Int(peer.get_ready_state().as_godot_code() as i64)),
+            // Godot `Error` codes: OK 0, FAILED 1, ERR_OUT_OF_MEMORY 6 (a message
+            // over `outbound_buffer_size`, `wsl_peer.cpp:784`).
             "send_text" => Ok(Variant::Int(match peer.send_text(&str_arg(args, 0)) {
                 Ok(()) => 0,
+                Err(gdplatform::websocket_peer::WebSocketError::BufferFull { .. }) => 6,
                 Err(_) => 1,
             })),
             "send" => {
@@ -31656,6 +32140,7 @@ fn call_websocket_peer_instance(
                 };
                 Ok(Variant::Int(match peer.send(&bytes, mode) {
                     Ok(()) => 0,
+                    Err(gdplatform::websocket_peer::WebSocketError::BufferFull { .. }) => 6,
                     Err(_) => 1,
                 }))
             }
@@ -31737,6 +32222,20 @@ fn call_websocket_peer_instance(
                 Ok(Variant::Nil)
             }
             "get_max_queued_packets" => Ok(Variant::Int(peer.get_max_queued_packets())),
+            "set_inbound_buffer_size" => {
+                if let Some(Variant::Int(n)) = args.first() {
+                    peer.set_inbound_buffer_size(*n);
+                }
+                Ok(Variant::Nil)
+            }
+            "get_inbound_buffer_size" => Ok(Variant::Int(peer.get_inbound_buffer_size())),
+            "set_outbound_buffer_size" => {
+                if let Some(Variant::Int(n)) = args.first() {
+                    peer.set_outbound_buffer_size(*n);
+                }
+                Ok(Variant::Nil)
+            }
+            "get_outbound_buffer_size" => Ok(Variant::Int(peer.get_outbound_buffer_size())),
             other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                 format!("WebSocketPeer.{other}"),
             ))),
@@ -33135,7 +33634,13 @@ fn call_refcounted_instance(
 // bus index and the effect index are packed into the id and unpacked on every
 // call. Nothing to allocate, nothing to leak, and no way for the handle to
 // outlive the effect and answer from a stale copy.
-const AUDIO_EFFECT_HANDLE_TAG: u64 = 0x1200_0000_0000_0000;
+// ⚠️ `0x13`, not `0x12`: `0x12` is `FS_DOCK_HANDLE_TAG`, and with both on one
+// byte every `AudioServer.get_bus_effect_instance(..)` handle was claimed by
+// the FileSystemDock dispatch first — `inst.get_buffer(64)` raised
+// "method not found: FileSystemDock.get_buffer_length_frames" and an
+// AudioEffectCapture could never be drained from a script. Uniqueness is now
+// enforced workspace-wide by `tests/handle_tags_are_unique.rs`.
+const AUDIO_EFFECT_HANDLE_TAG: u64 = 0x1300_0000_0000_0000;
 
 /// Packs a bus/effect slot pair into an addressing handle.
 ///
@@ -38289,7 +38794,9 @@ return d[\"b\"]
     #[test]
     fn builtin_print_multiple_args() {
         let r = run("print(\"a\", \"b\", \"c\")\n");
-        assert_eq!(r.output, vec!["a b c"]);
+        // Godot's print concatenates with no separator (join_string,
+        // core/variant/variant_utility.cpp:1153); `prints` adds spaces.
+        assert_eq!(r.output, vec!["abc"]);
     }
 
     #[test]
@@ -39028,7 +39535,7 @@ func get_level():
             .run_class(
                 "\
 class_name Base
-func _init():
+func greet():
     return 42
 ",
             )
@@ -39038,16 +39545,18 @@ func _init():
                 "\
 class_name Child
 extends Base
-func call_super():
-    return super()
+func greet():
+    return super() + 1
 ",
             )
             .unwrap();
         let mut inst = interp.instantiate_class(&child).unwrap();
         let result = interp
-            .call_instance_method(&mut inst, "call_super", &[])
+            .call_instance_method(&mut inst, "greet", &[])
             .unwrap();
-        assert_eq!(result, Variant::Int(42));
+        // Bare `super()` calls the PARENT'S override of the current function
+        // (Godot), not the parent's `_init`.
+        assert_eq!(result, Variant::Int(43));
     }
 
     #[test]
@@ -39749,14 +40258,16 @@ var speed = 10
 
     #[test]
     fn vector2_property_access_xy() {
+        // Godot 4 stringifies a float with `String::num_real(f, true)`
+        // (variant.cpp:1612), which keeps the `.0`.
         let r = run("var v = Vector2(3.0, 4.0)\nprint(v.x)\nprint(v.y)\n");
-        assert_eq!(r.output, vec!["3", "4"]);
+        assert_eq!(r.output, vec!["3.0", "4.0"]);
     }
 
     #[test]
     fn vector3_property_access_xyz() {
         let r = run("var v = Vector3(1.0, 2.0, 3.0)\nprint(v.x)\nprint(v.y)\nprint(v.z)\n");
-        assert_eq!(r.output, vec!["1", "2", "3"]);
+        assert_eq!(r.output, vec!["1.0", "2.0", "3.0"]);
     }
 
     #[test]
@@ -39942,7 +40453,14 @@ var speed = 10
 
     #[test]
     fn vector2_div_zero_error() {
-        let err = run_err("return Vector2(1.0, 2.0) / 0.0");
+        // Godot registers `Vector2 / float` as plain `OperatorEvaluatorDiv`
+        // (variant_op.cpp:359): IEEE division, (inf, inf), no error. Only the
+        // integer kinds (`int / int`, `Vector2i / Vector2i`, ...) are DivNZ.
+        assert_eq!(
+            run_val("return Vector2(1.0, 2.0) / 0.0"),
+            Variant::Vector2(Vector2::new(f32::INFINITY, f32::INFINITY))
+        );
+        let err = run_err("return Vector2i(1, 2) / Vector2i(0, 1)");
         assert!(matches!(err.kind, RuntimeErrorKind::DivisionByZero));
     }
 
@@ -40319,13 +40837,17 @@ var speed = 10
     #[test]
     fn print_mixed_types() {
         let r = run("print(\"count:\", 42, true, null)\n");
-        assert_eq!(r.output, vec!["count: 42 true <null>"]);
+        // Godot's print concatenates with no separator (join_string,
+        // core/variant/variant_utility.cpp:1153); `prints` adds spaces.
+        assert_eq!(r.output, vec!["count:42true<null>"]);
     }
 
     #[test]
     fn print_many_string_args() {
         let r = run("print(\"a\", \"b\", \"c\", \"d\", \"e\")\n");
-        assert_eq!(r.output, vec!["a b c d e"]);
+        // Godot's print concatenates with no separator (join_string,
+        // core/variant/variant_utility.cpp:1153); `prints` adds spaces.
+        assert_eq!(r.output, vec!["abcde"]);
     }
 
     // -----------------------------------------------------------------------
@@ -42345,6 +42867,13 @@ match x:
             run_val("return DisplayServer.screen_get_dpi()\n"),
             Variant::Int(_)
         ));
+        // The PRIMARY selection is unsupported off LinuxBSD in Godot: the
+        // getter reads "" (never the regular clipboard) and the setter is a
+        // no-op — not an UndefinedFunction.
+        assert_eq!(
+            run_val("DisplayServer.clipboard_set_primary(\"sel\")\nreturn DisplayServer.clipboard_get_primary()\n"),
+            Variant::String(String::new())
+        );
         // clipboard round-trip.
         assert_eq!(
             run_val("DisplayServer.clipboard_set(\"hi\")\nreturn DisplayServer.clipboard_get()\n"),

@@ -64,12 +64,10 @@ fn button_carries_its_thirteen_members() {
 
 #[test]
 fn label_carries_its_twenty_two_members() {
-    assert_eq!(
-        own_property_count("Label"),
-        22,
-        "Label.xml lists 24, two of which (`mouse_filter`, `size_flags_vertical`) \
-         are Control members Label merely re-defaults"
-    );
+    // Counted like RichTextLabel/CodeEdit (richtextlabel_and_codeedit_carry_godot_properties.rs): Patina expresses an `overrides=` member by re-declaring it, so it is in the OWN list, and the count is the doc XML's `<member>` total.
+    // doc/classes/Label.xml: 24 members, 2 of them overrides (`mouse_filter`,
+    // `size_flags_vertical`).
+    assert_eq!(own_property_count("Label"), 24);
 
     assert_eq!(
         own_property("Label", "text"),

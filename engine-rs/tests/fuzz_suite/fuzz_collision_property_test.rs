@@ -284,8 +284,10 @@ proptest! {
 fn zero_radius_circle_collision() {
     let s = Shape2D::Circle { radius: 0.0 };
     let t = Transform2D::translated(Vector2::ZERO);
-    // Two zero-radius circles at the same point
-    let result = test_collision(&s, &t, &s, &t).unwrap();
+    // Two zero-radius circles at the same point. Degenerate: the narrow phase
+    // may report no contact (`None`), which is fine — the property under test
+    // is only that it does not PANIC. The old `.unwrap()` was the panic.
+    let result = test_collision(&s, &t, &s, &t);
     // Coincident: depth = sum_r = 0, so this is an edge case
     // Just verify it doesn't panic
     let _ = result;
@@ -297,7 +299,9 @@ fn zero_extents_rectangle_collision() {
         half_extents: Vector2::ZERO,
     };
     let t = Transform2D::translated(Vector2::ZERO);
-    let result = test_collision(&s, &t, &s, &t).unwrap();
+    // Degenerate input: `None` (no contact) is an acceptable answer; the
+    // property is that it does not panic, so no `.unwrap()`.
+    let result = test_collision(&s, &t, &s, &t);
     // Zero-size rects at same position: overlap_x = 0, overlap_y = 0
     // The <= 0 check means no collision, which is acceptable
     let _ = result;

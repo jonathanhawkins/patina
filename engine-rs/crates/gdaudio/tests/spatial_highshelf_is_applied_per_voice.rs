@@ -16,10 +16,17 @@
 //! accident. So each case here pairs a high tone with a low one: the shelf must
 //! take the highs down and leave the lows essentially alone.
 //!
-//! Expected magnitudes are derived from the biquad's own transfer function
-//! rather than guessed. For a -12 dB shelf at 5 kHz with `q = sqrt(0.5)` on a
-//! 44.1 kHz stream, |H| is 1.000 at 100 Hz, 0.501 at the 5 kHz cutoff (half the
-//! shelf, in dB — the textbook shelf midpoint) and 0.252 at 15 kHz.
+//! Expected magnitudes are derived from GODOT's transfer function rather than
+//! guessed: `AudioFilterSW` HIGHSHELF with `set_resonance(1)`, `set_stages(1)`
+//! and the gain slot fed `db_to_linear(db)` (see the mixer's comment in
+//! `server.rs`), so the shelf is TWICE as deep in dB as the authored value.
+//! For -12 dB at 5 kHz on a 44.1 kHz stream |H| is 1.003 at 200 Hz, 0.251 at
+//! the cutoff and 0.0589 at 15 kHz; for -24 dB it is 0.0631 / 0.00351.
+//!
+//! ⚠️ These windows were once centred on the RBJ `10^(dB/40)`, `q = sqrt(0.5)`
+//! curve (0.252 / 0.064 at 15 kHz), half Godot's depth. The mixer moved to
+//! Godot's coefficients and the tests kept the old numbers, so they were red
+//! against a correct engine. Both windows below EXCLUDE the old values.
 
 use gdaudio::decode::AudioBuffer;
 use gdaudio::server::AudioServer;
@@ -69,13 +76,13 @@ fn the_high_shelf_attenuates_high_frequencies_and_spares_low_ones() {
     let low_off = mixed_rms(200.0, 0.0);
     let low_on = mixed_rms(200.0, -12.0);
 
-    // |H| at 15 kHz for a -12 dB shelf is 0.252, computed from the transfer
-    // function. The window is wide enough to absorb the resampler and the
-    // finite measurement, and far too narrow to admit "no filtering" (1.0).
+    // |H| at 15 kHz for a -12 dB Godot shelf is 0.0589, computed from the
+    // transfer function. The window absorbs the finite measurement and admits
+    // neither "no filtering" (1.0) nor the half-depth RBJ curve (0.252).
     let high_ratio = high_on / high_off;
     assert!(
-        (0.15..0.36).contains(&high_ratio),
-        "a -12 dB shelf must take 15 kHz down to about 0.25 of its level; got \
+        (0.045..0.075).contains(&high_ratio),
+        "a -12 dB shelf must take 15 kHz down to about 0.059 of its level; got \
          {high_ratio} ({high_on} vs {high_off})"
     );
 
@@ -121,14 +128,14 @@ fn a_deeper_shelf_cuts_more() {
     let shallow = mixed_rms(15_000.0, -12.0) / off;
     let deep = mixed_rms(15_000.0, -24.0) / off;
 
-    // |H| at 15 kHz is 0.252 for -12 dB and 0.064 for -24 dB.
+    // |H| at 15 kHz is 0.0589 for -12 dB and 0.00351 for -24 dB.
     assert!(
         deep < shallow * 0.5,
         "-24 dB must cut markedly more than -12 dB; got {deep} vs {shallow}"
     );
     assert!(
-        (0.03..0.11).contains(&deep),
-        "-24 dB at 15 kHz should land near 0.064; got {deep}"
+        (0.0028..0.0044).contains(&deep),
+        "-24 dB at 15 kHz should land near 0.00351; got {deep}"
     );
 }
 

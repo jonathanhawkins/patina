@@ -185,17 +185,20 @@ fn import_dock_persists_options_and_reimports() {
         "/api/import_settings?path=res%3A//hero.png",
     ));
     assert_eq!(info["importable"], serde_json::json!(true));
+    // Godot 4.6's key and default (resource_importer_texture.cpp: the
+    // auto-detect preset leaves `mipmaps/generate` off). The dock used to
+    // report an invented `mipmaps` key the importer never read.
     assert_eq!(
-        option_value(&info, "mipmaps"),
-        serde_json::json!(true),
-        "the importer default is mipmaps=true"
+        option_value(&info, "mipmaps/generate"),
+        serde_json::json!(false),
+        "the importer default is mipmaps/generate=false"
     );
 
     // -- (2) POST persists the edit into [params] on disk ---------------------
     let set = json_of(&http_post(
         port,
         "/api/import_settings",
-        r#"{"path":"res://hero.png","option":"mipmaps","value":false}"#,
+        r#"{"path":"res://hero.png","option":"mipmaps/generate","value":true}"#,
     ));
     assert_eq!(set["ok"], serde_json::json!(true));
 
@@ -205,13 +208,13 @@ fn import_dock_persists_options_and_reimports() {
         "the sidecar must carry a [params] section:\n{text}"
     );
     assert!(
-        text.contains("mipmaps=false"),
+        text.contains("mipmaps/generate=true"),
         "the edited option must be written as a bare INI literal:\n{text}"
     );
     // A bool written as the STRING "false" is how a sidecar silently stops
     // matching its own importer, so pin the unquoted form specifically.
     assert!(
-        !text.contains("mipmaps=\"false\""),
+        !text.contains("mipmaps/generate=\"true\""),
         "a bool must not be quoted:\n{text}"
     );
 
@@ -221,8 +224,8 @@ fn import_dock_persists_options_and_reimports() {
         "/api/import_settings?path=res%3A//hero.png",
     ));
     assert_eq!(
-        option_value(&after, "mipmaps"),
-        serde_json::json!(false),
+        option_value(&after, "mipmaps/generate"),
+        serde_json::json!(true),
         "the dock must show what the asset is actually set to"
     );
 
@@ -293,8 +296,8 @@ fn import_dock_persists_options_and_reimports() {
         "/api/import_settings?path=res%3A//hero.png",
     ));
     assert_eq!(
-        option_value(&final_info, "mipmaps"),
-        serde_json::json!(false),
+        option_value(&final_info, "mipmaps/generate"),
+        serde_json::json!(true),
         "reimport must not reset the stored options"
     );
 
@@ -315,7 +318,7 @@ fn a_dock_created_sidecar_names_its_importer_and_source() {
     json_of(&http_post(
         port,
         "/api/import_settings",
-        r#"{"path":"res://hero.png","option":"filter","value":"Nearest"}"#,
+        r#"{"path":"res://hero.png","option":"compress/mode","value":"Lossy"}"#,
     ));
 
     let text = sidecar_text(&dir);
@@ -327,10 +330,20 @@ fn a_dock_created_sidecar_names_its_importer_and_source() {
         text.contains("source_file=\"res://hero.png\""),
         "[deps] must record the source:\n{text}"
     );
-    // An enum choice is free text, so it stays quoted.
+    // 🔑 An enum is stored as its INDEX, exactly as Godot writes it
+    // (`compress/mode=1` for Lossy) — the importer reads
+    // `params.int("compress/mode")`, so a quoted label would be ignored.
     assert!(
-        text.contains("filter=\"Nearest\""),
-        "string options stay quoted:\n{text}"
+        text.contains("compress/mode=1"),
+        "an enum label must be stored as Godot's index:\n{text}"
+    );
+    assert!(!text.contains("compress/mode=\"Lossy\""), "never the label:\n{text}");
+    // …and the dock reads that index back as its label.
+    let info = json_of(&http_get(port, "/api/import_settings?path=res%3A//hero.png"));
+    assert_eq!(
+        option_value(&info, "compress/mode"),
+        serde_json::json!("Lossy"),
+        "a stored enum index must display as its choice label"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -401,7 +414,7 @@ fn import_settings_refuses_bad_paths() {
     let not_importable = http_post(
         port,
         "/api/import_settings",
-        r#"{"path":"res://notes.xyz","option":"mipmaps","value":false}"#,
+        r#"{"path":"res://notes.xyz","option":"mipmaps/generate","value":false}"#,
     );
     assert!(
         not_importable.contains("400"),
@@ -411,7 +424,7 @@ fn import_settings_refuses_bad_paths() {
     let traversal = http_post(
         port,
         "/api/import_settings",
-        r#"{"path":"res://../escape.png","option":"mipmaps","value":false}"#,
+        r#"{"path":"res://../escape.png","option":"mipmaps/generate","value":false}"#,
     );
     assert!(
         traversal.contains("403"),

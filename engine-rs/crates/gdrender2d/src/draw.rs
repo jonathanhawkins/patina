@@ -107,6 +107,9 @@ pub fn draw_texture_rect_transformed(
 /// resolved against the ancestor chain before drawing, and reaching here means
 /// nothing resolved it, so it degrades to Godot's default (`Disabled`) rather
 /// than silently tiling.
+// Per-pixel hot path: inlined so the filter/repeat `match` folds into
+// the caller's loop (no arithmetic changes — output is bit-identical).
+#[inline(always)]
 fn wrap_texel(c: i64, size: u32, repeat: TextureRepeat) -> u32 {
     let size_i = size as i64;
     match repeat {
@@ -133,6 +136,18 @@ fn wrap_texel(c: i64, size: u32, repeat: TextureRepeat) -> u32 {
 /// each neighbour goes through [`wrap_texel`], so filtering and repeating
 /// compose — a bilinear tap that crosses the right edge of a tiling texture
 /// wraps to the left edge instead of smearing the border.
+/// One texel at integer coordinates, wrapped per `repeat`.
+#[inline(always)]
+fn texel_at(texture: &Texture2D, x: i64, y: i64, repeat: TextureRepeat) -> Color {
+    texture.get_pixel(
+        wrap_texel(x, texture.width, repeat),
+        wrap_texel(y, texture.height, repeat),
+    )
+}
+
+// Per-pixel hot path: inlined so the filter/repeat `match` folds into
+// the caller's loop (no arithmetic changes — output is bit-identical).
+#[inline(always)]
 fn sample_texture(
     texture: &Texture2D,
     fx: f32,
@@ -140,12 +155,7 @@ fn sample_texture(
     filter: TextureFilter,
     repeat: TextureRepeat,
 ) -> Color {
-    let at = |x: i64, y: i64| -> Color {
-        texture.get_pixel(
-            wrap_texel(x, texture.width, repeat),
-            wrap_texel(y, texture.height, repeat),
-        )
-    };
+    let at = |x: i64, y: i64| -> Color { texel_at(texture, x, y, repeat) };
     match filter {
         TextureFilter::Linear => {
             let (gx, gy) = (fx - 0.5, fy - 0.5);
@@ -165,7 +175,9 @@ fn sample_texture(
             };
             mix(mix(c00, c10, wx), mix(c01, c11, wx), wy)
         }
-        TextureFilter::Nearest | TextureFilter::ParentNode => at(fx as i64, fy as i64),
+        TextureFilter::Nearest | TextureFilter::ParentNode => {
+            texel_at(texture, fx as i64, fy as i64, repeat)
+        }
     }
 }
 

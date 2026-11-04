@@ -84,10 +84,16 @@ fn fs_dock_import_hooks() {
         serde_json::json!(true),
         "PNG is importable"
     );
+    // "Import As:" is the importer NAME Godot writes into `.import`
+    // (`importer="texture"`), not the resource type "Texture2D": upstream
+    // editor/import/resource_importer_texture.cpp:164-166
+    // `ResourceImporterTexture::get_importer_name()` returns "texture". The
+    // server was corrected to report importer names (pat-21oab, see
+    // `api_get_import_settings`).
     assert_eq!(
         imp["importer"],
-        serde_json::json!("Texture2D"),
-        "Import As: Texture2D"
+        serde_json::json!("texture"),
+        "Import As: texture"
     );
     let presets: Vec<String> = imp["presets"]
         .as_array()
@@ -96,7 +102,7 @@ fn fs_dock_import_hooks() {
         .map(|p| p.as_str().unwrap().to_string())
         .collect();
     assert!(
-        presets.iter().any(|p| p == "2D Pixel"),
+        presets.iter().any(|p| p == "2D"),
         "texture import presets: {presets:?}"
     );
     let option_names: Vec<String> = imp["options"]
@@ -106,12 +112,12 @@ fn fs_dock_import_hooks() {
         .map(|o| o["name"].as_str().unwrap_or("").to_string())
         .collect();
     assert!(
-        option_names.iter().any(|n| n == "compression"),
-        "compression option present"
+        option_names.iter().any(|n| n == "compress/mode"),
+        "compress/mode option present"
     );
     assert!(
-        option_names.iter().any(|n| n == "filter"),
-        "filter option present"
+        option_names.iter().any(|n| n == "mipmaps/generate"),
+        "mipmaps/generate option present"
     );
 
     // --- Reimport-on-change hook ---

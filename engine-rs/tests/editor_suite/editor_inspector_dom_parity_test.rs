@@ -188,7 +188,17 @@ fn collect_editor_inspector(port: u16) -> InspectorView {
 /// which is backed by `IndexMap`/`Map` in serde_json).
 fn collect_golden_inspector(golden_json: &serde_json::Value) -> InspectorView {
     let mut out = InspectorView::new();
-    if let Some(arr) = golden_json.get("nodes").and_then(|n| n.as_array()) {
+    // Accept the conformance envelope (`data.nodes`) too — see the scene-tree
+    // DOM parity test; `minimal_3d.json` is stored that way.
+    let golden_nodes: Option<Vec<serde_json::Value>> = match golden_json.get("nodes") {
+        Some(n) => n.as_array().cloned(),
+        None => golden_json
+            .get("data")
+            .and_then(|d| d.get("nodes"))
+            .and_then(|n| n.as_array())
+            .map(|a| nest_flat_golden(a)),
+    };
+    if let Some(arr) = golden_nodes.as_ref() {
         for n in arr {
             walk_golden(n, &mut out);
         }
@@ -305,6 +315,12 @@ fn editor_inspector_dom_parity_across_five_reference_scenes() {
         let golden_json: serde_json::Value =
             serde_json::from_str(&golden_text).expect("golden JSON parses");
         let golden_view = collect_golden_inspector(&golden_json);
+        // ⚠️ An ENVELOPE golden (`data.nodes`, e.g. minimal_3d) stores each
+        // node's properties as a key-SORTED map, so its order is alphabetical
+        // and says nothing about the inspector's order. Compare membership
+        // only for those; nested goldens keep insertion order and are checked
+        // for order too.
+        let order_is_meaningful = golden_json.get("nodes").is_some();
 
         // The two walks must visit nodes in the same order: scene root
         // first, then depth-first children. Mismatched node names at the
@@ -332,7 +348,12 @@ fn editor_inspector_dom_parity_across_five_reference_scenes() {
                 // for this node.
                 continue;
             }
-            if let Err(why) = editor_preserves_golden_order(e_props, g_props) {
+            let checked = if order_is_meaningful {
+                editor_preserves_golden_order(e_props, g_props)
+            } else {
+                editor_contains_golden_properties(e_props, g_props)
+            };
+            if let Err(why) = checked {
                 failures.push(format!(
                     "[{scene_name}] node '{e_name}' (idx {idx}): {why}; golden order: {g_props:?}"
                 ));
@@ -358,4 +379,55 @@ fn inspector_parity_test_covers_at_least_five_scenes() {
         "pat-yunxt requires at least five reference scenes; got {}",
         REFERENCE_SCENES.len()
     );
+}
+
+/// The conformance-envelope golden (`data.nodes`) is a FLAT list whose
+/// `children` are NAMES; the other goldens nest child OBJECTS. Rebuild the
+/// nesting from `path` so both shapes walk the same way.
+fn nest_flat_golden(nodes: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let by_path: std::collections::HashMap<String, &serde_json::Value> = nodes
+        .iter()
+        .filter_map(|n| Some((n.get("path")?.as_str()?.to_string(), n)))
+        .collect();
+    fn build(
+        n: &serde_json::Value,
+        by_path: &std::collections::HashMap<String, &serde_json::Value>,
+    ) -> serde_json::Value {
+        let mut out = n.clone();
+        let path = n.get("path").and_then(|p| p.as_str()).unwrap_or("");
+        if let Some(kids) = n.get("children").and_then(|c| c.as_array()) {
+            let nested: Vec<serde_json::Value> = kids
+                .iter()
+                .map(|k| match k.as_str() {
+                    Some(name) => by_path
+                        .get(&format!("{path}/{name}"))
+                        .map(|c| build(c, by_path))
+                        .unwrap_or(serde_json::Value::Null),
+                    None => k.clone(),
+                })
+                .filter(|v| !v.is_null())
+                .collect();
+            out["children"] = serde_json::Value::Array(nested);
+        }
+        out
+    }
+    nodes
+        .iter()
+        .filter(|n| {
+            let path = n.get("path").and_then(|p| p.as_str()).unwrap_or("");
+            let parent = path.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+            !by_path.contains_key(parent)
+        })
+        .map(|n| build(n, &by_path))
+        .collect()
+}
+
+/// Membership half of [`editor_preserves_golden_order`]: every golden
+/// property is present in the editor's list, in any order.
+fn editor_contains_golden_properties(editor: &[String], golden: &[String]) -> Result<(), String> {
+    let editor_set: HashSet<&str> = editor.iter().map(|s| s.as_str()).collect();
+    match golden.iter().find(|g| !editor_set.contains(g.as_str())) {
+        Some(missing) => Err(format!("editor is missing golden property '{missing}'; editor: {editor:?}")),
+        None => Ok(()),
+    }
 }

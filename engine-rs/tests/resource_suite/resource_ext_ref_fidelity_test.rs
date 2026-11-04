@@ -200,7 +200,12 @@ fn sub_resource_in_theme_fixture() {
     // Only run if fixture is accessible
     if let Ok(source) = source {
         let res = loader.parse_str(&source, "res://theme.tres").unwrap();
-        assert!(res.uid.is_valid(), "theme.tres should have a UID");
+        // The fixture's header writes `uid://theme_res`, which Godot rejects:
+        // UID text is base-34 over `a-z0-9` (ResourceUID::text_to_id,
+        // core/io/resource_uid.cpp), so `_` makes it INVALID and the loader
+        // treats the resource as having no UID — see
+        // resource_uid_loader_path_parity_test, which pins the same fixture.
+        assert!(!res.uid.is_valid(), "an underscore UID is not a valid UID");
         assert_eq!(res.subresources.len(), 2, "theme.tres has 2 sub_resources");
         assert!(res.subresources.contains_key("panel_style"));
         assert!(res.subresources.contains_key("button_style"));

@@ -10,15 +10,7 @@
 							"name": "BackgroundLayer",
 							"path": "/root/TileMapLevel/Background/BackgroundLayer",
 							"properties": {
-								"motion_scale": {
-									"class_type": "",
-									"hint": 5,
-									"type": "Vector2",
-									"value": {
-										"x": 0.5,
-										"y": 0.5
-									}
-								}
+
 							}
 						}
 					],
@@ -46,15 +38,7 @@
 							"name": "Coin1",
 							"path": "/root/TileMapLevel/Collectibles/Coin1",
 							"properties": {
-								"position": {
-									"class_type": "",
-									"hint": 1,
-									"type": "Vector2",
-									"value": {
-										"x": 128.0,
-										"y": 192.0
-									}
-								}
+
 							}
 						},
 						{
@@ -63,15 +47,7 @@
 							"name": "Coin2",
 							"path": "/root/TileMapLevel/Collectibles/Coin2",
 							"properties": {
-								"position": {
-									"class_type": "",
-									"hint": 1,
-									"type": "Vector2",
-									"value": {
-										"x": 256.0,
-										"y": 128.0
-									}
-								}
+
 							}
 						},
 						{
@@ -80,15 +56,7 @@
 							"name": "Coin3",
 							"path": "/root/TileMapLevel/Collectibles/Coin3",
 							"properties": {
-								"position": {
-									"class_type": "",
-									"hint": 1,
-									"type": "Vector2",
-									"value": {
-										"x": 384.0,
-										"y": 192.0
-									}
-								}
+
 							}
 						}
 					],
@@ -105,18 +73,7 @@
 					"name": "SpawnPoints",
 					"path": "/root/TileMapLevel/SpawnPoints",
 					"properties": {
-						"metadata/enemy_types": {
-							"class_type": "",
-							"hint": 0,
-							"type": "PackedStringArray",
-							"value": "[\"slime\", \"bat\", \"skeleton\"]"
-						},
-						"metadata/spawn_positions": {
-							"class_type": "",
-							"hint": 0,
-							"type": "PackedVector2Array",
-							"value": "[(64.0, 320.0), (512.0, 320.0), (256.0, 64.0)]"
-						}
+
 					}
 				},
 				{
@@ -125,18 +82,7 @@
 					"name": "Boundaries",
 					"path": "/root/TileMapLevel/Boundaries",
 					"properties": {
-						"metadata/level_bounds": {
-							"class_type": "",
-							"hint": 0,
-							"type": "PackedFloat32Array",
-							"value": "[0.0, 0.0, 1024.0, 640.0]"
-						},
-						"metadata/tile_indices": {
-							"class_type": "",
-							"hint": 0,
-							"type": "PackedInt32Array",
-							"value": "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
-						}
+
 					}
 				}
 			],

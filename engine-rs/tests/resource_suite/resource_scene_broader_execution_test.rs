@@ -647,12 +647,16 @@ fn change_scene_to_packed_replaces_tree_children() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
-    // Add some initial children
-    tree.add_child(root, Node::new("OldChild1", "Node"))
-        .unwrap();
-    tree.add_child(root, Node::new("OldChild2", "Node"))
-        .unwrap();
-    assert_eq!(tree.node_count(), 3); // root + 2
+    // An initial scene with two children, as the CURRENT scene.
+    // The starting scene must be the CURRENT scene: Godot's change_scene_* frees
+    // only `current_scene` (scene_tree.cpp `_flush_scene_change`) — other root
+    // children such as autoloads survive. These tests used to add it to root
+    // without making it current, relying on a free-every-root-child behaviour.
+    let old = tree.add_child(root, Node::new("OldScene", "Node")).unwrap();
+    tree.add_child(old, Node::new("OldChild1", "Node")).unwrap();
+    tree.add_child(old, Node::new("OldChild2", "Node")).unwrap();
+    tree.set_current_scene(old, None);
+    assert_eq!(tree.node_count(), 4); // root + scene + 2
 
     let packed = PackedScene::from_tscn(minimal_tscn()).unwrap();
     let scene_root = tree.change_scene_to_packed(&packed).unwrap();
@@ -813,13 +817,15 @@ fn tres_saver_renumbered_produces_sequential_ids() {
         .insert("sub_42".into(), Arc::new(sub2));
 
     let saver = TresSaver::new();
-    let renumbered = saver.save_to_string(&resource).unwrap();
+    let saved = saver.save_to_string(&resource).unwrap();
 
-    // Renumbered should have sequential IDs
-    assert!(
-        renumbered.contains("id=\"1\"") || renumbered.contains("id=\"SubResource_1\""),
-        "Renumbered output should contain sequential ID: {renumbered}"
-    );
+    // Godot 4 KEEPS each sub-resource's existing scene-unique id and only
+    // generates one when it is empty (ResourceFormatSaverText,
+    // scene/resources/resource_format_text.cpp:1889-1926). Sequential
+    // renumbering was Godot 3's format; this test used to require it.
+    assert!(saved.contains("id=\"sub_99\""), "existing ids are preserved: {saved}");
+    assert!(saved.contains("id=\"sub_42\""), "existing ids are preserved: {saved}");
+    assert!(!saved.contains("id=\"1\""), "nothing is renumbered: {saved}");
 }
 
 #[test]

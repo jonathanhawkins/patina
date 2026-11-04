@@ -1421,7 +1421,7 @@ mod tests {
         let bodies = vec![sphere_body(1, Vector3::new(0.0, 0.0, 100.0))];
         let (safe, unsafe_) = sweeping_capsule().cast_motion(bodies.iter());
         assert!((safe - 1.0).abs() < 1e-6, "safe {}", safe);
-        assert!((unsafe_ - 1.0).abs() < 1e-6, "unsafe {}", unsafe_);
+        assert!((unsafe_ - 1.0).abs() < 1e-6, "unsafe_ {}", unsafe_);
     }
 
     #[test]
@@ -1431,7 +1431,7 @@ mod tests {
         let bodies = vec![sphere_body(1, Vector3::new(0.0, 0.0, 10.0))];
         let (safe, unsafe_) = sweeping_capsule().cast_motion(bodies.iter());
         assert!((safe - 0.85).abs() < 0.01, "safe {}", safe);
-        assert!(unsafe_ >= safe, "unsafe {} < safe {}", unsafe_, safe);
+        assert!(unsafe_ >= safe, "unsafe_ {} < safe {}", unsafe_, safe);
         assert!(
             unsafe_ - safe < 0.01,
             "bracket too wide: {}..{}",
@@ -1476,7 +1476,7 @@ mod tests {
         query.motion = Vector3::ZERO;
         let (safe, unsafe_) = query.cast_motion(bodies.iter());
         assert!((safe - 1.0).abs() < 1e-6, "safe {}", safe);
-        assert!((unsafe_ - 1.0).abs() < 1e-6, "unsafe {}", unsafe_);
+        assert!((unsafe_ - 1.0).abs() < 1e-6, "unsafe_ {}", unsafe_);
     }
 
     // -- PhysicsShapeQuery3D::collide_shape -----------------------------------

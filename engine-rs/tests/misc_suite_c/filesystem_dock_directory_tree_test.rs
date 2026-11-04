@@ -6,6 +6,9 @@
 //! 3. GET /api/filesystem/dir — single-directory lazy loading
 //! 4. FsEntry JSON structure (files vs directories)
 //! 5. File type classification for various extensions
+//!
+//! Errors use the server-wide envelope `{"error":{"code","message"}}`
+//! (editor_error_envelope_test.rs), so a "not found" reads `error.message`.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -84,8 +87,8 @@ fn api_filesystem_tree_nonexistent_root() {
     let resp = http_get(port, "/api/filesystem/tree?root=nonexistent_dir_xyz_42");
     let body = extract_body(&resp);
     let v: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
-    assert!(v["error"].is_string());
-    assert!(v["error"].as_str().unwrap().contains("not found"));
+    assert!(v["error"]["message"].is_string());
+    assert!(v["error"]["message"].as_str().unwrap().contains("not found"));
     handle.stop();
 }
 
@@ -97,7 +100,7 @@ fn api_filesystem_tree_with_res_prefix() {
     let body = extract_body(&resp);
     let v: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
     // Either returns entries or "not found" depending on CWD — both are valid JSON
-    assert!(v["entries"].is_array() || v["error"].is_string());
+    assert!(v["entries"].is_array() || v["error"]["message"].is_string());
     handle.stop();
 }
 
@@ -121,7 +124,7 @@ fn api_filesystem_dir_nonexistent_dir() {
     let resp = http_get(port, "/api/filesystem/dir?path=res://nonexistent_xyz");
     let body = extract_body(&resp);
     let v: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
-    assert!(v["error"].is_string());
+    assert!(v["error"]["message"].is_string());
     handle.stop();
 }
 

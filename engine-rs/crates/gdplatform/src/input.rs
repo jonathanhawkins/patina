@@ -323,16 +323,29 @@ impl Key {
             "8" => Some(Key::Num8),
             "9" => Some(Key::Num9),
             " " | "Space" => Some(Key::Space),
-            "Enter" => Some(Key::Enter),
+            "Enter" | "Return" => Some(Key::Enter),
             "Escape" => Some(Key::Escape),
             "Tab" => Some(Key::Tab),
             "Shift" => Some(Key::Shift),
             "Ctrl" | "Control" => Some(Key::Ctrl),
+            // Command on macOS (the browser's `"Meta"`), the Windows/Super key
+            // elsewhere. Patina has no Meta key, so it folds into Ctrl exactly
+            // as project `meta_pressed` bindings and the builtin CMD_OR_CTRL
+            // shortcuts already do. Unknown before, it made every held Command
+            // an "untyped" key — and one untyped key switched the whole game
+            // onto the editor's fallback snapshot, which has none of the
+            // project's actions: holding ⌘ (or losing its keyup to an OS
+            // shortcut) froze every `move_*` in a played game.
+            "Meta" | "OS" | "Super" | "Command" => Some(Key::Ctrl),
             "Alt" => Some(Key::Alt),
-            "ArrowUp" => Some(Key::Up),
-            "ArrowDown" => Some(Key::Down),
-            "ArrowLeft" => Some(Key::Left),
-            "ArrowRight" => Some(Key::Right),
+            // Godot's own names too (`OS.get_keycode_string(KEY_LEFT)` is
+            // "Left"), not only the DOM's "ArrowLeft": a key named the Godot
+            // way — as a project or an agent's playtest names it — was
+            // unknown, and an unknown key is silently not pressed.
+            "ArrowUp" | "Up" => Some(Key::Up),
+            "ArrowDown" | "Down" => Some(Key::Down),
+            "ArrowLeft" | "Left" => Some(Key::Left),
+            "ArrowRight" | "Right" => Some(Key::Right),
             "F1" => Some(Key::F1),
             "F2" => Some(Key::F2),
             "F3" => Some(Key::F3),
@@ -3061,6 +3074,16 @@ impl InputMap {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn command_and_super_are_typed_keys_folded_into_ctrl() {
+        // Unknown, they made a held Command an "untyped" key in the editor's
+        // Play, which threw away every project action until it was released.
+        for name in ["Meta", "OS", "Super", "Command"] {
+            assert_eq!(Key::from_name(name), Some(Key::Ctrl), "{name}");
+        }
+    }
+
     use super::*;
 
     // -- Godot KEY_* mapping (pat-0q2kx.20) ---------------------------------

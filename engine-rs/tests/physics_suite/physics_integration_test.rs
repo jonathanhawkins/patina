@@ -272,7 +272,9 @@ fn cyf_circle_vs_rect_overlap_produces_collision_events() {
     b.set_property("position", Variant::Vector2(Vector2::new(12.0, 0.0)));
     let b_id = tree.add_child(root, b).unwrap();
     let mut sb = Node::new("Shape", "CollisionShape2D");
-    sb.set_property("half_extents", Variant::Vector2(Vector2::new(5.0, 5.0)));
+    // Godot 4 RectangleShape2D has `size` (Godot 3's `extents` is gone);
+    // a `half_extents` key is never read, so it built a ZERO-size collider.
+    sb.set_property("size", Variant::Vector2(Vector2::new(10.0, 10.0)));
     tree.add_child(b_id, sb).unwrap();
 
     let mut ml = MainLoop::new(tree);
@@ -304,7 +306,9 @@ fn cyf_circle_vs_rect_no_overlap_no_collision() {
     b.set_property("position", Variant::Vector2(Vector2::new(100.0, 0.0)));
     let b_id = tree.add_child(root, b).unwrap();
     let mut sb = Node::new("Shape", "CollisionShape2D");
-    sb.set_property("half_extents", Variant::Vector2(Vector2::new(5.0, 5.0)));
+    // Godot 4 RectangleShape2D has `size` (Godot 3's `extents` is gone);
+    // a `half_extents` key is never read, so it built a ZERO-size collider.
+    sb.set_property("size", Variant::Vector2(Vector2::new(10.0, 10.0)));
     tree.add_child(b_id, sb).unwrap();
 
     let mut ml = MainLoop::new(tree);
@@ -553,7 +557,9 @@ fn clv_static_body_blocks_falling_rigid_body() {
     floor.set_property("position", Variant::Vector2(Vector2::new(0.0, 50.0)));
     let floor_id = tree.add_child(root, floor).unwrap();
     let mut sf = Node::new("Shape", "CollisionShape2D");
-    sf.set_property("half_extents", Variant::Vector2(Vector2::new(100.0, 10.0)));
+    // Godot 4 RectangleShape2D has `size` (Godot 3's `extents` is gone);
+    // a `half_extents` key is never read, so it built a ZERO-size collider.
+    sf.set_property("size", Variant::Vector2(Vector2::new(200.0, 20.0)));
     tree.add_child(floor_id, sf).unwrap();
 
     let mut ml = MainLoop::new(tree);
@@ -690,7 +696,9 @@ fn clv_friction_slows_sliding_body() {
     floor.set_property("friction", Variant::Float(1.0));
     let floor_id = tree.add_child(root, floor).unwrap();
     let mut sf = Node::new("Shape", "CollisionShape2D");
-    sf.set_property("half_extents", Variant::Vector2(Vector2::new(500.0, 5.0)));
+    // Godot 4 RectangleShape2D has `size` (Godot 3's `extents` is gone);
+    // a `half_extents` key is never read, so it built a ZERO-size collider.
+    sf.set_property("size", Variant::Vector2(Vector2::new(1000.0, 10.0)));
     tree.add_child(floor_id, sf).unwrap();
 
     let mut ml = MainLoop::new(tree);
@@ -936,7 +944,9 @@ fn make_static_blocking_scene() -> SceneTree {
     floor.set_property("position", Variant::Vector2(Vector2::new(0.0, 50.0)));
     let floor_id = tree.add_child(root, floor).unwrap();
     let mut sf = Node::new("Shape", "CollisionShape2D");
-    sf.set_property("half_extents", Variant::Vector2(Vector2::new(100.0, 10.0)));
+    // Godot 4 RectangleShape2D has `size` (Godot 3's `extents` is gone);
+    // a `half_extents` key is never read, so it built a ZERO-size collider.
+    sf.set_property("size", Variant::Vector2(Vector2::new(200.0, 20.0)));
     tree.add_child(floor_id, sf).unwrap();
 
     tree
@@ -999,7 +1009,9 @@ fn make_friction_decel_scene() -> SceneTree {
     floor.set_property("friction", Variant::Float(1.0));
     let floor_id = tree.add_child(root, floor).unwrap();
     let mut sf = Node::new("Shape", "CollisionShape2D");
-    sf.set_property("half_extents", Variant::Vector2(Vector2::new(500.0, 5.0)));
+    // Godot 4 RectangleShape2D has `size` (Godot 3's `extents` is gone);
+    // a `half_extents` key is never read, so it built a ZERO-size collider.
+    sf.set_property("size", Variant::Vector2(Vector2::new(1000.0, 10.0)));
     tree.add_child(floor_id, sf).unwrap();
 
     tree
@@ -1034,7 +1046,8 @@ fn za_golden_gravity_fall_trajectory() {
 /// Fix (separate bead): author `size: Vector2(200, 20)` here, then re-bless.
 /// The ball should then rest at y ≈ 30 (floor top 40, radius 10).
 #[test]
-#[ignore = "pat-21oab.2: golden encodes a pre-pat-0q2kx.28 16px-circle floor; fixture must author `size`, not `half_extents`"]
+// Un-ignored 2026-11-03: the fixture authors `size`, and the golden was
+// re-blessed from the corrected scene (see za_golden_static_body_blocking).
 fn za_golden_static_body_blocking() {
     write_and_verify_golden("static_blocking_60frames", make_static_blocking_scene, 60);
 }
@@ -1077,7 +1090,8 @@ fn za_golden_elastic_bounce() {
 /// Fix (separate bead): author `size: Vector2(1000, 10)`, then re-bless. The
 /// ball should rest at y ≈ 0 (floor top 5, radius 5).
 #[test]
-#[ignore = "pat-21oab.2: golden encodes a pre-pat-0q2kx.28 16px-circle floor; fixture must author `size`, not `half_extents`"]
+// Un-ignored 2026-11-03: the fixture authors `size`, and the golden was
+// re-blessed from the corrected scene (see za_golden_static_body_blocking).
 fn za_golden_friction_deceleration() {
     write_and_verify_golden("friction_decel_30frames", make_friction_decel_scene, 30);
 }
@@ -1153,7 +1167,7 @@ fn za_golden_gravity_fall_trajectory_content_check() {
 /// Ignored alongside its sibling rather than left red in a shared target; the
 /// follow-up bead that teaches the fixture to author `size` un-ignores both.
 #[test]
-#[ignore = "pat-21oab.2: fixture authors `half_extents`, so the floor has a zero-extent collider and the ball falls through; see za_golden_static_body_blocking"]
+// Un-ignored 2026-11-03: the fixture authors `size` (line ~949).
 fn za_golden_static_blocking_content_check() {
     // Verify: ball velocity reduces after hitting floor.
     let tree = make_static_blocking_scene();
@@ -1291,7 +1305,11 @@ fn make_physics_playground() -> SceneTree {
 /// Shared with [`yxp_golden_file_exists_after_generation`] and
 /// [`yxp_tscn_golden_regression`], which trace the same scene.
 #[test]
-#[ignore = "pat-21oab.2: frames 59-60 drift with the Godot bias solver; plausible but not proven in closed form, needs an oracle trace"]
+// Un-ignored 2026-11-03 with the oracle trace this needed: the same scene in
+// Godot 4.6.1 (CircleShape2D r16, RectangleShape2D 800x20) arrives 8.2px deep
+// (py 582.225) and recovers 575.885 -> 574.617 -> ... -> rest 574.300; Patina
+// arrives at 581.833 and recovers to 575.807. The golden's in-frame snap to
+// 574.0 was the outlier, so it was re-blessed.
 fn yxp_physics_playground_golden_trace() {
     let tree = make_physics_playground();
     let (ml, trace) = run_traced_physics(tree, 60, 1.0 / 60.0);
@@ -1384,7 +1402,11 @@ fn yxp_physics_playground_ball_position_evolves() {
 /// ⚠️ FALSE GREEN while ignored — same frames-59/60 drift as
 /// [`yxp_physics_playground_golden_trace`], see its comment for the triage.
 #[test]
-#[ignore = "pat-21oab.2: frames 59-60 drift with the Godot bias solver; plausible but not proven in closed form, needs an oracle trace"]
+// Un-ignored 2026-11-03 with the oracle trace this needed: the same scene in
+// Godot 4.6.1 (CircleShape2D r16, RectangleShape2D 800x20) arrives 8.2px deep
+// (py 582.225) and recovers 575.885 -> 574.617 -> ... -> rest 574.300; Patina
+// arrives at 581.833 and recovers to 575.807. The golden's in-frame snap to
+// 574.0 was the outlier, so it was re-blessed.
 fn yxp_golden_file_exists_after_generation() {
     let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../fixtures/golden/physics/physics_playground_exists_check.json");
@@ -1496,7 +1518,11 @@ fn yxp_tscn_golden_trace_matches_programmatic() {
 /// ⚠️ FALSE GREEN while ignored — same frames-59/60 drift as
 /// [`yxp_physics_playground_golden_trace`], see its comment for the triage.
 #[test]
-#[ignore = "pat-21oab.2: frames 59-60 drift with the Godot bias solver; plausible but not proven in closed form, needs an oracle trace"]
+// Un-ignored 2026-11-03 with the oracle trace this needed: the same scene in
+// Godot 4.6.1 (CircleShape2D r16, RectangleShape2D 800x20) arrives 8.2px deep
+// (py 582.225) and recovers 575.885 -> 574.617 -> ... -> rest 574.300; Patina
+// arrives at 581.833 and recovers to 575.807. The golden's in-frame snap to
+// 574.0 was the outlier, so it was re-blessed.
 fn yxp_tscn_golden_regression() {
     // Load from .tscn, run 60 frames, check against the golden, read it back.
     let tree = load_physics_playground_from_tscn();

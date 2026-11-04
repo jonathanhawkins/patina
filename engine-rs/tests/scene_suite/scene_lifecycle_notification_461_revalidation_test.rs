@@ -391,18 +391,19 @@ fn lifecycle_3d_fixtures_match_oracle_461() {
 fn scene_transition_2d_to_3d_preserves_lifecycle_461() {
     // Load a 2D scene, transition to 3D — verify lifecycle ordering.
     let (mut tree, scene_2d) = load_scene_with_id("hierarchy");
-    let root = tree.root_id();
 
-    // Exit 2D scene
+    // The real transition, as a game's `change_scene_to_*` performs it: free
+    // the current scene (EXIT_TREE bottom-up), then add the new one, which
+    // `add_child` enters once (ENTER_TREE top-down, READY bottom-up).
+    //
+    // ⚠️ This used to hand-assemble it as `add_packed_scene_to_tree` plus a
+    // manual `LifecycleManager::enter_tree`; `add_child` already enters, so
+    // every 3D node was recorded entering twice.
+    tree.set_current_scene(scene_2d, None);
     tree.event_trace_mut().clear();
-    LifecycleManager::exit_tree(&mut tree, scene_2d);
-    tree.remove_node(scene_2d).unwrap();
-
-    // Enter 3D scene
     let tscn_3d = load_tscn("hierarchy_3d");
     let packed_3d = PackedScene::from_tscn(&tscn_3d).unwrap();
-    let scene_3d = add_packed_scene_to_tree(&mut tree, root, &packed_3d).unwrap();
-    LifecycleManager::enter_tree(&mut tree, scene_3d);
+    let _scene_3d = tree.change_scene_to_packed(&packed_3d).unwrap();
 
     // Verify EXIT_TREE of 2D scene is bottom-up
     let hierarchy_oracle = load_oracle_tree("hierarchy");

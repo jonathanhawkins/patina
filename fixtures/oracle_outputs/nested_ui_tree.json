@@ -1,0 +1,153 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [
+						{
+							"children": [
+								{
+									"children": [],
+									"class": "Label",
+									"groups": [],
+									"name": "Title",
+									"owner": "/root/UIRoot",
+									"path": "/root/UIRoot/MainVBox/Header/Title"
+								},
+								{
+									"children": [],
+									"class": "Button",
+									"groups": [],
+									"name": "CloseBtn",
+									"owner": "/root/UIRoot",
+									"path": "/root/UIRoot/MainVBox/Header/CloseBtn"
+								}
+							],
+							"class": "HBoxContainer",
+							"groups": [],
+							"name": "Header",
+							"owner": "/root/UIRoot",
+							"path": "/root/UIRoot/MainVBox/Header"
+						},
+						{
+							"children": [
+								{
+									"children": [
+										{
+											"children": [],
+											"class": "Label",
+											"groups": [],
+											"name": "NameLabel",
+											"owner": "/root/UIRoot",
+											"path": "/root/UIRoot/MainVBox/Body/NameRow/NameLabel"
+										},
+										{
+											"children": [],
+											"class": "LineEdit",
+											"groups": [
+												"_vp_unhandled_key_input25769805219"
+											],
+											"name": "NameInput",
+											"owner": "/root/UIRoot",
+											"path": "/root/UIRoot/MainVBox/Body/NameRow/NameInput"
+										}
+									],
+									"class": "HBoxContainer",
+									"groups": [],
+									"name": "NameRow",
+									"owner": "/root/UIRoot",
+									"path": "/root/UIRoot/MainVBox/Body/NameRow"
+								},
+								{
+									"children": [
+										{
+											"children": [],
+											"class": "Label",
+											"groups": [],
+											"name": "DescLabel",
+											"owner": "/root/UIRoot",
+											"path": "/root/UIRoot/MainVBox/Body/DescRow/DescLabel"
+										},
+										{
+											"children": [],
+											"class": "TextEdit",
+											"groups": [
+												"_vp_unhandled_key_input25769805219"
+											],
+											"name": "DescInput",
+											"owner": "/root/UIRoot",
+											"path": "/root/UIRoot/MainVBox/Body/DescRow/DescInput"
+										}
+									],
+									"class": "HBoxContainer",
+									"groups": [],
+									"name": "DescRow",
+									"owner": "/root/UIRoot",
+									"path": "/root/UIRoot/MainVBox/Body/DescRow"
+								}
+							],
+							"class": "VBoxContainer",
+							"groups": [],
+							"name": "Body",
+							"owner": "/root/UIRoot",
+							"path": "/root/UIRoot/MainVBox/Body"
+						},
+						{
+							"children": [
+								{
+									"children": [],
+									"class": "Button",
+									"groups": [],
+									"name": "CancelBtn",
+									"owner": "/root/UIRoot",
+									"path": "/root/UIRoot/MainVBox/Footer/CancelBtn"
+								},
+								{
+									"children": [],
+									"class": "Button",
+									"groups": [],
+									"name": "SaveBtn",
+									"owner": "/root/UIRoot",
+									"path": "/root/UIRoot/MainVBox/Footer/SaveBtn"
+								}
+							],
+							"class": "HBoxContainer",
+							"groups": [],
+							"name": "Footer",
+							"owner": "/root/UIRoot",
+							"path": "/root/UIRoot/MainVBox/Footer"
+						},
+						{
+							"children": [],
+							"class": "Panel",
+							"groups": [],
+							"name": "StatusPanel",
+							"owner": "/root/UIRoot",
+							"path": "/root/UIRoot/MainVBox/StatusPanel"
+						}
+					],
+					"class": "VBoxContainer",
+					"groups": [],
+					"name": "MainVBox",
+					"owner": "/root/UIRoot",
+					"path": "/root/UIRoot/MainVBox"
+				}
+			],
+			"class": "Control",
+			"groups": [
+				"_root_canvas77309411328"
+			],
+			"name": "UIRoot",
+			"owner": "/root",
+			"path": "/root/UIRoot"
+		}
+	],
+	"class": "Window",
+	"groups": [
+		"_picking_viewports",
+		"_viewports"
+	],
+	"name": "root",
+	"owner": "",
+	"path": "/root"
+}

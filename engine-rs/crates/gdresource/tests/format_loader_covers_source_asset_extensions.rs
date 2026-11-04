@@ -215,6 +215,16 @@ fn the_default_registry_counts_every_extension_it_registers() {
         ".hdr",
         ".gltf",
         ".glb",
+        // Registered by later beads and never added here, which left this
+        // test red: Godot's compressed cubemap / texture-array / 3D-texture
+        // artifacts (`ResourceFormatLoaderCompressedTexture{Layered,3D}`) and
+        // the WOFF web-font containers `FontFile` loads.
+        ".ccube",
+        ".ccubearray",
+        ".ctexarray",
+        ".ctex3d",
+        ".woff",
+        ".woff2",
     ];
     for ext in expected {
         assert!(rfl.can_load(ext), "{ext} must be registered");

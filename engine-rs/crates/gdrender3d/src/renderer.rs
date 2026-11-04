@@ -432,7 +432,10 @@ impl SoftwareRenderer3D {
                     environment: base.environment.clone(),
                 };
                 let frame = self.render_frame_solid(&face_view);
-                cube.set_face(face, frame.pixels);
+                cube.set_face(
+                    face,
+                    remap_capture_to_cubemap_face(face, &basis, &frame.pixels, resolution),
+                );
             }
             captured.push((i, cube));
         }
@@ -1411,9 +1414,15 @@ impl SoftwareRenderer3D {
                         lerp(pixels[i].b, fog_color.b, amount),
                         pixels[i].a,
                     );
-                } else if env.fog_sky_affect > 0.0 {
+                } else if env.fog_sky_affect > 0.0
+                    && env.background_mode == gdserver3d::environment::BackgroundMode::Sky
+                {
                     // Sky background: blend toward the fog color (base + sun
                     // scatter, no aerial — it *is* the sky) by fog_sky_affect.
+                    // ⚠️ SKY only: Godot applies `fog_sky_affect` in sky.glsl
+                    // (:284), so a clear-colour / custom-colour background is a
+                    // plain clear and is never fogged. This tinted a custom
+                    // colour background toward the fog colour.
                     let (fog_color, _) = fog_process(env, 1.0, 0.0, &view_dir_world, suns, None);
                     let a = env.fog_sky_affect;
                     pixels[i] = Color::new(
@@ -2596,6 +2605,64 @@ impl RenderingServer3D for SoftwareRenderer3D {
             RenderMode::Solid => self.render_frame_solid(viewport),
         }
     }
+}
+
+/// The direction [`ReflectionCubemap::sample_direction`] reads at face
+/// coordinates `(sc, tc)` in `[-1, 1]` — its face/axis table, inverted.
+fn cubemap_texel_direction(face: CubeFace, sc: f32, tc: f32) -> Vector3 {
+    match face {
+        CubeFace::PosX => Vector3::new(1.0, -tc, -sc),
+        CubeFace::NegX => Vector3::new(-1.0, -tc, sc),
+        CubeFace::PosY => Vector3::new(sc, 1.0, tc),
+        CubeFace::NegY => Vector3::new(sc, -1.0, -tc),
+        CubeFace::PosZ => Vector3::new(sc, -tc, 1.0),
+        CubeFace::NegZ => Vector3::new(-sc, -tc, -1.0),
+    }
+}
+
+/// Re-indexes one rendered capture face into the texel layout
+/// [`ReflectionCubemap::sample_direction`] reads (pat-s3rrv.206).
+///
+/// 🔑 A cubemap face is NOT the image a camera at the centre sees. The sampler
+/// uses the standard cubemap s/t table, which is mirrored against an outward-
+/// looking camera on every face (cubemaps are addressed as if seen from the
+/// inside), and on `±Y` its rows also run the other way. Storing the rendered
+/// frame as-is therefore mirrored every face: a wall captured above-left read
+/// back from above-RIGHT, so a mirror reflected the empty half of the scene and
+/// the captured object never appeared in any reflection.
+///
+/// Rather than hand-flip each face (the easy way to get one of six wrong), each
+/// texel's sampling direction is projected through the face camera — 90° FOV,
+/// square, `clip_to_screen`'s y-down rows — to the pixel that saw it.
+fn remap_capture_to_cubemap_face(
+    face: CubeFace,
+    camera: &gdcore::math3d::Basis,
+    frame: &[Color],
+    resolution: u32,
+) -> Vec<Color> {
+    let res = resolution as usize;
+    let mut out = vec![Color::new(0.0, 0.0, 0.0, 1.0); res * res];
+    if frame.len() != res * res {
+        return out;
+    }
+    let (right, up, forward) = (camera.x, camera.y, camera.z * -1.0);
+    for row in 0..res {
+        for col in 0..res {
+            let sc = 2.0 * (col as f32 + 0.5) / resolution as f32 - 1.0;
+            let tc = 2.0 * (row as f32 + 0.5) / resolution as f32 - 1.0;
+            let d = cubemap_texel_direction(face, sc, tc);
+            let depth = d.dot(forward);
+            if depth <= 0.0 {
+                continue;
+            }
+            let x = d.dot(right) / depth;
+            let y = d.dot(up) / depth;
+            let px = (((x + 1.0) * 0.5 * resolution as f32) as usize).min(res - 1);
+            let py = (((1.0 - y) * 0.5 * resolution as f32) as usize).min(res - 1);
+            out[row * res + col] = frame[py * res + px];
+        }
+    }
+    out
 }
 
 /// Godot's `Math::smoothstep(0.0, 1.0, x)`.

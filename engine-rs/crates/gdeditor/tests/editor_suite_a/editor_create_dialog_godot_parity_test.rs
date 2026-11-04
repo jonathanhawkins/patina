@@ -153,7 +153,22 @@ fn editor_api_classes_hidden() {
 #[test]
 fn search_mesh_matches_and_auto_selects_meshinstance3d() {
     let (handle, port) = make_server();
-    let v = dialog_response(port, r#"{"search":"mesh","base_class":"Node"}"#);
+    // MeshInstance2D and MeshInstance3D score IDENTICALLY for "mesh" in
+    // Godot's `_score_type` (same length, same prefix position), so the winner
+    // is decided by `_is_type_preferred` — the Scene dock sets the preferred
+    // type from the edited scene root's family (Control/Node2D/Node3D,
+    // upstream editor/docks/scene_tree_dock.cpp:633-647) — and, on a tie, by
+    // the alphabetical `type_info_list` order with a strict `>`
+    // (create_dialog.cpp:131, :276). This fixture's root is a Node2D, so with
+    // no preference MeshInstance2D legitimately wins; a 3D scene (preferred
+    // Node3D) is what makes MeshInstance3D the auto-selection.
+    let v2d = dialog_response(port, r#"{"search":"mesh","base_class":"Node"}"#);
+    assert_eq!(v2d["best_match"], "MeshInstance2D", "tie breaks alphabetically");
+
+    let v = dialog_response(
+        port,
+        r#"{"search":"mesh","base_class":"Node","preferred":"Node3D"}"#,
+    );
     let tree = &v["tree"];
     let mesh = find_in_tree(tree, "MeshInstance3D").expect("MeshInstance3D matches 'mesh'");
     assert_eq!(mesh["matched"], true);

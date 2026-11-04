@@ -88,10 +88,16 @@ impl CallableRef {
     /// - `Method` / `Lambda`: passes args through unchanged
     pub fn resolve_args(&self, call_args: &[Variant]) -> Vec<Variant> {
         match self {
+            // Godot's `CallableCustomBind::call` (`core/variant/callable_bind.cpp:141`)
+            // appends THIS level's binds and then calls the inner callable with
+            // the result, so the inner level sees them. Resolving the inner level
+            // first put nested binds in reverse (`bind(100).bind(200)` gave
+            // `[.., 100, 200]` where Godot gives `[.., 200, 100]`) and let an inner
+            // `unbind` skip an outer bind it should have dropped.
             CallableRef::Bound { inner, bound_args } => {
-                let mut resolved = inner.resolve_args(call_args);
-                resolved.extend(bound_args.iter().cloned());
-                resolved
+                let mut with_binds = call_args.to_vec();
+                with_binds.extend(bound_args.iter().cloned());
+                inner.resolve_args(&with_binds)
             }
             CallableRef::Unbound {
                 inner,
@@ -1172,6 +1178,20 @@ fn slice_bounds(begin: i64, end: i64, len: usize) -> (usize, usize) {
 // Arithmetic operators
 // ---------------------------------------------------------------------------
 
+/// A numeric scalar operand as `f32`, for vector-by-scalar operators.
+fn scalar_operand(v: &Variant) -> Option<f32> {
+    match v {
+        Variant::Int(i) => Some(*i as f32),
+        Variant::Float(f) => Some(*f as f32),
+        _ => None,
+    }
+}
+
+// The vector arms below follow Godot's operator table
+// (core/variant/variant_op.cpp: OP_ADD/OP_SUBTRACT/OP_MULTIPLY/OP_DIVIDE/
+// OP_NEGATE register Vector2/Vector3 with themselves and with int/float).
+// They were missing, so `Variant::Vector2(..) + Variant::Vector2(..)` was Nil.
+
 impl std::ops::Add for Variant {
     type Output = Variant;
 
@@ -1182,6 +1202,8 @@ impl std::ops::Add for Variant {
             (Variant::Int(a), Variant::Float(b)) => Variant::Float(*a as f64 + b),
             (Variant::Float(a), Variant::Int(b)) => Variant::Float(a + *b as f64),
             (Variant::String(a), Variant::String(b)) => Variant::String(format!("{a}{b}")),
+            (Variant::Vector2(a), Variant::Vector2(b)) => Variant::Vector2(*a + *b),
+            (Variant::Vector3(a), Variant::Vector3(b)) => Variant::Vector3(*a + *b),
             _ => Variant::Nil,
         }
     }
@@ -1196,6 +1218,8 @@ impl std::ops::Sub for Variant {
             (Variant::Float(a), Variant::Float(b)) => Variant::Float(a - b),
             (Variant::Int(a), Variant::Float(b)) => Variant::Float(*a as f64 - b),
             (Variant::Float(a), Variant::Int(b)) => Variant::Float(a - *b as f64),
+            (Variant::Vector2(a), Variant::Vector2(b)) => Variant::Vector2(*a - *b),
+            (Variant::Vector3(a), Variant::Vector3(b)) => Variant::Vector3(*a - *b),
             _ => Variant::Nil,
         }
     }
@@ -1210,6 +1234,21 @@ impl std::ops::Mul for Variant {
             (Variant::Float(a), Variant::Float(b)) => Variant::Float(a * b),
             (Variant::Int(a), Variant::Float(b)) => Variant::Float(*a as f64 * b),
             (Variant::Float(a), Variant::Int(b)) => Variant::Float(a * *b as f64),
+            // Component-wise, as Godot's Vector * Vector.
+            (Variant::Vector2(a), Variant::Vector2(b)) => {
+                Variant::Vector2(gdcore::math::Vector2::new(a.x * b.x, a.y * b.y))
+            }
+            (Variant::Vector3(a), Variant::Vector3(b)) => {
+                Variant::Vector3(gdcore::math::Vector3::new(a.x * b.x, a.y * b.y, a.z * b.z))
+            }
+            (Variant::Vector2(v), k) | (k, Variant::Vector2(v)) => match scalar_operand(k) {
+                Some(k) => Variant::Vector2(*v * k),
+                None => Variant::Nil,
+            },
+            (Variant::Vector3(v), k) | (k, Variant::Vector3(v)) => match scalar_operand(k) {
+                Some(k) => Variant::Vector3(*v * k),
+                None => Variant::Nil,
+            },
             _ => Variant::Nil,
         }
     }
@@ -1228,6 +1267,21 @@ impl std::ops::Div for Variant {
             (Variant::Int(a), Variant::Float(b)) => Variant::Float(*a as f64 / b),
             (Variant::Float(_), Variant::Int(0)) => Variant::Nil,
             (Variant::Float(a), Variant::Int(b)) => Variant::Float(a / *b as f64),
+            // Float division, so a zero divisor gives inf as in Godot.
+            (Variant::Vector2(a), Variant::Vector2(b)) => {
+                Variant::Vector2(gdcore::math::Vector2::new(a.x / b.x, a.y / b.y))
+            }
+            (Variant::Vector3(a), Variant::Vector3(b)) => {
+                Variant::Vector3(gdcore::math::Vector3::new(a.x / b.x, a.y / b.y, a.z / b.z))
+            }
+            (Variant::Vector2(v), k) => match scalar_operand(k) {
+                Some(k) => Variant::Vector2(gdcore::math::Vector2::new(v.x / k, v.y / k)),
+                None => Variant::Nil,
+            },
+            (Variant::Vector3(v), k) => match scalar_operand(k) {
+                Some(k) => Variant::Vector3(gdcore::math::Vector3::new(v.x / k, v.y / k, v.z / k)),
+                None => Variant::Nil,
+            },
             _ => Variant::Nil,
         }
     }
@@ -1254,6 +1308,8 @@ impl std::ops::Neg for Variant {
         match self {
             Variant::Int(i) => Variant::Int(i.wrapping_neg()),
             Variant::Float(f) => Variant::Float(-f),
+            Variant::Vector2(v) => Variant::Vector2(-v),
+            Variant::Vector3(v) => Variant::Vector3(-v),
             _ => Variant::Nil,
         }
     }
@@ -1403,10 +1459,22 @@ pub fn num_real_f32(value: f32, trailing: bool) -> String {
     num_with_decimals(value as f64, decimals)
 }
 
-/// Shorthand for a math-type component: Godot always passes `true` for
-/// `p_trailing` from an `operator String`.
+/// Shorthand for a math-type component: the vector, rect, basis and
+/// transform `operator String`s pass `true` for `p_trailing`
+/// (core/math/vector2.cpp:210), so a whole number keeps its `.0`.
+///
+/// ⚠️ NOT every type: Color uses `String::num(r, 4)` ([`num4`]) and Quaternion
+/// `num_real(x, false)` — see those arms.
 fn c(value: f32) -> String {
     num_real_f32(value, true)
+}
+
+/// Godot's `String::num(v, 4)` (`Color::operator String`, core/math/color.cpp:483):
+/// at most four decimals, trailing zeros and a bare `.` dropped — `1`, `0.5`.
+fn num4(value: f32) -> String {
+    let s = format!("{:.4}", value);
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s == "-0" { "0".to_string() } else { s.to_string() }
 }
 
 impl fmt::Display for Variant {
@@ -1464,10 +1532,10 @@ impl fmt::Display for Variant {
             Self::Color(col) => write!(
                 f,
                 "({}, {}, {}, {})",
-                c(col.r),
-                c(col.g),
-                c(col.b),
-                c(col.a)
+                num4(col.r),
+                num4(col.g),
+                num4(col.b),
+                num4(col.a)
             ),
             Self::Basis(b) => write!(
                 f,
@@ -1482,21 +1550,24 @@ impl fmt::Display for Variant {
                 c(b.z.y),
                 c(b.z.z)
             ),
+            // Each column is a `Vector3::operator String`, so it formats like
+            // one — this printed raw `{}` floats (`(1, 0, 0)`) while Basis and
+            // Vector3 printed `(1.0, 0.0, 0.0)`.
             Self::Transform3D(t) => write!(
                 f,
                 "[X: ({}, {}, {}), Y: ({}, {}, {}), Z: ({}, {}, {}), O: ({}, {}, {})]",
-                t.basis.x.x,
-                t.basis.x.y,
-                t.basis.x.z,
-                t.basis.y.x,
-                t.basis.y.y,
-                t.basis.y.z,
-                t.basis.z.x,
-                t.basis.z.y,
-                t.basis.z.z,
-                t.origin.x,
-                t.origin.y,
-                t.origin.z
+                c(t.basis.x.x),
+                c(t.basis.x.y),
+                c(t.basis.x.z),
+                c(t.basis.y.x),
+                c(t.basis.y.y),
+                c(t.basis.y.z),
+                c(t.basis.z.x),
+                c(t.basis.z.y),
+                c(t.basis.z.z),
+                c(t.origin.x),
+                c(t.origin.y),
+                c(t.origin.z)
             ),
             // `Projection::operator String` (core/math/projection.cpp:851)
             // labels its four COLUMNS X/Y/Z/W, each printed as a Vector4.
@@ -1509,13 +1580,14 @@ impl fmt::Display for Variant {
                 c(p.m[2][0]), c(p.m[2][1]), c(p.m[2][2]), c(p.m[2][3]),
                 c(p.m[3][0]), c(p.m[3][1]), c(p.m[3][2]), c(p.m[3][3]),
             ),
+            // `Quaternion::operator String` passes `false` (core/math/quaternion.cpp:268).
             Self::Quaternion(q) => write!(
                 f,
                 "({}, {}, {}, {})",
-                c(q.x),
-                c(q.y),
-                c(q.z),
-                c(q.w)
+                num_real_f32(q.x, false),
+                num_real_f32(q.y, false),
+                num_real_f32(q.z, false),
+                num_real_f32(q.w, false)
             ),
             Self::Aabb(a) => write!(
                 f,
@@ -1533,7 +1605,8 @@ impl fmt::Display for Variant {
                 c(p.normal.x),
                 c(p.normal.y),
                 c(p.normal.z),
-                c(p.d)
+                // `num_real(d, false)` (core/math/plane.cpp:184): no `.0`.
+                num_real_f32(p.d, false)
             ),
             // `Variant::stringify` (core/variant/variant.cpp:1739) prints a
             // handle as `RID(<id>)`, NOT the bare number.
@@ -1901,7 +1974,8 @@ mod tests {
     #[test]
     fn display_color() {
         let c = gdcore::math::Color::new(1.0, 0.5, 0.0, 1.0);
-        assert_eq!(format!("{}", Variant::Color(c)), "(1.0, 0.5, 0.0, 1.0)");
+        // `String::num(r, 4)` — no trailing `.0` (core/math/color.cpp:483).
+        assert_eq!(format!("{}", Variant::Color(c)), "(1, 0.5, 0, 1)");
     }
 
     #[test]

@@ -32,7 +32,7 @@ const SRC: &str = "extends Node\n\
                    \x20   return ClassDB.instantiate(\"NoSuchClassAnywhere\")\n\
                    \n\
                    func make_abstract():\n\
-                   \x20   return ClassDB.instantiate(\"Material\")\n";
+                   \x20   return ClassDB.instantiate(\"Light3D\")\n";
 
 /// Runs one method of the probe script.
 ///
@@ -80,6 +80,7 @@ fn instantiate_builds_a_plain_refcounted() {
 /// abstract case is the one that *does* raise. The pair is what proves the
 /// delegation did not swallow the abstract gate: `Material.new()` on its own
 /// fails with an UndefinedVariable, not with Godot's abstract-class message.
+/// (The abstract probe is `Light3D` — see the note in the test.)
 #[test]
 fn unknown_is_nil_and_abstract_still_errors() {
     assert_eq!(
@@ -88,7 +89,11 @@ fn unknown_is_nil_and_abstract_still_errors() {
         "Godot returns null for an unregistered class"
     );
 
-    let err = call("make_abstract").expect_err("Material is abstract");
+    // ⚠️ `Light3D`, not `Material`: Material is `GDREGISTER_VIRTUAL_CLASS`
+    // (`scene/register_scene_types.cpp:439`), and a VIRTUAL class still has a
+    // creation function, so Godot's `ClassDB.instantiate("Material")`
+    // SUCCEEDS. `GDREGISTER_ABSTRACT_CLASS(Light3D)` is genuinely abstract.
+    let err = call("make_abstract").expect_err("Light3D is abstract");
     assert!(
         err.contains("abstract"),
         "an abstract class must report Godot's abstract-class error, not a \

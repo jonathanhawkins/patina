@@ -98,7 +98,10 @@ fn classdb_registers_characterbody3d() {
 fn classdb_characterbody3d_inherits_node3d() {
     gdobject::class_db::register_3d_classes();
     let info = gdobject::class_db::get_class_info("CharacterBody3D").unwrap();
-    assert_eq!(info.parent_class.as_str(), "Node3D");
+    // Godot: CharacterBody3D : PhysicsBody3D : CollisionObject3D : Node3D
+    // (scene/3d/physics/character_body_3d.h).
+    assert_eq!(info.parent_class.as_str(), "PhysicsBody3D");
+    assert!(gdobject::class_db::is_parent_class("CharacterBody3D", "Node3D"));
 }
 
 #[test]

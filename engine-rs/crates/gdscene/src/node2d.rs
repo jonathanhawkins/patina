@@ -274,6 +274,93 @@ pub fn set_global_rotation(tree: &mut SceneTree, node_id: NodeId, radians: f32) 
     set_rotation(tree, node_id, radians - parent_rotation);
 }
 
+/// Whether `node_id` is a `Node2D` (or a subclass).
+fn is_node2d(tree: &SceneTree, node_id: NodeId) -> bool {
+    tree.get_node(node_id)
+        .is_some_and(|n| gdobject::class_db::is_parent_class(n.class_name(), "Node2D"))
+}
+
+/// Node2D's COMPUTED properties, for a script reading `global_position` and
+/// friends. None of them is stored on the node, so the accessor's property-bag
+/// read answered `Nil` and the interpreter reported `global_position` as an
+/// undefined variable — inside any 2D script. `None` for a node that is not a
+/// Node2D or a property this does not compute.
+pub fn get_derived_property(tree: &SceneTree, node_id: NodeId, prop: &str) -> Option<Variant> {
+    if !is_node2d(tree, node_id) {
+        return None;
+    }
+    Some(match prop {
+        "global_position" => Variant::Vector2(get_global_position(tree, node_id)),
+        "global_rotation" => Variant::Float(get_global_rotation(tree, node_id) as f64),
+        "global_rotation_degrees" => {
+            Variant::Float((get_global_rotation(tree, node_id) as f64).to_degrees())
+        }
+        "global_scale" => Variant::Vector2(get_global_scale(tree, node_id)),
+        "global_transform" => Variant::Transform2D(get_global_transform(tree, node_id)),
+        _ => return None,
+    })
+}
+
+/// The write half of [`get_derived_property`]: converts a global value into the
+/// local one the node stores. `false` when this does not own the property.
+pub fn set_derived_property(
+    tree: &mut SceneTree,
+    node_id: NodeId,
+    prop: &str,
+    value: &Variant,
+) -> bool {
+    if !is_node2d(tree, node_id) {
+        return false;
+    }
+    let as_f32 = |v: &Variant| match v {
+        Variant::Float(f) => Some(*f as f32),
+        Variant::Int(i) => Some(*i as f32),
+        _ => None,
+    };
+    // The parent whose global transform composes this node's — none for a
+    // `top_level` node, which ignores its ancestors.
+    let parent = tree
+        .get_node(node_id)
+        .and_then(|n| n.parent())
+        .filter(|_| !is_top_level(tree, node_id));
+    match (prop, value) {
+        ("global_position", Variant::Vector2(v)) => set_global_position(tree, node_id, *v),
+        ("global_rotation", v) if as_f32(v).is_some() => {
+            set_global_rotation(tree, node_id, as_f32(v).unwrap_or(0.0))
+        }
+        ("global_rotation_degrees", v) if as_f32(v).is_some() => {
+            set_global_rotation(tree, node_id, as_f32(v).unwrap_or(0.0).to_radians())
+        }
+        // Godot's `Node2D::set_global_scale`: the local scale that, composed
+        // with the parent chain's, gives the requested one.
+        ("global_scale", Variant::Vector2(v)) => {
+            let parent_scale = parent
+                .map(|p| get_global_scale(tree, p))
+                .unwrap_or(Vector2::new(1.0, 1.0));
+            let div = |a: f32, b: f32| if b == 0.0 { a } else { a / b };
+            set_scale(
+                tree,
+                node_id,
+                Vector2::new(div(v.x, parent_scale.x), div(v.y, parent_scale.y)),
+            );
+        }
+        // Godot's `set_global_transform`: `parent_global⁻¹ * t`, decomposed into
+        // the position/rotation/scale/skew the node stores.
+        ("global_transform", Variant::Transform2D(t)) => {
+            let local = match parent {
+                Some(p) => get_global_transform(tree, p).affine_inverse() * *t,
+                None => *t,
+            };
+            set_position(tree, node_id, local.origin);
+            set_rotation(tree, node_id, local.get_rotation());
+            set_scale(tree, node_id, local.get_scale());
+            set_skew(tree, node_id, local.get_skew());
+        }
+        _ => return false,
+    }
+    true
+}
+
 // ===========================================================================
 // CanvasItem properties
 // ===========================================================================

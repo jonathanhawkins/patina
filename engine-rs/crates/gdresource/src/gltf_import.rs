@@ -325,17 +325,33 @@ fn build_document(
             }
 
             // indices (optional — if missing, sequential triangle list)
-            if let Some(i_acc) = prim.get("indices").and_then(|v| v.as_u64()) {
-                let indices = read_index_accessor(json, &buffers, i_acc as usize)?;
-                sub.set_property(
-                    "indices",
-                    Variant::Array(indices.iter().map(|&i| Variant::Int(i as i64)).collect()),
-                );
-            } else {
-                let n = positions.len() as i64;
-                let indices: Vec<Variant> = (0..n).map(Variant::Int).collect();
-                sub.set_property("indices", Variant::Array(indices.into()));
+            //
+            // 🔑 glTF winds front faces COUNTER-clockwise; Godot's are CLOCKWISE
+            // (`doc/classes/ArrayMesh.xml:49`), so Godot's importer swaps the
+            // last two indices of every triangle — for an index buffer
+            // (`gltf_document.cpp:1486-1493`, "convert ccw to cw for front face")
+            // and for a generated one alike (`:1700-1712`). Without it every
+            // imported model is inside-out under back-face culling. Only for
+            // TRIANGLES (`mode` 4, the glTF default).
+            let triangles = prim.get("mode").and_then(|v| v.as_u64()).unwrap_or(4) == 4;
+            let mut indices: Vec<i64> =
+                if let Some(i_acc) = prim.get("indices").and_then(|v| v.as_u64()) {
+                    read_index_accessor(json, &buffers, i_acc as usize)?
+                        .iter()
+                        .map(|&i| i as i64)
+                        .collect()
+                } else {
+                    (0..positions.len() as i64).collect()
+                };
+            if triangles {
+                for tri in indices.chunks_exact_mut(3) {
+                    tri.swap(1, 2);
+                }
             }
+            sub.set_property(
+                "indices",
+                Variant::Array(indices.into_iter().map(Variant::Int).collect()),
+            );
 
             // material
             if let Some(mat_idx) = prim.get("material").and_then(|v| v.as_u64()) {
@@ -2124,6 +2140,32 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// glTF's CCW front face becomes Godot's CW one on import: the triangle
+    /// authored `0, 1, 2` (counter-clockwise about its +Z normal) must come out
+    /// `0, 2, 1`, exactly as Godot's `_parse_meshes` swaps it
+    /// (`gltf_document.cpp:1486-1493`). Without the swap every imported model
+    /// renders inside-out under the renderer's Godot-convention back-face cull.
+    #[test]
+    fn import_converts_ccw_triangles_to_godot_clockwise() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("t.glb");
+        std::fs::write(&path, make_triangle_glb()).unwrap();
+        let res = import_gltf(&path).unwrap();
+        let sub = res.subresources.get("mesh_0_prim_0").expect("prim");
+        let indices: Vec<i64> = match sub.get_property("indices") {
+            Some(Variant::Array(a)) => a
+                .to_vec()
+                .iter()
+                .map(|v| match v {
+                    Variant::Int(i) => *i,
+                    other => panic!("index {other:?}"),
+                })
+                .collect(),
+            other => panic!("indices {other:?}"),
+        };
+        assert_eq!(indices, vec![0, 2, 1]);
     }
 
     #[test]

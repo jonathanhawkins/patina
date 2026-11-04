@@ -348,6 +348,27 @@ pub struct ParticleEmitter {
     /// a `Vec` of keyframes. Putting it there would silently remove `Copy` from
     /// a type that is copied all over this crate and the scene layer.
     pub color_curve: Option<crate::particle3d::ColorCurve>,
+    /// The material's `scale_curve`: each particle's size multiplier over its
+    /// life, on top of its spawn scale (`scale_min..scale_max`).
+    ///
+    /// 🔑 Read by the 3D emitter only, so every 2D particle held its spawn size
+    /// for its whole life. The official Dodge the Creeps demo's player trail
+    /// authors 0.5 -> 0.32: at full size it drew a copy of the ship TWICE as
+    /// big as the ship (whose sprite is scaled 0.5) behind it.
+    ///
+    /// `None` keeps the previous behaviour exactly. Next to `color_curve`, not
+    /// on [`ParticleMaterial`], for the same `Copy` reason.
+    pub scale_curve: Option<crate::particle3d::ScaleCurve>,
+}
+
+/// A particle's size NOW: its spawn scale times the emitter's `scale_curve` at
+/// its age, as Godot's `ParticleProcessMaterial` computes it. `p.scale` stays
+/// the spawn value, so the curve never compounds frame over frame.
+fn current_scale(emitter: &ParticleEmitter, p: &Particle) -> f32 {
+    match &emitter.scale_curve {
+        Some(curve) => p.scale * curve.sample(p.age_ratio()),
+        None => p.scale,
+    }
 }
 
 impl Default for ParticleEmitter {
@@ -366,6 +387,7 @@ impl Default for ParticleEmitter {
             draw_order: ParticleDrawOrder::Index,
             fixed_fps: 0,
             color_curve: None,
+            scale_curve: None,
         }
     }
 }
@@ -696,14 +718,14 @@ impl ParticleSimulator {
         if mode == ParticleCollisionMode::HideOnContact {
             self.active_particles.retain(|p| {
                 let canvas = p.spawn_transform.xform(p.position);
-                sdf.sample(canvas) - base_size * p.scale * 0.5 > 0.0
+                sdf.sample(canvas) - base_size * current_scale(&self.emitter, p) * 0.5 > 0.0
             });
             return;
         }
 
         for p in &mut self.active_particles {
             let canvas = p.spawn_transform.xform(p.position);
-            let radius = base_size * p.scale * 0.5;
+            let radius = base_size * current_scale(&self.emitter, p) * 0.5;
             let d = sdf.sample(canvas) - radius;
             // `> 0.0` and not `>= 0.0`: a particle resting exactly ON the surface is
             // in contact and must keep being resolved, or gravity walks it inside
@@ -995,7 +1017,7 @@ impl ParticleSimulator {
     pub fn get_draw_commands(&self) -> Vec<(Vector2, Color, f32)> {
         self.ordered_particles()
             .into_iter()
-            .map(|p| (p.position, p.color, p.scale))
+            .map(|p| (p.position, p.color, current_scale(&self.emitter, p)))
             .collect()
     }
 
@@ -1070,7 +1092,7 @@ impl ParticleSimulator {
                 (
                     to_local.xform(p.spawn_transform.xform(p.position)),
                     p.color,
-                    p.scale,
+                    current_scale(&self.emitter, p),
                 )
             })
             .collect()

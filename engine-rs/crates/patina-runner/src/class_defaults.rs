@@ -462,6 +462,12 @@ fn variant_eq(a: &Variant, b: &Variant) -> bool {
         (Variant::Nil, Variant::Nil) => true,
         (Variant::Bool(a), Variant::Bool(b)) => a == b,
         (Variant::Int(a), Variant::Int(b)) => a == b,
+        // A `.tscn` may author an int/enum property as a bool
+        // (`cast_shadow = true`); Godot converts on assignment, so the stored
+        // value is `1` and compares equal to an Int default of 1.
+        (Variant::Bool(a), Variant::Int(b)) | (Variant::Int(b), Variant::Bool(a)) => {
+            i64::from(*a) == *b
+        }
         (Variant::Float(a), Variant::Float(b)) => (*a - *b).abs() < FLOAT_TOL,
         (Variant::String(a), Variant::String(b)) => a == b,
         (Variant::Vector2(a), Variant::Vector2(b)) => {
@@ -509,6 +515,16 @@ mod tests {
     // -----------------------------------------------------------------------
     // should_output_property: basic filtering
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn bool_authored_on_an_int_default_compares_by_value() {
+        // `cast_shadow = true` in a .tscn equals the Int default 1 (Godot
+        // converts on assignment); `false` (0) differs and is output.
+        assert!(variant_eq(&Variant::Bool(true), &Variant::Int(1)));
+        assert!(variant_eq(&Variant::Int(0), &Variant::Bool(false)));
+        assert!(!variant_eq(&Variant::Bool(false), &Variant::Int(1)));
+        assert!(!variant_eq(&Variant::Bool(true), &Variant::Int(2)));
+    }
 
     #[test]
     fn internal_properties_never_output() {

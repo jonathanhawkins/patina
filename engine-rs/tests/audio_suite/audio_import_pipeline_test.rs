@@ -161,7 +161,10 @@ fn uxn40_format_detection_ogg_header() {
 
 #[test]
 fn uxn40_format_detection_unknown() {
-    assert_eq!(AudioFormat::from_header(b"ID3\x04"), None);
+    // Godot 4 imports WAV, Ogg Vorbis and MP3 (AudioStreamMP3); an ID3 tag
+    // opens an MP3, so it is no longer "unknown". FLAC is not a Godot format.
+    assert_eq!(AudioFormat::from_header(b"ID3\x04"), Some(AudioFormat::Mp3));
+    assert_eq!(AudioFormat::from_header(b"fLaC"), None);
     assert_eq!(AudioFormat::from_header(b"fl"), None);
 }
 
@@ -177,7 +180,7 @@ fn uxn40_format_from_extension() {
         AudioFormat::from_extension("ogg"),
         Some(AudioFormat::OggVorbis)
     );
-    assert_eq!(AudioFormat::from_extension("mp3"), None);
+    assert_eq!(AudioFormat::from_extension("mp3"), Some(AudioFormat::Mp3));
     assert_eq!(AudioFormat::from_extension("flac"), None);
 }
 
@@ -255,8 +258,10 @@ fn uxn40_missing_file_returns_io_error() {
 #[test]
 fn uxn40_unsupported_extension_and_header() {
     let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("music.mp3");
-    std::fs::write(&path, b"ID3v2_NOT_SUPPORTED").unwrap();
+    // FLAC: neither its extension nor its `fLaC` magic is a format Godot
+    // imports (MP3, which this used to use, now is).
+    let path = dir.path().join("music.flac");
+    std::fs::write(&path, b"fLaC\x00\x00\x00\x22").unwrap();
 
     let err = load_audio_file(&path).unwrap_err();
     assert!(matches!(err, ImportError::UnsupportedFormat(_)));

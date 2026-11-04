@@ -973,9 +973,6 @@ fn every_domain_gate_has_nonempty_filter() {
 /// FAILS. Shrinking this list as gates grow is the intended direction.
 const KNOWN_UNGATED_TEST_FILES: &[&str] = &[
     "crash_report_test.rs",
-    "docs_phase5_initial_3d_architecture_spec_test.rs",
-    "docs_phase6_3d_fixture_corpus_test.rs",
-    "docs_phase6_first_3d_crate_set_test.rs",
     "file_access_parity_test.rs",
     "fixture_corpus_coverage_test.rs",
     "golden_staleness_test.rs",
@@ -983,12 +980,8 @@ const KNOWN_UNGATED_TEST_FILES: &[&str] = &[
     "oracle_parity_461_metrics_test.rs",
     "oracle_parity_test.rs",
     "oracle_regression_test.rs",
-    "phase6_3d_crate_boundary_audit_test.rs",
-    "phase6_3d_fixture_corpus_audit_test.rs",
     "phase7_desktop_targets_doc_validation_test.rs",
     "phase9_hardening_classification_test.rs",
-    "publish_3d_parity_report_test.rs",
-    "raycast3d_shapecast3d_parity_test.rs",
     "true_defaults_probe_source_test.rs",
     "ui_parity_test.rs",
 ];
@@ -1336,7 +1329,9 @@ fn a7o_2d_gate_patterns_match_real_test_files() {
         "render_2d_parity_test.rs",
         "collision_overlap_extended_parity_test.rs",
         "node2d_body_sync_parity_test.rs",
-        "geometry2d_arc_parity_test.rs",
+        // `geometry2d_arc_parity_test.rs` was folded into the singleton
+        // parity file; spot-check the file that exists.
+        "geometry2d_singleton_parity_test.rs",
     ];
 
     for expected in &expected_2d_tests {

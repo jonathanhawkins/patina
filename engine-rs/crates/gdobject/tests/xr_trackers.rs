@@ -106,6 +106,12 @@ fn the_family_instantiates() {
     register_3d_classes();
 
     for (class, _) in FAMILY {
+        // XRTracker is GDREGISTER_ABSTRACT_CLASS upstream; its positional /
+        // body / face / hand subclasses are the instantiable ones.
+        if class == "XRTracker" || class == "XRInterface" {
+            assert!(instantiate(class).is_none(), "{class}: Godot registers it with GDREGISTER_ABSTRACT_CLASS");
+            continue;
+        }
         assert!(
             instantiate(class).is_some(),
             "{class} must instantiate through ClassDB",

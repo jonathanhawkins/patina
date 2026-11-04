@@ -236,6 +236,30 @@ fn engine_debugger_attaches_to_editor_play_session() {
         "the break must be recorded where the editor can show it: {errors}"
     );
 
+    // -- Link 3b: the break is a real, resumable suspension --------------------
+    //
+    // `debug()` publishes the session's live pause (so the runtime driver
+    // stops stepping, as Godot's debug loop suspends the game), and the
+    // editor's Continue must release it. A `debug()` break has no parked
+    // frame to wake, so Continue drops the pause rather than leaving the game
+    // frozen forever.
+    let again = json_of(&http_get(port, "/api/debug/state"));
+    assert_eq!(
+        again["state"], "paused",
+        "the debug() pause must survive a second read, not flip back to running: {again}"
+    );
+    let cont = json_of(&http_post(port, "/api/debug/continue", ""));
+    assert_eq!(cont["ok"], true, "continue must find the live pause: {cont}");
+    assert_eq!(
+        cont["paused"], false,
+        "Continue must resume a debug() break (it has no parked frame): {cont}"
+    );
+    let resumed = json_of(&http_get(port, "/api/debug/state"));
+    assert_eq!(
+        resumed["state"], "running",
+        "after Continue the session reads as running again: {resumed}"
+    );
+
     // -- Link 4: the debugger belongs to the session ---------------------------
     let stopped = json_of(&http_post(port, "/api/runtime/stop", ""));
     assert_eq!(stopped["ok"], true, "stop failed: {stopped}");

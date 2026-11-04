@@ -17,7 +17,21 @@ use web_time::{Instant, SystemTime, UNIX_EPOCH};
 static EPOCH: OnceLock<Instant> = OnceLock::new();
 
 fn epoch() -> &'static Instant {
-    EPOCH.get_or_init(Instant::now)
+    // Godot's tick clock starts at OS init (os_unix.cpp `_clock_start`), so a
+    // script never observes 0. Lazily started here, the FIRST call measured
+    // its own start and returned exactly 0; back-date by 1µs so the clock is
+    // already running. Engine boot calls `start_clock` to anchor it properly.
+    EPOCH.get_or_init(|| {
+        let now = Instant::now();
+        now.checked_sub(std::time::Duration::from_micros(1)).unwrap_or(now)
+    })
+}
+
+/// Starts the tick clock (idempotent) — Godot's `OS::initialize` setting
+/// `_clock_start`. Called from engine boot so `get_ticks_*` measure time since
+/// the engine started, not since some script first asked.
+pub fn start_clock() {
+    let _ = epoch();
 }
 
 // ---------------------------------------------------------------------------
@@ -907,5 +921,16 @@ mod tests {
 
         // Unknown tags are not features.
         assert!(!has_feature("totally_made_up_tag"));
+    }
+}
+
+#[cfg(test)]
+mod tick_clock_start_tests {
+    /// The very first `get_ticks_usec` call must not read 0: Godot's clock is
+    /// already running by the time any script asks. Its own test binary would
+    /// share EPOCH, so this is one assertion on whichever call is first here.
+    #[test]
+    fn the_first_tick_read_is_nonzero() {
+        assert!(super::get_ticks_usec() > 0);
     }
 }

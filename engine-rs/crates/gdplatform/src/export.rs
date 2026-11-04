@@ -2052,12 +2052,29 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("game.tscn"), "game").unwrap();
 
+        // ⚠️ Web needs a REAL wasm payload: `generate_web_bundle` refuses to
+        // emit a placeholder `.wasm` (a bundle that looks runnable and is not),
+        // so `run()` with no binary is correctly a failure there. Supply a
+        // minimal module (the `\0asm` magic + version 1) for the web target.
+        let wasm = tmp.join("runtime.wasm");
+        std::fs::write(&wasm, [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]).unwrap();
+        {
+            let out = tmp.join("out_web_no_payload");
+            let cfg = ExportConfig::new("web", "Game").with_resource("game.tscn");
+            let result = PackageExecutor::new(cfg, &tmp, &out).run();
+            assert!(!result.success, "a web export with no wasm payload must fail loudly");
+        }
+
         for platform in &["linux", "windows", "macos", "web"] {
             let out = tmp.join(format!("out_{platform}"));
             let cfg = ExportConfig::new(*platform, "Game").with_resource("game.tscn");
             let mut exec = PackageExecutor::new(cfg, &tmp, &out);
-            let result = exec.run();
-            assert!(result.success, "packaging failed for {platform}");
+            let result = if *platform == "web" {
+                exec.run_with_binary(Some(&wasm))
+            } else {
+                exec.run()
+            };
+            assert!(result.success, "packaging failed for {platform}: {:?}", result.messages);
             assert!(
                 result.output_path.contains(platform),
                 "output should contain platform name for {platform}"

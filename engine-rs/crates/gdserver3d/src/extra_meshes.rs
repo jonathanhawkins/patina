@@ -198,10 +198,13 @@ fn add_quad(
     uvs.push([1.0, 1.0]);
     uvs.push([0.0, 1.0]);
 
+    // Emitted CLOCKWISE seen from outside — Godot's front face
+    // (`doc/classes/ArrayMesh.xml:49`): reverse the order whose raw cross
+    // product already points outward.
     if flip {
-        indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
-    } else {
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    } else {
+        indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
     }
 }
 
@@ -228,10 +231,11 @@ fn add_tri(
     uvs.push([1.0, 0.0]);
     uvs.push([0.5, 1.0]);
 
+    // Clockwise seen from outside, as `add_quad`.
     if flip {
-        indices.extend_from_slice(&[base, base + 2, base + 1]);
-    } else {
         indices.extend_from_slice(&[base, base + 1, base + 2]);
+    } else {
+        indices.extend_from_slice(&[base, base + 2, base + 1]);
     }
 }
 
@@ -480,8 +484,10 @@ mod tests {
 
     #[test]
     fn prism_face_normals_point_outward() {
-        // For this convex solid centered at the origin, every triangle's normal
-        // must point away from the centroid (outward).
+        // For this convex solid centered at the origin, every triangle must be
+        // a FRONT face seen from outside: Godot winds front faces CLOCKWISE
+        // (`doc/classes/ArrayMesh.xml:49`), so the raw `(b-a)×(c-a)` points
+        // INWARD while the stored vertex normal points outward.
         let mesh = PrismMesh {
             size: Vector3::new(2.0, 2.0, 2.0),
             left_to_right: 0.7,
@@ -494,8 +500,12 @@ mod tests {
             let face_center = (a + b + c) * (1.0 / 3.0);
             let geo_normal = (b - a).cross(c - a).normalized();
             assert!(
-                geo_normal.dot(face_center) > 0.0,
-                "winding gives inward normal for {a:?},{b:?},{c:?}"
+                geo_normal.dot(face_center) < 0.0,
+                "triangle {a:?},{b:?},{c:?} is not clockwise seen from outside"
+            );
+            assert!(
+                mesh.normals[tri[0] as usize].dot(face_center) > 0.0,
+                "vertex normal must still point outward for {a:?},{b:?},{c:?}"
             );
         }
     }

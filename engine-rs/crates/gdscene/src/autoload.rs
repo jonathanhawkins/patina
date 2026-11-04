@@ -45,6 +45,11 @@ pub struct AutoloadResult {
     /// `(autoload name, root node id)` for each successfully instantiated
     /// entry, in instantiation order.
     pub nodes: Vec<(String, NodeId)>,
+    /// One line per autoload that failed to load or whose script failed to
+    /// compile. These went to `tracing::warn!` only, so a typo in a global
+    /// singleton's script left every `Global.x` reading null with nothing on
+    /// screen; a host (the editor's Play) surfaces them.
+    pub errors: Vec<String>,
 }
 
 impl AutoloadResult {
@@ -96,7 +101,7 @@ pub fn instantiate_autoloads(
 ) -> AutoloadResult {
     let mut result = AutoloadResult::default();
     for entry in autoloads {
-        match instantiate_one(tree, root_id, entry, project_root) {
+        match instantiate_one(tree, root_id, entry, project_root, &mut result.errors) {
             Some(node_id) => {
                 // Bind the autoload's global name so scripts can write
                 // `Global.score` without a get_node (pat-nzgdu.70). Registered
@@ -113,6 +118,10 @@ pub fn instantiate_autoloads(
                     path = %entry.path,
                     "autoload: failed to instantiate; skipping"
                 );
+                result.errors.push(format!(
+                    "autoload {}: failed to load {}",
+                    entry.name, entry.path
+                ));
             }
         }
     }
@@ -178,6 +187,7 @@ fn instantiate_one(
     root_id: NodeId,
     entry: &AutoloadEntry,
     project_root: &Path,
+    errors: &mut Vec<String>,
 ) -> Option<NodeId> {
     let fs_path = resolve_res_path(project_root, &entry.path);
     let lower = entry.path.to_ascii_lowercase();
@@ -186,7 +196,9 @@ fn instantiate_one(
         // Scene autoload: instance the packed scene and rename its root.
         let source = std::fs::read_to_string(&fs_path).ok()?;
         let scene = PackedScene::from_tscn(&source).ok()?;
-        let node_id = add_packed_scene_to_tree(tree, root_id, &scene).ok()?;
+        // Runtime load: expand the autoload scene's own `instance=` children.
+        let node_id =
+            crate::packed_scene::add_packed_scene_to_tree_from_res(tree, root_id, &scene).ok()?;
         if let Some(node) = tree.get_node_mut(node_id) {
             node.set_name(entry.name.clone());
         }
@@ -202,13 +214,25 @@ fn instantiate_one(
         let node = Node::new(entry.name.clone(), base_class);
         let node_id = tree.add_child(root_id, node).ok()?;
         match GDScriptNodeInstance::from_source(&source, node_id) {
-            Ok(instance) => tree.attach_script(node_id, Box::new(instance)),
+            Ok(mut instance) => {
+                // So `get_script().resource_path` (and any tool listing the
+                // tree) names the autoload's file, as for a scene script.
+                gdscript_interop::bindings::ScriptInstance::set_script_file_path(
+                    &mut instance,
+                    &entry.path,
+                );
+                tree.attach_script(node_id, Box::new(instance))
+            }
             Err(e) => {
                 tracing::warn!(
                     autoload = %entry.name,
                     error = ?e,
                     "autoload: script parse failed; node added without script"
                 );
+                errors.push(format!(
+                    "autoload {}: script {} failed to load: {}",
+                    entry.name, entry.path, e
+                ));
             }
         }
         Some(node_id)

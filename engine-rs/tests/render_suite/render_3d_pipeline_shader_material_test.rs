@@ -110,7 +110,11 @@ fn unshaded_shader_material_ignores_lights() {
     let mut shader_mat = ShaderMaterial3D::new();
     let shader = Shader3D::new(
         ShaderType3D::Spatial,
-        "shader_type spatial;\nrender_mode unshaded;\nuniform vec4 albedo_color : source_color;",
+        // ⚠️ The shader must WRITE ALBEDO. This test used to declare the
+        // uniform and no `fragment()`, and in Godot a spatial shader without
+        // one keeps ALBEDO's default white — the uniform is never read, so
+        // grey could not appear in Godot either.
+        "shader_type spatial;\nrender_mode unshaded;\nuniform vec4 albedo_color : source_color;\nvoid fragment() {\n\tALBEDO = albedo_color.rgb;\n}\n",
     );
     shader_mat.shader = Some(shader);
     shader_mat.set_shader_parameter(
@@ -132,8 +136,24 @@ fn unshaded_shader_material_ignores_lights() {
     });
     assert!(
         exact_gray > 50,
-        "unshaded shader should produce uniform gray regardless of lights ({exact_gray} matching pixels)"
+        "unshaded shader should produce uniform gray regardless of lights ({exact_gray} matching pixels); colours: {:?}",
+        dominant_colours(&fb)
     );
+}
+
+/// The most common non-black pixel colours, for a failure message.
+fn dominant_colours(fb: &FrameBuffer3D) -> Vec<((u8, u8, u8), usize)> {
+    let mut counts = std::collections::HashMap::new();
+    for c in &fb.pixels {
+        let k = ((c.r * 255.0) as u8, (c.g * 255.0) as u8, (c.b * 255.0) as u8);
+        if k != (0, 0, 0) {
+            *counts.entry(k).or_insert(0usize) += 1;
+        }
+    }
+    let mut v: Vec<_> = counts.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    v.truncate(5);
+    v
 }
 
 // ── 3. Shader material with no shader falls back gracefully ──

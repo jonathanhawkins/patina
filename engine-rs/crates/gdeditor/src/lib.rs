@@ -54,6 +54,7 @@ pub mod editor_interface;
 pub mod editor_menu;
 pub mod editor_menu_commands;
 pub mod editor_plugin;
+pub mod agent_mcp;
 pub mod editor_server;
 pub mod editor_settings_dialog;
 pub mod editor_settings_store;
@@ -721,6 +722,16 @@ pub enum EditorCommand {
         entries: Vec<crate::editor_server::ClipboardEntry>,
         /// The nodes created by the paste — what undo removes.
         created_ids: Vec<NodeId>,
+        /// Every node id of each pasted subtree, pre-order, one list per entry.
+        ///
+        /// Redo re-creates the nodes under THESE ids, so a redone paste is the
+        /// same objects again — as in Godot, where the paste's UndoRedo action
+        /// keeps the duplicated nodes alive (`add_do_reference`) and redo
+        /// re-adds those very instances (editor/docks/scene_tree_dock.cpp
+        /// `_paste_nodes`). Re-pasting under fresh ids made a redone paste a
+        /// different node than the one the user (or a later history step, or a
+        /// script holding its instance id) had seen.
+        subtree_ids: Vec<Vec<NodeId>>,
     },
     /// Move a child node to a new index within its parent's child list.
     MoveNode {
@@ -1112,14 +1123,17 @@ impl EditorCommand {
                 parent_id,
                 entries,
                 created_ids,
+                subtree_ids,
             } => {
                 // Redo: re-create the pasted nodes. The originals were removed
-                // by `undo`, and the arena hands out fresh ids, so
-                // `created_ids` is rebuilt rather than reused.
+                // by `undo`; they come back under their ORIGINAL ids (see
+                // `subtree_ids`), so redo restores the very nodes the paste
+                // made rather than look-alikes.
                 let mut fresh = Vec::with_capacity(entries.len());
-                for e in entries.iter() {
-                    fresh.push(crate::editor_server::paste_entry_with_unique_name(
-                        tree, *parent_id, e,
+                for (i, e) in entries.iter().enumerate() {
+                    let reuse = subtree_ids.get(i).map(Vec::as_slice).unwrap_or(&[]);
+                    fresh.push(crate::editor_server::paste_entry_reusing_ids(
+                        tree, *parent_id, e, reuse,
                     )?);
                 }
                 *created_ids = fresh;

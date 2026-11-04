@@ -132,7 +132,7 @@ fn editor_play_lifecycle_order() {
         .texture_cache
         .set_project_root(dir.path().to_string_lossy().to_string());
 
-    let played = build_play_tree(&mut state);
+    let played = build_play_tree(&mut state, None);
     let seq = recorded(&played);
 
     // The headline contract, stated as the whole sequence so a reordering shows
@@ -204,7 +204,7 @@ fn play_notifies_each_node_exactly_once() {
     state
         .texture_cache
         .set_project_root(dir.path().to_string_lossy().to_string());
-    let played = build_play_tree(&mut state);
+    let played = build_play_tree(&mut state, None);
 
     for name in ["Recorder", "A", "B", "C"] {
         let id = node_named(&played, name);

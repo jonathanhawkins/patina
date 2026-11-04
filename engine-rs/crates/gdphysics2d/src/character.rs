@@ -30,6 +30,13 @@ pub struct CharacterBody2D {
     pub position: Vector2,
     /// Collision shape in local space.
     pub shape: Shape2D,
+    /// The collider's LOCAL transform inside the body — the
+    /// `CollisionShape2D`'s `position`/`rotation` (`PhysicsBody2D::shape_transform`).
+    /// Every overlap test places the shape at `position` composed with this.
+    /// It used to be dropped, so a character whose shape sits off its origin
+    /// (the official 2D Platformer demo's player: `(0, -14)`) collided as if
+    /// the shape were centred and stood 14 px above the floor.
+    pub shape_offset: Transform2D,
     /// The up direction for floor/ceiling detection (default: negative Y).
     pub up_direction: Vector2,
     /// Maximum angle (in radians) from up_direction that still counts as floor.
@@ -277,10 +284,17 @@ fn shape_min_extent(shape: &Shape2D) -> f32 {
 
 impl CharacterBody2D {
     /// Creates a new character body at the given position.
+    /// Where the collider sits when the body is at `pos`: the body's
+    /// translation composed with the collider's local `shape_offset`.
+    fn shape_tf(&self, pos: Vector2) -> Transform2D {
+        Transform2D::translated(pos) * self.shape_offset
+    }
+
     pub fn new(position: Vector2, shape: Shape2D) -> Self {
         Self {
             position,
             shape,
+            shape_offset: Transform2D::IDENTITY,
             up_direction: Vector2::new(0.0, -1.0),
             floor_max_angle: DEFAULT_FLOOR_MAX_ANGLE,
             collision_layer: 1,
@@ -377,6 +391,10 @@ impl CharacterBody2D {
         // (2) Grounded slide loop.
         let mut motion = self.velocity * dt;
         let max_slides = self.max_slides.max(1);
+        // Godot's `motion_slide_up` and the FIRST collision's normal, for the
+        // wall-only velocity rule after the loop (`character_body_2d.cpp:266`).
+        let motion_slide_up = motion - up * motion.dot(up);
+        let mut first_normal: Option<Vector2> = None;
 
         for _ in 0..max_slides {
             if motion.length_squared() < 1e-8 {
@@ -395,7 +413,7 @@ impl CharacterBody2D {
                 let mut blocked = false;
                 for _ in 0..steps {
                     let probe = self.position + step;
-                    let tf_probe = Transform2D::translated(probe);
+                    let tf_probe = self.shape_tf(probe);
                     let hit = bodies.iter().any(|body| {
                         (self.collision_mask & body.collision_layer) != 0
                             && deepest_hit_against(&self.shape, &tf_probe, body, step).is_some()
@@ -427,7 +445,7 @@ impl CharacterBody2D {
             }
 
             let target = self.position + motion;
-            let tf_target = Transform2D::translated(target);
+            let tf_target = self.shape_tf(target);
             let mut deepest: Option<(collision::CollisionResult, usize)> = None;
 
             for (idx, body) in bodies.iter().enumerate() {
@@ -483,15 +501,29 @@ impl CharacterBody2D {
                 }
             }
 
-            // Slide: project velocity (px/s) and motion onto the surface plane.
+            // Slide the MOTION onto the surface plane. ⚠️ Not the velocity:
+            // Godot's slide loop leaves `velocity` alone for floors and walls
+            // and only edits it on a ceiling hit (`character_body_2d.cpp:224-
+            // 229`); the floor's gravity reset and the wall-only rescale run
+            // AFTER the loop. Projecting it on every contact zeroed
+            // `velocity.x` for a body pressed into a wall while grounded, so a
+            // script reading `velocity` saw "stopped" where Godot reports the
+            // requested speed (and `get_real_velocity()` reports the stop).
+            first_normal.get_or_insert(surface_normal);
             let speed_before = self.velocity.length();
-            self.velocity = self.velocity - surface_normal * self.velocity.dot(surface_normal);
+            let is_ceiling = surface_normal.dot(-up) > floor_cos;
+            if is_ceiling && vel_dir_facing_up && self.slide_on_ceiling {
+                self.velocity = self.velocity - surface_normal * self.velocity.dot(surface_normal);
+            }
             let mut new_motion = remainder;
 
-            // floor_constant_speed: keep the speed magnitude across floor slides
-            // instead of bleeding speed into the slope normal.
-            if is_floor && self.floor_constant_speed && self.velocity.length_squared() > 1e-8 {
-                self.velocity = self.velocity.normalized() * speed_before;
+            // floor_constant_speed: keep the TRAVEL length across a floor slide
+            // instead of bleeding it into the slope normal. Godot applies this
+            // to the motion (`character_body_2d.cpp:210-213`), never to
+            // `velocity`, which the floor reset below flattens regardless.
+            let _ = speed_before;
+            if is_floor && self.floor_constant_speed && new_motion.length_squared() > 1e-8 {
+                new_motion = new_motion.normalized() * motion.length();
             }
 
             // slide_on_ceiling: when disabled, ceiling contact cancels motion so
@@ -529,6 +561,27 @@ impl CharacterBody2D {
         // platform under it is not forgotten (pat-s3rrv.93).
         if !self.on_floor && was_on_floor && !vel_dir_facing_up {
             self.probe_resting_floor(up, floor_cos, bodies, &mut floor_platform_vel);
+        }
+
+        // (3c) Godot's post-loop velocity rules (`character_body_2d.cpp:264-
+        // 282`). Against a wall in the air, the horizontal part of the velocity
+        // is the wall-slid one; on the floor the vertical part is reset, which
+        // is what stops gravity accumulating.
+        if self.on_wall && !self.on_floor && !self.on_ceiling {
+            if let Some(n0) = first_normal {
+                if motion_slide_up.dot(n0) < 0.0 {
+                    let vertical = up * up.dot(self.velocity);
+                    let slide_motion = self.velocity - n0 * self.velocity.dot(n0);
+                    self.velocity = if motion_slide_up.dot(slide_motion) < 0.0 {
+                        vertical
+                    } else {
+                        vertical + (slide_motion - up * slide_motion.dot(up))
+                    };
+                }
+            }
+        }
+        if self.on_floor && !vel_dir_facing_up {
+            self.velocity = self.velocity - up * self.velocity.dot(up);
         }
 
         // (4) Remember the platform velocity for next frame's carry.
@@ -572,7 +625,7 @@ impl CharacterBody2D {
         // overlap, and a strictly-zero probe misses a body sitting exactly on
         // the surface.
         let probe = -up * RESTING_FLOOR_PROBE;
-        let tf = Transform2D::translated(self.position + probe);
+        let tf = self.shape_tf(self.position + probe);
         let mut best: Option<(collision::CollisionResult, usize)> = None;
 
         for (idx, body) in bodies.iter().enumerate() {
@@ -611,7 +664,7 @@ impl CharacterBody2D {
         floor_platform_vel: &mut Vector2,
     ) {
         let snap_target = self.position - up * self.floor_snap_length;
-        let tf_target = Transform2D::translated(snap_target);
+        let tf_target = self.shape_tf(snap_target);
         let mut best: Option<(collision::CollisionResult, usize)> = None;
 
         for (idx, body) in bodies.iter().enumerate() {
@@ -728,7 +781,7 @@ impl CharacterBody2D {
         bodies: &[&PhysicsBody2D],
     ) -> Option<KinematicCollision2D> {
         let target = self.position + motion;
-        let tf_target = Transform2D::translated(target);
+        let tf_target = self.shape_tf(target);
 
         let mut deepest: Option<(collision::CollisionResult, usize)> = None;
 
@@ -1138,62 +1191,61 @@ mod tests {
     /// floor_stop_on_slope stops a body with no lateral input from sliding down.
     #[test]
     fn floor_stop_on_slope_prevents_downhill_slide() {
+        // ⚠️ Measured on DISPLACEMENT, not the returned velocity. In Godot the
+        // knob shapes the motion; `velocity` is flattened by the floor reset
+        // (`character_body_2d.cpp:281`, `velocity.slide(up_direction)`) either
+        // way, so a purely-downward input returns ~0 in both cases. Both bodies
+        // start overlapping the slope by the same amount, so the depenetration
+        // push is common-mode and the DIFFERENCE is the downhill slide.
         let ground = make_ground_circle();
         let bodies: Vec<&PhysicsBody2D> = vec![&ground];
+        let start = Vector2::new(30.0, 13.6);
 
-        // Sliding disabled: purely-downward velocity on a slope => stop.
-        let mut stopping =
-            CharacterBody2D::new(Vector2::new(30.0, 13.6), Shape2D::Circle { radius: 1.0 });
+        let mut stopping = CharacterBody2D::new(start, Shape2D::Circle { radius: 1.0 });
         stopping.floor_stop_on_slope = true;
         let v_stop = stopping.move_and_slide_delta(Vector2::new(0.0, 30.0), 1.0, &bodies);
         assert!(stopping.is_on_floor(), "should detect the slope as floor");
-        assert!(
-            v_stop.length() < 0.5,
-            "stop_on_slope should zero velocity, got {:?}",
-            v_stop
-        );
+        assert!(v_stop.length() < 0.5, "stopped on the slope, got {v_stop:?}");
 
-        // Sliding enabled: the same body slides downhill (gains lateral speed).
-        let mut sliding =
-            CharacterBody2D::new(Vector2::new(30.0, 13.6), Shape2D::Circle { radius: 1.0 });
+        let mut sliding = CharacterBody2D::new(start, Shape2D::Circle { radius: 1.0 });
         sliding.floor_stop_on_slope = false;
-        let v_slide = sliding.move_and_slide_delta(Vector2::new(0.0, 30.0), 1.0, &bodies);
+        sliding.move_and_slide_delta(Vector2::new(0.0, 30.0), 1.0, &bodies);
+
+        let downhill_stop = (stopping.position - start).x;
+        let downhill_slide = (sliding.position - start).x;
         assert!(
-            v_slide.x.abs() > 5.0,
-            "without stop_on_slope the body should slide downhill, got {:?}",
-            v_slide
+            downhill_slide > downhill_stop + 0.3,
+            "without stop_on_slope the body must slide further downhill: \
+             slid {downhill_slide} vs stopped {downhill_stop}"
         );
     }
 
-    /// floor_constant_speed preserves speed magnitude across a floor slide.
+    /// floor_constant_speed keeps the TRAVEL across a floor slide.
     #[test]
     fn floor_constant_speed_preserves_speed() {
+        // On displacement for the same reason as the test above: Godot's
+        // constant speed is a property of the motion (`character_body_2d.cpp:
+        // 210-213`); the returned velocity is floor-flattened in both cases.
         let ground = make_ground_circle();
         let bodies: Vec<&PhysicsBody2D> = vec![&ground];
         let input = Vector2::new(10.0, 20.0);
-        let input_speed = input.length();
+        let start = Vector2::new(30.0, 13.6);
 
-        let mut constant =
-            CharacterBody2D::new(Vector2::new(30.0, 13.6), Shape2D::Circle { radius: 1.0 });
+        let mut constant = CharacterBody2D::new(start, Shape2D::Circle { radius: 1.0 });
         constant.floor_constant_speed = true;
-        let v_const = constant.move_and_slide_delta(input, 0.5, &bodies);
+        constant.move_and_slide_delta(input, 0.5, &bodies);
         assert!(constant.is_on_floor());
 
-        let mut varying =
-            CharacterBody2D::new(Vector2::new(30.0, 13.6), Shape2D::Circle { radius: 1.0 });
+        let mut varying = CharacterBody2D::new(start, Shape2D::Circle { radius: 1.0 });
         varying.floor_constant_speed = false;
-        let v_var = varying.move_and_slide_delta(input, 0.5, &bodies);
+        varying.move_and_slide_delta(input, 0.5, &bodies);
 
+        let d_const = (constant.position - start).length();
+        let d_var = (varying.position - start).length();
         assert!(
-            (v_const.length() - input_speed).abs() < 0.5,
-            "constant_speed should preserve speed ~{}, got {}",
-            input_speed,
-            v_const.length()
-        );
-        assert!(
-            v_var.length() < input_speed - 1.0,
-            "without constant_speed the slope should bleed speed, got {}",
-            v_var.length()
+            d_const > d_var + 0.1,
+            "constant_speed must keep more of the travel than a plain slide, \
+             which bleeds it into the slope normal: {d_const} vs {d_var}"
         );
     }
 

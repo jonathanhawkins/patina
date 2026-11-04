@@ -163,6 +163,9 @@ fn change_scene_to_file_swaps_at_frame_end() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let id = tree.add_child(root, Node::new("SceneA", "Node")).unwrap();
+    // The running scene, as every boot path records it: `change_scene_*`
+    // frees `current_scene` only (Godot), so a bare root child would survive.
+    tree.set_current_scene(id, None);
     // `change_scene_to_file` resolves through `gdcore::resolve_path`, so the
     // script is handed an absolute path rather than a `res://` one.
     let src = format!(

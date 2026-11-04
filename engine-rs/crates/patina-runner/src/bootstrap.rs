@@ -419,6 +419,19 @@ impl EngineBootstrap {
             });
         }
 
+        // Root `res://` at the project directory, as Godot's boot does before
+        // anything loads. `project_boot::boot_project` sets it for the runner's
+        // own path; `EngineBootstrap` never did, so every `res://` read in a
+        // game booted this way failed — `load("res://layout.tres")` fell back
+        // to a bare `Resource` placeholder and `get_class()` lied. `user://`
+        // keeps whatever root is already installed.
+        if self.config.project_dir.exists() {
+            gdcore::file_access::set_path_roots(
+                Some(self.config.project_dir.clone()),
+                gdcore::file_access::user_root(),
+            );
+        }
+
         // Install the DisplayServer backend from the project's configured
         // viewport, so a script calling `DisplayServer.window_get_size()` sees
         // the real value instead of the interpreter's old hardcoded 1920x1080

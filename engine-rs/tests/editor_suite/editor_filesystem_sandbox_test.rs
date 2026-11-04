@@ -3,8 +3,12 @@
 //! Acceptance: `/api/filesystem`, `/api/filesystem/tree`, `/api/filesystem/delete`,
 //! `/api/filesystem/mkdir`, and `/api/filesystem/rename` all reject paths
 //! containing `..` or pointing outside the project root with HTTP 403 and a
-//! machine-readable error code (`E_PATH_SANDBOX`).
+//! machine-readable error code (`path_sandbox`, the envelope's lower-case code).
 
+// The server's error envelope uses lower-case snake codes (`rate_limit`,
+// `not_found`, `path_sandbox`, `cors_origin` — pinned by
+// editor_error_envelope_test.rs); these tests predate it and asked for
+// `E_`-prefixed codes the server never emits.
 use gdeditor::editor_server::{EditorServerHandle, EditorState};
 use gdscene::node::Node;
 use gdscene::SceneTree;
@@ -70,7 +74,7 @@ fn http_post(port: u16, path: &str, body: &str) -> String {
     http_raw(port, &req)
 }
 
-/// Each filesystem endpoint must produce a 403 with `E_PATH_SANDBOX` when
+/// Each filesystem endpoint must produce a 403 with `path_sandbox` when
 /// asked to touch a path that contains `..` or escapes the project root.
 #[test]
 fn filesystem_endpoints_reject_traversal_with_403_and_machine_code() {
@@ -111,8 +115,8 @@ fn filesystem_endpoints_reject_traversal_with_403_and_machine_code() {
         );
         let body = response_body(&resp);
         assert!(
-            body.contains(r#""code":"E_PATH_SANDBOX""#),
-            "{method} {path} response body must carry machine-readable code E_PATH_SANDBOX, got: {body}",
+            body.contains(r#""code":"path_sandbox""#),
+            "{method} {path} response body must carry machine-readable code path_sandbox, got: {body}",
         );
     }
 
@@ -149,8 +153,8 @@ fn filesystem_endpoints_reject_traversal_with_403_and_machine_code() {
         );
         let body = response_body(&resp);
         assert!(
-            body.contains(r#""code":"E_PATH_SANDBOX""#),
-            "{method} {path} response body must carry machine-readable code E_PATH_SANDBOX, got: {body}",
+            body.contains(r#""code":"path_sandbox""#),
+            "{method} {path} response body must carry machine-readable code path_sandbox, got: {body}",
         );
     }
 
@@ -167,8 +171,8 @@ fn filesystem_endpoints_reject_traversal_with_403_and_machine_code() {
     );
     let body = response_body(&resp);
     assert!(
-        body.contains(r#""code":"E_PATH_SANDBOX""#),
-        "rename traversal new_name must carry E_PATH_SANDBOX, got: {body}",
+        body.contains(r#""code":"path_sandbox""#),
+        "rename traversal new_name must carry path_sandbox, got: {body}",
     );
 
     handle.stop();

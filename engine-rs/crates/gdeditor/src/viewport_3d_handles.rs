@@ -226,6 +226,238 @@ pub fn box_handle_drag_commands(
     ))
 }
 
+/// Smallest extent any shape handle may collapse to. Godot clamps every one of
+/// them to the same `0.001` — the box path spells it [`MIN_BOX_EXTENT`], and
+/// sphere/capsule/cylinder use this.
+pub const MIN_SHAPE_EXTENT: f32 = 0.001;
+
+/// Handles a `SphereShape3D` exposes: one radius handle on +X.
+pub const SPHERE_HANDLE_COUNT: usize = 1;
+
+/// Handles a `CapsuleShape3D`/`CylinderShape3D` exposes: radius on +X, then
+/// height on +Y and -Y.
+pub const CYLINDER_HANDLE_COUNT: usize = 3;
+
+/// Handle positions for a sphere of `radius`
+/// (`collision_shape_3d_gizmo_plugin.cpp:109`).
+pub fn sphere_get_handles(radius: f32) -> [Vector3; SPHERE_HANDLE_COUNT] {
+    [Vector3::new(radius, 0.0, 0.0)]
+}
+
+/// Resolves a sphere radius drag to the new radius
+/// (`collision_shape_3d_gizmo_plugin.cpp:183-197`).
+///
+/// `ra` is the point on the +X axis closest to the mouse ray, in the shape's
+/// LOCAL space. The sphere has no position component: unlike the box and the
+/// cylinder, growing a sphere never moves the node.
+pub fn sphere_set_handle(ra: Vector3, snap_step: Option<f32>) -> f32 {
+    let mut d = ra.x;
+    if let Some(step) = snap_step {
+        d = snapped(d, step);
+    }
+    d.max(MIN_SHAPE_EXTENT)
+}
+
+/// Handle positions for a cylinder/capsule of `height` and `radius`
+/// (`gizmo_3d_helper.cpp:143`).
+///
+/// Order is Godot's handle id order, and the ids are load-bearing: 0 is radius,
+/// 1 is the +Y cap and 2 is the -Y cap, which is how
+/// [`cylinder_or_capsule_set_handle`] recovers the axis and sign.
+pub fn cylinder_get_handles(height: f32, radius: f32) -> [Vector3; CYLINDER_HANDLE_COUNT] {
+    [
+        Vector3::new(radius, 0.0, 0.0),
+        Vector3::new(0.0, height * 0.5, 0.0),
+        Vector3::new(0.0, height * -0.5, 0.0),
+    ]
+}
+
+/// Resolves a cylinder or capsule handle drag, a 1:1 port of
+/// `Gizmo3DHelper::_cylinder_or_capsule_set_handle` (`gizmo_3d_helper.cpp:159`).
+///
+/// Returns `(radius, height, position)`. `ra` is the point on the dragged
+/// handle's axis closest to the mouse ray in LOCAL space; `symmetric` is
+/// Godot's Alt modifier.
+///
+/// 🔑 **The two couplings are the whole reason this is a port and not a
+/// formula.** For a capsule, `height` is the TOTAL height including the
+/// hemispherical caps, so the two dimensions cannot move independently:
+///
+/// 1. Dragging the **radius** out PUSHES the height up —
+///    `height = max(initial_height, radius * 2)`. Without it a fat capsule
+///    inverts, because the caps would overlap past the cylinder body.
+/// 2. Dragging the **height** in PULLS the radius down —
+///    `radius = min(initial_radius, height / 2)`.
+///
+/// A cylinder has neither coupling: each dimension keeps the other's initial
+/// value. Getting this backwards yields a gizmo that looks right until a drag
+/// crosses `height == 2 * radius`.
+///
+/// ⚠️ `d` is snapped BEFORE the branches, exactly as upstream does, so the snap
+/// applies to the projected drag distance rather than to the resulting
+/// dimension — snapping the result would quantise height in steps of half the
+/// grid.
+pub fn cylinder_or_capsule_set_handle(
+    initial_radius: f32,
+    initial_height: f32,
+    initial_transform: &Transform3D,
+    handle_id: usize,
+    ra: Vector3,
+    symmetric: bool,
+    snap_step: Option<f32>,
+    is_capsule: bool,
+) -> (f32, f32, Vector3) {
+    // id 2 is the -Y cap; ids 0 and 1 point positive. id 0 works on X, the
+    // height handles on Y.
+    let sign = if handle_id == 2 { -1.0f32 } else { 1.0 };
+    let axis = if handle_id == 0 { 0usize } else { 1 };
+
+    // Godot takes `axis_vector.dot(ra)` where `axis_vector[axis] = sign`,
+    // which is just the signed component.
+    let mut d = sign * axis_get(ra, axis);
+    if let Some(step) = snap_step {
+        d = snapped(d, step);
+    }
+
+    if handle_id == 0 {
+        let radius = d.max(MIN_SHAPE_EXTENT);
+        let height = if is_capsule {
+            initial_height.max(radius * 2.0)
+        } else {
+            initial_height
+        };
+        return (radius, height, initial_transform.origin);
+    }
+
+    let height = if symmetric {
+        d * 2.0
+    } else {
+        (initial_height * 0.5) + d
+    }
+    .max(MIN_SHAPE_EXTENT);
+
+    let position = if symmetric {
+        initial_transform.origin
+    } else {
+        let mut offset = Vector3::ZERO;
+        axis_set(&mut offset, axis, (height - initial_height) * 0.5 * sign);
+        initial_transform.xform(offset)
+    };
+
+    let radius = if is_capsule {
+        initial_radius.min(height / 2.0)
+    } else {
+        initial_radius
+    };
+
+    (radius, height, position)
+}
+
+/// Reads a shape dimension companion as `f32`, accepting either numeric
+/// Variant spelling.
+///
+/// A `.tscn` writes `radius = 0.5` (Float) but a hand-built node or an integral
+/// literal can leave an Int, and matching only `Float` would silently treat
+/// `radius = 1` as "no radius" and refuse the drag.
+fn shape_dimension(node: &gdscene::node::Node, key: &str) -> Option<f32> {
+    match node.get_property(key) {
+        gdvariant::Variant::Float(f) => Some(f as f32),
+        gdvariant::Variant::Int(i) => Some(i as f32),
+        _ => None,
+    }
+}
+
+/// Resolves a `SphereShape3D` radius drag into one UNDOABLE editor command.
+///
+/// Returns `None` when the node records no radius — refusing beats inventing a
+/// default and silently resizing the shape to it.
+pub fn sphere_handle_drag_commands(
+    tree: &gdscene::scene_tree::SceneTree,
+    node_id: gdscene::node::NodeId,
+    handle_id: usize,
+    ra: Vector3,
+    snap_step: Option<f32>,
+) -> Option<crate::EditorCommand> {
+    if handle_id >= SPHERE_HANDLE_COUNT {
+        return None;
+    }
+    let node = tree.get_node(node_id)?;
+    shape_dimension(node, "__shape__radius")?;
+    let radius = sphere_set_handle(ra, snap_step);
+    Some(crate::EditorCommand::SetProperty {
+        node_id,
+        property: "__shape__radius".to_string(),
+        new_value: gdvariant::Variant::Float(radius as f64),
+        old_value: gdvariant::Variant::Nil,
+    })
+}
+
+/// Resolves a `CapsuleShape3D`/`CylinderShape3D` handle drag into UNDOABLE
+/// editor commands: `(radius, height, position)`.
+///
+/// All three are returned on **every** handle, including a pure radius drag,
+/// because of the capsule couplings documented on
+/// [`cylinder_or_capsule_set_handle`]: widening a capsule can raise its height,
+/// so a caller that applied only the dragged dimension would leave the shape in
+/// a state the gizmo never computed. For a cylinder the untouched dimensions
+/// simply re-assert their initial values, which is harmless and keeps one undo
+/// step shape for both classes.
+pub fn cylinder_capsule_handle_drag_commands(
+    tree: &gdscene::scene_tree::SceneTree,
+    node_id: gdscene::node::NodeId,
+    handle_id: usize,
+    ra: Vector3,
+    symmetric: bool,
+    snap_step: Option<f32>,
+    is_capsule: bool,
+) -> Option<(
+    crate::EditorCommand,
+    crate::EditorCommand,
+    crate::EditorCommand,
+)> {
+    if handle_id >= CYLINDER_HANDLE_COUNT {
+        return None;
+    }
+    let node = tree.get_node(node_id)?;
+    let initial_radius = shape_dimension(node, "__shape__radius")?;
+    let initial_height = shape_dimension(node, "__shape__height")?;
+    let initial_transform = gdscene::node3d::get_global_transform(tree, node_id);
+
+    let (radius, height, position) = cylinder_or_capsule_set_handle(
+        initial_radius,
+        initial_height,
+        &initial_transform,
+        handle_id,
+        ra,
+        symmetric,
+        snap_step,
+        is_capsule,
+    );
+
+    Some((
+        crate::EditorCommand::SetProperty {
+            node_id,
+            property: "__shape__radius".to_string(),
+            new_value: gdvariant::Variant::Float(radius as f64),
+            old_value: gdvariant::Variant::Nil,
+        },
+        crate::EditorCommand::SetProperty {
+            node_id,
+            property: "__shape__height".to_string(),
+            new_value: gdvariant::Variant::Float(height as f64),
+            old_value: gdvariant::Variant::Nil,
+        },
+        // A non-symmetric height drag moves one cap and re-centres the node so
+        // the other cap stays put — the same rule the box path follows.
+        crate::EditorCommand::SetProperty {
+            node_id,
+            property: "position".to_string(),
+            new_value: gdvariant::Variant::Vector3(position),
+            old_value: gdvariant::Variant::Nil,
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

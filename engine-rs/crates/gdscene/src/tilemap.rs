@@ -669,6 +669,13 @@ pub fn tile_occluder_polygons(
 /// same way `__tile_nav_sources__` carries the navigation layer.
 pub const TILE_PHYSICS_SOURCES: &str = "__tile_physics_sources__";
 
+/// The TileSet physics layer 0's `collision_layer` / `collision_mask`,
+/// flattened onto the TileMapLayer node. Godot gives every tile body of that
+/// physics layer these bits (`TileMapLayer::_physics_update_cell`); both
+/// default to 1, as in `TileSet::add_physics_layer`.
+pub const TILE_PHYSICS_COLLISION_LAYER: &str = "__tile_physics_collision_layer";
+pub const TILE_PHYSICS_COLLISION_MASK: &str = "__tile_physics_collision_mask";
+
 /// Prefix of the flattened per-tile collision companions. The full keys are
 /// `__tile_physics_<source>_<ax>_<ay>_points` (a `PackedVector2Array` in
 /// **tile-local pixels, relative to the tile centre**, which is Godot's own
@@ -679,6 +686,30 @@ pub const TILE_PHYSICS_PREFIX: &str = "__tile_physics_";
 pub fn tile_physics_points_key(source_id: i32, atlas: Vector2i) -> String {
     format!(
         "{TILE_PHYSICS_PREFIX}{source_id}_{}_{}_points",
+        atlas.x, atlas.y
+    )
+}
+
+/// [`tile_physics_points_key`] for an ALTERNATIVE tile (`alternative > 0`):
+/// each alternative carries its own polygon in Godot (a flipped variant's is
+/// mirrored), so they cannot share the default tile's key.
+pub fn tile_physics_points_alt_key(source_id: i32, atlas: Vector2i, alternative: i32) -> String {
+    format!(
+        "{TILE_PHYSICS_PREFIX}{source_id}_{}_{}_alt{alternative}_points",
+        atlas.x, atlas.y
+    )
+}
+
+/// Bit flags of an alternative tile's orientation (`TileData.flip_h` /
+/// `flip_v` / `transpose`), flattened under [`tile_alternative_flags_key`].
+pub const TILE_FLIP_H: i64 = 1;
+pub const TILE_FLIP_V: i64 = 2;
+pub const TILE_TRANSPOSE: i64 = 4;
+
+/// Where `packed_scene` stores an alternative tile's orientation flags.
+pub fn tile_alternative_flags_key(source_id: i32, atlas: Vector2i, alternative: i32) -> String {
+    format!(
+        "{TILE_SET_PREFIX}source_{source_id}_alt_{}_{}_{alternative}_flags",
         atlas.x, atlas.y
     )
 }
@@ -825,7 +856,7 @@ pub fn tile_collision_infos(
     cells: &HashMap<Vector2i, TileData>,
     tile_size: Vector2i,
     physics_sources: &[i32],
-    get_polygon: impl Fn(i32, Vector2i) -> (Vec<Vector2>, bool),
+    get_polygon: impl Fn(i32, Vector2i, i32) -> (Vec<Vector2>, bool),
 ) -> Vec<gdphysics2d::tilemap_collision::TileCollisionInfo> {
     use gdphysics2d::tilemap_collision::TileCollisionInfo;
 
@@ -841,7 +872,8 @@ pub fn tile_collision_infos(
         if !physics_sources.contains(&data.source_id) {
             continue;
         }
-        let (polygon, one_way) = get_polygon(data.source_id, data.atlas_coords);
+        let (polygon, one_way) =
+            get_polygon(data.source_id, data.atlas_coords, data.alternative_id);
         if polygon.len() >= 3 {
             out.push(TileCollisionInfo::polygon(*cell, polygon, one_way));
         } else {

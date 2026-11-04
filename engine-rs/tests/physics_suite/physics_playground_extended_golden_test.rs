@@ -538,8 +538,9 @@ fn extended_velocity_evolves() {
         last_pos.y
     );
 
-    // If no collision occurred, velocity stays constant for rigid bodies
-    // (no gravity in our engine). If collision did occur, velocity changes.
+    // Rigid bodies fall under the default 2D gravity (980 px/s², as in Godot),
+    // so velocity is not constant; the golden was regenerated 2026-11-03 after
+    // it was found to record a world with NO gravity (vy frozen at 120).
     // Either way the position changes are the key determinism indicator.
     let _ = (first_vel, last_vel); // used for documentation
 }

@@ -637,6 +637,60 @@ pub fn register_class(reg: ClassRegistration) -> ClassId {
         .register(reg)
 }
 
+/// The ONE definition of `Resource` (pat-s3rrv.57): its signals, its three
+/// members and its virtuals.
+///
+/// 🔑 Every registrar that needs `Resource` registers THIS, never a bare
+/// `ClassRegistration::new("Resource")`. Nine registrars used to register it
+/// bare behind `if !class_exists("Resource")`, so whichever ran first decided
+/// whether Resource had `resource_local_to_scene` / `resource_name` /
+/// `resource_path` at all — in a viewport- or 3D-only registry it had none,
+/// and every subclass then appeared to own them (and `resource_name` lost its
+/// `get_name`/`set_name` accessors). `register()` merges by member name, so
+/// registering this from every site is additive and idempotent.
+fn resource_class() -> ClassRegistration {
+    ClassRegistration::new("Resource")
+        .parent("RefCounted")
+        .signal(SignalInfo::new("setup_local_to_scene_requested"))
+        .signal(SignalInfo::new("changed"))
+        .property(
+            PropertyInfo::new("resource_local_to_scene", Variant::Bool(false))
+                .with_accessors("is_local_to_scene", "set_local_to_scene"),
+        )
+        // 🔑 `set_name` / `get_name`, NOT `set_resource_name`. The accessor
+        // pair is stored from the doc rather than derived from the property
+        // name, and this is a member where the two disagree.
+        .property(
+            PropertyInfo::new("resource_name", Variant::String(String::new()))
+                .with_accessors("get_name", "set_name"),
+        )
+        .property(
+            PropertyInfo::new("resource_path", Variant::String(String::new()))
+                .with_accessors("get_path", "set_path"),
+        )
+        // Resource's virtuals (pat-s3rrv.157). All four were absent from
+        // ClassDB tree-wide, so reflection could not see them and a script
+        // overriding `_setup_local_to_scene` had nothing to be dispatched
+        // against.
+        //
+        // 🔑 Qualifiers transcribed from doc/classes/Resource.xml, not
+        // derived: `_set_path_cache` is `virtual const` even though it
+        // reads as a setter, and `_get_rid` is const too. Guessing from the
+        // names gets both wrong.
+        .method(MethodInfo::new("_setup_local_to_scene", 0).virtual_method())
+        .method(
+            MethodInfo::new("_get_rid", 0)
+                .virtual_method()
+                .const_method(),
+        )
+        .method(MethodInfo::new("_reset_state", 0).virtual_method())
+        .method(
+            MethodInfo::new("_set_path_cache", 1)
+                .virtual_method()
+                .const_method(),
+        )
+}
+
 /// Returns class info by name, if registered.
 pub fn get_class_info(name: &str) -> Option<ClassInfo> {
     global_db()
@@ -3044,6 +3098,21 @@ pub fn register_3d_classes() {
 
     register_class(
         ClassRegistration::new("RigidBody3D")
+            // Godot's force/impulse/contact methods (doc/classes/RigidBody3D.xml),
+            // each dispatched by gdscene's RigidBody3D arms (Vector3 args).
+            // `get_inverse_inertia_tensor` and `set_axis_velocity` have no 3D
+            // arm yet, so they stay out rather than answering Nil.
+            .method(MethodInfo::new("apply_central_force", 1))
+            .method(MethodInfo::new("apply_force", 2))
+            .method(MethodInfo::new("apply_central_impulse", 1))
+            .method(MethodInfo::new("apply_impulse", 2))
+            .method(MethodInfo::new("apply_torque", 1))
+            .method(MethodInfo::new("apply_torque_impulse", 1))
+            .method(MethodInfo::new("add_constant_central_force", 1))
+            .method(MethodInfo::new("add_constant_force", 2))
+            .method(MethodInfo::new("add_constant_torque", 1))
+            .method(MethodInfo::new("get_contact_count", 0).const_method())
+            .method(MethodInfo::new("get_colliding_bodies", 0).const_method())
             .signal(SignalInfo::new("body_entered").arg("body"))
             .signal(SignalInfo::new("body_exited").arg("body"))
             .signal(
@@ -3250,7 +3319,32 @@ pub fn register_3d_classes() {
             .property(
                 PropertyInfo::new("wall_min_slide_angle", Variant::Float(0.2617994))
                     .with_accessors("get_wall_min_slide_angle", "set_wall_min_slide_angle"),
-            ),
+            )
+            // Godot's non-accessor methods (scene/3d/physics/character_body_3d.cpp
+            // `_bind_methods`). Every one is dispatched in gdscene's
+            // `call_node_method` (the 3D slide publishes the same
+            // `_slide_collisions` the 2D one does), so `has_method` now answers
+            // what a call already did. None was registered, so
+            // `has_method("move_and_slide")` was false on a CharacterBody3D.
+            .method(MethodInfo::new("move_and_slide", 0))
+            .method(MethodInfo::new("apply_floor_snap", 0))
+            .method(MethodInfo::new("is_on_floor", 0).const_method())
+            .method(MethodInfo::new("is_on_floor_only", 0).const_method())
+            .method(MethodInfo::new("is_on_ceiling", 0).const_method())
+            .method(MethodInfo::new("is_on_ceiling_only", 0).const_method())
+            .method(MethodInfo::new("is_on_wall", 0).const_method())
+            .method(MethodInfo::new("is_on_wall_only", 0).const_method())
+            .method(MethodInfo::new("get_floor_normal", 0).const_method())
+            .method(MethodInfo::new("get_wall_normal", 0).const_method())
+            .method(MethodInfo::new("get_last_motion", 0).const_method())
+            .method(MethodInfo::new("get_position_delta", 0).const_method())
+            .method(MethodInfo::new("get_real_velocity", 0).const_method())
+            .method(MethodInfo::new("get_floor_angle", 1).const_method())
+            .method(MethodInfo::new("get_platform_velocity", 0).const_method())
+            .method(MethodInfo::new("get_platform_angular_velocity", 0).const_method())
+            .method(MethodInfo::new("get_slide_collision_count", 0).const_method())
+            .method(MethodInfo::new("get_slide_collision", 1))
+            .method(MethodInfo::new("get_last_slide_collision", 0)),
     );
 
     register_class(
@@ -3417,6 +3511,12 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("CollisionShape3D")
             .parent("Node3D")
+            // Godot's fourth member (doc/classes/CollisionShape3D.xml) — the
+            // Shape3D resource. It lives in the node's property bag, which the
+            // generic accessor bridge serves for `get_shape` / `set_shape`.
+            .property(
+                PropertyInfo::new("shape", Variant::Nil).with_accessors("get_shape", "set_shape"),
+            )
             .property(
                 PropertyInfo::new("disabled", Variant::Bool(false))
                     .with_accessors("is_disabled", "set_disabled"),
@@ -7968,7 +8068,7 @@ pub fn register_3d_classes() {
             .method(MethodInfo::new("tetrahedralize_delaunay", 1).const_method()),
     );
     if !class_exists("Resource") {
-        register_class(ClassRegistration::new("Resource").parent("RefCounted"));
+        register_class(resource_class());
     }
     register_class(ClassRegistration::new("VisualScript").parent("Resource"));
 
@@ -10289,6 +10389,11 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("ShaderMaterial")
             .parent("Material")
+            // Godot's one member (doc/classes/ShaderMaterial.xml), backed by
+            // the interpreter's `set_shader` / `get_shader` resource arms.
+            .property(
+                PropertyInfo::new("shader", Variant::Nil).with_accessors("get_shader", "set_shader"),
+            )
             .method(MethodInfo::new("set_shader", 1))
             .method(MethodInfo::new("get_shader", 0))
             .method(MethodInfo::new("set_shader_parameter", 2))
@@ -13529,48 +13634,7 @@ pub fn register_2d_classes() {
     //
     // `resource_scene_unique_id` is deliberately absent: doc/classes/Resource.xml
     // states no `default=` for it, and this translation never invents one.
-    register_class(
-        ClassRegistration::new("Resource")
-            .parent("RefCounted")
-            .signal(SignalInfo::new("setup_local_to_scene_requested"))
-            .signal(SignalInfo::new("changed"))
-            .property(
-                PropertyInfo::new("resource_local_to_scene", Variant::Bool(false))
-                    .with_accessors("is_local_to_scene", "set_local_to_scene"),
-            )
-            // 🔑 `set_name` / `get_name`, NOT `set_resource_name`. The accessor
-            // pair is stored from the doc rather than derived from the property
-            // name, and this is a member where the two disagree.
-            .property(
-                PropertyInfo::new("resource_name", Variant::String(String::new()))
-                    .with_accessors("get_name", "set_name"),
-            )
-            .property(
-                PropertyInfo::new("resource_path", Variant::String(String::new()))
-                    .with_accessors("get_path", "set_path"),
-            )
-            // Resource's virtuals (pat-s3rrv.157). All four were absent from
-            // ClassDB tree-wide, so reflection could not see them and a script
-            // overriding `_setup_local_to_scene` had nothing to be dispatched
-            // against.
-            //
-            // 🔑 Qualifiers transcribed from doc/classes/Resource.xml, not
-            // derived: `_set_path_cache` is `virtual const` even though it
-            // reads as a setter, and `_get_rid` is const too. Guessing from the
-            // names gets both wrong.
-            .method(MethodInfo::new("_setup_local_to_scene", 0).virtual_method())
-            .method(
-                MethodInfo::new("_get_rid", 0)
-                    .virtual_method()
-                    .const_method(),
-            )
-            .method(MethodInfo::new("_reset_state", 0).virtual_method())
-            .method(
-                MethodInfo::new("_set_path_cache", 1)
-                    .virtual_method()
-                    .const_method(),
-            ),
-    );
+    register_class(resource_class());
 
     // -- StyleBox resource family (pat-nzgdu.90). Registering these lets ClassDB
     // resolve `[sub_resource type="StyleBoxFlat"]` (etc.) in a .tscn/.tres theme
@@ -20616,7 +20680,10 @@ pub fn register_2d_classes() {
             ClassRegistration::new("PhysicsBody2D")
                 .parent("CollisionObject2D")
                 .abstract_class()
-                .property(PropertyInfo::new("input_pickable", Variant::Bool(false))),
+                .property(PropertyInfo::new("input_pickable", Variant::Bool(false)))
+                // Godot 4.3+ (doc/classes/PhysicsBody2D.xml), dispatched by
+                // gdscene's `get_gravity` arm for PhysicsBody2D nodes.
+                .method(MethodInfo::new("get_gravity", 0).const_method()),
         );
     }
     if !class_exists("StaticBody2D") {
@@ -22977,11 +23044,67 @@ pub fn register_root_window_chain() {
     }
     if !class_exists("DisplayServer") {
         // No properties in `doc/classes/DisplayServer.xml` — it is a pure
-        // method surface.
+        // method surface. The methods listed are EXACTLY those the interpreter
+        // dispatches (`call_displayserver_via_backend` /
+        // `call_displayserver_static`), with Godot's parameter counts: until
+        // now the class was registered bare, so `DisplayServer.has_method(
+        // "clipboard_get")` was false while the call itself worked. Nothing
+        // unimplemented is advertised.
         register_class(
             ClassRegistration::new("DisplayServer")
                 .parent("Object")
-                .abstract_class(),
+                .abstract_class()
+                .method(MethodInfo::new("clipboard_get", 0))
+                .method(MethodInfo::new("clipboard_has", 0))
+                .method(MethodInfo::new("clipboard_set", 1))
+                .method(MethodInfo::new("clipboard_get_primary", 0))
+                .method(MethodInfo::new("clipboard_set_primary", 1))
+                .method(MethodInfo::new("cursor_get_shape", 0))
+                .method(MethodInfo::new("cursor_set_shape", 1))
+                .method(MethodInfo::new("get_accent_color", 0))
+                .method(MethodInfo::new("get_display_cutouts", 0))
+                .method(MethodInfo::new("get_display_safe_area", 0))
+                .method(MethodInfo::new("get_name", 0))
+                .method(MethodInfo::new("get_screen_count", 0))
+                .method(MethodInfo::new("get_swap_cancel_ok", 0))
+                .method(MethodInfo::new("has_feature", 1))
+                .method(MethodInfo::new("ime_get_selection", 0))
+                .method(MethodInfo::new("ime_get_text", 0))
+                .method(MethodInfo::new("is_dark_mode", 0))
+                .method(MethodInfo::new("is_dark_mode_supported", 0))
+                .method(MethodInfo::new("is_touchscreen_available", 0))
+                .method(MethodInfo::new("keyboard_get_keycode_from_physical", 1))
+                .method(MethodInfo::new("mouse_get_mode", 0))
+                .method(MethodInfo::new("mouse_get_position", 0))
+                .method(MethodInfo::new("mouse_set_mode", 1))
+                .method(MethodInfo::new("screen_get_dpi", 1))
+                .method(MethodInfo::new("screen_get_max_scale", 0))
+                .method(MethodInfo::new("screen_get_orientation", 1))
+                .method(MethodInfo::new("screen_get_refresh_rate", 1))
+                .method(MethodInfo::new("screen_get_scale", 1))
+                .method(MethodInfo::new("screen_get_size", 1))
+                .method(MethodInfo::new("screen_set_orientation", 2))
+                .method(MethodInfo::new("tts_get_voices", 0))
+                .method(MethodInfo::new("tts_get_voices_for_language", 1))
+                .method(MethodInfo::new("tts_is_paused", 0))
+                .method(MethodInfo::new("tts_is_speaking", 0))
+                .method(MethodInfo::new("tts_pause", 0))
+                .method(MethodInfo::new("tts_resume", 0))
+                .method(MethodInfo::new("tts_speak", 7))
+                .method(MethodInfo::new("tts_stop", 0))
+                .method(MethodInfo::new("window_get_mode", 1))
+                .method(MethodInfo::new("window_get_position", 1))
+                .method(MethodInfo::new("window_get_size", 1))
+                .method(MethodInfo::new("window_get_size_with_decorations", 1))
+                .method(MethodInfo::new("window_get_vsync_mode", 1))
+                .method(MethodInfo::new("window_set_mode", 2))
+                .method(MethodInfo::new("window_set_size", 2))
+                .method(MethodInfo::new("window_set_title", 2))
+                .method(MethodInfo::new("window_set_vsync_mode", 2))
+                .method(MethodInfo::new("cursor_set_custom_image", 3))
+                .method(MethodInfo::new("virtual_keyboard_get_height", 0))
+                .method(MethodInfo::new("virtual_keyboard_hide", 0))
+                .method(MethodInfo::new("virtual_keyboard_show", 6)),
         );
     }
     if !class_exists("EngineDebugger") {
@@ -23663,7 +23786,7 @@ pub fn register_viewport_classes() {
         );
     }
     if !class_exists("Resource") {
-        register_class(ClassRegistration::new("Resource").parent("RefCounted"));
+        register_class(resource_class());
     }
 
     // Viewport is abstract in Godot (Window / SubViewport are concrete).
@@ -24926,7 +25049,7 @@ fn register_rendering_device_classes() {
         register_class(object_class());
     }
     if !class_exists("Resource") {
-        register_class(ClassRegistration::new("Resource").parent("RefCounted"));
+        register_class(resource_class());
     }
     // `RefCounted` is not registered anywhere else in this module's viewport
     // path, and an unregistered base silently severs the chain from `Object`
@@ -26321,7 +26444,7 @@ pub fn register_audio_classes() {
     // `Resource` needs its own guard: this function ensures Object/Node/RefCounted
     // but never Resource, and every class below descends from it.
     if !class_exists("Resource") {
-        register_class(ClassRegistration::new("Resource").parent("RefCounted"));
+        register_class(resource_class());
     }
     if !class_exists("AudioStream") {
         // GDREGISTER_CLASS in servers/register_server_types.cpp:166 — concrete,
@@ -26434,7 +26557,7 @@ pub fn register_io_classes() {
     // `inheritance_chain` only walks parents it can find, so
     // `is_parent_class("GDExtension", "Resource")` would be false.
     if !class_exists("Resource") {
-        register_class(ClassRegistration::new("Resource").parent("RefCounted"));
+        register_class(resource_class());
     }
 
     // GDExtension / GDExtensionManager (pat-0q2kx.252). Godot:
@@ -27386,7 +27509,7 @@ pub fn register_io_classes() {
     // guard it here rather than relying on `register_gltf_classes` happening to
     // do it first.
     if !class_exists("Resource") {
-        register_class(ClassRegistration::new("Resource").parent("RefCounted"));
+        register_class(resource_class());
     }
     if !class_exists("PackedDataContainer") {
         register_class(
@@ -27589,7 +27712,7 @@ fn register_gltf_classes() {
         register_class(ClassRegistration::new("RefCounted").parent("Object"));
     }
     if !class_exists("Resource") {
-        register_class(ClassRegistration::new("Resource").parent("RefCounted"));
+        register_class(resource_class());
     }
 
     register_class(
@@ -28298,17 +28421,18 @@ pub fn register_networking_classes() {
         register_class(
             ClassRegistration::new("WebSocketPeer")
                 .parent("PacketPeer")
-                // pat-s3rrv.248: the two of Godot's six this class was missing. Defaults are
-                // 65535 from doc/classes/WebSocketPeer.xml, not 0 — a zero-sized buffer reads
-                // as "no buffering configured" to anything inspecting the property.
-                .property(PropertyInfo::new(
-                    "inbound_buffer_size",
-                    Variant::Int(65535),
-                ))
-                .property(PropertyInfo::new(
-                    "outbound_buffer_size",
-                    Variant::Int(65535),
-                ))
+                // Defaults 65535 (WebSocketPeer.xml). Implemented in gdplatform's
+                // WebSocketPeer: inbound = max message length (1009 past it) and
+                // the inbound queue's byte budget; outbound = per-send bound,
+                // ERR_OUT_OF_MEMORY past it (wsl_peer.cpp:299-300, 784).
+                .property(
+                    PropertyInfo::new("inbound_buffer_size", Variant::Int(65535))
+                        .with_accessors("get_inbound_buffer_size", "set_inbound_buffer_size"),
+                )
+                .property(
+                    PropertyInfo::new("outbound_buffer_size", Variant::Int(65535))
+                        .with_accessors("get_outbound_buffer_size", "set_outbound_buffer_size"),
+                )
                 .method(MethodInfo::new("connect_to_url", 2))
                 .method(MethodInfo::new("accept_stream", 1))
                 .method(MethodInfo::new("send", 2))
@@ -28349,12 +28473,6 @@ pub fn register_networking_classes() {
                 // `class_get_property_list` omitted two settings a script can
                 // set right now.
                 //
-                // ⚠️ `inbound_buffer_size` and `outbound_buffer_size` stay
-                // UNREGISTERED on purpose. Nothing implements them, and they
-                // cannot be implemented meaningfully yet: `send` writes straight
-                // to the socket and keeps no outbound queue, so there is no
-                // buffer for a size to bound. A declared-but-unbacked property
-                // is exactly the inert state this codebase keeps producing.
                 .property(
                     PropertyInfo::new("handshake_headers", Variant::PackedStringArray(Vec::new()))
                         .with_accessors("get_handshake_headers", "set_handshake_headers"),
@@ -28875,7 +28993,7 @@ pub fn register_networking_classes() {
     // for the runtime half of this bead, not merely reflection polish.
     if !class_exists("SceneReplicationConfig") {
         if !class_exists("Resource") {
-            register_class(ClassRegistration::new("Resource").parent("RefCounted"));
+            register_class(resource_class());
         }
         register_class(
             ClassRegistration::new("SceneReplicationConfig")
@@ -29373,7 +29491,7 @@ fn register_navigation_resource_classes() {
         register_class(ClassRegistration::new("RefCounted").parent("Object"));
     }
     if !class_exists("Resource") {
-        register_class(ClassRegistration::new("Resource").parent("RefCounted"));
+        register_class(resource_class());
     }
 
     if !class_exists("NavigationPathQueryParameters2D") {
@@ -33883,7 +34001,17 @@ mod tests {
             );
             assert!(is_parent_class(name, "AudioStreamPlayback"), "{name}");
             assert!(class_has_method(name, "mix"), "{name} inherits mix");
-            assert!(can_instantiate(name), "{name} is concrete");
+            // servers/register_server_types.cpp: AudioStreamGeneratorPlayback is
+            // GDREGISTER_ABSTRACT_CLASS — a playback is made by its stream, not
+            // `.new()`. The others are concrete.
+            if name == "AudioStreamGeneratorPlayback" {
+                assert!(
+                    !can_instantiate(name),
+                    "{name}: Godot registers it with GDREGISTER_ABSTRACT_CLASS"
+                );
+            } else {
+                assert!(can_instantiate(name), "{name} is concrete");
+            }
         }
 
         // Container playbacks mix already-resampled children, so they derive the
@@ -33900,7 +34028,23 @@ mod tests {
                 !is_parent_class(name, "AudioStreamPlaybackResampled"),
                 "{name} must NOT derive Resampled",
             );
-            assert!(can_instantiate(name), "{name} is concrete");
+            // Container playbacks are GDREGISTER_ABSTRACT_CLASS upstream (made by
+            // their stream); the decoder playbacks (OggVorbis) are concrete.
+            if [
+                "AudioStreamPlaybackPolyphonic",
+                "AudioStreamPlaybackInteractive",
+                "AudioStreamPlaybackPlaylist",
+                "AudioStreamPlaybackSynchronized",
+            ]
+            .contains(&name)
+            {
+                assert!(
+                    !can_instantiate(name),
+                    "{name}: GDREGISTER_ABSTRACT_CLASS upstream"
+                );
+            } else {
+                assert!(can_instantiate(name), "{name} is concrete");
+            }
         }
 
         // The generator's buffer surface is what scripts drive.
@@ -34003,7 +34147,16 @@ mod tests {
                 is_parent_class(name, "VisualShaderNode"),
                 "{name} derives VisualShaderNode",
             );
-            assert!(can_instantiate(name), "{name} is concrete");
+            // scene/register_scene_types.cpp: VisualShaderNodeOutput is
+            // GDREGISTER_ABSTRACT_CLASS (the graph creates its output node).
+            if name == "VisualShaderNodeOutput" {
+                assert!(
+                    !can_instantiate(name),
+                    "{name}: Godot registers it with GDREGISTER_ABSTRACT_CLASS"
+                );
+            } else {
+                assert!(can_instantiate(name), "{name} is concrete");
+            }
         }
 
         // The two abstract intermediates.

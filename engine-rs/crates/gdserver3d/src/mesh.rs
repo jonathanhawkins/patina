@@ -805,12 +805,19 @@ impl Mesh3D {
             uvs.push([1.0, 1.0]);
             uvs.push([0.0, 1.0]);
 
-            indices.push(base);
-            indices.push(base + 1);
-            indices.push(base + 2);
-            indices.push(base);
-            indices.push(base + 2);
-            indices.push(base + 3);
+            // 🔑 Wound CLOCKWISE as seen from outside, on EVERY face — Godot's
+            // front-face convention (`doc/classes/ArrayMesh.xml:49`). The quad
+            // `0,1,2 / 0,2,3` is counter-clockwise exactly when `u × v` points
+            // along the outward normal, which held for the X and Z faces but not
+            // the Y faces, so this mesh used to be half inside-out: under
+            // back-face culling the top of a box was dropped and its BOTTOM face
+            // (lit by a downward normal) drew in its place. Only the index order
+            // changes; vertices and UVs are untouched.
+            if u_dir.cross(*v_dir).dot(*normal) > 0.0 {
+                indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+            } else {
+                indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            }
         }
 
         Self {
@@ -1362,6 +1369,15 @@ impl Mesh3D {
             Self::compute_flat_normals(&vertices, &indices, &mut normals);
         }
 
+        // OBJ winds front faces counter-clockwise; Godot's are CLOCKWISE
+        // (`doc/classes/ArrayMesh.xml:49`), and its OBJ importer swaps the first
+        // two corners of every triangle (`resource_importer_obj.cpp:336-338`,
+        // `idx = 1 ^ idx`). Done AFTER the flat normals above, which read the
+        // file's own CCW order as outward.
+        for tri in indices.chunks_exact_mut(3) {
+            tri.swap(0, 1);
+        }
+
         Ok(Self {
             vertices,
             normals,
@@ -1783,7 +1799,9 @@ f 1 2 3
         let mesh = Mesh3D::from_obj(obj).unwrap();
         assert_eq!(mesh.vertex_count(), 3);
         assert_eq!(mesh.triangle_count(), 1);
-        assert_eq!(mesh.indices, vec![0, 1, 2]);
+        // OBJ's CCW `1 2 3` stored Godot-clockwise: the importer swaps the first
+        // two corners (`resource_importer_obj.cpp:336-338`).
+        assert_eq!(mesh.indices, vec![1, 0, 2]);
         assert_eq!(mesh.primitive_type, PrimitiveType::Triangles);
     }
 
@@ -1868,7 +1886,8 @@ f -3 -2 -1
 ";
         let mesh = Mesh3D::from_obj(obj).unwrap();
         assert_eq!(mesh.vertex_count(), 3);
-        assert_eq!(mesh.indices, vec![0, 1, 2]);
+        // Same vertices as `f 1 2 3`, so the same Godot-clockwise order.
+        assert_eq!(mesh.indices, vec![1, 0, 2]);
     }
 
     #[test]

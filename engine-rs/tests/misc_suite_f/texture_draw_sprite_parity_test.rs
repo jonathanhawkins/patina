@@ -285,10 +285,15 @@ fn modulate_zero_alpha() {
 
     let frame = renderer.render_frame(&vp);
     let p = pixel_at(&frame, 2, 2);
-    // Alpha should be 0 (1.0 * 0.0 = 0.0)
+    // The viewport clears to OPAQUE black, and a canvas draw is composited
+    // with Godot's BLEND_MODE_MIX: rgb = src·a + dst·(1−a), a = a_src +
+    // a_dst·(1−a_src). So a translucent draw reads back blended over black
+    // with alpha 1 — these tests used to expect the source colour with its
+    // alpha carried through, which only a transparent target could give.
+    // Alpha 0 contributes nothing: the clear colour is untouched.
     assert!(
-        p.a < 0.01,
-        "modulate alpha=0 should produce transparent pixel"
+        approx_eq(p, Color::new(0.0, 0.0, 0.0, 1.0), 0.01),
+        "modulate alpha=0 must leave the clear colour: got {p:?}"
     );
 }
 
@@ -1208,10 +1213,15 @@ fn modulate_half_alpha_produces_semitransparent() {
 
     let frame = renderer.render_frame(&vp);
     let p = pixel_at(&frame, 2, 2);
-    // Red(1,0,0,1) * modulate(1,1,1,0.5) → (1,0,0,0.5).
+    // The viewport clears to OPAQUE black, and a canvas draw is composited
+    // with Godot's BLEND_MODE_MIX: rgb = src·a + dst·(1−a), a = a_src +
+    // a_dst·(1−a_src). So a translucent draw reads back blended over black
+    // with alpha 1 — these tests used to expect the source colour with its
+    // alpha carried through, which only a transparent target could give.
+    // Red(1,0,0,1) * modulate(1,1,1,0.5) = (1,0,0,0.5), over black → (0.5,0,0,1).
     assert!(
-        approx_eq(p, Color::new(1.0, 0.0, 0.0, 0.5), 0.02),
-        "half-alpha modulate: expected (1,0,0,0.5), got {:?}",
+        approx_eq(p, Color::new(0.5, 0.0, 0.0, 1.0), 0.02),
+        "half-alpha modulate: expected (0.5,0,0,1), got {:?}",
         p
     );
 }
@@ -1234,10 +1244,15 @@ fn modulate_tint_with_alpha() {
 
     let frame = renderer.render_frame(&vp);
     let p = pixel_at(&frame, 2, 2);
-    // White * (0, 1, 0, 0.25) = (0, 1, 0, 0.25).
+    // The viewport clears to OPAQUE black, and a canvas draw is composited
+    // with Godot's BLEND_MODE_MIX: rgb = src·a + dst·(1−a), a = a_src +
+    // a_dst·(1−a_src). So a translucent draw reads back blended over black
+    // with alpha 1 — these tests used to expect the source colour with its
+    // alpha carried through, which only a transparent target could give.
+    // White * (0, 1, 0, 0.25) = (0, 1, 0, 0.25), over black → (0,0.25,0,1).
     assert!(
-        approx_eq(p, Color::new(0.0, 1.0, 0.0, 0.25), 0.02),
-        "green tint + quarter alpha: expected (0,1,0,0.25), got {:?}",
+        approx_eq(p, Color::new(0.0, 0.25, 0.0, 1.0), 0.02),
+        "green tint + quarter alpha: expected (0,0.25,0,1), got {:?}",
         p
     );
 }
@@ -1731,19 +1746,29 @@ fn texture_with_per_pixel_alpha() {
     let frame = renderer.render_frame(&vp);
     // TL: fully opaque red.
     assert_eq!(pixel_at(&frame, 0, 0), Color::new(1.0, 0.0, 0.0, 1.0));
-    // TR: half-alpha green.
+    // The viewport clears to OPAQUE black, and a canvas draw is composited
+    // with Godot's BLEND_MODE_MIX: rgb = src·a + dst·(1−a), a = a_src +
+    // a_dst·(1−a_src). So a translucent draw reads back blended over black
+    // with alpha 1 — these tests used to expect the source colour with its
+    // alpha carried through, which only a transparent target could give.
+    // TR: half-alpha green over black.
     let tr = pixel_at(&frame, 2, 0);
     assert!(
-        approx_eq(tr, Color::new(0.0, 1.0, 0.0, 0.5), 0.02),
+        approx_eq(tr, Color::new(0.0, 0.5, 0.0, 1.0), 0.02),
         "half-alpha green: got {:?}",
         tr
     );
-    // BL: fully transparent blue → alpha channel = 0.
+    // BL: fully transparent blue contributes nothing — the clear shows.
     let bl = pixel_at(&frame, 0, 2);
     assert!(
-        bl.a < 0.01,
-        "fully transparent pixel should have near-zero alpha, got {}",
-        bl.a
+        approx_eq(bl, Color::new(0.0, 0.0, 0.0, 1.0), 0.01),
+        "fully transparent texel must leave the clear colour: got {bl:?}"
+    );
+    // BR: quarter-alpha white over black.
+    let br = pixel_at(&frame, 2, 2);
+    assert!(
+        approx_eq(br, Color::new(0.25, 0.25, 0.25, 1.0), 0.02),
+        "quarter-alpha white: got {br:?}"
     );
 }
 
@@ -1767,10 +1792,15 @@ fn modulate_alpha_multiplies_with_texture_alpha() {
 
     let frame = renderer.render_frame(&vp);
     let p = pixel_at(&frame, 2, 2);
-    // (1,0,0,0.5) * modulate(1,1,1,0.5) = (1,0,0,0.25).
+    // The viewport clears to OPAQUE black, and a canvas draw is composited
+    // with Godot's BLEND_MODE_MIX: rgb = src·a + dst·(1−a), a = a_src +
+    // a_dst·(1−a_src). So a translucent draw reads back blended over black
+    // with alpha 1 — these tests used to expect the source colour with its
+    // alpha carried through, which only a transparent target could give.
+    // (1,0,0,0.5) * modulate(1,1,1,0.5) = (1,0,0,0.25), over black → (0.25,0,0,1).
     assert!(
-        approx_eq(p, Color::new(1.0, 0.0, 0.0, 0.25), 0.02),
-        "alpha multiply: expected (1,0,0,0.25), got {:?}",
+        approx_eq(p, Color::new(0.25, 0.0, 0.0, 1.0), 0.02),
+        "alpha multiply: expected (0.25,0,0,1), got {:?}",
         p
     );
 }

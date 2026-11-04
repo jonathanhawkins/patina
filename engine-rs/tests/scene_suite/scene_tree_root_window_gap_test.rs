@@ -124,15 +124,14 @@ fn collect_subtree(
 // ===========================================================================
 
 #[test]
-fn patina_root_is_node_not_window() {
+fn patina_root_is_a_window_as_in_godot() {
     let _g = setup();
     let tree = SceneTree::new();
     let root = tree.get_node(tree.root_id()).expect("root must exist");
-    assert_eq!(
-        root.class_name(),
-        "Node",
-        "Patina root is class 'Node', not 'Window'"
-    );
+    // Godot's root is the main Window (`SceneTree::get_root() -> Window`).
+    // This test used to pin the GAP ("root is Node, not Window"); the root
+    // is a Window now, so it pins the parity instead.
+    assert_eq!(root.class_name(), "Window", "the root is a Window, as in Godot");
     assert_eq!(root.name(), "root");
 }
 

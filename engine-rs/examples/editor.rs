@@ -106,7 +106,15 @@ fn main() {
     // (pat-qtmbv): Player -> player.gd, Enemy -> enemy_spawner.gd. The selection
     // handler reads `_script_path` and loads it via GET /api/script (res://
     // resolves against the cwd, where fixtures/scripts/*.gd live).
+    //
+    // Only for the bundled demo scene: matched by NAME, this used to give any
+    // project's `Player` node the demo's movement script, silently replacing the
+    // game's own on every editor start.
+    let is_demo_scene = scene_path == DEFAULT_SCENE;
     for nid in tree.all_nodes_in_tree_order() {
+        if !is_demo_scene {
+            break;
+        }
         let script = match tree.get_node(nid).map(|n| n.name().to_string()).as_deref() {
             Some("Player") => Some("res://fixtures/scripts/player.gd"),
             Some("Enemy") => Some("res://fixtures/scripts/enemy_spawner.gd"),
@@ -178,6 +186,8 @@ fn main() {
     // Main loop: re-render, and run game loop when playing.
     let mut frame_count: u64 = 0;
     let mut last_runtime_tick = std::time::Instant::now();
+    // The game frame (`runtime_frame_count`) the Play view last rendered.
+    let mut last_rendered_game_frame: Option<u64> = None;
     // Render-on-change gating for the idle editor (pat-5xrsr): the signature of
     // the last frame we actually rendered, and when we rendered it. While idle we
     // re-render only when the signature changes or the keepalive elapses.
@@ -200,28 +210,35 @@ fn main() {
     // motion so the reduced resolution reads as motion blur.
     let mut last_frame_lowres = false;
     while running.load(Ordering::SeqCst) {
-        let is_runtime_running = {
+        let (is_runtime_running, game_frame) = {
             let state = handle.state().lock().unwrap();
-            state.is_running && !state.is_paused
+            (
+                state.is_running && !state.is_paused,
+                state.runtime_frame_count,
+            )
         };
         if is_runtime_running {
-            let now = std::time::Instant::now();
-            let elapsed = now.duration_since(last_runtime_tick);
-            if elapsed < Duration::from_millis(16) {
-                std::thread::sleep(Duration::from_millis(16) - elapsed);
-            }
-            last_runtime_tick = std::time::Instant::now();
+            // Render each game frame once, as soon as the game thread has
+            // stepped it. Rendering on a 16 ms timer of its own drifted against
+            // the game's 60 Hz clock: it published ~56 fps, showing some game
+            // frames twice and skipping others, which reads as judder. A game
+            // that stops stepping (a debugger break, a long frame) is still
+            // re-rendered at 10 Hz so the view stays live.
+            if last_rendered_game_frame == Some(game_frame)
+                && last_runtime_tick.elapsed() < Duration::from_millis(100)
             {
-                let mut state = handle.state().lock().unwrap();
-                let delta = state.delta_time;
-                let input_snapshot = state.make_input_snapshot();
-                if let Some(ref mut main_loop) = state.run_main_loop {
-                    main_loop.set_input(input_snapshot);
-                    let output = main_loop.step(delta);
-                    state.runtime_frame_count = output.frame_count;
-                }
-                state.clear_frame_input();
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
             }
+            last_rendered_game_frame = Some(game_frame);
+            last_runtime_tick = std::time::Instant::now();
+            // The server's runtime thread steps the game (and is the only
+            // thread game code runs on). This loop used to step it TOO, so a
+            // played scene ran ~1.6x too fast, alternating between two
+            // threads, and skipped the per-frame hooks
+            // `advance_running_main_loop` runs (output, debugger, profiler).
+            // It only renders now.
+            let render_started = std::time::Instant::now();
             let job = {
                 let mut state = handle.state().lock().unwrap();
                 // Render at the panel's real size (reported by the browser via
@@ -326,16 +343,18 @@ fn main() {
                             gdeditor::viewport_2d_render::build_runtime_render_list(running_tree);
                         let canvas_size =
                             gdcore::math::Vector2::new(rw.max(1) as f32, rh.max(1) as f32);
+                        let mut window = *running_tree.root_window();
+                        window.size = canvas_size;
+                        // The camera centres on the canvas (the base resolution
+                        // under stretch), not the window.
                         if let Some(view) = gdeditor::viewport_2d_render::camera2d_view_transform(
                             running_tree,
-                            canvas_size,
+                            gdscene::canvas_render::canvas_size_of(&window),
                             None,
                             1.0 / 60.0,
                         ) {
                             gdeditor::viewport_2d_render::apply_camera2d_view(&mut items, view);
                         }
-                        let mut window = *running_tree.root_window();
-                        window.size = canvas_size;
                         gdeditor::viewport_2d_render::apply_stretch_transform(
                             &mut items,
                             window.stretch_transform(),
@@ -439,6 +458,7 @@ fn main() {
                 // 2D running scene: canvas rasterizer, full-quality publish.
                 RenderJob::Cpu(fb) => handle.update_frame(fb),
             }
+            handle.note_render_time(render_started.elapsed());
         } else {
             // Poll fast while an interaction is actively producing new frames,
             // otherwise idle at 50ms. The interaction cadence is a live perf knob
@@ -571,14 +591,25 @@ fn main() {
                         // container-resolved rect — while Play, which already
                         // takes `&mut st.scene_tree` on its fallback branch
                         // above, showed the same scene correctly.
-                        RenderJob::Cpu(gdeditor::scene_renderer::render_scene_with_zoom_pan_mut(
-                            &mut state.scene_tree,
-                            selected,
-                            rw,
-                            rh,
-                            zoom,
-                            pan,
-                        ))
+                        // With every `instance=` sub-scene previewed, textured,
+                        // as Godot's 2D editor shows them: the edited tree keeps
+                        // them as placeholders, so without this a main scene
+                        // drew with no player, enemies or HUD. Two disjoint
+                        // field borrows of the one guard.
+                        let st = &mut *state;
+                        let project_root = st.texture_cache.project_root().to_string();
+                        RenderJob::Cpu(
+                            gdeditor::scene_renderer::render_scene_with_instance_previews(
+                                &mut st.scene_tree,
+                                &project_root,
+                                &mut st.texture_cache,
+                                selected,
+                                rw,
+                                rh,
+                                zoom,
+                                pan,
+                            ),
+                        )
                     };
                     if let Some(saved) = restore_grid {
                         state.editor_viewport_3d.grid.visible = saved;

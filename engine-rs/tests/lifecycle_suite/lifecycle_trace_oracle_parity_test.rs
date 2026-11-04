@@ -431,17 +431,16 @@ fn exit_tree_is_postorder_for_oracle_scenes() {
 fn transition_between_oracle_scenes_preserves_ordering() {
     // Load hierarchy scene, then transition to platformer.
     let (mut tree, hierarchy_scene_id) = load_scene_into_tree_with_id("hierarchy");
-    let root = tree.root_id();
 
-    // Clear trace and transition: exit hierarchy, remove, add platformer.
+    // The real transition (`change_scene_to_packed`): the current scene exits
+    // bottom-up and is freed, and the new one is added once — `add_child`
+    // enters it. The old hand-assembled form (`add_packed_scene_to_tree` plus
+    // a manual `LifecycleManager::enter_tree`) entered every node twice.
+    tree.set_current_scene(hierarchy_scene_id, None);
     tree.event_trace_mut().clear();
-    LifecycleManager::exit_tree(&mut tree, hierarchy_scene_id);
-    tree.remove_node(hierarchy_scene_id).unwrap();
-
     let platformer_tscn = load_tscn("platformer");
     let packed = PackedScene::from_tscn(&platformer_tscn).unwrap();
-    let platformer_scene_id = add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
-    LifecycleManager::enter_tree(&mut tree, platformer_scene_id);
+    let _platformer_scene_id = tree.change_scene_to_packed(&packed).unwrap();
 
     // EXIT_TREE should match hierarchy oracle's post-order (bottom-up).
     let hierarchy_oracle = load_oracle_tree("hierarchy");

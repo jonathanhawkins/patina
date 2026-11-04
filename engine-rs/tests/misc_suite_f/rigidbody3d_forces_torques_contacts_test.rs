@@ -62,7 +62,8 @@ fn classdb_rigidbody3d_exists() {
 fn classdb_rigidbody3d_inherits_node3d() {
     gdobject::class_db::register_3d_classes();
     let info = gdobject::class_db::get_class_info("RigidBody3D").unwrap();
-    assert_eq!(info.parent_class.as_str(), "Node3D");
+    // Godot: RigidBody3D : PhysicsBody3D : CollisionObject3D : Node3D (doc/classes/RigidBody3D.xml).
+    assert_eq!(info.parent_class.as_str(), "PhysicsBody3D");
 }
 
 #[test]
@@ -78,8 +79,8 @@ fn classdb_rigidbody3d_has_physics_properties() {
         "angular_velocity",
         "linear_damp",
         "angular_damp",
-        "friction",
-        "bounce",
+        // No `friction` / `bounce`: Godot 4 moved both onto
+        // `physics_material_override` (doc/classes/RigidBody3D.xml).
         "continuous_cd",
         "can_sleep",
         "sleeping",

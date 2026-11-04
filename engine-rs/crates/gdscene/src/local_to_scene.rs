@@ -164,13 +164,25 @@ pub fn setup_local_to_scene_in(
     scene: &crate::packed_scene::PackedScene,
     subtree_root: crate::node::NodeId,
 ) -> usize {
-    let mut made = 0usize;
     // `SceneTree::collect_subtree_top_down` is the engine's own subtree walk —
     // `all_nodes_in_tree_order` covers the WHOLE tree, which is the one thing
     // this pass must not do.
     let mut ids = Vec::new();
     tree.collect_subtree_top_down(subtree_root, &mut ids);
-    for node_id in ids {
+    setup_local_to_scene_for(tree, scene, &ids)
+}
+
+/// [`setup_local_to_scene_in`] over an explicit node list — the nodes ONE scene
+/// level created. A scene with instanced sub-scenes holds nodes whose
+/// `__resref__` ids belong to DIFFERENT scenes, so even the subtree is too wide
+/// a scope there; each level passes the nodes it built with its own table.
+pub fn setup_local_to_scene_for(
+    tree: &mut crate::scene_tree::SceneTree,
+    scene: &crate::packed_scene::PackedScene,
+    ids: &[crate::node::NodeId],
+) -> usize {
+    let mut made = 0usize;
+    for &node_id in ids {
         // Collect first, mutate second: the walk borrows the node immutably and
         // the write below needs it mutably.
         let refs: Vec<(String, String, String)> = match tree.get_node(node_id) {

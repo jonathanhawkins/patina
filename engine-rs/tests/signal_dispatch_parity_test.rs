@@ -201,8 +201,14 @@ fn connections_survive_reparenting_emitter() {
         "connection should survive reparent"
     );
 
-    // Trace should show the new path.
-    let sig_events = signal_events(&tree);
+    // Trace should show the new path. Only `test_sig`: the reparent itself
+    // emits Godot's lifecycle signals (tree_exiting, child_exiting_tree,
+    // tree_exited, child_order_changed, tree_entered, child_entered_tree —
+    // scene/main/node.cpp), which this test predates.
+    let sig_events: Vec<_> = signal_events(&tree)
+        .into_iter()
+        .filter(|e| e.1 == "test_sig")
+        .collect();
     assert_eq!(sig_events.len(), 1);
     assert_eq!(
         sig_events[0].0, "/root/RecvA/Emitter",
@@ -737,9 +743,13 @@ fn duplicate_connections_fire_twice() {
 
     tree.emit_signal(emitter_id, "dup_sig", &[]);
 
+    // Godot refuses a duplicate connect of the same callable unless it passes
+    // `CONNECT_REFERENCE_COUNTED` (`core/object/object.cpp:1646-1650`,
+    // "already connected to given callable"), as the engine does since
+    // pat-mgixk.98. These tests predated that and asserted duplicates stack.
     assert_eq!(
         counter.load(Ordering::SeqCst),
-        2,
-        "duplicate connections should both fire"
+        1,
+        "the second connect of the same target+method is refused"
     );
 }

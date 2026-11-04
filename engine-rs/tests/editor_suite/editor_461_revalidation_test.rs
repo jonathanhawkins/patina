@@ -196,8 +196,9 @@ fn revalidate_scene_tree_preserves_461_class_names() {
     let scene = parse_json(&http_get(port, "/api/scene"));
     let root = &scene["nodes"];
 
-    // Root is always "Node" class
-    assert_eq!(root["class"], "Node");
+    // Godot 4's scene-tree root is a `Window` (scene_tree.cpp:2042
+    // `root = memnew(Window)`), not a plain `Node`.
+    assert_eq!(root["class"], "Window");
 
     // Walk children for expected 4.6.1 classes
     let children = root["children"].as_array().unwrap();

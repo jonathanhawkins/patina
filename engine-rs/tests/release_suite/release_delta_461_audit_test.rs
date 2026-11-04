@@ -345,7 +345,11 @@ fn change_scene_to_node_exists_and_works() {
     // Add an initial scene
     let initial = Node::new("InitialScene", "Node2D");
     let initial_id = tree.add_child(root, initial).unwrap();
-    // current_scene is set by change_scene_to_node/change_scene_to_packed
+    // A bare `add_child` does NOT make a node the current scene, and Godot's
+    // `change_scene_to_*` frees only `current_scene` (scene_tree.cpp
+    // `_flush_scene_change`). Mark it current, as the engine's main-scene boot
+    // does, so the transition has a scene to replace.
+    tree.set_current_scene(initial_id, None);
 
     // Change to a new node-based scene
     let new_scene = Node::new("NewScene", "Control");
@@ -429,9 +433,20 @@ fn instanced_scene_resource_sharing_tests_exist() {
     // Verify test files covering resource sharing in instanced scenes exist
     let test_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/");
 
-    let has_coverage = std::fs::read_dir(test_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
+    // Recurse: the integration tests now live in `tests/<suite>/` folders.
+    let mut entries = Vec::new();
+    let mut stack = vec![std::path::PathBuf::from(test_dir)];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            if e.path().is_dir() {
+                stack.push(e.path());
+            } else {
+                entries.push(e);
+            }
+        }
+    }
+    let has_coverage = entries
+        .into_iter()
         .any(|e| {
             let name = e.file_name().to_string_lossy().to_string();
             name.contains("instanced_resource")

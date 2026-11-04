@@ -655,6 +655,22 @@ impl Parser {
                 if annotations.iter().any(|a| a.name == "tool") {
                     return Ok(Stmt::AnnotationStmt { annotations });
                 }
+                // Godot lets an annotation precede ANY statement:
+                // `@warning_ignore("unused_signal")` before a `signal`,
+                // `@warning_ignore(...)` before a const, an enum or an
+                // expression inside a function, `@icon(...)` before
+                // `class_name`. None of those change runtime behaviour, so the
+                // statement is parsed as usual. This used to be a parse error,
+                // which failed the whole script — the official 2D Platformer
+                // demo's player.gd (`@warning_ignore("unused_signal")` +
+                // `signal coin_collected()`) never loaded, so the player had no
+                // script and never moved.
+                if !matches!(self.peek(), Token::Eof) {
+                    return self.parse_stmt();
+                }
+                if annotations.iter().all(|a| matches!(a.name.as_str(), "icon" | "static_unload")) {
+                    return Ok(Stmt::AnnotationStmt { annotations });
+                }
                 let ts = self.tokens.get(self.pos);
                 let (token, line, col) = match ts {
                     Some(ts) => (ts.token.to_string(), ts.line, ts.col),

@@ -270,8 +270,13 @@ fn keycode_string_round_trips_and_renders_modifiers() {
 }
 
 /// A project with no `application/config/name` still lands under
-/// `app_userdata/<name>` — `ProjectSettings::project_name` supplies Godot's
-/// "New Project" default — rather than an empty (or engine-shared) `user://`.
+/// `app_userdata/` rather than an empty (or engine-shared) `user://`.
+///
+/// ⚠️ The folder is `[unnamed project]`, not "New Project": Godot's
+/// `OS::get_user_data_dir` falls back to exactly
+/// `app_userdata/[unnamed project]` when the safe app name is empty
+/// (`core/os/os.cpp:351`). "New Project" is only the project-manager's
+/// suggested name for a NEW project, never what a nameless one resolves to.
 #[test]
 fn unnamed_project_falls_back_to_default_name() {
     let _boot = lock_boot();
@@ -284,7 +289,7 @@ fn unnamed_project_falls_back_to_default_name() {
 
     boot_project(&dir).expect("boot a project with no configured name");
     assert!(
-        gdplatform::os::user_data_dir().ends_with("app_userdata/New Project"),
+        gdplatform::os::user_data_dir().ends_with("app_userdata/[unnamed project]"),
         "an unnamed project should still land under app_userdata/, got '{}'",
         gdplatform::os::user_data_dir(),
     );

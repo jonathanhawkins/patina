@@ -249,7 +249,10 @@ fn macos_bundle_result_points_at_bundle_path() {
     let mut executor = PackageExecutor::new(macos_config("PathGame"), &project, &output);
     let result = executor.run();
     assert!(result.success);
-    assert!(result.output_path.ends_with("PathGame.app"));
+    // `output_path` is the canonical `<app>.<platform>.<profile>` marker; the
+    // native bundle is reported as the `platform artifact:` message
+    // (PackageExecutor::run_with_binary, export.rs).
+    assert!(platform_artifact(&result).ends_with("PathGame.app"));
 }
 
 // ---------------------------------------------------------------------------
@@ -482,8 +485,9 @@ fn linux_appimage() {
         result.messages
     );
 
-    // Output path is the final .AppImage marker.
-    let appimage_path = Path::new(&result.output_path).to_path_buf();
+    // The .AppImage is the platform artifact; `output_path` is the canonical
+    // staging marker (see `platform_artifact`).
+    let appimage_path = platform_artifact(&result);
     let expected_appimage_name = appimage_filename(app_name);
     assert_eq!(
         appimage_path
@@ -619,4 +623,16 @@ fn linux_appimage_rejects_non_linux_platform() {
         }
         other => panic!("expected BundleFailed, got {other:?}"),
     }
+}
+
+/// The platform-native bundle `run()` built, from its `platform artifact: …`
+/// message. `PackageResult::output_path` is deliberately the canonical
+/// `<app>.<platform>.<profile>` marker, not the bundle.
+fn platform_artifact(result: &gdplatform::export::PackageResult) -> std::path::PathBuf {
+    let line = result
+        .messages
+        .iter()
+        .find_map(|m| m.strip_prefix("platform artifact: "))
+        .unwrap_or_else(|| panic!("no platform artifact reported: {:?}", result.messages));
+    std::path::PathBuf::from(line)
 }

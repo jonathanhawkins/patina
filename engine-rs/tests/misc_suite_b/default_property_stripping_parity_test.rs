@@ -1509,7 +1509,7 @@ fn known_registry_properties() -> HashMap<&'static str, BTreeSet<&'static str>> 
         .collect();
     let collision_shape_3d: BTreeSet<&str> = node3d.iter().copied().chain(["disabled"]).collect();
 
-    m.insert("Node3D", node3d);
+    m.insert("Node3D", node3d.clone());
     m.insert("Camera3D", camera_3d);
     m.insert("MeshInstance3D", mesh_instance_3d);
     m.insert("Light3D", light_3d);
@@ -1520,6 +1520,20 @@ fn known_registry_properties() -> HashMap<&'static str, BTreeSet<&'static str>> 
     m.insert("RigidBody3D", rigid_body_3d);
     m.insert("CharacterBody3D", character_body_3d);
     m.insert("CollisionShape3D", collision_shape_3d);
+    // Mirrors of the registry entries added in class_defaults.rs (each is the
+    // same set the registry builds there).
+    m.insert("MultiMeshInstance3D", node3d.clone());
+    m.insert("Marker3D", node3d.clone());
+    m.insert("CollisionObject3D", collision_object_3d.clone());
+    m.insert("PhysicsBody3D", collision_object_3d.clone());
+    m.insert(
+        "Area3D",
+        collision_object_3d
+            .iter()
+            .copied()
+            .chain(["monitoring", "monitorable"])
+            .collect(),
+    );
 
     // Node2D-basic derived classes all share the same set.
     for class in &[

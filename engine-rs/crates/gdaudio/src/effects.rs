@@ -61,6 +61,12 @@ pub trait AudioEffect: Send {
     ///
     /// Defaults to `name()` so every existing effect keeps answering something
     /// sensible without being touched.
+    ///
+    /// ⚠️ Defaults to [`name`](Self::name), which is the SHORT display name
+    /// ("Amplify"), so every effect must override this with its real Godot
+    /// class — `bus_effect_class` reported "Amplify" where a script's
+    /// `get_bus_effect(..).get_class()` and the layout loader say
+    /// "AudioEffectAmplify". `every_effect_reports_its_godot_class` guards it.
     fn godot_class(&self) -> &str {
         self.name()
     }
@@ -118,6 +124,10 @@ impl AudioEffectAmplify {
 impl AudioEffect for AudioEffectAmplify {
     fn name(&self) -> &str {
         "Amplify"
+    }
+
+    fn godot_class(&self) -> &str {
+        "AudioEffectAmplify"
     }
 
     fn process(&mut self, samples: &mut [f32], _sample_rate: u32, _channels: u16) {
@@ -179,6 +189,10 @@ impl Default for AudioEffectReverb {
 impl AudioEffect for AudioEffectReverb {
     fn name(&self) -> &str {
         "Reverb"
+    }
+
+    fn godot_class(&self) -> &str {
+        "AudioEffectReverb"
     }
 
     fn process(&mut self, samples: &mut [f32], sample_rate: u32, channels: u16) {
@@ -264,6 +278,10 @@ impl AudioEffectEQ {
 impl AudioEffect for AudioEffectEQ {
     fn name(&self) -> &str {
         "EQ"
+    }
+
+    fn godot_class(&self) -> &str {
+        "AudioEffectEQ"
     }
 
     fn process(&mut self, samples: &mut [f32], sample_rate: u32, channels: u16) {
@@ -1810,6 +1828,10 @@ impl AudioEffect for AudioEffectCompressor {
         "Compressor"
     }
 
+    fn godot_class(&self) -> &str {
+        "AudioEffectCompressor"
+    }
+
     fn sidechain_bus(&self) -> Option<&str> {
         self.sidechain_bus.as_deref()
     }
@@ -1882,6 +1904,10 @@ impl AudioEffect for AudioEffectLimiter {
         "Limiter"
     }
 
+    fn godot_class(&self) -> &str {
+        "AudioEffectLimiter"
+    }
+
     fn process(&mut self, samples: &mut [f32], _sample_rate: u32, _channels: u16) {
         let ceiling = 10.0f32.powf(self.ceiling_db / 20.0);
         let knee = 10.0f32.powf((self.ceiling_db - self.soft_clip_db) / 20.0);
@@ -1921,6 +1947,10 @@ impl AudioEffectHardLimiter {
 impl AudioEffect for AudioEffectHardLimiter {
     fn name(&self) -> &str {
         "HardLimiter"
+    }
+
+    fn godot_class(&self) -> &str {
+        "AudioEffectHardLimiter"
     }
 
     fn process(&mut self, samples: &mut [f32], _sample_rate: u32, _channels: u16) {

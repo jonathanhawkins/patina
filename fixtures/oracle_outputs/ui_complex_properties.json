@@ -10,9 +10,15 @@
 							"name": "Title",
 							"path": "/root/UIRoot/Header/Title",
 							"properties": {
+								"layout_mode": {
+									"class_type": "",
+									"hint": 2,
+									"type": "int",
+									"value": 0
+								},
 								"text": {
 									"class_type": "",
-									"hint": 0,
+									"hint": 18,
 									"type": "String",
 									"value": "Game HUD"
 								}
@@ -24,9 +30,15 @@
 							"name": "ScoreLabel",
 							"path": "/root/UIRoot/Header/ScoreLabel",
 							"properties": {
+								"layout_mode": {
+									"class_type": "",
+									"hint": 2,
+									"type": "int",
+									"value": 0
+								},
 								"text": {
 									"class_type": "",
-									"hint": 0,
+									"hint": 18,
 									"type": "String",
 									"value": "Score: 0"
 								}
@@ -38,9 +50,15 @@
 							"name": "HealthLabel",
 							"path": "/root/UIRoot/Header/HealthLabel",
 							"properties": {
+								"layout_mode": {
+									"class_type": "",
+									"hint": 2,
+									"type": "int",
+									"value": 0
+								},
 								"text": {
 									"class_type": "",
-									"hint": 0,
+									"hint": 18,
 									"type": "String",
 									"value": "HP: 100"
 								}
@@ -56,6 +74,12 @@
 							"hint": 1,
 							"type": "float",
 							"value": 1.0
+						},
+						"layout_mode": {
+							"class_type": "",
+							"hint": 2,
+							"type": "int",
+							"value": 0
 						},
 						"offset_bottom": {
 							"class_type": "",
@@ -73,9 +97,15 @@
 							"name": "InventoryLabel",
 							"path": "/root/UIRoot/Sidebar/InventoryLabel",
 							"properties": {
+								"layout_mode": {
+									"class_type": "",
+									"hint": 2,
+									"type": "int",
+									"value": 0
+								},
 								"text": {
 									"class_type": "",
-									"hint": 0,
+									"hint": 18,
 									"type": "String",
 									"value": "Inventory"
 								}
@@ -87,9 +117,15 @@
 							"name": "Slot1",
 							"path": "/root/UIRoot/Sidebar/Slot1",
 							"properties": {
+								"layout_mode": {
+									"class_type": "",
+									"hint": 2,
+									"type": "int",
+									"value": 0
+								},
 								"text": {
 									"class_type": "",
-									"hint": 0,
+									"hint": 18,
 									"type": "String",
 									"value": "Sword"
 								}
@@ -101,9 +137,15 @@
 							"name": "Slot2",
 							"path": "/root/UIRoot/Sidebar/Slot2",
 							"properties": {
+								"layout_mode": {
+									"class_type": "",
+									"hint": 2,
+									"type": "int",
+									"value": 0
+								},
 								"text": {
 									"class_type": "",
-									"hint": 0,
+									"hint": 18,
 									"type": "String",
 									"value": "Shield"
 								}
@@ -115,9 +157,15 @@
 							"name": "Slot3",
 							"path": "/root/UIRoot/Sidebar/Slot3",
 							"properties": {
+								"layout_mode": {
+									"class_type": "",
+									"hint": 2,
+									"type": "int",
+									"value": 0
+								},
 								"text": {
 									"class_type": "",
-									"hint": 0,
+									"hint": 18,
 									"type": "String",
 									"value": "Potion"
 								}
@@ -133,6 +181,12 @@
 							"hint": 1,
 							"type": "float",
 							"value": 1.0
+						},
+						"layout_mode": {
+							"class_type": "",
+							"hint": 2,
+							"type": "int",
+							"value": 0
 						},
 						"offset_right": {
 							"class_type": "",
@@ -156,9 +210,15 @@
 							"name": "SpeakerName",
 							"path": "/root/UIRoot/DialogBox/SpeakerName",
 							"properties": {
+								"layout_mode": {
+									"class_type": "",
+									"hint": 2,
+									"type": "int",
+									"value": 0
+								},
 								"text": {
 									"class_type": "",
-									"hint": 0,
+									"hint": 18,
 									"type": "String",
 									"value": "NPC"
 								}
@@ -170,9 +230,15 @@
 							"name": "DialogText",
 							"path": "/root/UIRoot/DialogBox/DialogText",
 							"properties": {
+								"layout_mode": {
+									"class_type": "",
+									"hint": 2,
+									"type": "int",
+									"value": 0
+								},
 								"text": {
 									"class_type": "",
-									"hint": 0,
+									"hint": 18,
 									"type": "String",
 									"value": "Welcome, adventurer!"
 								}
@@ -184,9 +250,15 @@
 							"name": "NextButton",
 							"path": "/root/UIRoot/DialogBox/NextButton",
 							"properties": {
+								"layout_mode": {
+									"class_type": "",
+									"hint": 2,
+									"type": "int",
+									"value": 0
+								},
 								"text": {
 									"class_type": "",
-									"hint": 0,
+									"hint": 18,
 									"type": "String",
 									"value": "Next"
 								}
@@ -198,9 +270,15 @@
 							"name": "SkipButton",
 							"path": "/root/UIRoot/DialogBox/SkipButton",
 							"properties": {
+								"layout_mode": {
+									"class_type": "",
+									"hint": 2,
+									"type": "int",
+									"value": 0
+								},
 								"text": {
 									"class_type": "",
-									"hint": 0,
+									"hint": 18,
 									"type": "String",
 									"value": "Skip"
 								}
@@ -228,6 +306,12 @@
 							"hint": 1,
 							"type": "float",
 							"value": 0.75
+						},
+						"layout_mode": {
+							"class_type": "",
+							"hint": 2,
+							"type": "int",
+							"value": 0
 						}
 					}
 				}
@@ -247,6 +331,12 @@
 					"hint": 1,
 					"type": "float",
 					"value": 1.0
+				},
+				"anchors_preset": {
+					"class_type": "",
+					"hint": 2,
+					"type": "int",
+					"value": 15
 				}
 			}
 		}

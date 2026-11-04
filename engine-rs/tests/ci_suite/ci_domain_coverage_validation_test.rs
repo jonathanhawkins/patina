@@ -111,6 +111,9 @@ const DOMAIN_3D_PREFIXES: &[&str] = &[
 ];
 
 const PLATFORM_PREFIXES: &[&str] = &[
+    // Mirrors the platform lane in .github/workflows/ci.yml, which already
+    // runs `export_` (it was missing from this copy only).
+    "export_",
     "input_",
     "window_",
     "platform_",

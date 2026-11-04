@@ -650,6 +650,11 @@ fn make_project_fixture() -> TempDir {
     // Must be excluded by DEFAULT_IGNORED_DIRS.
     fs::create_dir_all(root.join("target")).unwrap();
     fs::write(root.join("target/junk.txt"), "junk").unwrap();
+    // Godot hides a folder from the FileSystem dock only when it carries a
+    // `.gdignore` (or a nested `project.godot`) — there is no name-based
+    // ignore list, so a build directory is hidden the way a real project
+    // hides one.
+    fs::write(root.join("target/.gdignore"), "").unwrap();
 
     // Must be excluded as hidden.
     fs::create_dir_all(root.join(".hidden")).unwrap();
@@ -714,9 +719,8 @@ fn asset_browser_list_dir_sorts_dirs_first() {
     );
 }
 
-/// Hidden entries (`.git`, `.hidden`, etc.) and `DEFAULT_IGNORED_DIRS`
-/// entries (`target`, `node_modules`, ...) must never appear in a listing —
-/// the asset browser panel relies on this to hide build artefacts.
+/// Hidden entries (`.git`, `.hidden`, etc.) and folders carrying a
+/// `.gdignore` (Godot's only ignore mechanism) must never appear in a listing.
 #[test]
 fn asset_browser_list_dir_skips_ignored_and_hidden() {
     let fixture = make_project_fixture();
@@ -870,10 +874,14 @@ fn asset_browser_filesystem_tree_http_returns_entries() {
         payload.get("root").and_then(|v| v.as_str()).is_some(),
         "missing 'root' field: {payload}"
     );
+    // One entry shape for every filesystem route — the `FsEntry` JSON that
+    // `/api/filesystem` (the dock's live endpoint) already serves — under
+    // `entries`. This test once asked for `tree`; a sibling bead's test asked
+    // for `entries`, and no client reads either.
     let tree = payload
-        .get("tree")
+        .get("entries")
         .and_then(|v| v.as_array())
-        .expect("missing 'tree' array");
+        .expect("missing 'entries' array");
     assert!(
         !tree.is_empty(),
         "tree must list project entries, got empty"
@@ -898,10 +906,11 @@ fn asset_browser_filesystem_dir_http_lists_children() {
     assert!(head.contains("200 OK"), "dir GET failed: {head}");
 
     let payload = parse_json_body(&resp);
+    // `FsEntry` shape, as `/api/filesystem` (see the tree test above).
     let children = payload
-        .get("children")
+        .get("entries")
         .and_then(|v| v.as_array())
-        .expect("children array");
+        .expect("entries array");
     assert_eq!(
         children.len(),
         1,
@@ -909,14 +918,16 @@ fn asset_browser_filesystem_dir_http_lists_children() {
     );
     let child = &children[0];
     assert_eq!(child.get("name").and_then(|v| v.as_str()), Some("player.gd"));
+    assert_eq!(child.get("is_dir").and_then(|v| v.as_bool()), Some(false));
     assert_eq!(
-        child.get("is_directory").and_then(|v| v.as_bool()),
-        Some(false)
+        child.get("path").and_then(|v| v.as_str()),
+        Some("res://scripts/player.gd")
     );
     assert_eq!(
-        child.get("icon").and_then(|v| v.as_str()),
-        Some("Script"),
-        "player.gd must be typed as Script: {child}"
+        child.get("file_type").and_then(|v| v.as_str()),
+        // The resource class, as Godot's EditorFileSystem::get_file_type.
+        Some("GDScript"),
+        "player.gd must be typed as GDScript: {child}"
     );
     assert!(
         child

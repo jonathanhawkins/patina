@@ -65,6 +65,10 @@ pub enum WebSocketError {
     /// An underlying IO error.
     #[error("io error: {0}")]
     Io(String),
+    /// A message does not fit the configured buffer — Godot's
+    /// `ERR_OUT_OF_MEMORY` from `put_packet` (`wsl_peer.cpp:784`).
+    #[error("message of {size} bytes exceeds outbound_buffer_size {limit}")]
+    BufferFull { size: usize, limit: usize },
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +417,17 @@ pub struct WebSocketPeer {
     /// Cap on queued inbound packets (Godot
     /// `WebSocketPeer.max_queued_packets`, default `4096`).
     max_queued_packets: usize,
+    /// Godot `WebSocketPeer.inbound_buffer_size` (default `65535`): the
+    /// longest message accepted (wslay's `max_recv_msg_length` — a longer one
+    /// fails the connection with 1009 MESSAGE_TOO_BIG), and, rounded up to a
+    /// power of two, the byte budget of the inbound packet queue
+    /// (`in_buffer.resize(nearest_shift(size), ..)`, `wsl_peer.cpp:299-300`).
+    inbound_buffer_size: usize,
+    /// Godot `WebSocketPeer.outbound_buffer_size` (default `65535`): `send`
+    /// refuses a message once queued-plus-new bytes would exceed it
+    /// (`wsl_peer.cpp:784`). `send` writes straight to the socket and queues
+    /// nothing, so the queued part is zero and the bound is per message.
+    outbound_buffer_size: usize,
     /// Handle into the browser `WebSocket` registry in
     /// [`crate::websocket_web`], set instead of `stream` on wasm32.
     ///
@@ -470,6 +485,8 @@ impl WebSocketPeer {
             last_heartbeat: Instant::now(),
             heartbeat_waiting: false,
             max_queued_packets: 4096,
+            inbound_buffer_size: 65535,
+            outbound_buffer_size: 65535,
             #[cfg(target_arch = "wasm32")]
             browser: None,
         }
@@ -546,6 +563,46 @@ impl WebSocketPeer {
     /// The configured queue cap.
     pub fn get_max_queued_packets(&self) -> i64 {
         self.max_queued_packets as i64
+    }
+
+    /// Godot `WebSocketPeer.inbound_buffer_size` (default 65535). Negative
+    /// values are refused, as Godot's `ERR_FAIL_COND(p_buffer_size < 0)`.
+    pub fn set_inbound_buffer_size(&mut self, size: i64) {
+        if size >= 0 {
+            self.inbound_buffer_size = size as usize;
+        }
+    }
+
+    pub fn get_inbound_buffer_size(&self) -> i64 {
+        self.inbound_buffer_size as i64
+    }
+
+    /// Godot `WebSocketPeer.outbound_buffer_size` (default 65535); `0` means
+    /// unbounded (`outbound_buffer_size > 0 && ...`, `wsl_peer.cpp:784`).
+    pub fn set_outbound_buffer_size(&mut self, size: i64) {
+        if size >= 0 {
+            self.outbound_buffer_size = size as usize;
+        }
+    }
+
+    pub fn get_outbound_buffer_size(&self) -> i64 {
+        self.outbound_buffer_size as i64
+    }
+
+    /// The inbound queue's byte budget: `1 << nearest_shift(size)`, Godot's
+    /// ring-buffer size for `inbound_buffer_size`.
+    fn inbound_queue_capacity(&self) -> usize {
+        let n = self.inbound_buffer_size as u32;
+        if n == 0 {
+            return 0;
+        }
+        // Godot's `nearest_shift`: one past the index of the highest set bit.
+        let shift = 32 - n.leading_zeros();
+        1usize << shift
+    }
+
+    fn queued_payload_bytes(&self) -> usize {
+        self.packets.iter().map(|(p, _)| p.len()).sum()
     }
 
     pub fn get_handshake_headers(&self) -> &[String] {
@@ -863,6 +920,31 @@ impl WebSocketPeer {
             loop {
                 match decode_frame(&self.in_buf) {
                     Ok(Some((frame, consumed))) => {
+                        // Backpressure, as Godot's recv callback (it reads only
+                        // `payload_space_left()`, `wsl_peer.cpp:574`): a data
+                        // frame the queue's byte budget cannot take stays in
+                        // the socket buffer until the script drains packets.
+                        // An over-long message is checked FIRST: wslay sees the
+                        // length in the frame header, which fits in any space
+                        // left, and fails the connection (handle_frame).
+                        let is_data = matches!(
+                            frame.opcode,
+                            Opcode::Text | Opcode::Binary | Opcode::Continuation
+                        );
+                        let so_far = if frame.opcode == Opcode::Continuation {
+                            self.frag_payload.len()
+                        } else {
+                            0
+                        };
+                        let too_long = so_far + frame.payload.len() > self.inbound_buffer_size;
+                        if is_data
+                            && !too_long
+                            && !self.packets.is_empty()
+                            && self.queued_payload_bytes() + frame.payload.len()
+                                > self.inbound_queue_capacity()
+                        {
+                            break;
+                        }
                         self.in_buf.drain(..consumed);
                         self.handle_frame(frame);
                         if self.state == WebSocketState::Closed {
@@ -918,6 +1000,12 @@ impl WebSocketPeer {
     pub fn send(&mut self, data: &[u8], mode: WriteMode) -> Result<(), WebSocketError> {
         if self.state != WebSocketState::Open {
             return Err(WebSocketError::NotOpen);
+        }
+        if self.outbound_buffer_size > 0 && data.len() > self.outbound_buffer_size {
+            return Err(WebSocketError::BufferFull {
+                size: data.len(),
+                limit: self.outbound_buffer_size,
+            });
         }
         if let Some(result) = self.browser_send(data, mode == WriteMode::Text) {
             return result;
@@ -1139,6 +1227,22 @@ impl WebSocketPeer {
     }
 
     fn handle_frame(&mut self, frame: Frame) {
+        // A message longer than `inbound_buffer_size` fails the connection
+        // with 1009 MESSAGE_TOO_BIG — wslay's `max_recv_msg_length`
+        // (`wsl_peer.cpp:299`). Counted across fragments.
+        if matches!(frame.opcode, Opcode::Text | Opcode::Binary | Opcode::Continuation) {
+            let so_far = if frame.opcode == Opcode::Continuation {
+                self.frag_payload.len()
+            } else {
+                0
+            };
+            if so_far + frame.payload.len() > self.inbound_buffer_size {
+                self.frag_opcode = None;
+                self.frag_payload.clear();
+                self.close(1009, "");
+                return;
+            }
+        }
         match frame.opcode {
             Opcode::Text | Opcode::Binary => {
                 if frame.fin {
@@ -1561,6 +1665,142 @@ mod tests {
              `third` loses data the application was promised",
         );
         assert_eq!(peer.get_packet(), b"second".to_vec());
+    }
+
+    /// Connects a peer (configured by `setup` before connecting) to a loopback
+    /// server that completes the handshake, sends `frames` (unmasked, as a
+    /// server does) and then holds the socket open for `hold_ms`.
+    fn open_peer_with_server_frames(
+        frames: Vec<Frame>,
+        hold_ms: u64,
+        setup: impl FnOnce(&mut WebSocketPeer),
+    ) -> (WebSocketPeer, std::thread::JoinHandle<()>) {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let n = std::io::Read::read(&mut sock, &mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                if let Some(key) = parse_handshake_key(&req) {
+                    let _ = std::io::Write::write_all(
+                        &mut sock,
+                        websocket_handshake_response(&key).as_bytes(),
+                    );
+                }
+                for f in &frames {
+                    let _ = std::io::Write::write_all(&mut sock, &encode_frame(f, None));
+                }
+                std::thread::sleep(Duration::from_millis(hold_ms));
+            }
+        });
+        let mut peer = WebSocketPeer::new();
+        setup(&mut peer);
+        peer.connect_to_url(&format!("ws://127.0.0.1:{port}/"))
+            .expect("connect");
+        // Until the handshake resolves. Frames written right behind the 101
+        // can arrive in the same read and act in the same poll, so a test
+        // whose frames close the connection may already be past OPEN here.
+        for _ in 0..200 {
+            peer.poll();
+            if peer.get_ready_state() != WebSocketState::Connecting {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_ne!(peer.get_ready_state(), WebSocketState::Connecting, "handshake resolved");
+        (peer, server)
+    }
+
+    /// Polls a few times so frames already written by the server arrive.
+    fn settle(peer: &mut WebSocketPeer) {
+        for _ in 0..20 {
+            peer.poll();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn the_buffer_sizes_default_to_godots_65535_and_refuse_negatives() {
+        let mut peer = WebSocketPeer::new();
+        assert_eq!(peer.get_inbound_buffer_size(), 65535);
+        assert_eq!(peer.get_outbound_buffer_size(), 65535);
+        // Godot's ring buffer for 65535 bytes is 1 << nearest_shift(65535).
+        assert_eq!(peer.inbound_queue_capacity(), 65536);
+        peer.set_inbound_buffer_size(-1);
+        peer.set_outbound_buffer_size(-1);
+        assert_eq!(peer.get_inbound_buffer_size(), 65535, "negative refused");
+        assert_eq!(peer.get_outbound_buffer_size(), 65535, "negative refused");
+    }
+
+    /// `outbound_buffer_size` bounds a send: Godot's `ERR_OUT_OF_MEMORY` once
+    /// queued + new bytes exceed it (`wsl_peer.cpp:784`), and `0` = unbounded.
+    #[test]
+    fn a_send_larger_than_outbound_buffer_size_is_refused() {
+        let (mut peer, server) = open_peer_with_server_frames(vec![], 300, |p| {
+            p.set_outbound_buffer_size(8);
+        });
+        assert!(matches!(
+            peer.send(&[0u8; 9], WriteMode::Binary),
+            Err(WebSocketError::BufferFull { size: 9, limit: 8 })
+        ));
+        assert!(peer.send(&[0u8; 8], WriteMode::Binary).is_ok(), "exactly the limit fits");
+        peer.set_outbound_buffer_size(0);
+        assert!(
+            peer.send(&[0u8; 100], WriteMode::Binary).is_ok(),
+            "0 disables the bound"
+        );
+        let _ = server.join();
+    }
+
+    /// A message longer than `inbound_buffer_size` fails the connection with
+    /// 1009 MESSAGE_TOO_BIG (wslay `max_recv_msg_length`, `wsl_peer.cpp:299`);
+    /// one within it is delivered.
+    #[test]
+    fn a_message_longer_than_inbound_buffer_size_closes_with_1009() {
+        let frames = vec![
+            Frame::new(Opcode::Text, b"0123456789".to_vec()),
+            Frame::new(Opcode::Text, vec![b'x'; 11]),
+        ];
+        let (mut peer, server) = open_peer_with_server_frames(frames, 300, |p| {
+            p.set_inbound_buffer_size(10);
+        });
+        settle(&mut peer);
+        assert!(peer.close_frame_sent, "the handshake completed and the peer failed it");
+        assert_eq!(peer.get_available_packet_count(), 1, "the 10-byte message fits");
+        assert_eq!(peer.get_packet(), b"0123456789".to_vec());
+        assert_ne!(
+            peer.get_ready_state(),
+            WebSocketState::Open,
+            "an 11-byte message over a 10-byte limit must fail the connection"
+        );
+        assert_eq!(peer.close_code, 1009, "MESSAGE_TOO_BIG");
+        let _ = server.join();
+    }
+
+    /// The inbound queue's byte budget (`1 << nearest_shift(size)`) applies
+    /// BACKPRESSURE: a message that does not fit waits in the socket buffer
+    /// and arrives once the script drains packets — it is not dropped
+    /// (`wsl_peer.cpp:574` reads only `payload_space_left()`).
+    #[test]
+    fn a_full_inbound_byte_budget_delays_messages_rather_than_dropping_them() {
+        // inbound 16 → capacity 32: two 12-byte messages fit, a third waits.
+        let frames = (0..3u8)
+            .map(|i| Frame::new(Opcode::Binary, vec![i; 12]))
+            .collect();
+        let (mut peer, server) = open_peer_with_server_frames(frames, 400, |p| {
+            p.set_inbound_buffer_size(16);
+        });
+        settle(&mut peer);
+        assert_eq!(peer.get_available_packet_count(), 2, "the budget holds two");
+        assert_eq!(peer.get_packet(), vec![0u8; 12]);
+        settle(&mut peer);
+        assert_eq!(peer.get_available_packet_count(), 2, "the third arrives once there is room");
+        assert_eq!(peer.get_packet(), vec![1u8; 12]);
+        assert_eq!(peer.get_packet(), vec![2u8; 12], "nothing was dropped");
+        assert_eq!(peer.get_ready_state(), WebSocketState::Open);
+        let _ = server.join();
     }
 
     /// A cap below 1 is clamped, not honoured.

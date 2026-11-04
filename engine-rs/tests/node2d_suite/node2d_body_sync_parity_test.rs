@@ -180,7 +180,7 @@ fn sync_to_physics_pushes_kinematic_rotation_to_body() {
 }
 
 #[test]
-fn sync_to_physics_does_not_overwrite_rigid_body() {
+fn sync_to_physics_teleports_a_rigid_body_on_an_external_write() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
@@ -206,18 +206,21 @@ fn sync_to_physics_does_not_overwrite_rigid_body() {
     let pos_after_step = server.world().get_body(body_id).unwrap().position;
     assert!(pos_after_step.x > 100.0, "rigid body should have moved");
 
-    // Change node position to something different (simulating erroneous write)
+    // A script writes the node's position (in Godot this is
+    // NOTIFICATION_TRANSFORM_CHANGED → body_set_state(BODY_STATE_TRANSFORM),
+    // collision_object_2d.cpp:79-90 — a teleport, not an error).
     tree.get_node_mut(rigid_id)
         .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(0.0, 0.0)));
 
-    // sync_to_physics should NOT overwrite the rigid body
     server.sync_to_physics(&mut tree);
 
     let pos_after_sync = server.world().get_body(body_id).unwrap().position;
+    assert_ne!(pos_after_sync, pos_after_step);
     assert_eq!(
-        pos_after_sync, pos_after_step,
-        "sync_to_physics must not overwrite rigid body position"
+        pos_after_sync,
+        Vector2::new(0.0, 0.0),
+        "sync_to_physics must carry the written position into the rigid body"
     );
 }
 
@@ -1177,8 +1180,13 @@ fn register_bodies_twice_does_not_duplicate() {
 // 19. External position write on rigid body: physics overwrites — pat-ctv
 // ===========================================================================
 
+// Godot TELEPORTS a rigid body on an external transform write:
+// `CollisionObject2D` answers NOTIFICATION_TRANSFORM_CHANGED with
+// `body_set_state(BODY_STATE_TRANSFORM, ...)` (scene/2d/physics/
+// collision_object_2d.cpp:79-90). Simulation continues from the written
+// state; it is not discarded.
 #[test]
-fn external_position_write_rigid_overwritten_by_sync_from() {
+fn external_position_write_rigid_teleports_the_body() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
@@ -1207,19 +1215,20 @@ fn external_position_write_rigid_overwritten_by_sync_from() {
         .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(9999.0, 9999.0)));
 
-    // Next tick — physics engine is source of truth for rigid bodies.
+    // Next tick — the body continues from the teleport.
     server.sync_to_physics(&mut tree);
     server.step_physics(1.0 / 60.0);
     server.sync_from_physics(&mut tree);
 
+    let _ = pos_after_first;
     let pos_after_second = get_vec2(&tree, rigid_id, "position");
     assert!(
-        pos_after_second.x < 200.0,
-        "rigid body external write must be overwritten by physics: got {pos_after_second:?}"
+        pos_after_second.x >= 9999.0 && pos_after_second.x < 9999.0 + 3.0,
+        "rigid body is teleported to x=9999 then advances one tick: got {pos_after_second:?}"
     );
     assert!(
-        pos_after_second.x > pos_after_first.x - 1.0,
-        "rigid body should continue trajectory: first={pos_after_first:?}, second={pos_after_second:?}"
+        pos_after_second.y >= 9999.0 && pos_after_second.y < 9999.0 + 3.0,
+        "rigid body y continues from the teleport: got {pos_after_second:?}"
     );
 }
 
@@ -1340,10 +1349,12 @@ fn external_rotation_write_rigid_overwritten() {
     server.step_physics(1.0 / 60.0);
     server.sync_from_physics(&mut tree);
 
+    // BODY_STATE_TRANSFORM carries the rotation too; with no angular
+    // velocity it stays where it was written.
     let rot = get_float(&tree, rigid_id, "rotation");
     assert!(
-        rot.abs() < 10.0,
-        "rigid body external rotation write must be overwritten: got {rot}"
+        (rot - 99.0).abs() < 1e-3,
+        "rigid body external rotation write teleports it: got {rot}"
     );
 }
 
@@ -1422,10 +1433,16 @@ fn external_velocity_write_rigid_overwritten() {
     server.step_physics(1.0 / 60.0);
     server.sync_from_physics(&mut tree);
 
+    // `set_linear_velocity` writes BODY_STATE_LINEAR_VELOCITY: the written
+    // velocity stands, plus one tick of gravity on y.
     let vel = get_vec2(&tree, rigid_id, "linear_velocity");
     assert!(
-        vel.x < 1000.0,
-        "rigid body velocity must not retain external write: got {vel:?}"
+        (vel.x - 99999.0).abs() < 1.0,
+        "rigid body keeps the written velocity: got {vel:?}"
+    );
+    assert!(
+        vel.y > 99999.0 && vel.y < 99999.0 + 20.0,
+        "written y velocity plus one tick of gravity: got {vel:?}"
     );
 }
 
@@ -1531,11 +1548,11 @@ fn simultaneous_external_writes_mixed_body_types() {
     server.step_physics(1.0 / 60.0);
     server.sync_from_physics(&mut tree);
 
-    // Rigid: overwritten.
+    // Rigid: teleported (see the cite above `external_position_write_rigid_teleports_the_body`).
     let rigid_pos = get_vec2(&tree, rigid_id, "position");
     assert!(
-        rigid_pos.x < 300.0,
-        "rigid external write overwritten: got {rigid_pos:?}"
+        rigid_pos.x >= 5000.0 && rigid_pos.x < 5003.0,
+        "rigid external write teleports: got {rigid_pos:?}"
     );
 
     // Static: persists.
@@ -1772,8 +1789,9 @@ fn external_transform_write_parity_report() {
     let mut checks_passed = 0;
     let total_checks = 3;
 
-    // Rigid: overwritten by physics (not at 5000).
-    if rigid_pos.x < 300.0 {
+    // Rigid: teleported to the written 5000 (Godot body_set_state TRANSFORM).
+    let rigid_teleported = rigid_pos.x >= 5000.0 && rigid_pos.x < 5003.0;
+    if rigid_teleported {
         checks_passed += 1;
     }
     // Static: persists.
@@ -1790,8 +1808,8 @@ fn external_transform_write_parity_report() {
     eprintln!("\n=== External Transform Write Parity Report (4.6.1) ===");
     eprintln!("  Contract: physics.fixedstep.body_sync_external_transform_writes");
     eprintln!(
-        "  Rigid body external write overwritten:  {}",
-        if rigid_pos.x < 300.0 { "PASS" } else { "FAIL" }
+        "  Rigid body external write teleports:    {}",
+        if rigid_teleported { "PASS" } else { "FAIL" }
     );
     eprintln!(
         "  Static body external write persists:    {}",

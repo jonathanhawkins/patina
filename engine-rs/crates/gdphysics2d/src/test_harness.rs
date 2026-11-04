@@ -74,9 +74,12 @@ pub fn assert_bodies_separated(world: &PhysicsWorld2D, id_a: BodyId, id_b: BodyI
         }
     };
 
+    // Godot leaves a resting contact up to `contact_max_allowed_penetration`
+    // deep rather than correcting it to zero (it would oscillate), so a pair
+    // the solver has separated sits exactly that far inside touching.
     let dist = (b.position - a.position).length();
     assert!(
-        dist >= min_dist - 1e-3,
+        dist >= min_dist - crate::solver::DEFAULT_MAX_PENETRATION - 1e-2,
         "Bodies overlap: distance {dist} < required {min_dist}"
     );
 }
@@ -88,7 +91,12 @@ mod tests {
     #[test]
     fn harness_two_overlapping_circles_separate_after_step() {
         let (mut world, id_a, id_b) = two_overlapping_circles();
-        world.step(0.0);
+        // Real steps: the solver's push-out is a bias velocity over `dt`, so
+        // `step(0.0)` correctly moves nothing.
+        world.set_gravity(Vector2::ZERO);
+        for _ in 0..30 {
+            world.step(1.0 / 60.0);
+        }
         assert_bodies_separated(&world, id_a, id_b);
     }
 

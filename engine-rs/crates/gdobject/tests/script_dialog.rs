@@ -126,12 +126,13 @@ fn confirmation_dialog_overrides_the_inherited_title() {
     // Inherited flags still come through the chain.
     assert_eq!(c.get_property("exclusive"), Variant::Bool(true));
 
-    // ScriptCreateDialog inherits the confirmation title rather than the alert
-    // one — proof the override resolves through two levels.
+    // ScriptCreateDialog re-declares title AGAIN — its own default is
+    // "Attach Node Script" (doc/classes/ScriptCreateDialog.xml:44, `overrides=
+    // "Window"`). The NEAREST declaration wins, three levels down.
     let s = instantiate("ScriptCreateDialog").expect("instantiates");
     assert_eq!(
         s.get_property("title"),
-        Variant::String("Please Confirm...".to_string()),
-        "the nearer override must win over AcceptDialog's default"
+        Variant::String("Attach Node Script".to_string()),
+        "the nearest override (ScriptCreateDialog's own) must win"
     );
 }

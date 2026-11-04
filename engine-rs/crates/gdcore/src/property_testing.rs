@@ -505,8 +505,12 @@ mod tests {
         ) {
             let aabb = Aabb::new(pos, size);
             let expanded = aabb.expand(point);
-            // Expanded volume should be >= original volume
-            prop_assert!(expanded.get_volume() >= aabb.get_volume() - EPSILON);
+            // Expanded volume should be >= original volume. `expand` rebuilds
+            // the size as `end - begin` in f32 (as Godot's `AABB::expand_to`
+            // does), so the bound is RELATIVE: an absolute EPSILON is far below
+            // one f32 ulp of a ~5e4 volume and failed on a no-op expand.
+            let v = aabb.get_volume();
+            prop_assert!(expanded.get_volume() >= v - v.abs() * 1e-5 - EPSILON);
         }
     }
 

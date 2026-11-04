@@ -72,6 +72,9 @@ fn scene_tree_script_bridge_scene_management() {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
     let a = tree.add_child(root, Node::new("A", "Node")).unwrap();
+    // The running scene, as every boot path records it: `change_scene_*`
+    // frees `current_scene` only (Godot), so a bare root child would survive.
+    tree.set_current_scene(a, None);
     attach(
         &mut tree,
         a,

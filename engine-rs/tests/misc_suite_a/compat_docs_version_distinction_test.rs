@@ -28,9 +28,12 @@ fn compat_matrix_references_461() {
         content.contains("4.6.1"),
         "COMPAT_MATRIX.md must reference 4.6.1"
     );
+    // The scene count must be the LIVE one, not a number frozen into this
+    // test (it said "18" while the doc said "21+" and the fixtures held 45).
+    let n = oracle_scene_count();
     assert!(
-        content.contains("18 scenes") || content.contains("18 oracle"),
-        "COMPAT_MATRIX.md must show current expanded parity metrics (18 oracle scenes)"
+        content.contains(&format!("{n} oracle scenes")),
+        "COMPAT_MATRIX.md must state the current oracle corpus: {n} oracle scenes"
     );
 }
 
@@ -146,9 +149,14 @@ fn compat_dashboard_no_stale_script_var_gaps() {
 fn compat_matrix_oracle_parity_shows_current_metrics() {
     let content = fs::read_to_string(repo_root().join("COMPAT_MATRIX.md")).unwrap();
     // The Oracle Parity Summary section must show the expanded corpus metrics
+    let n = oracle_scene_count();
+    let files = std::fs::read_dir(repo_root().join("fixtures/oracle_outputs"))
+        .unwrap()
+        .filter(|e| e.as_ref().map_or(false, |e| e.path().extension().map_or(false, |x| x == "json")))
+        .count();
     assert!(
-        content.contains("18 oracle scenes") || content.contains("18 measured scenes"),
-        "COMPAT_MATRIX.md Oracle Parity Summary must show expanded corpus metrics (18 scenes)"
+        content.contains(&format!("{n} oracle scenes")) && content.contains(&format!("{files} oracle output files")),
+        "COMPAT_MATRIX.md Oracle Parity Summary must show the live corpus: {n} oracle scenes, {files} oracle output files"
     );
 }
 
@@ -217,4 +225,13 @@ fn repin_diff_report_has_both_versions() {
         content.contains("Improved") && content.contains("Regressed"),
         "repin diff must separate improvements from regressions"
     );
+}
+
+/// Scenes with a Godot property capture — the oracle corpus the matrix reports.
+fn oracle_scene_count() -> usize {
+    std::fs::read_dir(repo_root().join("fixtures/oracle_outputs"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with("_properties.json"))
+        .count()
 }

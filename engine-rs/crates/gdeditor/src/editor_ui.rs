@@ -2187,6 +2187,12 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   <div class="ctx-item" data-action="move-down">Move Down</div>
   <div class="ctx-separator"></div>
   <div class="ctx-item" data-action="attach-script">Attach Script</div>
+  <div class="ctx-item" data-action="detach-script">Detach Script</div>
+  <div class="ctx-item" data-action="extend-script">Extend Script&hellip;</div>
+  <div class="ctx-separator"></div>
+  <div class="ctx-item" data-action="save-branch">Save Branch as Scene&hellip;</div>
+  <div class="ctx-item" data-action="reparent-to-new">Reparent to New Node</div>
+  <div class="ctx-item" data-action="make-root">Make Scene Root</div>
   <div class="ctx-separator"></div>
   <div class="ctx-item" data-action="change-type">Change Type…</div>
   <div class="ctx-item" data-action="make-local">Make Local</div>
@@ -2791,7 +2797,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         <button class="game-tool-btn" id="game-embed-options" title="Embedding Options">&#9635;</button>
       </div>
       <div id="game-screen">
-        <img id="game-screen-img" alt="game" style="display:none" />
+        <img id="game-screen-img" alt="game" draggable="false" style="display:none" />
         <div id="game-idle">
           <div class="game-idle-icon">&#9654;</div>
           <div id="game-status">Press play to start the game.</div>
@@ -4807,6 +4813,22 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         await api('POST', '/api/node/reorder', { node_id: nodeId, direction: 'down' });
         await fetchScene(); break;
       case 'attach-script': doAttachScript(nodeId); break;
+      case 'detach-script':
+        await api('POST', '/api/node/detach_script', { node_id: nodeId });
+        await fetchScene(); break;
+      case 'extend-script': await doExtendScript(nodeId); break;
+      case 'save-branch': await doSaveBranch(nodeId); break;
+      case 'reparent-to-new':
+        // The multi-select set when there is one, else the clicked node —
+        // Godot wraps the whole selection.
+        await api('POST', '/api/node/reparent_to_new', {
+          node_ids: selectedNodeIds.size > 1 ? Array.from(selectedNodeIds) : [nodeId],
+          class_name: 'Node2D'
+        });
+        await fetchScene(); break;
+      case 'make-root':
+        await api('POST', '/api/node/make_root', { node_id: nodeId });
+        await fetchScene(); break;
       case 'instance-scene': doInstanceScene(nodeId); break;
       case 'change-type': doChangeType(nodeId); break;
       case 'make-local': doMakeLocal(nodeId); break;
@@ -4814,6 +4836,24 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       case 'unique-name': doToggleUniqueName(nodeId); break;
       case 'lock': doToggleLock(nodeId); break;
     }
+  }
+
+  // Godot's "Save Branch as Scene": the server writes the subtree to the given
+  // .tscn and replaces the branch with an instance of that file.
+  async function doSaveBranch(nodeId) {
+    var path = prompt('Save branch as scene (res:// path):', 'res://branch.tscn');
+    if (!path) return;
+    await api('POST', '/api/node/save_branch', { node_id: nodeId, path: path });
+    await fetchScene();
+  }
+
+  // Godot's "Extend Script": the new script's first line inherits the node's
+  // current script, so the node must already have one.
+  async function doExtendScript(nodeId) {
+    var path = prompt('New script path (res://):', 'res://extended.gd');
+    if (!path) return;
+    await api('POST', '/api/node/extend_script', { node_id: nodeId, path: path });
+    await fetchScene();
   }
 
   async function doInstanceScene(parentNodeId) {
@@ -5783,6 +5823,14 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     return api('POST', '/api/property/resource/make_unique',
                { node_id: nodeId, property: property })
       .then(function(r) {
+        // ⚠️ `api()` parses and returns the body whatever the status, so a 400
+        // arrives here as a resolved value, not a rejection. Without this check
+        // the refusal the server sends for an already-unique resource would be
+        // logged as a success.
+        if (r && r.error) {
+          logMessage('warn', 'Make Unique: ' + (r.error.message || 'refused'));
+          return;
+        }
         logMessage('info', 'Made unique: ' + humanizeProp(property) +
                            (r && r.id ? ' → SubResource("' + r.id + '")' : ''));
         if (selectedNodeId) fetchSelected();
@@ -5794,7 +5842,14 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   function saveResourceAs(nodeId, property, path) {
     return api('POST', '/api/property/resource/save_as',
                { node_id: nodeId, property: property, path: path })
-      .then(function() {
+      .then(function(r) {
+        // Same envelope caveat as makeResourceUnique: a 400 (e.g. the property
+        // is already external, or no project is open) resolves rather than
+        // rejects, so it has to be read off the body.
+        if (r && r.error) {
+          logMessage('warn', 'Save As: ' + (r.error.message || 'refused'));
+          return;
+        }
         logMessage('info', 'Saved ' + humanizeProp(property) + ' → ' + path);
         if (selectedNodeId) fetchSelected();
       });
@@ -6941,6 +6996,29 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   var dragStartY = 0;
   var DRAG_THRESHOLD = 3;
   var viewportZoom = 1.0;
+  // 🔑 The server frames the 2D view on the scene's BOUNDS: world (0,0) sits
+  // at `width/2 - scene_center*zoom + pan` (`scene_renderer::camera_offset`,
+  // the same offset its picking uses). The overlay assumed `width/2 + pan`, so
+  // its origin lines, grid, rulers and guides were off from the drawn scene by
+  // the bounds centre — 217px vertically on Dodge the Creeps' main.tscn.
+  var viewportSceneCX = 0, viewportSceneCY = 0, _sceneCenterAt = 0;
+  function viewOriginX(width) { return width / 2 + viewportPanX - viewportSceneCX * viewportZoom; }
+  function viewOriginY(height) { return height / 2 + viewportPanY - viewportSceneCY * viewportZoom; }
+  // Re-read after each edit-view frame (the bounds move as the scene is
+  // edited), throttled so a fast spin does not add a request per frame.
+  function refreshSceneCenter() {
+    var now = performance.now();
+    if (now - _sceneCenterAt < 250) return;
+    _sceneCenterAt = now;
+    api('GET', '/api/viewport/zoom_pan').then(function(d) {
+      if (!d || typeof d.scene_center_x !== 'number') return;
+      if (d.scene_center_x !== viewportSceneCX || d.scene_center_y !== viewportSceneCY) {
+        viewportSceneCX = d.scene_center_x;
+        viewportSceneCY = d.scene_center_y;
+        renderViewportOverlay();
+      }
+    });
+  }
   var viewportPanX = 0;
   var viewportPanY = 0;
   var isPanning = false;
@@ -8248,9 +8326,9 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       // The corner belongs to the top ruler, matching Godot: a drag starting in
       // the 18x18 overlap produces a horizontal guide.
       if (inTop) {
-        pendingGuide = { orientation: 'horizontal', position: (ly - (rect.height / 2 + viewportPanY)) / zoom };
+        pendingGuide = { orientation: 'horizontal', position: (ly - viewOriginY(rect.height)) / zoom };
       } else {
-        pendingGuide = { orientation: 'vertical', position: (lx - (rect.width / 2 + viewportPanX)) / zoom };
+        pendingGuide = { orientation: 'vertical', position: (lx - viewOriginX(rect.width)) / zoom };
       }
       renderViewportOverlay();
     });
@@ -8259,9 +8337,9 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       var rect = container.getBoundingClientRect();
       var zoom = viewportZoom || 1.0;
       if (pendingGuide.orientation === 'horizontal') {
-        pendingGuide.position = ((e.clientY - rect.top) - (rect.height / 2 + viewportPanY)) / zoom;
+        pendingGuide.position = ((e.clientY - rect.top) - viewOriginY(rect.height)) / zoom;
       } else {
-        pendingGuide.position = ((e.clientX - rect.left) - (rect.width / 2 + viewportPanX)) / zoom;
+        pendingGuide.position = ((e.clientX - rect.left) - viewOriginX(rect.width)) / zoom;
       }
       renderViewportOverlay();
     });
@@ -8303,8 +8381,8 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       var ly = e.clientY - rect.top;
       if (lx < RULER_SIZE || ly < RULER_SIZE) return;   // ruler strips create
       var zoom = viewportZoom || 1.0;
-      var ox = rect.width / 2 + viewportPanX;
-      var oy = rect.height / 2 + viewportPanY;
+      var ox = viewOriginX(rect.width);
+      var oy = viewOriginY(rect.height);
       var GRAB = 4;                          // px; Godot uses a similar slop
       for (var i = 0; i < viewportGuides.length; i++) {
         var g = viewportGuides[i];
@@ -8326,9 +8404,9 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       var rect = container.getBoundingClientRect();
       var zoom = viewportZoom || 1.0;
       if (draggingGuide.orientation === 'horizontal') {
-        draggingGuide.position = ((e.clientY - rect.top) - (rect.height / 2 + viewportPanY)) / zoom;
+        draggingGuide.position = ((e.clientY - rect.top) - viewOriginY(rect.height)) / zoom;
       } else {
-        draggingGuide.position = ((e.clientX - rect.left) - (rect.width / 2 + viewportPanX)) / zoom;
+        draggingGuide.position = ((e.clientX - rect.left) - viewOriginX(rect.width)) / zoom;
       }
       renderViewportOverlay();
     });
@@ -8397,6 +8475,10 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         viewportZoom = data.zoom || 1.0;
         viewportPanX = data.pan_x || 0;
         viewportPanY = data.pan_y || 0;
+        if (typeof data.scene_center_x === 'number') {
+          viewportSceneCX = data.scene_center_x;
+          viewportSceneCY = data.scene_center_y;
+        }
         updateZoomIndicator();
       }
     });
@@ -8434,8 +8516,103 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
 
   var _viewportLoading = false;
   var _viewportEverLoaded = false;
+  // ---- Game frame pump (while a scene runs) ----
+  // The Game view used to take a frame from the 200 ms viewport poll, so a
+  // running game was SHOWN at 5 fps whatever it ran at. While playing, frames
+  // are pulled back-to-back instead: each request asks for the frame AFTER the
+  // last one shown (`/api/viewport?after=<seq>`, which the server holds until
+  // that frame exists), is decoded off-thread, and then swapped in.
+  var _gamePumpActive = false;
+  var _gameFrameSeq = 0;
+  var _gameFrameUrl = null;
+  var _gameShownTimes = [];
+  // Each pump loop owns a generation, so Stop then Play while a request is
+  // still in flight ends the old loop instead of running two.
+  var _gamePumpGen = 0;
+  function startGameFramePump() {
+    if (_gamePumpActive) return;
+    _gamePumpActive = true;
+    pumpGameFrame(++_gamePumpGen);
+  }
+  function stopGameFramePump() { _gamePumpActive = false; }
+  async function pumpGameFrame(gen) {
+    // Requests go out back to back; the server's wait paces them, so no frame
+    // timer sits in between (a requestAnimationFrame per frame cost ~6 fps).
+    while (_gamePumpActive && runtimeRunning && gen === _gamePumpGen) {
+      if (document.hidden) {
+        // Nobody is looking: don't pull 3 MB frames for a background tab.
+        await new Promise(function(r) { setTimeout(r, 250); });
+        continue;
+      }
+      try {
+        var resp = await fetch('/api/viewport?after=' + _gameFrameSeq, { cache: 'no-store' });
+        var seq = parseInt(resp.headers.get('X-Frame-Seq') || '0', 10);
+        if (!resp.ok || seq === _gameFrameSeq) {
+          // No newer frame within the server's wait: a paused or stalled game.
+          await new Promise(function(r) { setTimeout(r, 16); });
+          continue;
+        }
+        _gameFrameSeq = seq;
+        var url = URL.createObjectURL(await resp.blob());
+        var frame = new Image();
+        frame.src = url;
+        await frame.decode();
+        if (viewportImg) { viewportImg.src = url; viewportImg.style.display = 'block'; }
+        var gimg = document.getElementById('game-screen-img');
+        if (gimg) gimg.src = url;
+        if (_gameFrameUrl) URL.revokeObjectURL(_gameFrameUrl);
+        _gameFrameUrl = url;
+        _viewportEverLoaded = true;
+        var ph = document.getElementById('viewport-placeholder');
+        if (ph) ph.style.display = 'none';
+        var now = performance.now();
+        _gameShownTimes.push(now);
+        while (_gameShownTimes.length && now - _gameShownTimes[0] > 1000) _gameShownTimes.shift();
+      } catch (e) {
+        await new Promise(function(r) { setTimeout(r, 100); });
+      }
+    }
+    if (gen === _gamePumpGen) _gamePumpActive = false;
+  }
+  // Frames the browser actually showed in the last second.
+  function displayedFps() {
+    var now = performance.now();
+    while (_gameShownTimes.length && now - _gameShownTimes[0] > 1000) _gameShownTimes.shift();
+    return _gameShownTimes.length;
+  }
+  var runtimeSimFps = 0, runtimeRenderFps = 0, runtimeRenderMs = 0, runtimeBuild = '';
+  // The counter sits over whichever surface is showing the game: the Game
+  // view's screen, or the 2D/3D viewport when Play runs there.
+  function fpsOverlayHost() {
+    var g = document.getElementById('game-screen');
+    if (g && g.offsetParent !== null) return g;
+    return document.getElementById('viewport-container');
+  }
+  function updateFpsOverlay() {
+    var o = document.getElementById('fps-overlay');
+    if (!runtimeRunning) { if (o) o.remove(); return; }
+    var host = fpsOverlayHost();
+    if (!host) return;
+    if (!o) {
+      o = document.createElement('div');
+      o.id = 'fps-overlay';
+      o.style.cssText = 'position:absolute;top:6px;right:8px;z-index:21;pointer-events:none;font:11px/1.35 monospace;color:#cfe3ff;background:rgba(0,0,0,0.55);padding:3px 7px;border-radius:3px;text-align:right;white-space:pre;';
+    }
+    if (o.parentElement !== host) host.appendChild(o);
+    var shown = displayedFps();
+    var colour = shown >= 50 ? '#8fe388' : shown >= 25 ? '#f2d16b' : '#ff8a7a';
+    o.innerHTML = '<span style="color:' + colour + ';font-weight:bold">' + shown + ' fps shown</span>\n'
+      + 'game ' + runtimeSimFps + ' · render ' + runtimeRenderFps + ' fps\n'
+      + 'render ' + runtimeRenderMs.toFixed(1) + ' ms'
+      // A debug editor renders ~10x slower than a release one; say so, or
+      // the number reads as an engine performance problem.
+      + (runtimeBuild === 'debug' ? '\n<span style="color:#f2d16b">debug build: ~10x slower</span>' : '');
+  }
+
   function refreshViewport() {
     if (!viewportImg) return;
+    // While a scene runs, the frame pump above owns the viewport image.
+    if (_gamePumpActive) return;
     // pat-vl1mk: single-in-flight. Skip this frame if the previous PNG is still
     // loading so 5Hz viewport polls can't stack up decode work on a slow link.
     if (_viewportLoading) return;
@@ -8445,6 +8622,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       _viewportLoading = false;
       _viewportEverLoaded = true;
       viewportImg.src = img.src;
+      refreshSceneCenter();
       viewportImg.style.display = 'block';
       var ph = document.getElementById('viewport-placeholder');
       if (ph) ph.style.display = 'none';
@@ -12342,7 +12520,9 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     var sb = document.getElementById('statusbar'), rs = document.getElementById('status-runtime');
     if (runtimeRunning) {
       if (!rs) { rs = document.createElement('span'); rs.id = 'status-runtime'; sb.appendChild(rs); }
-      rs.innerHTML = 'Frame: <span class="accent">' + runtimeFrameCount + '</span> | FPS: <span class="accent">' + runtimeFps.toFixed(0) + '</span>';
+      // Measured, not the target: the old readout was `1 / delta`, a constant
+      // 60 while the view showed 5.
+      rs.innerHTML = 'Frame: <span class="accent">' + runtimeFrameCount + '</span> | FPS: <span class="accent">' + displayedFps() + '</span> shown · <span class="accent">' + runtimeSimFps + '</span> game';
     } else { if (rs) rs.remove(); }
   }
   function setRuntimeEditingDisabled(d) {
@@ -12359,7 +12539,10 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     _runtimeStatusInflight = true;
     try {
       var r = await api('GET', '/api/runtime/status');
-      if (r) { runtimeRunning = r.running; runtimePaused = r.paused; runtimeFrameCount = r.frame_count; runtimeFps = r.fps; if (r.midi_open) startWebMidi(); updatePlayButtonStates(); showPlayingOverlay(runtimeRunning); updateRuntimeStatusBar(); if (!runtimeRunning) { restoreViewAfterStop(); setRuntimeEditingDisabled(false); stopRuntimePolling(); stopGameInput(); } }
+      if (r) { runtimeRunning = r.running; runtimePaused = r.paused; runtimeFrameCount = r.frame_count; runtimeFps = r.fps;
+        runtimeSimFps = r.sim_fps || 0; runtimeRenderFps = r.render_fps || 0; runtimeRenderMs = r.render_ms || 0; runtimeBuild = r.build || '';
+        if (runtimeRunning) startGameFramePump(); else stopGameFramePump();
+        updateFpsOverlay(); if (r.midi_open) startWebMidi(); updatePlayButtonStates(); showPlayingOverlay(runtimeRunning); updateRuntimeStatusBar(); if (!runtimeRunning) { restoreViewAfterStop(); setRuntimeEditingDisabled(false); stopRuntimePolling(); stopGameInput(); } }
     } finally { _runtimeStatusInflight = false; }
   }
   function startRuntimePolling() { if (runtimeStatusInterval) return; runtimeStatusInterval = setInterval(pollRuntimeStatus, 200); }
@@ -12395,7 +12578,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     });
     document.getElementById('btn-play').addEventListener('click', async function() {
       if (runtimeRunning) return;
-      var r = await api('POST', '/api/runtime/play', { movie: movieMakerEnabled });
+      var r = await api('POST', '/api/runtime/play', { movie: movieMakerEnabled, audio: true });
       if (r && r.ok) { runtimeRunning = true; runtimePaused = false; runtimeFrameCount = 0; logMessage('info', 'Play started (F5)'); enterGameViewOnPlay(); updatePlayButtonStates(); showPlayingOverlay(true); updateRuntimeStatusBar(); setRuntimeEditingDisabled(true); startRuntimePolling(); startGameInput(); }
     });
     document.getElementById('btn-pause').addEventListener('click', async function() {
@@ -12412,7 +12595,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     });
     document.getElementById('btn-play-current').addEventListener('click', async function() {
       if (runtimeRunning) return;
-      var r = await api('POST', '/api/runtime/play', { movie: movieMakerEnabled });
+      var r = await api('POST', '/api/runtime/play', { movie: movieMakerEnabled, audio: true });
       if (r && r.ok) { runtimeRunning = true; runtimePaused = false; runtimeFrameCount = 0; logMessage('info', 'Play Current Scene (F6)'); enterGameViewOnPlay(); updatePlayButtonStates(); showPlayingOverlay(true); updateRuntimeStatusBar(); setRuntimeEditingDisabled(true); startRuntimePolling(); startGameInput(); }
     });
     // pat-12qzs: Play Custom Scene — pick a scene file and run it (Godot's
@@ -12425,7 +12608,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       var scene = prompt('Play a custom scene (res:// path):', def);
       if (!scene || !scene.trim()) return;
       if (typeof doOpenScene === 'function') { await doOpenScene(scene.trim()); }
-      var r = await api('POST', '/api/runtime/play', { movie: movieMakerEnabled });
+      var r = await api('POST', '/api/runtime/play', { movie: movieMakerEnabled, audio: true });
       if (r && r.ok) { runtimeRunning = true; runtimePaused = false; runtimeFrameCount = 0; logMessage('info', 'Play Custom Scene: ' + scene.trim()); enterGameViewOnPlay(); updatePlayButtonStates(); showPlayingOverlay(true); updateRuntimeStatusBar(); setRuntimeEditingDisabled(true); startRuntimePolling(); startGameInput(); }
     });
     // pat-uqj6w: Movie Maker mode toggle. When enabled, a play records the
@@ -12450,6 +12633,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   var gameInputLastPen = null;
   var gameInputMousedownHandler = null;
   var gameInputMouseupHandler = null;
+  var gameInputWheelHandler = null;
   // pat-s3rrv.77 — one per DOM phase, kept individually so the teardown below
   // can removeEventListener each with its exact function reference. A factory
   // used inline would produce a NEW closure per call and none of them could
@@ -12528,9 +12712,39 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     midiRequested = false;
   }
 
+  // Keys this page has forwarded as down and not yet as up, by `code`.
+  //
+  // ⚠️ A browser only reports a keyup to a page that still has focus. A key
+  // held when focus leaves — an OS shortcut such as the screenshot chord
+  // Cmd+Ctrl+Shift+4, Cmd+Tab, a click in another window — never sends its
+  // keyup, so the running game saw it held forever. Godot releases every
+  // pressed input on focus-out (`Input::release_pressed_events`); this page
+  // does the same on blur, on hide, and when Command is let go (macOS sends no
+  // keyup at all for a key released while Command was down).
+  var gameKeysHeld = {};
+  var gameInputBlurHandler = null;
+  var gameInputVisibilityHandler = null;
+  function releaseHeldGameKeys(exceptCode) {
+    var codes = Object.keys(gameKeysHeld);
+    for (var i = 0; i < codes.length; i++) {
+      if (codes[i] === exceptCode) continue;
+      var k = gameKeysHeld[codes[i]];
+      delete gameKeysHeld[codes[i]];
+      api('POST', '/api/runtime/input/key_up', {
+        key: k.key, code: k.code, location: k.location,
+        shift: false, ctrl: false, alt: false, meta: false
+      });
+    }
+  }
+
   function startGameInput() {
     if (gameInputActive) return;
     gameInputActive = true;
+    gameKeysHeld = {};
+    gameInputBlurHandler = function() { releaseHeldGameKeys(); };
+    gameInputVisibilityHandler = function() { if (document.hidden) releaseHeldGameKeys(); };
+    window.addEventListener('blur', gameInputBlurHandler);
+    document.addEventListener('visibilitychange', gameInputVisibilityHandler);
     gameInputKeydownHandler = function(e) {
       if (!runtimeRunning) return;
       if (e.key === 'F5' || e.key === 'F6' || e.key === 'F7' || e.key === 'F8') return;
@@ -12556,6 +12770,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         alt: e.altKey,
         meta: e.metaKey
       });
+      gameKeysHeld[e.code || e.key] = { key: e.key, code: e.code, location: e.location };
     };
     gameInputKeyupHandler = function(e) {
       if (!runtimeRunning) return;
@@ -12569,6 +12784,8 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         alt: e.altKey,
         meta: e.metaKey
       });
+      delete gameKeysHeld[e.code || e.key];
+      if (e.key === 'Meta') releaseHeldGameKeys();
     };
     document.addEventListener('keydown', gameInputKeydownHandler, true);
     document.addEventListener('keyup', gameInputKeyupHandler, true);
@@ -12584,6 +12801,27 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       // touch also raises pointermove and already has its own
       // /api/runtime/input/touch route — switching would make every touch emit
       // mouse motion as well.
+      // 🔑 The running game is shown on TWO surfaces: the edit viewport (Play
+      // inside the 2D/3D view) and the Game tab's own screen, `#game-screen-img`,
+      // which is where Play lands by default. Pointer input was wired to the
+      // edit viewport only — hidden (0x0) while the Game tab shows — so no
+      // click, drag or tap ever reached a game played in the Game tab: a
+      // "Start" button could not be pressed. Every pointer listener now goes on
+      // both, and each event is measured against the surface it came from.
+      var gameScreenImg = document.getElementById('game-screen-img');
+      var gameInputSurfaces = [vp, gameScreenImg].filter(Boolean);
+      function gameSurfaceOf(e) {
+        return e.currentTarget === gameScreenImg ? gameScreenImg : viewportImg;
+      }
+      // Client (CSS) pixels -> the frame's own pixels, the space the engine
+      // rendered in: the frame is drawn at the panel's size and then scaled to
+      // fit by CSS, so the two differ by the displayed scale.
+      function gameSurfacePoint(surface, clientX, clientY) {
+        var rect = surface.getBoundingClientRect();
+        var sx = surface.naturalWidth && rect.width ? surface.naturalWidth / rect.width : 1;
+        var sy = surface.naturalHeight && rect.height ? surface.naturalHeight / rect.height : 1;
+        return { x: Math.round((clientX - rect.left) * sx), y: Math.round((clientY - rect.top) * sy) };
+      }
       gameInputPointermoveHandler = function(e) {
         if (!runtimeRunning) return;
         if (e.pointerType !== 'pen') { gameInputLastPen = null; return; }
@@ -12625,20 +12863,49 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         // coords meant a game view displayed at any size other than 1:1 sent
         // the engine a point from the wrong space, on top of the stretch
         // transform never being inverted at all.
-        api('POST', '/api/runtime/input/mouse_move', gameInputWithPen(viewportCoords(e)));
+        var mp = gameSurfacePoint(gameSurfaceOf(e), e.clientX, e.clientY);
+        api('POST', '/api/runtime/input/mouse_move', gameInputWithPen(mp));
       };
+      // A press carries its own position: a click that arrives without a
+      // preceding mousemove (a tap, a synthetic click, the first click after
+      // focusing) would otherwise land wherever the pointer last moved.
+      function gameButtonBody(e) {
+        var body = { button: e.button };
+        if (document.pointerLockElement !== vp) {
+          var p = gameSurfacePoint(gameSurfaceOf(e), e.clientX, e.clientY);
+          body.x = p.x;
+          body.y = p.y;
+        }
+        return body;
+      }
       gameInputMousedownHandler = function(e) {
         if (!runtimeRunning) return;
-        api('POST', '/api/runtime/input/mouse_down', { button: e.button });
+        api('POST', '/api/runtime/input/mouse_down', gameButtonBody(e));
       };
       gameInputMouseupHandler = function(e) {
         if (!runtimeRunning) return;
-        api('POST', '/api/runtime/input/mouse_up', { button: e.button });
+        api('POST', '/api/runtime/input/mouse_up', gameButtonBody(e));
       };
-      vp.addEventListener('mousemove', gameInputMousemoveHandler);
-      vp.addEventListener('pointermove', gameInputPointermoveHandler);
-      vp.addEventListener('mousedown', gameInputMousedownHandler);
-      vp.addEventListener('mouseup', gameInputMouseupHandler);
+      // The wheel on the Game tab's screen (found importing Dodge the Creeps).
+      // The edit viewport forwards its own wheel through its zoom handler; the
+      // Game tab had no wheel listener at all, so a running game there never
+      // saw MOUSE_BUTTON_WHEEL_*. Position first, so the notch lands where the
+      // cursor is, then the same `mouse_wheel` route the viewport uses.
+      gameInputWheelHandler = function(e) {
+        if (!runtimeRunning) return;
+        e.preventDefault();
+        var wp = gameSurfacePoint(gameScreenImg, e.clientX, e.clientY);
+        // ONE request carrying the position: two fetches could arrive out of
+        // order and scroll at the previous point.
+        api('POST', '/api/runtime/input/mouse_wheel', { delta_y: e.deltaY || 0, delta_x: e.deltaX || 0, x: wp.x, y: wp.y });
+      };
+      if (gameScreenImg) gameScreenImg.addEventListener('wheel', gameInputWheelHandler, { passive: false });
+      gameInputSurfaces.forEach(function(s) {
+        s.addEventListener('mousemove', gameInputMousemoveHandler);
+        s.addEventListener('pointermove', gameInputPointermoveHandler);
+        s.addEventListener('mousedown', gameInputMousedownHandler);
+        s.addEventListener('mouseup', gameInputMouseupHandler);
+      });
       // pat-s3rrv.77: the touch pipeline. Without these a phone or tablet
       // cannot play a Patina game at all — the engine's ScreenTouch/ScreenDrag
       // model existed with no producer.
@@ -12650,17 +12917,20 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
           // and the browser also synthesizes delayed mouse events, so every tap
           // would arrive twice.
           e.preventDefault();
-          var rect = vp.getBoundingClientRect();
+          var surface = gameSurfaceOf(e);
           // ⚠️ changedTouches — the fingers THIS event is about. `touches` is
           // every finger still down, which on a touchend would report the
           // lifted finger as present.
           var list = [];
           for (var i = 0; i < e.changedTouches.length; i++) {
             var t = e.changedTouches[i];
+            // Frame pixels, like the mouse: unscaled CSS offsets were wrong at
+            // any displayed size other than 1:1.
+            var tp = gameSurfacePoint(surface, t.clientX, t.clientY);
             list.push({
               identifier: t.identifier,
-              x: t.clientX - rect.left,
-              y: t.clientY - rect.top,
+              x: tp.x,
+              y: tp.y,
               // `force` is 0 for a plain finger and only meaningful for a
               // stylus; Godot reports it as `pressure` either way.
               force: t.force || 0,
@@ -12676,10 +12946,12 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       gameInputTouchMoveHandler = makeTouchHandler('move');
       gameInputTouchEndHandler = makeTouchHandler('end');
       gameInputTouchCancelHandler = makeTouchHandler('cancel');
-      vp.addEventListener('touchstart', gameInputTouchStartHandler, { passive: false });
-      vp.addEventListener('touchmove', gameInputTouchMoveHandler, { passive: false });
-      vp.addEventListener('touchend', gameInputTouchEndHandler, { passive: false });
-      vp.addEventListener('touchcancel', gameInputTouchCancelHandler, { passive: false });
+      gameInputSurfaces.forEach(function(s) {
+        s.addEventListener('touchstart', gameInputTouchStartHandler, { passive: false });
+        s.addEventListener('touchmove', gameInputTouchMoveHandler, { passive: false });
+        s.addEventListener('touchend', gameInputTouchEndHandler, { passive: false });
+        s.addEventListener('touchcancel', gameInputTouchCancelHandler, { passive: false });
+      });
       // pat-0q2kx.90: the browser can drop the lock on its own (Esc, tab
       // switch). Tell the server the ACTUAL state rather than assuming our
       // request stuck, so the engine's mouse mode cannot drift out of sync with
@@ -12837,19 +13109,35 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   function stopGameInput() {
     if (!gameInputActive) return;
     gameInputActive = false;
+    releaseHeldGameKeys();
+    if (gameInputBlurHandler) { window.removeEventListener('blur', gameInputBlurHandler); gameInputBlurHandler = null; }
+    if (gameInputVisibilityHandler) { document.removeEventListener('visibilitychange', gameInputVisibilityHandler); gameInputVisibilityHandler = null; }
     if (gameInputKeydownHandler) { document.removeEventListener('keydown', gameInputKeydownHandler, true); gameInputKeydownHandler = null; }
     if (gameInputKeyupHandler) { document.removeEventListener('keyup', gameInputKeyupHandler, true); gameInputKeyupHandler = null; }
-    var vp = document.getElementById('viewport-container');
-    if (vp) {
-      if (gameInputMousemoveHandler) { vp.removeEventListener('mousemove', gameInputMousemoveHandler); gameInputMousemoveHandler = null; }
-      if (gameInputPointermoveHandler) { vp.removeEventListener('pointermove', gameInputPointermoveHandler); gameInputPointermoveHandler = null; gameInputLastPen = null; }
-      if (gameInputMousedownHandler) { vp.removeEventListener('mousedown', gameInputMousedownHandler); gameInputMousedownHandler = null; }
-      if (gameInputMouseupHandler) { vp.removeEventListener('mouseup', gameInputMouseupHandler); gameInputMouseupHandler = null; }
-      if (gameInputTouchStartHandler) { vp.removeEventListener('touchstart', gameInputTouchStartHandler); gameInputTouchStartHandler = null; }
-      if (gameInputTouchMoveHandler) { vp.removeEventListener('touchmove', gameInputTouchMoveHandler); gameInputTouchMoveHandler = null; }
-      if (gameInputTouchEndHandler) { vp.removeEventListener('touchend', gameInputTouchEndHandler); gameInputTouchEndHandler = null; }
-      if (gameInputTouchCancelHandler) { vp.removeEventListener('touchcancel', gameInputTouchCancelHandler); gameInputTouchCancelHandler = null; }
-    }
+    // Both surfaces the start path registered on (see `gameInputSurfaces`).
+    [document.getElementById('viewport-container'), document.getElementById('game-screen-img')].forEach(function(vp) {
+      if (!vp) return;
+      if (gameInputMousemoveHandler) vp.removeEventListener('mousemove', gameInputMousemoveHandler);
+      if (gameInputPointermoveHandler) vp.removeEventListener('pointermove', gameInputPointermoveHandler);
+      if (gameInputMousedownHandler) vp.removeEventListener('mousedown', gameInputMousedownHandler);
+      if (gameInputMouseupHandler) vp.removeEventListener('mouseup', gameInputMouseupHandler);
+      if (gameInputTouchStartHandler) vp.removeEventListener('touchstart', gameInputTouchStartHandler);
+      if (gameInputTouchMoveHandler) vp.removeEventListener('touchmove', gameInputTouchMoveHandler);
+      if (gameInputTouchEndHandler) vp.removeEventListener('touchend', gameInputTouchEndHandler);
+      if (gameInputTouchCancelHandler) vp.removeEventListener('touchcancel', gameInputTouchCancelHandler);
+    });
+    var gimgWheel = document.getElementById('game-screen-img');
+    if (gimgWheel && gameInputWheelHandler) gimgWheel.removeEventListener('wheel', gameInputWheelHandler);
+    gameInputWheelHandler = null;
+    gameInputMousemoveHandler = null;
+    gameInputPointermoveHandler = null;
+    gameInputLastPen = null;
+    gameInputMousedownHandler = null;
+    gameInputMouseupHandler = null;
+    gameInputTouchStartHandler = null;
+    gameInputTouchMoveHandler = null;
+    gameInputTouchEndHandler = null;
+    gameInputTouchCancelHandler = null;
     stopGamepadPolling();
     stopWebMidi();
     showGameInputIndicator(false);
@@ -12906,14 +13194,24 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       if (selectedNodeId !== null) doAttachScript(selectedNodeId); else showFsToast('Select a node to attach a script');
     });
     var stDetach = document.getElementById('st-detach-script');
-    if (stDetach) stDetach.addEventListener('click', function(e) {
+    // `async` because the handler awaits the route call below. A plain
+    // `function(e)` containing `await` is a JS SYNTAX error, and this JS lives
+    // inside a Rust string literal, so no Rust-side check can see it.
+    if (stDetach) stDetach.addEventListener('click', async function(e) {
       e.stopPropagation();
-      showFsToast(selectedNodeId !== null ? 'Detach Script from selected node' : 'Select a node first');
+      if (selectedNodeId !== null) {
+        await api('POST', '/api/node/detach_script', { node_id: selectedNodeId });
+        await fetchScene();
+      } else { showFsToast('Select a node first'); }
     });
     var stExtend = document.getElementById('st-extend-script');
-    if (stExtend) stExtend.addEventListener('click', function(e) {
+    // `async` because the handler awaits the route call below. A plain
+    // `function(e)` containing `await` is a JS SYNTAX error, and this JS lives
+    // inside a Rust string literal, so no Rust-side check can see it.
+    if (stExtend) stExtend.addEventListener('click', async function(e) {
       e.stopPropagation();
-      showFsToast(selectedNodeId !== null ? 'Extend Script of selected node' : 'Select a node first');
+      if (selectedNodeId !== null) { await doExtendScript(selectedNodeId); }
+      else { showFsToast('Select a node first'); }
     });
     var stMenu = document.getElementById('st-tree-menu');
     if (stMenu) stMenu.addEventListener('click', function(ev) {
@@ -17406,9 +17704,9 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     var panX = viewportPanX || 0;
     var panY = viewportPanY || 0;
 
-    // Origin marker (world 0,0)
-    var ox = cw / 2 + panX;
-    var oy = ch / 2 + panY;
+    // Origin marker (world 0,0) — where the server actually draws it.
+    var ox = viewOriginX(cw);
+    var oy = viewOriginY(ch);
     ctx.strokeStyle = 'rgba(224,80,80,0.5)';
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(ox, 0); ctx.lineTo(ox, ch); ctx.stroke();
@@ -18393,7 +18691,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     var newMain = document.getElementById('script-new-main');
     if (newMain) newMain.addEventListener('click', function() { createNewScript(); });
     var gpb = document.getElementById('game-play-btn');
-    if (gpb) gpb.addEventListener('click', function() { api('POST', '/api/runtime/play', {}).then(refreshGameStatus); });
+    if (gpb) gpb.addEventListener('click', function() { api('POST', '/api/runtime/play', { audio: true }).then(refreshGameStatus); });
     var gpause = document.getElementById('game-pause-btn');
     if (gpause) gpause.addEventListener('click', function() { api('POST', '/api/runtime/pause', {}).then(refreshGameStatus); });
     var gstop = document.getElementById('game-stop-btn');

@@ -144,15 +144,19 @@ fn build_multi_node_scene() -> SceneTree {
     let root = tree.root_id();
 
     let mut n1 = Node::new("Player", "Node2D");
-    n1.set_property("position", Variant::Vector2(Vector2::new(30.0, 30.0)));
+    n1.set_property("position", Variant::Vector2(Vector2::new(10.0, 10.0)));
     tree.add_child(root, n1).unwrap();
 
     let mut n2 = Node::new("Sprite", "Sprite2D");
-    n2.set_property("position", Variant::Vector2(Vector2::new(80.0, 80.0)));
+    n2.set_property("position", Variant::Vector2(Vector2::new(30.0, 30.0)));
     tree.add_child(root, n2).unwrap();
 
     let mut n3 = Node::new("Cam", "Camera2D");
-    n3.set_property("position", Variant::Vector2(Vector2::new(50.0, 120.0)));
+    // ⚠️ Every position here must stay on the 200x200 canvas at BOTH 1x and
+    // 2x zoom (`zoom_changes_render_output`). The old (50,120) camera sat at
+    // screen y = 220 — wholly below the canvas — and the (80,80) sprite left
+    // the canvas at 2x, so "2x has more pixels" was false by construction.
+    n3.set_property("position", Variant::Vector2(Vector2::new(20.0, -40.0)));
     tree.add_child(root, n3).unwrap();
 
     tree

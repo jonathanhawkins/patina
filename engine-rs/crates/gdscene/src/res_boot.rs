@@ -81,7 +81,9 @@ pub fn load_scene_into_tree(
         .map_err(|e| format!("failed to read scene '{res_path}': {e}"))?;
     let packed = PackedScene::from_tscn(&source)
         .map_err(|e| format!("failed to parse scene '{res_path}': {e}"))?;
-    add_packed_scene_to_tree(tree, parent, &packed)
+    // A RUNTIME load: every `instance=` sub-scene is expanded. The plain
+    // instancer leaves them as childless placeholders (the editor's shape).
+    crate::packed_scene::add_packed_scene_to_tree_from_res(tree, parent, &packed)
         .map_err(|e| format!("failed to instance scene '{res_path}': {e}"))
 }
 

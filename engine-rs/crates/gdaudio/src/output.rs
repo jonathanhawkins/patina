@@ -22,7 +22,26 @@ pub fn mix_and_write(
     output: &mut dyn AudioOutputStream,
     frame_count: usize,
 ) -> usize {
-    let mixed = server.mix(frame_count);
+    mix_and_write_gain(server, output, frame_count, 1.0)
+}
+
+/// [`mix_and_write`] with a final output gain. The mix itself — every voice's
+/// playhead, every bus's peak meter — is unaffected; only what reaches the
+/// device is scaled. `0.0` is the editor's Game-view mute: the game keeps
+/// running exactly as unmuted, and its own `AudioServer` bus state is not
+/// touched (Godot's editor mute never changes what the game can read back).
+pub fn mix_and_write_gain(
+    server: &mut AudioServer,
+    output: &mut dyn AudioOutputStream,
+    frame_count: usize,
+    gain: f32,
+) -> usize {
+    let mut mixed = server.mix(frame_count);
+    if gain != 1.0 {
+        for s in &mut mixed {
+            *s *= gain;
+        }
+    }
     let channels = server.output_channels();
     let sample_rate = server.output_sample_rate();
     let layout = match channels {
@@ -79,15 +98,184 @@ impl AudioOutputStream for CaptureAudioOutput {
     }
 }
 
-/// Shared ring used by the cpal callback and the producer side.
-#[cfg(not(target_arch = "wasm32"))]
-struct SharedRing {
+/// The queue between the mixer (pushing once per game frame) and the device
+/// callback (pulling on its own clock).
+///
+/// ⚠️ Three things the old `Vec` + `remove(0)` got wrong, each audible as
+/// crackle on continuous audio (music) while short effects sounded fine:
+/// - `remove(0)` shifted the whole backlog for EVERY sample, inside the
+///   real-time callback and under the lock — its cost grew with the backlog
+///   until the callback missed its deadline. A `VecDeque` pops in O(1).
+/// - An empty queue mid-callback wrote silence right there: game frames (60
+///   Hz) and device callbacks (~93 Hz at 512 frames) do not line up, so the
+///   queue routinely ran dry between pushes. Playback now waits for
+///   [`PREBUFFER_SECS`] of audio before starting, and re-primes after any
+///   underrun, so a jittery producer costs latency, not a gap.
+/// - Nothing bounded the backlog, so a producer running ahead built latency
+///   forever. [`MAX_BACKLOG_SECS`] drops the oldest excess.
+#[derive(Debug, Default)]
+pub struct SharedRing {
     /// Interleaved f32 samples waiting to be played.
-    samples: Vec<f32>,
+    pub samples: std::collections::VecDeque<f32>,
     /// Total frames accepted from `write_samples`.
-    frames_accepted: usize,
+    pub frames_accepted: usize,
     /// Total frames consumed by the device callback.
-    frames_consumed: usize,
+    pub frames_consumed: usize,
+    /// Device callbacks that ran out of audio part-way (each one is a gap).
+    pub underruns: usize,
+    /// Device callbacks served at all.
+    pub callbacks: usize,
+    /// Callbacks answered with priming silence (start-up, or after an underrun).
+    pub priming_callbacks: usize,
+    /// Deepest the queue has been, in frames — how close to the latency cap.
+    pub max_queued_frames: usize,
+    /// Samples dropped by the backlog cap (a producer running ahead).
+    pub dropped_samples: usize,
+    /// Samples the device was handed outside `[-1, 1]` (hard clipping).
+    pub clipped_samples: usize,
+    /// The last [`HISTORY_SECS`] of EXACTLY what the device was handed,
+    /// interleaved, silence included — the ground truth for "does it crackle".
+    pub history: std::collections::VecDeque<f32>,
+    /// Whether enough audio is queued to play without starving.
+    primed: bool,
+}
+
+/// How much device output [`SharedRing::history`] keeps.
+pub const HISTORY_SECS: f32 = 10.0;
+
+/// A snapshot of the device queue, for diagnostics (`/api/runtime/audio`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DeviceAudioStats {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub callbacks: usize,
+    pub underruns: usize,
+    pub priming_callbacks: usize,
+    pub queued_frames: usize,
+    pub max_queued_frames: usize,
+    pub frames_accepted: usize,
+    pub frames_consumed: usize,
+    pub dropped_samples: usize,
+    pub clipped_samples: usize,
+}
+
+/// Audio queued before playback starts (and after an underrun): absorbs the
+/// beat between the game's frame clock and the device's callback clock.
+pub const PREBUFFER_SECS: f32 = 0.05;
+/// The most audio kept queued; beyond it the oldest is dropped.
+pub const MAX_BACKLOG_SECS: f32 = 0.25;
+
+impl SharedRing {
+    /// Queues interleaved samples, keeping at most [`MAX_BACKLOG_SECS`].
+    pub fn push(&mut self, samples: &[f32], sample_rate: u32, channels: u16) {
+        self.samples.extend(samples.iter().copied());
+        self.frames_accepted += samples.len() / channels.max(1) as usize;
+        self.max_queued_frames = self
+            .max_queued_frames
+            .max(self.samples.len() / channels.max(1) as usize);
+        let cap = (MAX_BACKLOG_SECS * sample_rate as f32) as usize * channels.max(1) as usize;
+        if self.samples.len() > cap {
+            let excess = self.samples.len() - cap;
+            // Whole frames only, so channels never swap.
+            let excess = excess - excess % channels.max(1) as usize;
+            self.dropped_samples += excess;
+            self.samples.drain(..excess);
+        }
+    }
+
+    /// Counters only (cheap; no history copy).
+    pub fn stats(&self, sample_rate: u32, channels: u16) -> DeviceAudioStats {
+        DeviceAudioStats {
+            sample_rate,
+            channels,
+            callbacks: self.callbacks,
+            underruns: self.underruns,
+            priming_callbacks: self.priming_callbacks,
+            queued_frames: self.samples.len() / channels.max(1) as usize,
+            max_queued_frames: self.max_queued_frames,
+            frames_accepted: self.frames_accepted,
+            frames_consumed: self.frames_consumed,
+            dropped_samples: self.dropped_samples,
+            clipped_samples: self.clipped_samples,
+        }
+    }
+
+    /// Fills one device callback. Silence while priming; an empty queue
+    /// part-way counts an underrun and re-primes.
+    pub fn pull(&mut self, out: &mut [f32], sample_rate: u32, channels: u16) {
+        self.pull_inner(out, sample_rate, channels);
+        self.callbacks += 1;
+        let cap = (HISTORY_SECS * sample_rate as f32) as usize * channels.max(1) as usize;
+        for &s in out.iter() {
+            if !(-1.0..=1.0).contains(&s) {
+                self.clipped_samples += 1;
+            }
+        }
+        self.history.extend(out.iter().copied());
+        if self.history.len() > cap {
+            let excess = self.history.len() - cap;
+            let excess = excess - excess % channels.max(1) as usize;
+            self.history.drain(..excess);
+        }
+    }
+
+    fn pull_inner(&mut self, out: &mut [f32], sample_rate: u32, channels: u16) {
+        let ch = channels.max(1) as usize;
+        let prebuffer = (PREBUFFER_SECS * sample_rate as f32) as usize * ch;
+        if !self.primed && self.samples.len() >= prebuffer.max(out.len()) {
+            self.primed = true;
+        }
+        if !self.primed {
+            out.fill(0.0);
+            self.priming_callbacks += 1;
+            return;
+        }
+        let mut starved = false;
+        for (i, slot) in out.iter_mut().enumerate() {
+            match self.samples.pop_front() {
+                Some(s) => {
+                    *slot = s;
+                    if (i + 1) % ch == 0 {
+                        self.frames_consumed += 1;
+                    }
+                }
+                None => {
+                    *slot = 0.0;
+                    starved = true;
+                }
+            }
+        }
+        if starved {
+            self.underruns += 1;
+            self.primed = false;
+        }
+    }
+}
+
+/// The live platform device's queue, published for diagnostics: the device
+/// lives on the game thread, but the editor's API thread has to read it.
+#[cfg(not(target_arch = "wasm32"))]
+static LIVE_DEVICE: Mutex<Option<(Arc<Mutex<SharedRing>>, u32, u16)>> = Mutex::new(None);
+
+/// Counters for the most recently opened platform device, if any.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn live_device_stats() -> Option<DeviceAudioStats> {
+    let guard = LIVE_DEVICE.lock().ok()?;
+    let (ring, rate, ch) = guard.as_ref()?;
+    let r = ring.lock().ok()?;
+    Some(r.stats(*rate, *ch))
+}
+
+/// The last `secs` of what the live device actually played, interleaved, with
+/// its `(sample_rate, channels)`.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn live_device_capture(secs: f32) -> Option<(Vec<f32>, u32, u16)> {
+    let guard = LIVE_DEVICE.lock().ok()?;
+    let (ring, rate, ch) = guard.as_ref()?;
+    let r = ring.lock().ok()?;
+    let want = (secs.max(0.0) * *rate as f32) as usize * *ch as usize;
+    let skip = r.history.len().saturating_sub(want);
+    Some((r.history.iter().skip(skip).copied().collect(), *rate, *ch))
 }
 
 /// Real platform audio output using the system default output device via cpal.
@@ -136,17 +324,19 @@ impl PlatformAudioOutput {
 
         let sample_rate = config.sample_rate().0;
         let channels = config.channels();
-        let ring = Arc::new(Mutex::new(SharedRing {
-            samples: Vec::new(),
-            frames_accepted: 0,
-            frames_consumed: 0,
-        }));
+        let ring = Arc::new(Mutex::new(SharedRing::default()));
         let ring_cb = Arc::clone(&ring);
 
         let stream = match config.sample_format() {
-            cpal::SampleFormat::F32 => build_stream::<f32>(&device, &config.into(), ring_cb)?,
-            cpal::SampleFormat::I16 => build_stream::<i16>(&device, &config.into(), ring_cb)?,
-            cpal::SampleFormat::U16 => build_stream::<u16>(&device, &config.into(), ring_cb)?,
+            cpal::SampleFormat::F32 => {
+                build_stream::<f32>(&device, &config.into(), ring_cb, sample_rate)?
+            }
+            cpal::SampleFormat::I16 => {
+                build_stream::<i16>(&device, &config.into(), ring_cb, sample_rate)?
+            }
+            cpal::SampleFormat::U16 => {
+                build_stream::<u16>(&device, &config.into(), ring_cb, sample_rate)?
+            }
             other => {
                 return Err(PlatformAudioError::Config(format!(
                     "unsupported sample format {other:?}"
@@ -157,6 +347,9 @@ impl PlatformAudioOutput {
         stream
             .play()
             .map_err(|e| PlatformAudioError::Stream(e.to_string()))?;
+        if let Ok(mut live) = LIVE_DEVICE.lock() {
+            *live = Some((Arc::clone(&ring), sample_rate, channels));
+        }
 
         Ok(Self {
             sample_rate,
@@ -175,6 +368,11 @@ impl PlatformAudioOutput {
     pub fn frames_consumed(&self) -> usize {
         self.ring.lock().map(|r| r.frames_consumed).unwrap_or(0)
     }
+
+    /// Device callbacks that ran out of audio part-way — each is an audible gap.
+    pub fn underruns(&self) -> usize {
+        self.ring.lock().map(|r| r.underruns).unwrap_or(0)
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -182,38 +380,30 @@ fn build_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     ring: Arc<Mutex<SharedRing>>,
+    sample_rate: u32,
 ) -> Result<cpal::Stream, PlatformAudioError>
 where
     T: cpal::SizedSample + cpal::FromSample<f32>,
 {
     use cpal::traits::DeviceTrait;
 
-    let channels = config.channels as usize;
+    let channels = config.channels;
     let err_fn = |e| tracing::error!(error = %e, "cpal stream error");
+    // Reused across callbacks: no allocation on the real-time thread after the
+    // first one of a given size.
+    let mut scratch: Vec<f32> = Vec::new();
 
     device
         .build_output_stream(
             config,
             move |data: &mut [T], _| {
-                let mut guard = match ring.lock() {
-                    Ok(g) => g,
-                    Err(_) => return,
-                };
-                let mut out_i = 0;
-                while out_i < data.len() {
-                    if guard.samples.is_empty() {
-                        // underrun: silence
-                        data[out_i] = T::EQUILIBRIUM;
-                        out_i += 1;
-                        continue;
-                    }
-                    let s = guard.samples.remove(0);
-                    data[out_i] = T::from_sample(s);
-                    out_i += 1;
-                    // count a frame when a full interleaved frame is written
-                    if out_i % channels == 0 {
-                        guard.frames_consumed += 1;
-                    }
+                scratch.resize(data.len(), 0.0);
+                match ring.lock() {
+                    Ok(mut guard) => guard.pull(&mut scratch, sample_rate, channels),
+                    Err(_) => scratch.fill(0.0),
+                }
+                for (slot, s) in data.iter_mut().zip(scratch.iter()) {
+                    *slot = T::from_sample(*s);
                 }
             },
             err_fn,
@@ -224,11 +414,17 @@ where
 
 #[cfg(not(target_arch = "wasm32"))]
 impl AudioOutputStream for PlatformAudioOutput {
+    fn queued_frames(&self) -> Option<usize> {
+        self.ring
+            .lock()
+            .ok()
+            .map(|r| r.samples.len() / self.channels.max(1) as usize)
+    }
+
     fn write_samples(&mut self, buffer: &AudioSampleBuffer) -> usize {
         let frames = buffer.frame_count();
         if let Ok(mut guard) = self.ring.lock() {
-            guard.samples.extend_from_slice(&buffer.samples);
-            guard.frames_accepted += frames;
+            guard.push(&buffer.samples, self.sample_rate, self.channels);
         }
         frames
     }

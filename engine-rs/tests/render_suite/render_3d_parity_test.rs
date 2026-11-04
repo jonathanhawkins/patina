@@ -778,6 +778,14 @@ fn world_environment_sky_physical_produces_non_black() {
         ..Default::default()
     };
     let vp = world_environment_sky_camera_viewport(W, H, env);
+    // ⚠️ A SUN is required: Godot's PhysicalSkyMaterial is lit by LIGHT0, the
+    // first sky-visible DirectionalLight3D, and with none it shows only its
+    // night-sky texture (default black). The test once expected a lit sky with
+    // no light in the scene. Elevated 45° so the sun is above the horizon.
+    let mut sun = make_directional_light(1.0, Color::rgb(1.0, 1.0, 1.0));
+    sun.direction = Vector3::new(0.0, -1.0, -1.0).normalized();
+    renderer.add_light(sun.id);
+    renderer.update_light(&sun);
     let fb = capture_frame_3d(&mut renderer, &vp);
     let nonzero = fb
         .pixels
@@ -1830,4 +1838,22 @@ fn gpu_particle_buffer_drains_after_all_particles_die() {
     let buf = sim.flatten_gpu_instance_buffer();
     assert!(buf.is_empty());
     assert_eq!(sim.particle_count(), 0);
+}
+
+/// Edge: with NO directional light, Godot's PhysicalSkyMaterial renders its
+/// night sky — black by default — not an atmosphere.
+#[test]
+fn world_environment_sky_physical_without_a_sun_is_black() {
+    let mut renderer = SoftwareRenderer3D::new();
+    let env = Environment3D {
+        background_mode: BackgroundMode::Sky,
+        sky: Some(Sky {
+            material: SkyMaterial::Physical(PhysicalSkyMaterial::default()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let vp = world_environment_sky_camera_viewport(W, H, env);
+    let fb = capture_frame_3d(&mut renderer, &vp);
+    assert!(fb.pixels.iter().all(|p| p.r + p.g + p.b < 1e-3));
 }

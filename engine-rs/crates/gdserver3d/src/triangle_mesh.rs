@@ -272,10 +272,17 @@ fn axis_of(v: Vector3, axis: u8) -> f32 {
     }
 }
 
-/// Geometric normal from winding order, matching Godot's `Face3::get_plane`
-/// convention.
+/// Geometric normal from winding order, matching Godot's `Face3::get_plane`,
+/// whose default is `CLOCKWISE` (`core/math/face3.h:56`): `Plane(p1, p2, p3)`
+/// takes `(p1 - p3).cross(p1 - p2)` (`core/math/plane.h:127`), so a face wound
+/// clockwise as seen from outside — Godot's front face
+/// (`doc/classes/ArrayMesh.xml:49`) — gets its OUTWARD normal.
+///
+/// ⚠️ This used the counter-clockwise `(v1 - v0) × (v2 - v0)`, the opposite of
+/// upstream. It read as correct only because `BoxMesh` had been wound CCW on the
+/// faces the tests probed; with Godot's winding it pointed every normal inward.
 fn face_normal(v0: Vector3, v1: Vector3, v2: Vector3) -> Vector3 {
-    (v1 - v0).cross(v2 - v0).normalized()
+    (v0 - v2).cross(v0 - v1).normalized()
 }
 
 /// Slab test. `bounded` clamps the ray to `dir`'s length; `limit` is the best

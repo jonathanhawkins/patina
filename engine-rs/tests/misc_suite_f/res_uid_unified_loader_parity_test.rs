@@ -72,11 +72,11 @@ fn repeated_res_loads_return_same_arc() {
 #[test]
 fn repeated_uid_loads_return_same_arc() {
     let mut ul = make_loader();
-    ul.register_uid_str("uid://weapon_ref", "res://weapon.tres");
+    ul.register_uid_str("uid://weaponref", "res://weapon.tres");
 
-    let first = ul.load("uid://weapon_ref").unwrap();
+    let first = ul.load("uid://weaponref").unwrap();
     for _ in 0..20 {
-        let again = ul.load("uid://weapon_ref").unwrap();
+        let again = ul.load("uid://weaponref").unwrap();
         assert!(
             Arc::ptr_eq(&first, &again),
             "repeated uid:// loads must return identical Arc"
@@ -309,13 +309,13 @@ fn clear_cache_forces_reload_for_both_paths() {
 #[test]
 fn with_registry_enables_immediate_uid_loads() {
     let mut reg = UidRegistry::new();
-    reg.register(parse_uid_string("uid://pre_alpha"), "res://alpha.tres");
-    reg.register(parse_uid_string("uid://pre_beta"), "res://beta.tres");
+    reg.register(parse_uid_string("uid://prealpha"), "res://alpha.tres");
+    reg.register(parse_uid_string("uid://prebeta"), "res://beta.tres");
 
     let mut ul = UnifiedLoader::with_registry(SequenceLoader::new(), reg);
 
-    let alpha = ul.load("uid://pre_alpha").unwrap();
-    let beta = ul.load("uid://pre_beta").unwrap();
+    let alpha = ul.load("uid://prealpha").unwrap();
+    let beta = ul.load("uid://prebeta").unwrap();
 
     assert_eq!(alpha.path, "res://alpha.tres");
     assert_eq!(beta.path, "res://beta.tres");
@@ -363,10 +363,10 @@ fn mixed_access_invokes_loader_exactly_once() {
 fn two_uids_same_path_share_arc() {
     let mut ul = make_loader();
     // Register two different UID strings that both point to the same path.
-    ul.register_uid_str("uid://alias_a", "res://shared.tres");
+    ul.register_uid_str("uid://aliasa", "res://shared.tres");
     // Note: UidRegistry only allows one UID per path, so second register
     // replaces the first. Instead, test that the cache key is the res:// path.
-    let by_uid = ul.load("uid://alias_a").unwrap();
+    let by_uid = ul.load("uid://aliasa").unwrap();
     let by_path = ul.load("res://shared.tres").unwrap();
     assert!(Arc::ptr_eq(&by_uid, &by_path));
 }
@@ -382,7 +382,7 @@ fn stress_50_resources_mixed_access() {
     // Register 50 resources with UIDs.
     for i in 0..50 {
         ul.register_uid_str(
-            &format!("uid://res_{i}"),
+            &format!("uid://res{i}"),
             &format!("res://resources/r{i}.tres"),
         );
     }
@@ -394,7 +394,7 @@ fn stress_50_resources_mixed_access() {
 
     // Load all by UID — must get same Arcs.
     let by_uid: Vec<Arc<Resource>> = (0..50)
-        .map(|i| ul.load(&format!("uid://res_{i}")).unwrap())
+        .map(|i| ul.load(&format!("uid://res{i}")).unwrap())
         .collect();
 
     for i in 0..50 {
@@ -595,10 +595,10 @@ damage = 42
 
     let path_str = tres_path.to_str().unwrap();
     let mut ul = UnifiedLoader::new(gdresource::loader::TresLoader);
-    ul.register_uid_str("uid://weapon_test", path_str);
+    ul.register_uid_str("uid://weapontest", path_str);
 
     let by_path = ul.load(path_str).unwrap();
-    let by_uid = ul.load("uid://weapon_test").unwrap();
+    let by_uid = ul.load("uid://weapontest").unwrap();
 
     assert!(
         Arc::ptr_eq(&by_path, &by_uid),
@@ -668,13 +668,13 @@ fn resolve_and_load_stress_20_resources() {
     let mut ul = make_loader();
     for i in 0..20 {
         ul.register_uid_str(
-            &format!("uid://stress_{i}"),
+            &format!("uid://stress{i}"),
             &format!("res://stress/r{i}.tres"),
         );
     }
 
     for i in 0..20 {
-        let uid_ref = format!("uid://stress_{i}");
+        let uid_ref = format!("uid://stress{i}");
         let path_ref = format!("res://stress/r{i}.tres");
 
         // resolve_to_path and load must agree.

@@ -204,12 +204,16 @@ fn signal_after_enter_tree_traced() {
     // Trace should show ENTER_TREE events before signal
     let events = tree.event_trace().events();
     let enter_count = events.iter().filter(|e| e.detail == "ENTER_TREE").count();
+    // The TEST's signal — not Godot's own `tree_entered`, which the enter
+    // pass emits right after each ENTER_TREE (scene/main/node.cpp:358).
     let signal_idx = events
         .iter()
-        .position(|e| e.event_type == TraceEventType::SignalEmit)
+        .position(|e| e.event_type == TraceEventType::SignalEmit && e.detail == "ready_sig")
         .unwrap();
+    let last_enter = events.iter().rposition(|e| e.detail == "ENTER_TREE").unwrap();
 
     assert!(enter_count >= 3); // root + E + R
+    assert!(signal_idx > last_enter, "ready_sig after every ENTER_TREE");
     assert!(
         signal_idx >= enter_count,
         "signal should come after ENTER_TREE"

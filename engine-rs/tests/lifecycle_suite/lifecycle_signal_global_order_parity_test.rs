@@ -23,6 +23,33 @@ use std::sync::{
 // Helpers
 // ===========================================================================
 
+/// The signals Godot ITSELF emits during the lifecycle and the frame:
+/// `_propagate_enter_tree` emits `tree_entered` right after ENTER_TREE and then
+/// `child_entered_tree` on the parent (scene/main/node.cpp:354-365);
+/// `_propagate_ready` emits `ready` after READY (:331); the exit path emits
+/// `tree_exiting`/`child_exiting_tree`/`tree_exited`; SceneTree emits
+/// `node_added`/`node_removed` and `physics_frame`/`process_frame` every
+/// frame. These tests predate those emissions, so they treated the first
+/// SignalEmit in the trace as the test's OWN signal.
+const ENGINE_SIGNALS: &[&str] = &[
+    "tree_entered",
+    "child_entered_tree",
+    "ready",
+    "tree_exiting",
+    "child_exiting_tree",
+    "tree_exited",
+    "child_order_changed",
+    "node_added",
+    "node_removed",
+    "physics_frame",
+    "process_frame",
+];
+
+/// Whether a trace event is a signal the TEST emitted (not an engine one).
+fn is_user_signal(e: &TraceEvent) -> bool {
+    e.event_type == TraceEventType::SignalEmit && !ENGINE_SIGNALS.contains(&e.detail.as_str())
+}
+
 /// Filter events by type.
 fn filter_type(events: &[TraceEvent], ty: TraceEventType) -> Vec<&TraceEvent> {
     events.iter().filter(|e| e.event_type == ty).collect()
@@ -304,19 +331,26 @@ fn deep_hierarchy_lifecycle_with_interleaved_signals() {
         .count();
     assert_eq!(lifecycle_count, 6, "3 ENTER_TREE + 3 READY = 6");
 
-    // Signals appear after all lifecycle events.
-    let signal_events = filter_type(events, TraceEventType::SignalEmit);
+    // Godot's own lifecycle signals: one tree_entered, child_entered_tree and
+    // ready per node (A's parent is the root, so it gets child_entered_tree too).
+    for sig in ["tree_entered", "child_entered_tree", "ready"] {
+        let n = events
+            .iter()
+            .filter(|e| e.event_type == TraceEventType::SignalEmit && e.detail == sig)
+            .count();
+        assert_eq!(n, 3, "{sig} once per node");
+    }
+
+    // The test's own signals appear after all lifecycle events.
+    let signal_events: Vec<&TraceEvent> = events.iter().filter(|e| is_user_signal(e)).collect();
     assert_eq!(signal_events.len(), 2);
     assert_eq!(signal_events[0].detail, "spawned");
     assert_eq!(signal_events[0].node_path, "/root/A/B/C");
     assert_eq!(signal_events[1].detail, "all_ready");
     assert_eq!(signal_events[1].node_path, "/root/A");
 
-    // Verify global ordering: all notifications have lower indices than signals.
-    let first_signal_idx = events
-        .iter()
-        .position(|e| e.event_type == TraceEventType::SignalEmit)
-        .unwrap();
+    // Verify global ordering: all notifications precede the test's signals.
+    let first_signal_idx = events.iter().position(is_user_signal).unwrap();
     let last_notif_idx = events
         .iter()
         .rposition(|e| e.event_type == TraceEventType::Notification)
@@ -377,15 +411,23 @@ fn full_lifecycle_frame_signal_exit_global_ordering() {
         })
         .collect();
 
-    // Verify phase ordering: ENTER_TREE comes first, EXIT_TREE comes last.
+    // Godot: ENTER_TREE, then tree_entered (node.cpp:354-358); READY, then
+    // ready (:330-331).
     assert_eq!(player_events[0], ("notif", "ENTER_TREE"));
-    assert_eq!(player_events[1], ("notif", "READY"));
-    assert_eq!(*player_events.last().unwrap(), ("notif", "EXIT_TREE"));
+    assert_eq!(player_events[1], ("signal", "tree_entered"));
+    assert_eq!(player_events[2], ("notif", "READY"));
+    assert_eq!(player_events[3], ("signal", "ready"));
+    let last_notif = player_events
+        .iter()
+        .rev()
+        .find(|&&(ty, _)| ty == "notif")
+        .copied();
+    assert_eq!(last_notif, Some(("notif", "EXIT_TREE")), "EXIT_TREE is the last notification");
 
-    // The signal must appear after process-phase notifications and before EXIT_TREE.
+    // The test's signal must appear after READY and before EXIT_TREE.
     let signal_idx = player_events
         .iter()
-        .position(|&(ty, _)| ty == "signal")
+        .position(|&(ty, d)| ty == "signal" && d == "action_complete")
         .expect("expected signal event");
     let exit_idx = player_events
         .iter()
@@ -803,9 +845,11 @@ fn multi_node_frame_godot_compatible_global_order() {
         .iter()
         .position(|e| e.detail == "PROCESS")
         .expect("PROCESS present");
+    // The test's own post-frame signal — not SceneTree's per-frame
+    // `physics_frame`, which Godot emits before the physics phase.
     let first_signal = events
         .iter()
-        .position(|e| e.event_type == TraceEventType::SignalEmit)
+        .position(|e| e.event_type == TraceEventType::SignalEmit && e.detail == "frame_done")
         .expect("signal present");
 
     // Godot ordering: INT_PHYS < PHYS < INT_PROC < PROC < post-frame signals

@@ -173,23 +173,23 @@ fn import_dock_populates_for_selected_resource() {
         .map(|o| o["name"].as_str().unwrap().to_string())
         .collect();
     assert!(
-        opt_names.contains(&"compression".to_string()),
-        "texture options include compression: {opt_names:?}"
+        opt_names.contains(&"compress/mode".to_string()),
+        "texture options include compress/mode: {opt_names:?}"
     );
     assert!(
-        opt_names.contains(&"filter".to_string()),
-        "texture options include filter: {opt_names:?}"
+        opt_names.contains(&"mipmaps/generate".to_string()),
+        "texture options include mipmaps/generate: {opt_names:?}"
     );
     let comp = tex["options"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|o| o["name"] == "compression")
+        .find(|o| o["name"] == "compress/mode")
         .unwrap();
     assert_eq!(comp["type"], serde_json::json!("enum"));
     assert!(
         comp["choices"].as_array().unwrap().len() >= 2,
-        "compression is a choice list"
+        "compress/mode is a choice list"
     );
 
     // A different resource type maps to a different importer.

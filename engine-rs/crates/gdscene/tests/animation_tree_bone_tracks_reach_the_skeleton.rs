@@ -86,8 +86,14 @@ impl ScriptInstance for RecordingScript {
     ///
     /// Fixed here rather than by filtering the log, so each assertion can keep
     /// saying what it means ("fired once") instead of carrying a subtraction.
+    ///
+    /// ⚠️ The same holds for EVERY lifecycle callback, not only `_init`: the
+    /// main loop dispatches `_process` / `_physics_process` / `_draw` to any
+    /// script that claims them (Godot runs a defined `_process` each frame),
+    /// so a double claiming everything logs them too. It declares only the
+    /// method the track calls.
     fn has_method(&self, name: &str) -> bool {
-        name != "_init"
+        name == "on_footstep"
     }
 }
 

@@ -26,10 +26,6 @@
 										"type": "String",
 										"value": ""
 									},
-									"health": {
-										"type": "int",
-										"value": 100
-									},
 									"light_mask": {
 										"type": "int",
 										"value": 1
@@ -54,8 +50,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 100.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -101,10 +97,6 @@
 									"skew": {
 										"type": "float",
 										"value": 0.0
-									},
-									"speed": {
-										"type": "float",
-										"value": 200.0
 									},
 									"texture_filter": {
 										"type": "int",
@@ -154,10 +146,6 @@
 								"name": "Enemy",
 								"path": "/root/World/Enemy",
 								"properties": {
-									"alive": {
-										"type": "bool",
-										"value": true
-									},
 									"auto_translate_mode": {
 										"type": "int",
 										"value": 0
@@ -194,8 +182,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 400.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -327,7 +315,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 500.0
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -610,7 +598,7 @@
 					},
 					"content_scale_size": {
 						"type": "Vector2i",
-						"value": "(640, 480)"
+						"value": "(1152, 648)"
 					},
 					"content_scale_stretch": {
 						"type": "int",
@@ -850,7 +838,7 @@
 					},
 					"title": {
 						"type": "String",
-						"value": "Sample Game"
+						"value": "Patina Fixtures"
 					},
 					"transient": {
 						"type": "bool",
@@ -938,16 +926,14 @@
 								"class": "Node2D",
 								"groups": [],
 								"name": "Player",
-								"path": "/root/World/Player",
-								"script": "res://scripts/player.gd"
+								"path": "/root/World/Player"
 							},
 							{
 								"children": [],
 								"class": "Node2D",
 								"groups": [],
 								"name": "Enemy",
-								"path": "/root/World/Enemy",
-								"script": "res://scripts/enemy.gd"
+								"path": "/root/World/Enemy"
 							},
 							{
 								"children": [],
@@ -998,10 +984,6 @@
 										"type": "String",
 										"value": ""
 									},
-									"health": {
-										"type": "int",
-										"value": 100
-									},
 									"light_mask": {
 										"type": "int",
 										"value": 1
@@ -1026,8 +1008,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 100.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -1073,10 +1055,6 @@
 									"skew": {
 										"type": "float",
 										"value": 0.0
-									},
-									"speed": {
-										"type": "float",
-										"value": 200.083333333333
 									},
 									"texture_filter": {
 										"type": "int",
@@ -1126,10 +1104,6 @@
 								"name": "Enemy",
 								"path": "/root/World/Enemy",
 								"properties": {
-									"alive": {
-										"type": "bool",
-										"value": true
-									},
 									"auto_translate_mode": {
 										"type": "int",
 										"value": 0
@@ -1166,8 +1140,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 400.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -1299,7 +1273,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 500.0
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -1582,7 +1556,7 @@
 					},
 					"content_scale_size": {
 						"type": "Vector2i",
-						"value": "(640, 480)"
+						"value": "(1152, 648)"
 					},
 					"content_scale_stretch": {
 						"type": "int",
@@ -1822,7 +1796,7 @@
 					},
 					"title": {
 						"type": "String",
-						"value": "Sample Game"
+						"value": "Patina Fixtures"
 					},
 					"transient": {
 						"type": "bool",
@@ -1910,16 +1884,14 @@
 								"class": "Node2D",
 								"groups": [],
 								"name": "Player",
-								"path": "/root/World/Player",
-								"script": "res://scripts/player.gd"
+								"path": "/root/World/Player"
 							},
 							{
 								"children": [],
 								"class": "Node2D",
 								"groups": [],
 								"name": "Enemy",
-								"path": "/root/World/Enemy",
-								"script": "res://scripts/enemy.gd"
+								"path": "/root/World/Enemy"
 							},
 							{
 								"children": [],
@@ -1970,10 +1942,6 @@
 										"type": "String",
 										"value": ""
 									},
-									"health": {
-										"type": "int",
-										"value": 100
-									},
 									"light_mask": {
 										"type": "int",
 										"value": 1
@@ -1998,8 +1966,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 100.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -2045,10 +2013,6 @@
 									"skew": {
 										"type": "float",
 										"value": 0.0
-									},
-									"speed": {
-										"type": "float",
-										"value": 200.1
 									},
 									"texture_filter": {
 										"type": "int",
@@ -2098,10 +2062,6 @@
 								"name": "Enemy",
 								"path": "/root/World/Enemy",
 								"properties": {
-									"alive": {
-										"type": "bool",
-										"value": true
-									},
 									"auto_translate_mode": {
 										"type": "int",
 										"value": 0
@@ -2138,8 +2098,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 400.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -2271,7 +2231,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 500.0
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -2554,7 +2514,7 @@
 					},
 					"content_scale_size": {
 						"type": "Vector2i",
-						"value": "(640, 480)"
+						"value": "(1152, 648)"
 					},
 					"content_scale_stretch": {
 						"type": "int",
@@ -2794,7 +2754,7 @@
 					},
 					"title": {
 						"type": "String",
-						"value": "Sample Game"
+						"value": "Patina Fixtures"
 					},
 					"transient": {
 						"type": "bool",
@@ -2882,16 +2842,14 @@
 								"class": "Node2D",
 								"groups": [],
 								"name": "Player",
-								"path": "/root/World/Player",
-								"script": "res://scripts/player.gd"
+								"path": "/root/World/Player"
 							},
 							{
 								"children": [],
 								"class": "Node2D",
 								"groups": [],
 								"name": "Enemy",
-								"path": "/root/World/Enemy",
-								"script": "res://scripts/enemy.gd"
+								"path": "/root/World/Enemy"
 							},
 							{
 								"children": [],
@@ -2942,10 +2900,6 @@
 										"type": "String",
 										"value": ""
 									},
-									"health": {
-										"type": "int",
-										"value": 100
-									},
 									"light_mask": {
 										"type": "int",
 										"value": 1
@@ -2970,8 +2924,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 100.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -3017,10 +2971,6 @@
 									"skew": {
 										"type": "float",
 										"value": 0.0
-									},
-									"speed": {
-										"type": "float",
-										"value": 200.101941
 									},
 									"texture_filter": {
 										"type": "int",
@@ -3070,10 +3020,6 @@
 								"name": "Enemy",
 								"path": "/root/World/Enemy",
 								"properties": {
-									"alive": {
-										"type": "bool",
-										"value": true
-									},
 									"auto_translate_mode": {
 										"type": "int",
 										"value": 0
@@ -3110,8 +3056,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 400.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -3243,7 +3189,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 500.0
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -3526,7 +3472,7 @@
 					},
 					"content_scale_size": {
 						"type": "Vector2i",
-						"value": "(640, 480)"
+						"value": "(1152, 648)"
 					},
 					"content_scale_stretch": {
 						"type": "int",
@@ -3766,7 +3712,7 @@
 					},
 					"title": {
 						"type": "String",
-						"value": "Sample Game"
+						"value": "Patina Fixtures"
 					},
 					"transient": {
 						"type": "bool",
@@ -3854,16 +3800,14 @@
 								"class": "Node2D",
 								"groups": [],
 								"name": "Player",
-								"path": "/root/World/Player",
-								"script": "res://scripts/player.gd"
+								"path": "/root/World/Player"
 							},
 							{
 								"children": [],
 								"class": "Node2D",
 								"groups": [],
 								"name": "Enemy",
-								"path": "/root/World/Enemy",
-								"script": "res://scripts/enemy.gd"
+								"path": "/root/World/Enemy"
 							},
 							{
 								"children": [],
@@ -3914,10 +3858,6 @@
 										"type": "String",
 										"value": ""
 									},
-									"health": {
-										"type": "int",
-										"value": 100
-									},
 									"light_mask": {
 										"type": "int",
 										"value": 1
@@ -3942,8 +3882,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 100.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -3989,10 +3929,6 @@
 									"skew": {
 										"type": "float",
 										"value": 0.0
-									},
-									"speed": {
-										"type": "float",
-										"value": 200.103003
 									},
 									"texture_filter": {
 										"type": "int",
@@ -4042,10 +3978,6 @@
 								"name": "Enemy",
 								"path": "/root/World/Enemy",
 								"properties": {
-									"alive": {
-										"type": "bool",
-										"value": true
-									},
 									"auto_translate_mode": {
 										"type": "int",
 										"value": 0
@@ -4082,8 +4014,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 400.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -4215,7 +4147,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 500.0
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -4498,7 +4430,7 @@
 					},
 					"content_scale_size": {
 						"type": "Vector2i",
-						"value": "(640, 480)"
+						"value": "(1152, 648)"
 					},
 					"content_scale_stretch": {
 						"type": "int",
@@ -4738,7 +4670,7 @@
 					},
 					"title": {
 						"type": "String",
-						"value": "Sample Game"
+						"value": "Patina Fixtures"
 					},
 					"transient": {
 						"type": "bool",
@@ -4826,16 +4758,14 @@
 								"class": "Node2D",
 								"groups": [],
 								"name": "Player",
-								"path": "/root/World/Player",
-								"script": "res://scripts/player.gd"
+								"path": "/root/World/Player"
 							},
 							{
 								"children": [],
 								"class": "Node2D",
 								"groups": [],
 								"name": "Enemy",
-								"path": "/root/World/Enemy",
-								"script": "res://scripts/enemy.gd"
+								"path": "/root/World/Enemy"
 							},
 							{
 								"children": [],
@@ -4886,10 +4816,6 @@
 										"type": "String",
 										"value": ""
 									},
-									"health": {
-										"type": "int",
-										"value": 100
-									},
 									"light_mask": {
 										"type": "int",
 										"value": 1
@@ -4914,8 +4840,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 100.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -4961,10 +4887,6 @@
 									"skew": {
 										"type": "float",
 										"value": 0.0
-									},
-									"speed": {
-										"type": "float",
-										"value": 200.108199
 									},
 									"texture_filter": {
 										"type": "int",
@@ -5014,10 +4936,6 @@
 								"name": "Enemy",
 								"path": "/root/World/Enemy",
 								"properties": {
-									"alive": {
-										"type": "bool",
-										"value": true
-									},
 									"auto_translate_mode": {
 										"type": "int",
 										"value": 0
@@ -5054,8 +4972,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 400.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -5187,7 +5105,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 500.0
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -5470,7 +5388,7 @@
 					},
 					"content_scale_size": {
 						"type": "Vector2i",
-						"value": "(640, 480)"
+						"value": "(1152, 648)"
 					},
 					"content_scale_stretch": {
 						"type": "int",
@@ -5710,7 +5628,7 @@
 					},
 					"title": {
 						"type": "String",
-						"value": "Sample Game"
+						"value": "Patina Fixtures"
 					},
 					"transient": {
 						"type": "bool",
@@ -5798,16 +5716,14 @@
 								"class": "Node2D",
 								"groups": [],
 								"name": "Player",
-								"path": "/root/World/Player",
-								"script": "res://scripts/player.gd"
+								"path": "/root/World/Player"
 							},
 							{
 								"children": [],
 								"class": "Node2D",
 								"groups": [],
 								"name": "Enemy",
-								"path": "/root/World/Enemy",
-								"script": "res://scripts/enemy.gd"
+								"path": "/root/World/Enemy"
 							},
 							{
 								"children": [],
@@ -5858,10 +5774,6 @@
 										"type": "String",
 										"value": ""
 									},
-									"health": {
-										"type": "int",
-										"value": 100
-									},
 									"light_mask": {
 										"type": "int",
 										"value": 1
@@ -5886,8 +5798,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 100.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -5933,10 +5845,6 @@
 									"skew": {
 										"type": "float",
 										"value": 0.0
-									},
-									"speed": {
-										"type": "float",
-										"value": 200.112365666667
 									},
 									"texture_filter": {
 										"type": "int",
@@ -5986,10 +5894,6 @@
 								"name": "Enemy",
 								"path": "/root/World/Enemy",
 								"properties": {
-									"alive": {
-										"type": "bool",
-										"value": true
-									},
 									"auto_translate_mode": {
 										"type": "int",
 										"value": 0
@@ -6026,8 +5930,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 400.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -6159,7 +6063,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 500.0
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -6442,7 +6346,7 @@
 					},
 					"content_scale_size": {
 						"type": "Vector2i",
-						"value": "(640, 480)"
+						"value": "(1152, 648)"
 					},
 					"content_scale_stretch": {
 						"type": "int",
@@ -6682,7 +6586,7 @@
 					},
 					"title": {
 						"type": "String",
-						"value": "Sample Game"
+						"value": "Patina Fixtures"
 					},
 					"transient": {
 						"type": "bool",
@@ -6770,16 +6674,14 @@
 								"class": "Node2D",
 								"groups": [],
 								"name": "Player",
-								"path": "/root/World/Player",
-								"script": "res://scripts/player.gd"
+								"path": "/root/World/Player"
 							},
 							{
 								"children": [],
 								"class": "Node2D",
 								"groups": [],
 								"name": "Enemy",
-								"path": "/root/World/Enemy",
-								"script": "res://scripts/enemy.gd"
+								"path": "/root/World/Enemy"
 							},
 							{
 								"children": [],
@@ -6830,10 +6732,6 @@
 										"type": "String",
 										"value": ""
 									},
-									"health": {
-										"type": "int",
-										"value": 100
-									},
 									"light_mask": {
 										"type": "int",
 										"value": 1
@@ -6858,8 +6756,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 100.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -6905,10 +6803,6 @@
 									"skew": {
 										"type": "float",
 										"value": 0.0
-									},
-									"speed": {
-										"type": "float",
-										"value": 200.116666666667
 									},
 									"texture_filter": {
 										"type": "int",
@@ -6958,10 +6852,6 @@
 								"name": "Enemy",
 								"path": "/root/World/Enemy",
 								"properties": {
-									"alive": {
-										"type": "bool",
-										"value": true
-									},
 									"auto_translate_mode": {
 										"type": "int",
 										"value": 0
@@ -6998,8 +6888,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 400.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -7131,7 +7021,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 500.0
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -7414,7 +7304,7 @@
 					},
 					"content_scale_size": {
 						"type": "Vector2i",
-						"value": "(640, 480)"
+						"value": "(1152, 648)"
 					},
 					"content_scale_stretch": {
 						"type": "int",
@@ -7654,7 +7544,7 @@
 					},
 					"title": {
 						"type": "String",
-						"value": "Sample Game"
+						"value": "Patina Fixtures"
 					},
 					"transient": {
 						"type": "bool",
@@ -7742,16 +7632,14 @@
 								"class": "Node2D",
 								"groups": [],
 								"name": "Player",
-								"path": "/root/World/Player",
-								"script": "res://scripts/player.gd"
+								"path": "/root/World/Player"
 							},
 							{
 								"children": [],
 								"class": "Node2D",
 								"groups": [],
 								"name": "Enemy",
-								"path": "/root/World/Enemy",
-								"script": "res://scripts/enemy.gd"
+								"path": "/root/World/Enemy"
 							},
 							{
 								"children": [],
@@ -7802,10 +7690,6 @@
 										"type": "String",
 										"value": ""
 									},
-									"health": {
-										"type": "int",
-										"value": 100
-									},
 									"light_mask": {
 										"type": "int",
 										"value": 1
@@ -7830,8 +7714,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 100.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -7877,10 +7761,6 @@
 									"skew": {
 										"type": "float",
 										"value": 0.0
-									},
-									"speed": {
-										"type": "float",
-										"value": 200.120833333333
 									},
 									"texture_filter": {
 										"type": "int",
@@ -7930,10 +7810,6 @@
 								"name": "Enemy",
 								"path": "/root/World/Enemy",
 								"properties": {
-									"alive": {
-										"type": "bool",
-										"value": true
-									},
 									"auto_translate_mode": {
 										"type": "int",
 										"value": 0
@@ -7970,8 +7846,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 400.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -8103,7 +7979,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 500.0
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -8386,7 +8262,7 @@
 					},
 					"content_scale_size": {
 						"type": "Vector2i",
-						"value": "(640, 480)"
+						"value": "(1152, 648)"
 					},
 					"content_scale_stretch": {
 						"type": "int",
@@ -8626,7 +8502,7 @@
 					},
 					"title": {
 						"type": "String",
-						"value": "Sample Game"
+						"value": "Patina Fixtures"
 					},
 					"transient": {
 						"type": "bool",
@@ -8714,16 +8590,14 @@
 								"class": "Node2D",
 								"groups": [],
 								"name": "Player",
-								"path": "/root/World/Player",
-								"script": "res://scripts/player.gd"
+								"path": "/root/World/Player"
 							},
 							{
 								"children": [],
 								"class": "Node2D",
 								"groups": [],
 								"name": "Enemy",
-								"path": "/root/World/Enemy",
-								"script": "res://scripts/enemy.gd"
+								"path": "/root/World/Enemy"
 							},
 							{
 								"children": [],
@@ -8774,10 +8648,6 @@
 										"type": "String",
 										"value": ""
 									},
-									"health": {
-										"type": "int",
-										"value": 100
-									},
 									"light_mask": {
 										"type": "int",
 										"value": 1
@@ -8802,8 +8672,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 100.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -8849,10 +8719,6 @@
 									"skew": {
 										"type": "float",
 										"value": 0.0
-									},
-									"speed": {
-										"type": "float",
-										"value": 200.127180666667
 									},
 									"texture_filter": {
 										"type": "int",
@@ -8902,10 +8768,6 @@
 								"name": "Enemy",
 								"path": "/root/World/Enemy",
 								"properties": {
-									"alive": {
-										"type": "bool",
-										"value": true
-									},
 									"auto_translate_mode": {
 										"type": "int",
 										"value": 0
@@ -8942,8 +8804,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 400.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -9075,7 +8937,7 @@
 										"type": "Vector2",
 										"value": {
 											"x": 0.0,
-											"y": 500.0
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -9358,7 +9220,7 @@
 					},
 					"content_scale_size": {
 						"type": "Vector2i",
-						"value": "(640, 480)"
+						"value": "(1152, 648)"
 					},
 					"content_scale_stretch": {
 						"type": "int",
@@ -9598,7 +9460,7 @@
 					},
 					"title": {
 						"type": "String",
-						"value": "Sample Game"
+						"value": "Patina Fixtures"
 					},
 					"transient": {
 						"type": "bool",
@@ -9686,16 +9548,14 @@
 								"class": "Node2D",
 								"groups": [],
 								"name": "Player",
-								"path": "/root/World/Player",
-								"script": "res://scripts/player.gd"
+								"path": "/root/World/Player"
 							},
 							{
 								"children": [],
 								"class": "Node2D",
 								"groups": [],
 								"name": "Enemy",
-								"path": "/root/World/Enemy",
-								"script": "res://scripts/enemy.gd"
+								"path": "/root/World/Enemy"
 							},
 							{
 								"children": [],
@@ -9724,7 +9584,7 @@
 		}
 	],
 	"frames_captured": 10,
-	"generated_at": "2026-03-20T13:40:01",
+	"generated_at": "2026-11-03T18:34:20",
 	"notification_trace": [],
 	"properties": {
 		"children": [
@@ -9747,10 +9607,6 @@
 							"editor_description": {
 								"type": "String",
 								"value": ""
-							},
-							"health": {
-								"type": "int",
-								"value": 100
 							},
 							"light_mask": {
 								"type": "int",
@@ -9776,8 +9632,8 @@
 							"position": {
 								"type": "Vector2",
 								"value": {
-									"x": 100.0,
-									"y": 200.0
+									"x": 0.0,
+									"y": 0.0
 								}
 							},
 							"process_mode": {
@@ -9823,10 +9679,6 @@
 							"skew": {
 								"type": "float",
 								"value": 0.0
-							},
-							"speed": {
-								"type": "float",
-								"value": 200.127180666667
 							},
 							"texture_filter": {
 								"type": "int",
@@ -9876,10 +9728,6 @@
 						"name": "Enemy",
 						"path": "/root/World/Enemy",
 						"properties": {
-							"alive": {
-								"type": "bool",
-								"value": true
-							},
 							"auto_translate_mode": {
 								"type": "int",
 								"value": 0
@@ -9916,8 +9764,8 @@
 							"position": {
 								"type": "Vector2",
 								"value": {
-									"x": 400.0,
-									"y": 200.0
+									"x": 0.0,
+									"y": 0.0
 								}
 							},
 							"process_mode": {
@@ -10049,7 +9897,7 @@
 								"type": "Vector2",
 								"value": {
 									"x": 0.0,
-									"y": 500.0
+									"y": 0.0
 								}
 							},
 							"process_mode": {
@@ -10332,7 +10180,7 @@
 			},
 			"content_scale_size": {
 				"type": "Vector2i",
-				"value": "(640, 480)"
+				"value": "(1152, 648)"
 			},
 			"content_scale_stretch": {
 				"type": "int",
@@ -10572,7 +10420,7 @@
 			},
 			"title": {
 				"type": "String",
-				"value": "Sample Game"
+				"value": "Patina Fixtures"
 			},
 			"transient": {
 				"type": "bool",
@@ -10660,16 +10508,14 @@
 						"class": "Node2D",
 						"groups": [],
 						"name": "Player",
-						"path": "/root/World/Player",
-						"script": "res://scripts/player.gd"
+						"path": "/root/World/Player"
 					},
 					{
 						"children": [],
 						"class": "Node2D",
 						"groups": [],
 						"name": "Enemy",
-						"path": "/root/World/Enemy",
-						"script": "res://scripts/enemy.gd"
+						"path": "/root/World/Enemy"
 					},
 					{
 						"children": [],

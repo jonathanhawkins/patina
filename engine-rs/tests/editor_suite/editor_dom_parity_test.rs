@@ -483,14 +483,20 @@ fn debugger_panel_has_setup_js() {
 
 #[test]
 fn debugger_panel_has_two_column_layout() {
+    // The Stack Trace sub-tab is now Godot's split: Stack Frames beside the
+    // stack variables (`#debug-split` > `.debug-col`), replacing the old
+    // `#debug-left` / `#debug-right` pair.
     assert!(
-        EDITOR_HTML.contains("id=\"debug-left\""),
-        "debugger panel must have left column"
+        EDITOR_HTML.contains("id=\"debug-split\""),
+        "debugger Stack Trace must be a split layout"
     );
     assert!(
-        EDITOR_HTML.contains("id=\"debug-right\""),
-        "debugger panel must have right column"
+        EDITOR_HTML.matches("class=\"debug-col\"").count() >= 2,
+        "the split must have at least two columns (frames | variables)"
     );
+    let frames = EDITOR_HTML.find("id=\"debug-stack-frames\"").expect("stack frames column");
+    let vars = EDITOR_HTML.find("id=\"debug-variables\"").expect("variables column");
+    assert!(frames < vars, "Stack Frames is the LEFT column, as in Godot");
 }
 
 #[test]

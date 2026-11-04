@@ -119,7 +119,9 @@
 				}
 			],
 			"class": "Control",
-			"groups": [],
+			"groups": [
+				"_root_canvas77309411328"
+			],
 			"name": "UIRoot",
 			"owner": "/root",
 			"path": "/root/UIRoot"

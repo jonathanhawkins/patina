@@ -2564,10 +2564,12 @@ mod tests {
             TransitionType::Nearest,
         ));
 
-        // Before midpoint → first value
+        // Godot's NEAREST holds the FLOOR key until the next key is reached
+        // (`animation.cpp:2674`, `return p_keys[idx].value`) — there is no
+        // midpoint switch, either side of it.
         assert_eq!(track.sample(0.3), Some(Variant::Float(0.0)));
-        // After midpoint → second value
-        assert_eq!(track.sample(0.7), Some(Variant::Float(10.0)));
+        assert_eq!(track.sample(0.7), Some(Variant::Float(0.0)));
+        assert_eq!(track.sample(1.0), Some(Variant::Float(10.0)));
     }
 
     #[test]

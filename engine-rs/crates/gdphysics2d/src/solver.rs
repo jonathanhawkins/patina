@@ -86,7 +86,22 @@ pub struct ContactManifold2D {
     pub points: Vec<Vector2>,
     /// Penetration depth along `normal`.
     pub depth: f32,
+    /// Per-point penetration along `normal`, parallel to `points`. Negative
+    /// means that point is still SEPARATED by that much (a speculative point).
+    /// Empty means every point shares `depth`.
+    pub depths: Vec<f32>,
 }
+
+/// How far a clipped manifold point may sit OUTSIDE the reference face and
+/// still be kept, as a speculative contact (px).
+///
+/// 🔑 Keeping only already-penetrating points made face-on-face contact
+/// unstable: a box tilted by an epsilon kept ONE corner, solved on a single
+/// off-centre point, and that point's impulse torqued it further over — a
+/// ten-box stack spun apart within half a second. Box2D keeps both clipped
+/// points within a margin and constrains each by its OWN separation; Godot's
+/// `GodotBodyPair2D` likewise keeps up to two contacts with per-contact depth.
+pub const SPECULATIVE_MARGIN: f32 = 0.5;
 
 /// The edge of a convex polygon whose outward normal is most aligned with
 /// `dir`, as `(start, end, outward_normal, alignment)`.
@@ -164,6 +179,7 @@ pub fn build_manifold(
         normal: result.normal,
         points: vec![result.point],
         depth: result.depth,
+        depths: Vec::new(),
     };
 
     let (Some((verts_a, radius_a)), Some((verts_b, radius_b))) =
@@ -209,18 +225,27 @@ pub fn build_manifold(
         return single;
     };
 
-    // Keep only the clipped points that are actually behind the reference face.
+    // Keep the clipped points behind the reference face, and those within
+    // `SPECULATIVE_MARGIN` in front of it, each with its own depth.
     let plane_offset = ref_normal.dot(ref_start);
     let mut points = Vec::with_capacity(2);
+    let mut depths = Vec::with_capacity(2);
     for p in [c0, c1] {
-        if ref_normal.dot(p) - plane_offset <= 1e-4 {
+        let depth = plane_offset - ref_normal.dot(p);
+        if depth >= -SPECULATIVE_MARGIN {
             points.push(p);
+            depths.push(depth);
         }
     }
     if points.len() == 2 && (points[0] - points[1]).length_squared() < 1e-6 {
         points.pop();
+        let d = depths[0].max(depths[1]);
+        depths.truncate(1);
+        depths[0] = d;
     }
-    if points.is_empty() {
+    if points.is_empty() || depths.iter().all(|d| *d < 0.0) {
+        // Every clipped point is in front of the face: the narrow phase saw an
+        // overlap the clip cannot place, so keep its single point.
         return single;
     }
 
@@ -228,6 +253,7 @@ pub fn build_manifold(
         normal,
         points,
         depth: result.depth,
+        depths,
     }
 }
 
@@ -301,7 +327,8 @@ impl ContactConstraint2D {
         let com_b = b.position + b.center_of_mass;
 
         let mut points = Vec::with_capacity(manifold.points.len());
-        for &world_point in &manifold.points {
+        for (index, &world_point) in manifold.points.iter().enumerate() {
+            let depth = manifold.depths.get(index).copied().unwrap_or(manifold.depth);
             let r_a = world_point - com_a;
             let r_b = world_point - com_b;
 
@@ -325,13 +352,21 @@ impl ContactConstraint2D {
 
             // Godot: `-bias * inv_dt * MIN(0, -depth + max_penetration)`, i.e.
             // nothing at all until the overlap exceeds the allowed slop.
-            let bias = -contact_bias * inv_dt * (max_penetration - manifold.depth).min(0.0);
+            //
+            // Per POINT: a tilted box's deep corner is pushed out and its
+            // shallow one is not, which is what levels it instead of spinning.
+            let bias = -contact_bias * inv_dt * (max_penetration - depth).min(0.0);
 
             // Restitution is read off the *approach* velocity, before any
             // impulse has been applied, and only when the approach is fast
             // enough to be a real bounce.
             let approach = relative_velocity_at(a, b, r_a, r_b).dot(normal);
-            let bounce = if approach < -RESTITUTION_VELOCITY_THRESHOLD {
+            let bounce = if depth < 0.0 {
+                // Speculative point: still `-depth` apart. Its row may let the
+                // pair close that gap within this step, and no faster — so it
+                // can never make a body hover, only stop it arriving too hard.
+                -depth * inv_dt
+            } else if approach < -RESTITUTION_VELOCITY_THRESHOLD {
                 combine_bounce(a.bounce, b.bounce) * approach
             } else {
                 0.0
@@ -620,6 +655,18 @@ impl ContactSolver2D {
                 };
                 let tangent = Vector2::new(-c.normal.y, c.normal.x);
 
+                // 🔑 A face-on-face pair solves its two points TOGETHER.
+                // Gauss-Seidel over the two points of ONE contact applies the
+                // first point's impulse before the second sees it, so every
+                // sweep leaves a net torque; on a stack that residue spins the
+                // boxes off each other (a mirror-symmetric ten-box stack picked
+                // up angular velocity on its second step and collapsed).
+                if c.points.len() == 2 && block_solve(c, &mut a, &mut b, tangent) {
+                    states.insert(c.body_a, a);
+                    states.insert(c.body_b, b);
+                    continue;
+                }
+
                 for point in c.points.iter_mut() {
                     // -- depenetration, on its own velocity channel ------------
                     let bias_relative = (b.bias_velocity_at(point.r_b)
@@ -675,6 +722,104 @@ impl ContactSolver2D {
         }
         bias_velocities
     }
+}
+
+/// `r × n` in 2D.
+fn cross(r: Vector2, n: Vector2) -> f32 {
+    r.x * n.y - r.y * n.x
+}
+
+/// One sweep of a two-point contact: friction per point, then the normal and
+/// depenetration channels each as a 2x2 LCP — Box2D's block solver
+/// (`b2ContactSolver::SolveVelocityConstraints`, the `pointCount == 2` branch).
+///
+/// Returns `false` (and changes nothing) when the 2x2 system is too
+/// ill-conditioned to invert, so the caller falls back to the sequential
+/// per-point sweep.
+fn block_solve(
+    c: &mut ContactConstraint2D,
+    a: &mut SolverBody2D,
+    b: &mut SolverBody2D,
+    tangent: Vector2,
+) -> bool {
+    let n = c.normal;
+    let (p0, p1) = (c.points[0], c.points[1]);
+    let (ra0, rb0, ra1, rb1) = (cross(p0.r_a, n), cross(p0.r_b, n), cross(p1.r_a, n), cross(p1.r_b, n));
+    let m = a.inv_mass + b.inv_mass;
+    let k11 = m + a.inv_inertia * ra0 * ra0 + b.inv_inertia * rb0 * rb0;
+    let k22 = m + a.inv_inertia * ra1 * ra1 + b.inv_inertia * rb1 * rb1;
+    let k12 = m + a.inv_inertia * ra0 * ra1 + b.inv_inertia * rb0 * rb1;
+    let det = k11 * k22 - k12 * k12;
+    // Box2D's guard: `k11^2 < 1000 * det`, i.e. the two rows are independent.
+    if !(k11 > 0.0 && k22 > 0.0 && k11 * k11 < 1000.0 * det) {
+        return false;
+    }
+
+    // -- friction, per point, against this iteration's normal impulse --------
+    for point in c.points.iter_mut() {
+        let relative = b.velocity_at(point.r_b) - a.velocity_at(point.r_a);
+        let vt = relative.dot(tangent) + point.surface_tangent;
+        let jt = -vt * point.mass_tangent;
+        let max_tangent = c.friction * point.acc_normal;
+        let old = point.acc_tangent;
+        point.acc_tangent = (old + jt).clamp(-max_tangent, max_tangent);
+        let impulse = tangent * (point.acc_tangent - old);
+        a.apply_impulse(point.r_a, -impulse);
+        b.apply_impulse(point.r_b, impulse);
+    }
+
+    // Solves `vn = K x + b' >= 0, x >= 0, x . vn = 0` for the new accumulated
+    // impulses, given each row's current relative velocity minus its target.
+    let lcp = |old: (f32, f32), err: (f32, f32)| -> (f32, f32) {
+        // b' = err - K * old
+        let b1 = err.0 - (k11 * old.0 + k12 * old.1);
+        let b2 = err.1 - (k12 * old.0 + k22 * old.1);
+        // Case 1: both active.
+        let x1 = -(k22 * b1 - k12 * b2) / det;
+        let x2 = -(k11 * b2 - k12 * b1) / det;
+        if x1 >= 0.0 && x2 >= 0.0 {
+            return (x1, x2);
+        }
+        // Case 2: only the first.
+        let x1 = -b1 / k11;
+        if x1 >= 0.0 && k12 * x1 + b2 >= 0.0 {
+            return (x1, 0.0);
+        }
+        // Case 3: only the second.
+        let x2 = -b2 / k22;
+        if x2 >= 0.0 && k12 * x2 + b1 >= 0.0 {
+            return (0.0, x2);
+        }
+        // Case 4: neither (both separating).
+        (0.0, 0.0)
+    };
+
+    // -- depenetration channel -------------------------------------------------
+    let vb0 = (b.bias_velocity_at(p0.r_b) - a.bias_velocity_at(p0.r_a)).dot(n);
+    let vb1 = (b.bias_velocity_at(p1.r_b) - a.bias_velocity_at(p1.r_a)).dot(n);
+    let old = (c.points[0].acc_bias, c.points[1].acc_bias);
+    let new = lcp(old, (vb0 - p0.bias, vb1 - p1.bias));
+    for (i, (o, nw)) in [(old.0, new.0), (old.1, new.1)].into_iter().enumerate() {
+        c.points[i].acc_bias = nw;
+        let impulse = n * (nw - o);
+        a.apply_bias_impulse(c.points[i].r_a, -impulse);
+        b.apply_bias_impulse(c.points[i].r_b, impulse);
+    }
+
+    // -- normal channel ----------------------------------------------------------
+    // Target velocity is `-bounce` (restitution, or a speculative gap's closing
+    // allowance), matching the sequential row's `-(bounce + vn)`.
+    let vn0 = (b.velocity_at(p0.r_b) - a.velocity_at(p0.r_a)).dot(n);
+    let vn1 = (b.velocity_at(p1.r_b) - a.velocity_at(p1.r_a)).dot(n);
+    let old = (c.points[0].acc_normal, c.points[1].acc_normal);
+    let new = lcp(old, (vn0 + p0.bounce, vn1 + p1.bounce));
+    for (i, (o, nw)) in [(old.0, new.0), (old.1, new.1)].into_iter().enumerate() {
+        c.points[i].acc_normal = nw;
+        let impulse = n * (nw - o);
+        a.apply_impulse(c.points[i].r_a, -impulse);
+        b.apply_impulse(c.points[i].r_b, impulse);
+    }
+    true
 }
 
 #[cfg(test)]

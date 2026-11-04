@@ -3,7 +3,9 @@
 //! Acceptance: more than 60 requests per second from one token returns HTTP
 //! 429 with a `Retry-After` header, and a different token is unaffected.
 
-use gdeditor::editor_server::{EditorServerHandle, EditorState};
+use gdeditor::editor_server::{
+    EditorServerHandle, EditorState, RateLimiter, DEFAULT_RATE_LIMIT_PER_SECOND,
+};
 use gdscene::node::Node;
 use gdscene::SceneTree;
 
@@ -71,13 +73,25 @@ fn get_with_token(port: u16, path: &str, token: &str) -> String {
 
 #[test]
 fn one_token_over_60_rps_returns_429_with_retry_after_other_token_unaffected() {
+    // The shipped default is the bead's 60 req/s.
+    assert_eq!(DEFAULT_RATE_LIMIT_PER_SECOND, 60);
+
+    // ⚠️ Exercise the MECHANISM with a small limit, not the default. The
+    // limiter counts requests per whole wall-clock second, so proving 429 at
+    // 60/s needs 61 sequential connections inside one second (<16 ms each).
+    // Under a loaded full-workspace run they are slower than that, the window
+    // rolls over first, and the test never saw a 429 — it measured host speed,
+    // not the limiter. At 5/s six requests in one second leaves a ~10x margin.
     let port = free_port();
-    // Default 60 req/s, open-access mode so any presented token is honored.
-    let handle = EditorServerHandle::start(port, fixture_state());
+    let handle = EditorServerHandle::start_with_auth_and_limiter(
+        port,
+        fixture_state(),
+        None,
+        RateLimiter::new(5),
+    );
     thread::sleep(Duration::from_millis(120));
 
-    // Burst 80 requests from one token within a single second. After the 60th
-    // success we must start seeing 429s.
+    // A window boundary can split at most one burst, so 80 attempts is ample.
     let mut seen_429 = false;
     let mut last_429_response = String::new();
     for _ in 0..80 {

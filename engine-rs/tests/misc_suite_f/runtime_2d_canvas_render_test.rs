@@ -187,9 +187,17 @@ fn runtime_canvas_paints_real_sprite_rect_and_label_pixels() {
     assert_pixel(&fb, 65, 125, GREEN, "the HUD rect where the world rect does not cover");
 
     // Label: some lit glyph pixels appear in the label's region (10..40, 10..30).
+    //
+    // ⚠️ NEAR-white, not exactly white. Runtime text is anti-aliased TTF since
+    // pat-s3rrv.37 (it was a 5x7 bitmap that painted solid 255s); a 16px stem
+    // peaks around 242 of 255. Grey over the 77-grey clear colour is still
+    // unmistakably glyph coverage, and with no text drawn the count is 0.
     let label_pixels = (10u32..40)
         .flat_map(|x| (10u32..30).map(move |y| (x, y)))
-        .filter(|&(x, y)| q(fb.get_pixel(x, y)) == q(WHITE))
+        .filter(|&(x, y)| {
+            let (r, g, b) = q(fb.get_pixel(x, y));
+            r >= 200 && r == g && g == b
+        })
         .count();
     assert!(
         label_pixels > 0,

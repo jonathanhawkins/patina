@@ -353,6 +353,37 @@ pub struct TileQuad {
     pub dest: Rect2,
     /// The sub-rectangle of `texture` the cell's atlas coordinates select.
     pub src: Rect2,
+    /// The cell's alternative-tile orientation, as `tilemap::TILE_FLIP_H` |
+    /// `TILE_FLIP_V` | `TILE_TRANSPOSE` bits (0 = drawn as authored).
+    pub flags: i64,
+}
+
+impl TileQuad {
+    /// The texture-space → layer-space transform that places this cell's
+    /// region in `dest` with its orientation, about the cell's centre.
+    ///
+    /// Godot's `TileMapLayer::draw_tile` negates the destination size per
+    /// flipped axis and passes `transpose` to `draw_texture_rect_region`,
+    /// which swaps the UV axes. Inverting that sampling (both steps are their
+    /// own inverse) gives the drawing transform `F · T`: `T` swaps x/y when
+    /// transposed, `F` mirrors the flipped axes.
+    pub fn orientation(&self) -> Transform2D {
+        let fx = if self.flags & crate::tilemap::TILE_FLIP_H != 0 { -1.0 } else { 1.0 };
+        let fy = if self.flags & crate::tilemap::TILE_FLIP_V != 0 { -1.0 } else { 1.0 };
+        let (x, y) = if self.flags & crate::tilemap::TILE_TRANSPOSE != 0 {
+            (Vector2::new(0.0, fy), Vector2::new(fx, 0.0))
+        } else {
+            (Vector2::new(fx, 0.0), Vector2::new(0.0, fy))
+        };
+        let c = Vector2::new(
+            self.dest.position.x + self.dest.size.x / 2.0,
+            self.dest.position.y + self.dest.size.y / 2.0,
+        );
+        // translate(c) · M · translate(-c)
+        let m = Transform2D { x, y, origin: Vector2::ZERO };
+        let to_origin = Transform2D::translated(Vector2::new(-c.x, -c.y));
+        Transform2D::translated(c) * m * to_origin
+    }
 }
 
 /// One live particle to draw, as published by the runtime particle phase
@@ -1363,7 +1394,20 @@ pub fn tilemap_quads(tree: &SceneTree, id: crate::NodeId) -> Vec<TileQuad> {
             continue;
         };
         let centre = tilemap::map_to_local(tile_set.tile_size, *coord);
+        let flags = if tile.alternative_id != 0 {
+            match node.get_property(&tilemap::tile_alternative_flags_key(
+                tile.source_id,
+                tile.atlas_coords,
+                tile.alternative_id,
+            )) {
+                Variant::Int(m) => m,
+                _ => 0,
+            }
+        } else {
+            0
+        };
         quads.push(TileQuad {
+            flags,
             texture: texture.to_string(),
             dest: Rect2::new(
                 Vector2::new(centre.x - src.size.x / 2.0, centre.y - src.size.y / 2.0),
@@ -2264,6 +2308,25 @@ pub fn build_control_render_items(
     root: crate::NodeId,
     size: Vector2,
 ) -> Vec<Render2DItem> {
+    build_control_render_items_sourced(tree, root, size)
+        .into_iter()
+        .map(|(item, _)| item)
+        .collect()
+}
+
+/// [`build_control_render_items`], each item paired with the Control node that
+/// drew it, and placed where that node really sits in the canvas: its own
+/// canvas layer, its effective `z_index`, and its layer's follow mode.
+///
+/// Feed the result to [`merge_control_items`], which puts each item at its
+/// node's TREE position among the runtime items. That is what Godot's canvas
+/// does — every CanvasItem, Control or Node2D, draws by layer, then z, then
+/// tree order.
+pub fn build_control_render_items_sourced(
+    tree: &mut SceneTree,
+    root: crate::NodeId,
+    size: Vector2,
+) -> Vec<(Render2DItem, Option<crate::NodeId>)> {
     // (1) Lay out containers first. `sort_container_tree` recurses, but it must be
     // entered at every container that is *not* nested inside another container —
     // entering at the subtree root would skip a container whose parent is a plain
@@ -2307,7 +2370,23 @@ pub fn build_control_render_items(
             found
         };
         if !nested {
-            control::sort_container_tree(tree, id, size);
+            // The container's OWN rect, from its anchors and offsets, not the
+            // viewport: an outermost container was laid out as if it filled
+            // the screen, so a centred 300px menu spread its children across
+            // the whole window. A container placed only by a stored `size`
+            // (no offsets) keeps that; one with neither still gets the viewport.
+            let anchored = control::anchored_size(tree, id, size);
+            let own = if anchored.x > 0.0 && anchored.y > 0.0 {
+                anchored
+            } else {
+                let stored = control::get_size(tree, id);
+                if stored.x > 0.0 && stored.y > 0.0 {
+                    stored
+                } else {
+                    size
+                }
+            };
+            control::sort_container_tree(tree, id, own);
         }
     }
 
@@ -2325,10 +2404,15 @@ pub fn build_control_render_items(
     // whatever base it is handed, so supplying it here is all the wiring the
     // project setting needs.
     let theme = project_base_theme();
-    let items =
-        crate::control_render::control_draw_items_themed(tree, root, &theme, &node_themes, size);
+    let items = crate::control_render::control_draw_items_themed_sourced(
+        tree,
+        root,
+        &theme,
+        &node_themes,
+        size,
+    );
     let mut out = Vec::with_capacity(items.len());
-    for item in items {
+    for (item, source) in items {
         let (transform, z, kind) = match item {
             ControlDrawItem::Rect {
                 rect,
@@ -2441,7 +2525,21 @@ pub fn build_control_render_items(
                 },
             ),
         };
-        out.push(Render2DItem {
+        // 🔑 The node's REAL place in the canvas. Every primitive used to get
+        // `CONTROL_Z_BASE + walk order` on layer 0 — "above every Node2D" — so a
+        // full-rect ColorRect background (the first child of Dodge the Creeps'
+        // Main) painted over the player and every enemy, and a HUD inside a
+        // CanvasLayer followed the Camera2D. A primitive with no single node
+        // (a popup overlay) keeps the old above-everything placement.
+        let (z_index, canvas_layer, canvas_follow) = match source {
+            Some(node) => (
+                canvas_order::effective_z_index(tree, node) as i64,
+                canvas_layer_for(tree, node),
+                canvas_layer_placement(tree, node).1,
+            ),
+            None => (CONTROL_Z_BASE + z as i64, 0, CanvasFollow::DefaultCanvas),
+        };
+        out.push((Render2DItem {
             // Control primitives are not one-per-node, so there is no single node
             // id to attribute them to; 0 marks "not pickable as a node".
             node_id: 0,
@@ -2449,12 +2547,9 @@ pub fn build_control_render_items(
             // Each primitive already carries its own themed colour, so the
             // item-level tint stays neutral.
             modulate: Color::new(1.0, 1.0, 1.0, 1.0),
-            z_index: CONTROL_Z_BASE + z as i64,
-            canvas_layer: 0,
-            // These primitives are emitted by the Control layout pass with
-            // `canvas_layer: 0` already, i.e. the default canvas — so the camera
-            // view applies to them as it always has (pat-0q2kx.212).
-            canvas_follow: CanvasFollow::DefaultCanvas,
+            z_index,
+            canvas_layer,
+            canvas_follow,
             // Control primitives are drawn by their own layout pass, which has
             // already resolved them inside their container.
             clip_rect: None,
@@ -2472,8 +2567,91 @@ pub fn build_control_render_items(
             texture_filter: TextureFilter::Nearest,
             texture_repeat: TextureRepeat::Disabled,
             kind,
-        });
+        }, source));
     }
+    out
+}
+
+/// Interleaves themed Control items into a runtime render list at each source
+/// node's TREE position, so the raster's one stable `(canvas_layer, z_index)`
+/// sort reproduces Godot's canvas order — layer, then z, then tree order — for
+/// Controls and Node2Ds together.
+///
+/// A node BOTH passes draw is drawn once, by whichever representation is the
+/// complete one — drawing both double-blended any translucent colour:
+/// - a **ColorRect** keeps the runtime item, which honours an authored
+///   `position`/`size`, the inherited modulate, materials and CanvasGroups; the
+///   Control pass's rect for it is the duplicate;
+/// - a **Label** keeps the Control item, which carries its colour and its
+///   in-rect alignment; the runtime Text item has neither.
+pub fn merge_control_items(
+    tree: &SceneTree,
+    runtime: Vec<Render2DItem>,
+    controls: Vec<(Render2DItem, Option<crate::NodeId>)>,
+) -> Vec<Render2DItem> {
+    let order: std::collections::HashMap<u64, usize> = tree
+        .all_nodes_in_tree_order()
+        .into_iter()
+        .enumerate()
+        .map(|(i, id)| (id.raw(), i))
+        .collect();
+    let class_of = |raw: u64| {
+        tree.get_node(crate::NodeId::from_object_id(gdcore::id::ObjectId::from_raw(raw)))
+            .map(|n| n.class_name().to_string())
+            .unwrap_or_default()
+    };
+    let drawn_by_controls: std::collections::HashSet<u64> = controls
+        .iter()
+        .filter_map(|(_, source)| source.map(|id| id.raw()))
+        .collect();
+    let runtime_color_rects: std::collections::HashSet<u64> = runtime
+        .iter()
+        .filter(|item| matches!(item.kind, Render2DKind::ColorRect { .. }))
+        .map(|item| item.node_id)
+        .collect();
+    let runtime: Vec<Render2DItem> = runtime
+        .into_iter()
+        .filter(|item| {
+            !(drawn_by_controls.contains(&item.node_id)
+                && matches!(item.kind, Render2DKind::Text { .. })
+                && class_of(item.node_id) == "Label")
+        })
+        .collect();
+    let controls: Vec<(Render2DItem, Option<crate::NodeId>)> = controls
+        .into_iter()
+        .filter(|(_, source)| {
+            !source.is_some_and(|id| {
+                runtime_color_rects.contains(&id.raw()) && class_of(id.raw()) == "ColorRect"
+            })
+        })
+        .collect();
+    // (layer, z, tree index): sourceless items sort after every node.
+    let key = |item: &Render2DItem, node: Option<u64>| {
+        (
+            item.canvas_layer,
+            item.z_index,
+            node.and_then(|n| order.get(&n).copied()).unwrap_or(usize::MAX),
+        )
+    };
+    let mut controls: Vec<((i64, i64, usize), Render2DItem)> = controls
+        .into_iter()
+        .map(|(item, source)| (key(&item, source.map(|s| s.raw())), item))
+        .collect();
+    // Stable: a node's own primitives keep their draw order.
+    controls.sort_by_key(|(k, _)| *k);
+    let mut controls = controls.into_iter().peekable();
+    let mut out = Vec::with_capacity(runtime.len() + controls.len());
+    for item in runtime {
+        let here = key(&item, Some(item.node_id));
+        // A Control draws before a runtime item it precedes in the canvas order;
+        // at an equal key (the node's own `_draw` output) the theme draw goes
+        // first, as Godot draws a Control's theme before calling `_draw`.
+        while controls.peek().is_some_and(|(k, _)| *k <= here) {
+            out.push(controls.next().unwrap().1);
+        }
+        out.push(item);
+    }
+    out.extend(controls.map(|(_, item)| item));
     out
 }
 
@@ -3238,10 +3416,17 @@ pub fn rasterize_render_list_with_quality(
                         let Some(tex) = cache.get(&cell.texture) else {
                             continue;
                         };
+                        // A flipped / transposed alternative draws through
+                        // its orientation about the cell centre.
+                        let cell_xform = if cell.flags != 0 {
+                            xform * cell.orientation()
+                        } else {
+                            xform
+                        };
                         draw::draw_texture_rect_transformed_filtered(
                             &mut fb,
                             tex,
-                            xform,
+                            cell_xform,
                             cell.dest,
                             Some(cell.src),
                             item.modulate,
@@ -4128,6 +4313,24 @@ pub fn render_runtime_canvas(
 ///
 /// Clears to [`RUNTIME_CLEAR_COLOR`]; a caller compositing over a 3D frame needs
 /// a transparent clear and so goes through [`render_canvas_from_list`] with its own.
+/// The size of the canvas coordinate space a running game lays itself out in:
+/// Godot's `Viewport.get_visible_rect().size`. Root-level Controls anchor to it
+/// and a Camera2D centres on it.
+///
+/// 🔑 Under stretch this is the project's BASE resolution, not the window: the
+/// stretch transform maps canvas → window afterwards. Laying Controls out
+/// against the window and then stretching them scaled the layout twice — a
+/// 480×720 `canvas_items` game's full-rect background and centred HUD spilled
+/// off the right of the Game view. With stretch off it IS the window size, so
+/// a non-stretched game is unchanged.
+pub fn canvas_size_of(window: &crate::viewport::RootWindow) -> Vector2 {
+    if window.is_stretching() {
+        window.visible_size()
+    } else {
+        window.size
+    }
+}
+
 pub fn render_play_frame(
     tree: &mut SceneTree,
     width: u32,
@@ -4136,32 +4339,76 @@ pub fn render_play_frame(
     settings: &gdcore::project_settings::ProjectSettings,
 ) -> FrameBuffer {
     let viewport_size = Vector2::new(width.max(1) as f32, height.max(1) as f32);
-
-    let mut items = build_runtime_render_list(tree);
-    let root = tree.root_id();
-    items.extend(build_control_render_items(tree, root, viewport_size));
-
-    if let Some(view) = camera2d_view_transform(tree, viewport_size, None, 1.0 / 60.0) {
-        apply_camera2d_view(&mut items, view);
-    }
     // The window here is the Play surface's rect, not the project's configured
     // one, so the project's base resolution stretches to whatever size the host
     // gave us — which is what makes the Play tab frame the scene the way the
     // exported game would.
     let mut window = *tree.root_window();
     window.size = viewport_size;
+    let canvas_size = canvas_size_of(&window);
+
+    // The Control pass FIRST: its layout writes each Control's rect back onto
+    // the node, and the runtime list reads that rect — built the other way round
+    // a ColorRect drew at last frame's size (zero on the first frame).
+    let root = tree.root_id();
+    let controls = build_control_render_items_sourced(tree, root, canvas_size);
+    let runtime = build_runtime_render_list(tree);
+    let mut items = merge_control_items(tree, runtime, controls);
+
+    if let Some(view) = camera2d_view_transform(tree, canvas_size, None, 1.0 / 60.0) {
+        apply_camera2d_view(&mut items, view);
+    }
     apply_stretch_transform(&mut items, window.stretch_transform());
 
     let quality = CanvasQuality::from_project_settings(settings);
-    render_canvas_from_list(
+    // The viewport clears to the PROJECT's `rendering/environment/defaults/
+    // default_clear_color` (Godot's 0.3 grey only when unset). The fixed grey
+    // ignored it, so Pong's near-black (0.106, 0.106, 0.125) showed as a grey
+    // band wherever an expanded viewport reached past the authored background.
+    let mut fb = render_canvas_from_list(
         tree,
         &items,
         width,
         height,
-        RUNTIME_CLEAR_COLOR,
+        settings.default_clear_color(),
         Some(texture_cache),
         &quality,
-    )
+    );
+    paint_black_bars(&mut fb, &window);
+    fb
+}
+
+/// Paints the letter/pillarbox bars a `keep`-aspect stretch leaves around the
+/// viewport, as Godot does (`RenderingServer.black_bars_set_margins`, black).
+///
+/// Also the viewport's CLIP: anything a game draws past its base resolution —
+/// a sprite half off-screen, a background wider than the view — falls in the
+/// bars and must not show, since in Godot it lies outside the viewport. A
+/// no-op when nothing stretches or the aspect fits exactly (zero margins).
+pub fn paint_black_bars(fb: &mut FrameBuffer, window: &crate::viewport::RootWindow) {
+    if !window.is_stretching() {
+        return;
+    }
+    let scale = window.content_scale();
+    let (mx, my) = (scale.margin.x.max(0.0), scale.margin.y.max(0.0));
+    if mx < 0.5 && my < 0.5 {
+        return;
+    }
+    let (w, h) = (fb.width as f32, fb.height as f32);
+    let black = gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0);
+    let inner = Rect2::new(Vector2::new(mx, my), scale.screen_size);
+    for y in 0..fb.height {
+        for x in 0..fb.width {
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            let inside = px >= inner.position.x
+                && px < (inner.position.x + inner.size.x).min(w)
+                && py >= inner.position.y
+                && py < (inner.position.y + inner.size.y).min(h);
+            if !inside {
+                fb.pixels[(y * fb.width + x) as usize] = black;
+            }
+        }
+    }
 }
 
 /// A `CanvasGroup` and the draw-list items that belong to its subtree
@@ -4573,7 +4820,13 @@ fn with_override_font<
             // `res://` is the project-relative spelling; strip it so the path
             // resolves against the working directory like every other asset read.
             let disk = path.strip_prefix("res://").unwrap_or(path);
-            std::fs::read(disk).ok().and_then(|bytes| {
+            // Through the configured `res://` root first: the working directory
+            // is the project only when the host happened to start there.
+            gdcore::file_access::resolve_path(path)
+                .ok()
+                .and_then(|p| std::fs::read(p).ok())
+                .or_else(|| std::fs::read(disk).ok())
+                .and_then(|bytes| {
                 // pat-s3rrv.214: a WOFF is an SFNT with zlib-compressed tables,
                 // and `TtfFont::from_bytes` only understands SFNT — so a `.woff`
                 // face parsed as nothing and the Label silently drew the
@@ -4603,6 +4856,16 @@ fn with_override_font<
             None => false,
         }
     })
+}
+
+/// Width of `text` at `px_size` in the override face at `path`, or `None` when
+/// that face cannot be loaded (the rasterizer then falls back to the built-in
+/// face, and so must the measurement). Shares [`with_override_font`]'s cache,
+/// so layout measures exactly the face the rasterizer draws.
+pub(crate) fn measure_with_override_font(path: &str, text: &str, px_size: f32) -> Option<f32> {
+    let mut width = None;
+    with_override_font(path, |ttf, _atlas| width = Some(ttf.measure_line(text, px_size)));
+    width
 }
 
 /// Runs `f` with the embedded default UI face and its glyph atlas

@@ -361,21 +361,23 @@ func _ready():
     let events = tree.event_trace().events();
 
     // Check that signal emission appears in trace.
+    // The SCRIPT's signal — not Godot's own `tree_entered`, which
+    // `_propagate_enter_tree` emits before READY (scene/main/node.cpp:358).
     let signal_events: Vec<_> = events
         .iter()
-        .filter(|e| e.event_type == TraceEventType::SignalEmit)
+        .filter(|e| e.event_type == TraceEventType::SignalEmit && e.detail == "my_signal")
         .collect();
 
-    // Signal may or may not be emitted depending on interpreter support.
-    // If it is, verify it appears after READY and during _ready script call.
-    if !signal_events.is_empty() {
+    // GDScript `emit_signal` is supported, so the emission must be traced.
+    assert!(!signal_events.is_empty(), "my_signal emitted from _ready is traced");
+    {
         let ready_idx = events
             .iter()
             .position(|e| e.detail == "READY" && e.node_path.contains("Emitter"))
             .expect("Emitter READY");
         let signal_idx = events
             .iter()
-            .position(|e| e.event_type == TraceEventType::SignalEmit)
+            .position(|e| e.event_type == TraceEventType::SignalEmit && e.detail == "my_signal")
             .expect("signal emission");
         assert!(
             signal_idx > ready_idx,

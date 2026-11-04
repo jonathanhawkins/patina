@@ -38,7 +38,9 @@ fn facing_quad() -> Mesh3D {
     let n = Vector3::new(0.0, 0.0, 1.0);
     m.normals = vec![n; 4];
     m.uvs = vec![[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
-    m.indices = vec![0, 1, 2, 0, 2, 3];
+    // Clockwise = front-facing in Godot (`doc/classes/ArrayMesh.xml:49`); the
+    // renderer now culls counter-clockwise triangles, as Godot does.
+    m.indices = vec![0, 2, 1, 0, 3, 2];
     m
 }
 
@@ -56,7 +58,9 @@ fn tilted_quad() -> Mesh3D {
     let n = Vector3::new(0.0, 0.0, 1.0);
     m.normals = vec![n; 4];
     m.uvs = vec![[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
-    m.indices = vec![0, 1, 2, 0, 2, 3];
+    // Clockwise = front-facing in Godot (`doc/classes/ArrayMesh.xml:49`); the
+    // renderer now culls counter-clockwise triangles, as Godot does.
+    m.indices = vec![0, 2, 1, 0, 3, 2];
     m
 }
 
@@ -293,29 +297,47 @@ fn roughness_map_modulates_specular() {
         center_diff(&with_map, &no_map) > 1.0,
         "roughness map must change the specular response"
     );
+    // ⚠️ Lower roughness CONCENTRATES the GGX lobe: the brightest pixel gets
+    // brighter while off-peak pixels dim, so the AVERAGE over the centre can
+    // fall (it did: 0.669 vs 0.671). Compare the peak, which is what "sharper
+    // highlight" means.
     assert!(
-        center_luma(&with_map) > center_luma(&no_map),
-        "lower roughness must brighten the highlight: with={:.3} without={:.3}",
-        center_luma(&with_map),
-        center_luma(&no_map)
+        peak_luma(&with_map) > peak_luma(&no_map),
+        "lower roughness must sharpen the highlight peak: with={:.3} without={:.3}",
+        peak_luma(&with_map),
+        peak_luma(&no_map)
     );
+}
+
+fn peak_luma(fb: &FrameBuffer3D) -> f32 {
+    let mut best = 0.0f32;
+    for y in 0..H {
+        for x in 0..W {
+            let c = fb.get_pixel(x, y);
+            best = best.max(c.r + c.g + c.b);
+        }
+    }
+    best
 }
 
 #[test]
 fn metallic_map_modulates_response() {
     let light = Some(Vector3::new(-0.3, 0.0, -1.0));
+    // Godot: `METALLIC = metallic_tex * metallic` — the map MULTIPLIES the
+    // scalar, so on a metallic = 0 base no map can change anything. Start
+    // fully metallic and let the map (B = 0 in the renderer's internal
+    // packing) drive it to a dielectric.
     let base = || Material3D {
         shading_mode: ShadingMode::Phong,
         albedo: Color::new(0.8, 0.3, 0.2, 1.0),
         roughness: 0.4,
-        metallic: 0.0,
+        metallic: 1.0,
         ..Default::default()
     };
     let no_map = render(facing_quad(), base(), light);
     let with_map = {
         let mut m = base();
-        // Blue channel (1.0) drives metallic → fully metallic.
-        m.metallic_texture = Some(arc_tex(1, 1, vec![Color::new(0.9, 0.9, 1.0, 1.0)]));
+        m.metallic_texture = Some(arc_tex(1, 1, vec![Color::new(0.9, 0.9, 0.0, 1.0)]));
         render(facing_quad(), m, light)
     };
     assert!(

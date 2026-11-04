@@ -760,11 +760,23 @@ pub fn attach_scene_animation_players(
 ) -> usize {
     let mut subtree = Vec::new();
     tree.collect_subtree_top_down(root_id, &mut subtree);
+    attach_scene_animation_players_for(tree, &subtree, scene)
+}
 
+/// [`attach_scene_animation_players`] over an explicit node list: the nodes
+/// ONE scene level created. A scene that instances sub-scenes resolves each
+/// player's `libraries` against the `PackedScene` that declared it, because
+/// `SubResource` ids are scene-local; walking the whole subtree would resolve
+/// an instanced player against the outer scene's table.
+pub fn attach_scene_animation_players_for(
+    tree: &mut SceneTree,
+    subtree: &[NodeId],
+    scene: &PackedScene,
+) -> usize {
     // Build first (immutable node reads), attach second, so the tree is not
     // borrowed mutably while the node's property map is being read.
     let mut built = Vec::new();
-    for &node_id in &subtree {
+    for &node_id in subtree {
         let Some(node) = tree.get_node(node_id) else {
             continue;
         };

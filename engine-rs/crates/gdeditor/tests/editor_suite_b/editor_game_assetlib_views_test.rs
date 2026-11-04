@@ -33,6 +33,65 @@ fn make_server() -> (EditorServerHandle, u16) {
     (handle, port)
 }
 
+/// A loopback stand-in for the asset catalog host, answering every request
+/// with a Godot-AssetLib-shaped `{"result":[...]}` envelope.
+///
+/// The AssetLib endpoint no longer serves a hardcoded catalog: twelve
+/// fabricated, uninstallable entries were removed in favour of an honest
+/// `configured:false` empty state (pat-0q2kx.240 / pat-s3rrv.227, see
+/// `api_get_assetlib_list`). A catalog is now opt-in per project via
+/// `[editor] assetlib/index_url` — so to prove the browser serves real
+/// entries, the fixture configures one, exactly as a project would.
+fn serve_catalog() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let body = br#"{"result":[{"title":"Fixture Asset","author":"patina","category":"Scripts","cost":"MIT","version_string":"1.0","download_url":"http://example.invalid/a.zip"}]}"#;
+    thread::spawn(move || {
+        for _ in 0..4 {
+            let Ok((mut sock, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 2048];
+            let _ = sock.read(&mut buf);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = sock.write_all(head.as_bytes());
+            let _ = sock.write_all(body);
+            let _ = sock.flush();
+        }
+    });
+    format!("http://127.0.0.1:{port}/catalog.json")
+}
+
+/// A server whose project names a catalog in `project.godot`.
+fn make_server_with_catalog() -> (EditorServerHandle, u16, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!(
+        "patina_assetlib_views_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("project.godot"),
+        format!(
+            "config_version=5\n\n[application]\n\nconfig/name=\"AssetLibViews\"\n\n[editor]\n\nassetlib/index_url=\"{}\"\n",
+            serve_catalog()
+        ),
+    )
+    .unwrap();
+    let port = free_port();
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    tree.add_child(root, Node::new("Main", "Node2D")).unwrap();
+    let mut state = EditorState::new(tree);
+    state.project_root = Some(dir.to_string_lossy().to_string());
+    let handle = EditorServerHandle::start(port, state);
+    thread::sleep(Duration::from_millis(100));
+    (handle, port, dir)
+}
+
 fn http_request(port: u16, req: &str) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
@@ -91,7 +150,7 @@ fn editor_game_mode_serves_game_view() {
 
 #[test]
 fn editor_assetlib_mode_serves_browser() {
-    let (_h, port) = make_server();
+    let (_h, port, dir) = make_server_with_catalog();
     let html = body_of(&http_get(port, "/editor")).to_string();
 
     assert!(
@@ -116,7 +175,7 @@ fn editor_assetlib_mode_serves_browser() {
     );
     let cbody = body_of(&catalog);
     assert!(
-        cbody.contains("\"assets\"") && cbody.contains("\"title\""),
+        cbody.contains("\"assets\"") && cbody.contains("\"title\":\"Fixture Asset\""),
         "AssetLib catalog must contain asset entries; got: {cbody}"
     );
 
@@ -126,4 +185,5 @@ fn editor_assetlib_mode_serves_browser() {
         main_view.contains("\"is_2d_viewport\":false") && main_view.contains("asset_lib"),
         "assetlib mode must serve the asset_lib browser, not the 2D viewport; got: {main_view}"
     );
+    let _ = std::fs::remove_dir_all(&dir);
 }

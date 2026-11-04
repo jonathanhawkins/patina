@@ -939,6 +939,9 @@ pub enum ColorExpr3D {
     Mix(Box<ColorExpr3D>, Box<ColorExpr3D>, FloatExpr3D),
     /// `texture(sampler, uv)` — sampler name plus the `u` and `v` coordinates.
     Texture(String, Box<FloatExpr3D>, Box<FloatExpr3D>),
+    /// `color * float` (either order) — scales RGB, leaves alpha alone, as a
+    /// GLSL `vec3 * float` written to `ALBEDO` does.
+    Scale(Box<ColorExpr3D>, FloatExpr3D),
 }
 
 /// An expression that evaluates to a float value in a 3D fragment shader.
@@ -1022,11 +1025,17 @@ pub fn parse_fragment_body_3d(source: &str) -> Vec<FragmentInstruction3D> {
 
 /// Shared body walk for [`parse_fragment_body_3d`] and [`parse_sky_body_3d`].
 fn parse_named_body_3d(source: &str, func: &str) -> Vec<FragmentInstruction3D> {
-    let mut instructions = parse_named_body_3d_matched(source, func);
-    // pat-s3rrv.36: when the line matcher understood NOTHING, hand the whole
-    // source to the real front end. A fallback, not a replacement — a shader the
-    // matcher already handles keeps its exact path, so nothing that renders
-    // correctly today can regress. Mirrors the 2D side.
+    let (mut instructions, complete) = parse_named_body_3d_matched(source, func);
+    // pat-s3rrv.36: when the line matcher did not understand EVERY statement,
+    // hand the whole source to the real front end. A shader the matcher fully
+    // handles keeps its exact path.
+    //
+    // ⚠️ This used to trigger only when the matcher understood NOTHING. A body
+    // with a local and an `if` whose assignments the matcher happened to
+    // recognise came back as those assignments alone — the declaration, the
+    // condition and the braces silently dropped — so the branch never ran and
+    // the quad rendered one colour. A partial match is a wrong program, not a
+    // smaller one.
     //
     // Restricted to `fragment` on purpose: `parse_sky_body_3d` shares this
     // function, but `execute_fragment_3d` evaluates a Program by calling its
@@ -1034,7 +1043,7 @@ fn parse_named_body_3d(source: &str, func: &str) -> Vec<FragmentInstruction3D> {
     // does not have, silently produce nothing, and be harder to diagnose than
     // the matcher's current behaviour. Extending the AST path to the sky stage
     // means carrying the entry-point name in the variant.
-    if instructions.is_empty() && func == "fragment" {
+    if !complete && func == "fragment" {
         if let Ok(program) = gdresource::shader_ast::parse_shader(source) {
             if program.function(func).is_some() {
                 return vec![FragmentInstruction3D::Program(std::sync::Arc::new(program))];
@@ -1045,25 +1054,30 @@ fn parse_named_body_3d(source: &str, func: &str) -> Vec<FragmentInstruction3D> {
     instructions
 }
 
-fn parse_named_body_3d_matched(source: &str, func: &str) -> Vec<FragmentInstruction3D> {
+/// The line matcher's instructions, and whether it understood every statement
+/// (`true` for a body with none). No function at all is `(empty, true)`:
+/// there is nothing a fuller parser could add.
+fn parse_named_body_3d_matched(source: &str, func: &str) -> (Vec<FragmentInstruction3D>, bool) {
     let mut instructions = Vec::new();
 
     let body = match extract_function_body_3d(source, func) {
         Some(b) => b,
-        None => return instructions,
+        None => return (instructions, true),
     };
 
+    let mut complete = true;
     for line in body.lines() {
         let trimmed = line.trim().trim_end_matches(';').trim();
         if trimmed.is_empty() || trimmed.starts_with("//") {
             continue;
         }
-        if let Some(inst) = parse_fragment_statement_3d(trimmed) {
-            instructions.push(inst);
+        match parse_fragment_statement_3d(trimmed) {
+            Some(inst) => instructions.push(inst),
+            None => complete = false,
         }
     }
 
-    instructions
+    (instructions, complete)
 }
 
 /// Extracts the body of a named function from shader source (private copy for
@@ -1275,6 +1289,27 @@ fn parse_color_expr_3d(s: &str) -> ColorExpr3D {
     // Uniform reference (a bare identifier).
     if !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return ColorExpr3D::Uniform(s.to_string());
+    }
+
+    // `color * float` / `float * color` at top level (`tint.rgb * UV.x`).
+    // ⚠️ Without this the product fell through to the passthrough below, so
+    // the shader silently rendered `ALBEDO = ALBEDO` — flat material colour —
+    // and the GPU path could not see the uniform it reads.
+    if let Some((i, '*')) = find_top_level_binop_3d(s) {
+        let (l, r) = (s[..i].trim(), s[i + 1..].trim());
+        let floatish = |t: &str| {
+            t.parse::<f32>().is_ok()
+                || t.starts_with("UV.")
+                || t == "TIME"
+                || ["sin(", "cos(", "fract("].iter().any(|f| t.starts_with(f))
+        };
+        let (color, scalar) = if floatish(l) && !floatish(r) { (r, l) } else { (l, r) };
+        if !floatish(color) && floatish(scalar) {
+            return ColorExpr3D::Scale(
+                Box::new(parse_color_expr_3d(color)),
+                parse_float_expr_3d(scalar),
+            );
+        }
     }
 
     // Unrecognised → treat as an albedo passthrough.
@@ -1578,6 +1613,11 @@ pub fn eval_color_expr_3d(
             let vv = eval_float_expr_3d(v, ctx, uniforms);
             sample_texture(name.as_str(), uu, vv)
         }
+        ColorExpr3D::Scale(c, f) => {
+            let c = eval_color_expr_3d(c, ctx, uniforms, sample_texture);
+            let f = eval_float_expr_3d(f, ctx, uniforms);
+            Color::new(c.r * f, c.g * f, c.b * f, c.a)
+        }
     }
 }
 
@@ -1790,9 +1830,9 @@ fn wgsl_f32(v: f32) -> String {
 }
 
 /// Transpiles a [`FloatExpr3D`] to a WGSL expression string, or `None` when the
-/// expression references a feature the base spatial pipeline does not bind
-/// (custom uniforms or the `TIME` built-in). `UV` maps to the interpolated
-/// `in.uv` fragment input.
+/// expression references a feature the GPU path does not bind. `UV` maps to the
+/// interpolated `in.uv` fragment input; uniforms and `TIME` to the group-3
+/// `custom` block.
 fn float_expr_to_wgsl(expr: &FloatExpr3D) -> Option<String> {
     Some(match expr {
         FloatExpr3D::Literal(v) => wgsl_f32(*v),
@@ -1863,14 +1903,20 @@ fn color_expr_to_wgsl(expr: &ColorExpr3D) -> Option<String> {
             float_expr_to_wgsl(u)?,
             float_expr_to_wgsl(v)?
         ),
+        // RGB only: alpha passes through, as for a GLSL `vec3 * float`.
+        ColorExpr3D::Scale(c, f) => {
+            let c = color_expr_to_wgsl(c)?;
+            format!("vec4<f32>(({c}).rgb * {}, ({c}).a)", float_expr_to_wgsl(f)?)
+        }
     })
 }
 
 /// Transpiles parsed fragment-body instructions into WGSL statements that
 /// mutate a mutable `color: vec4<f32>` variable (which the caller initialises to
-/// the base albedo). Returns `None` if any instruction references a feature not
-/// yet supported on the GPU path (custom uniforms, textures, or `TIME`), so the
-/// caller can fall back to the flat-albedo path rather than emit invalid WGSL.
+/// the base albedo). Custom uniforms and `TIME` read the group-3 `custom` block
+/// (pat-s3rrv.122). Returns `None` if any instruction references a feature not
+/// yet supported on the GPU path (e.g. textures), so the caller can fall back
+/// to the flat-albedo path rather than emit invalid WGSL.
 ///
 /// This is the GPU-side counterpart to [`execute_fragment_3d`] (the CPU
 /// interpreter); both consume the same [`FragmentInstruction3D`] AST so the two
@@ -2780,20 +2826,23 @@ uniform bool enabled = true;
         assert_eq!(stmts[0], "color.a = fract((in.uv.x * 4.0));");
     }
 
+    // pat-s3rrv.122 bound a per-material group-3 uniform block, so a custom
+    // uniform and TIME now transpile to reads of it (they used to bail to the
+    // flat-albedo fallback, which is what these two tests once asserted).
     #[test]
-    fn fragment_body_to_wgsl_statements_bails_on_custom_uniform() {
-        // A body referencing a custom uniform is not bindable in the base
-        // spatial pipeline (no group(3)), so transpilation bails to None.
+    fn fragment_body_to_wgsl_statements_reads_a_custom_uniform_from_the_block() {
         let body = vec![FragmentInstruction3D::SetAlpha(FloatExpr3D::Uniform(
             "alpha".into(),
         ))];
-        assert!(fragment_body_to_wgsl_statements(&body).is_none());
+        let stmts = fragment_body_to_wgsl_statements(&body).expect("uniforms are bound");
+        assert_eq!(stmts, vec![format!("color.a = custom.{}.x;", wgsl_uniform_field("alpha"))]);
     }
 
     #[test]
-    fn fragment_body_to_wgsl_statements_bails_on_time() {
+    fn fragment_body_to_wgsl_statements_reads_time_from_the_block() {
         let body = vec![FragmentInstruction3D::SetAlpha(FloatExpr3D::BuiltinTime)];
-        assert!(fragment_body_to_wgsl_statements(&body).is_none());
+        let stmts = fragment_body_to_wgsl_statements(&body).expect("TIME is bound");
+        assert_eq!(stmts, vec!["color.a = custom.time.x;".to_string()]);
     }
 
     #[test]
@@ -3049,19 +3098,24 @@ uniform bool enabled = true;
     }
 
     #[test]
-    fn parse_unsupported_statement_skipped() {
-        // `NORMAL = ...` and a local `float` declaration are unsupported and
-        // must be skipped, while the ALBEDO assignment is still parsed.
+    fn a_statement_the_matcher_cannot_classify_goes_to_the_ast() {
+        // `NORMAL = ...` and a local `float` are beyond the line matcher. This
+        // used to assert they were silently SKIPPED, keeping only the ALBEDO
+        // line — the partial-program bug pat-s3rrv.36 exists to remove. The
+        // whole body now runs through the GDShader front end.
         let source = "shader_type spatial;\nvoid fragment() {\n    float k = 0.5;\n    NORMAL = vec3(0.0, 0.0, 1.0);\n    ALBEDO = vec3(0.2, 0.2, 0.2);\n}";
         let body = parse_fragment_body_3d(source);
-        assert_eq!(
-            body,
-            vec![FragmentInstruction3D::SetAlbedo(ColorExpr3D::Vec3(
-                FloatExpr3D::Literal(0.2),
-                FloatExpr3D::Literal(0.2),
-                FloatExpr3D::Literal(0.2),
-            ))]
+        assert!(
+            matches!(body.as_slice(), [FragmentInstruction3D::Program(_)]),
+            "{body:?}"
         );
+        let out = execute_fragment_3d(
+            &body,
+            &FragmentContext3D::default(),
+            &HashMap::new(),
+            &|_n, _u, _v| Color::new(1.0, 1.0, 1.0, 1.0),
+        );
+        assert!((out.r - 0.2).abs() < 1e-5 && (out.b - 0.2).abs() < 1e-5, "{out:?}");
     }
 
     #[test]
@@ -3214,5 +3268,36 @@ uniform bool enabled = true;
             "shader_type spatial;\nvoid fragment() {\n    ALBEDO = vec3(1.0, 0.0, 0.0);\n}";
         let compiled = compiler.compile(ShaderType3D::Spatial, source);
         assert_eq!(compiled.fragment_body.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod color_scale_tests {
+    use super::*;
+
+    #[test]
+    fn a_uniform_times_uv_parses_as_a_scale_not_a_passthrough() {
+        let src = "shader_type spatial;\nuniform vec4 tint : source_color;\nvoid fragment() { ALBEDO = tint.rgb * UV.x; }";
+        let body = parse_fragment_body_3d(src);
+        assert_eq!(
+            body,
+            vec![FragmentInstruction3D::SetAlbedo(ColorExpr3D::Scale(
+                Box::new(ColorExpr3D::Uniform("tint".into())),
+                FloatExpr3D::UvComponent(UvAxis3D::X),
+            ))],
+            "the product must not degrade to `ALBEDO = ALBEDO`"
+        );
+    }
+
+    #[test]
+    fn float_first_order_and_alpha_preserved() {
+        // Edge: `0.5 * tint` scales RGB, keeps alpha.
+        let e = parse_color_expr_3d("0.5 * tint");
+        assert_eq!(
+            e,
+            ColorExpr3D::Scale(Box::new(ColorExpr3D::Uniform("tint".into())), FloatExpr3D::Literal(0.5))
+        );
+        let wgsl = color_expr_to_wgsl(&e).unwrap();
+        assert!(wgsl.contains(".rgb * 0.5") && wgsl.contains(".a)"), "{wgsl}");
     }
 }

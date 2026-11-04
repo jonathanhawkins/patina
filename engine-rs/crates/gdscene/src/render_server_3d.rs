@@ -1319,6 +1319,15 @@ impl RenderServer3DAdapter {
                 ShadingMode::Unlit
             },
             double_sided: sprite.double_sided,
+            // ⚠️ The rasterizers cull on `cull_mode` alone; `double_sided` is
+            // never read (the same trap `gdeditor::sprite3d_render` documents).
+            // SpriteBase3D's `double_sided` (default true) is Godot's
+            // CULL_DISABLED for the sprite's material.
+            cull_mode: if sprite.double_sided {
+                CullMode::Disabled
+            } else {
+                CullMode::Back
+            },
             ..Material3D::default()
         }
     }
@@ -2914,6 +2923,14 @@ pub fn standard_material_from_props(props: &HashMap<String, Variant>) -> Standar
         metallic_texture: texture("metallic_texture"),
         roughness: number("roughness", 1.0),
         roughness_texture: texture("roughness_texture"),
+        roughness_texture_channel: match props.get("roughness_texture_channel") {
+            Some(Variant::Int(v)) => gdserver3d::material::TextureChannel::from_godot_int(*v),
+            _ => gdserver3d::material::TextureChannel::Red,
+        },
+        metallic_texture_channel: match props.get("metallic_texture_channel") {
+            Some(Variant::Int(v)) => gdserver3d::material::TextureChannel::from_godot_int(*v),
+            _ => gdserver3d::material::TextureChannel::Red,
+        },
         normal_enabled,
         // Godot ignores the normal map entirely unless `normal_enabled` is set.
         normal_texture: if normal_enabled {
@@ -3272,6 +3289,7 @@ pub fn surface_materials_for_node(
         if let Some(slot) = standard.normal_texture.as_ref() {
             material.normal_texture = textures.get_or_load(&slot.path);
         }
+        load_orm_maps(&standard, &mut material, textures);
         // `index - 1`: companion 1 is `surfaces[0]`. Safe because `index == 0`
         // is filtered above.
         out[index - 1] = Some(material);
@@ -3293,7 +3311,43 @@ pub fn material3d_for_node(
     if let Some(slot) = standard.normal_texture.as_ref() {
         material.normal_texture = textures.get_or_load(&slot.path);
     }
+    load_orm_maps(&standard, &mut material, textures);
     Some(material)
+}
+
+/// Loads a StandardMaterial3D's roughness and metallic maps into the runtime
+/// material, normalised to the renderers' G/B packing from the authored
+/// `*_texture_channel` (Godot default RED).
+///
+/// ⚠️ These slots were parsed but never loaded, so every authored roughness or
+/// metallic map was silently ignored; and the renderers read G/B, which is
+/// glTF/ORM packing — Godot's StandardMaterial3D reads RED.
+fn load_orm_maps(
+    standard: &StandardMaterial3D,
+    material: &mut Material3D,
+    textures: &mut MaterialTextureCache,
+) {
+    // ⚠️ DATA, not colour: Godot samples these as `hint_roughness_*` /
+    // `hint_metallic`, never `source_color`, so a texel of 0.2 IS roughness
+    // 0.2. The shared cache decodes every texture sRGB→linear (right for
+    // albedo), which turned 0.2 into 0.033 — re-encode to the stored value.
+    let raw = |t: &TextureImage| {
+        TextureImage::new(
+            t.width,
+            t.height,
+            t.pixels.iter().map(|c| c.linear_to_srgb()).collect(),
+        )
+    };
+    if let Some(slot) = standard.roughness_texture.as_ref() {
+        material.roughness_texture = textures
+            .get_or_load(&slot.path)
+            .map(|t| Arc::new(standard.roughness_texture_channel.broadcast(&raw(&t))));
+    }
+    if let Some(slot) = standard.metallic_texture.as_ref() {
+        material.metallic_texture = textures
+            .get_or_load(&slot.path)
+            .map(|t| Arc::new(standard.metallic_texture_channel.broadcast(&raw(&t))));
+    }
 }
 
 #[cfg(test)]

@@ -1,0 +1,69 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://scripts/spark.gd" id="1_script"]
+[ext_resource type="Texture2D" path="res://art/spark.png" id="1_spark"]
+
+[sub_resource type="CircleShape2D" id="1_circleshape2d"]
+radius = 8.0
+
+[node name="Spark" type="Area2D"]
+angular_damp = 1.0
+angular_damp_space_override = 0
+audio_bus_name = &"Master"
+audio_bus_override = false
+clip_children = 0
+collision_layer = 2
+collision_mask = 1
+collision_priority = 1.0
+disable_mode = 0
+gravity = 980.0
+gravity_direction = Vector2(0, 1)
+gravity_point = false
+gravity_point_center = Vector2(0, 1)
+gravity_point_unit_distance = 0.0
+gravity_space_override = 0
+input_pickable = true
+light_mask = 1
+linear_damp = 0.1
+linear_damp_space_override = 0
+material = null
+modulate = Color(1, 1, 1, 1)
+monitorable = false
+monitoring = true
+position = Vector2(0, 0)
+priority = 0
+rotation = 0.0
+scale = Vector2(1, 1)
+script = ExtResource("1_script")
+self_modulate = Color(1, 1, 1, 1)
+show_behind_parent = false
+skew = 0.0
+texture_filter = 0
+texture_repeat = 0
+top_level = false
+use_parent_material = false
+visibility_layer = 1
+visible = true
+y_sort_enabled = false
+z_as_relative = true
+z_index = 0
+
+[node name="Shape" type="CollisionShape2D" parent="."]
+shape = SubResource("1_circleshape2d")
+
+[node name="Sprite" type="Sprite2D" parent="."]
+texture = ExtResource("1_spark")
+
+[node name="Burst" type="CPUParticles2D" parent="."]
+amount = 16
+color = Color(1, 0.8, 0.3, 1)
+emitting = false
+explosiveness = 1.0
+gravity = Vector2(0, 0)
+initial_velocity_max = 90.0
+initial_velocity_min = 40.0
+lifetime = 0.5
+one_shot = true
+scale_amount_max = 3.0
+scale_amount_min = 2.0
+spread = 180.0

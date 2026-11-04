@@ -39,7 +39,9 @@ fn own_count(class: &str) -> usize {
 
 #[test]
 fn scroll_container_carries_its_eleven_members() {
-    assert_eq!(own_count("ScrollContainer"), 11);
+    // Counted like RichTextLabel/CodeEdit (richtextlabel_and_codeedit_carry_godot_properties.rs): Patina expresses an `overrides=` member by re-declaring it, so it is in the OWN list, and the count is the doc XML's `<member>` total.
+    // doc/classes/ScrollContainer.xml: 12 members, 1 override (`clip_contents`).
+    assert_eq!(own_count("ScrollContainer"), 12);
 
     // ⚠️ The scroll MODES default to 1 (AUTO), not 0 (DISABLED). A zero here
     // would silently disable scrolling on every container in the project — the
@@ -87,16 +89,11 @@ fn split_container_carries_its_eleven_members() {
 /// previously zero.
 #[test]
 fn base_material_3d_carries_its_stated_members() {
-    // ⚠️ 121, not 131. Ten members state NO default in doc/classes/BaseMaterial3D.xml
-    // (alpha_scissor_threshold, emission_intensity, particles_anim_h_frames …).
-    // Inventing 0.0 for those is exactly the enum-zero trap above, so they are
-    // deliberately left unregistered rather than guessed.
-    assert_eq!(
-        own_count("BaseMaterial3D"),
-        121,
-        "121 of Godot's 131 members state a default; the other ten are omitted \
-         rather than invented"
-    );
+    // All 131 `<member>`s of doc/classes/BaseMaterial3D.xml are registered.
+    // (This said 121, omitting ten that state no XML default; a later bead
+    // completed them from the C++ initialisers, which is where an XML-less
+    // default comes from — not an invented 0.)
+    assert_eq!(own_count("BaseMaterial3D"), 131);
 
     assert_eq!(
         own("BaseMaterial3D", "albedo_color"),

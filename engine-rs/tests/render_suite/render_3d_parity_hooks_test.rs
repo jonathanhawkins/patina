@@ -442,7 +442,11 @@ fn plane_mesh_renders_visible_wireframe() {
         id,
         Transform3D {
             basis: Basis::IDENTITY,
-            origin: Vector3::new(0.0, 0.0, -5.0),
+            // ⚠️ A PlaneMesh lies in XZ. At y = 0 it sat EXACTLY at eye
+            // height, edge-on to a camera looking down -Z: zero screen area,
+            // which renders nothing in Godot too. Drop it 1 unit so the camera
+            // sees its top face.
+            origin: Vector3::new(0.0, -1.0, -5.0),
         },
     );
 

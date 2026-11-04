@@ -15,7 +15,8 @@
 //! completion report.
 
 use gdobject::class_db::{
-    class_exists, get_class_info, instantiate, is_abstract, is_parent_class, register_3d_classes,
+    class_exists, get_class_info, get_property_list, instantiate, is_abstract, is_parent_class,
+    register_3d_classes,
 };
 // `get_property` is a `GodotObject` trait method, not inherent on
 // `GenericObject`.
@@ -180,8 +181,18 @@ fn main_loop_declares_its_virtual_hooks() {
 fn remaining_class_defaults_are_type_correct() {
     register_3d_classes();
 
-    let timer = instantiate("SceneTreeTimer").expect("instantiates");
-    assert_eq!(timer.get_property("time_left"), Variant::Float(0.0));
+    // SceneTreeTimer is GDREGISTER_ABSTRACT_CLASS upstream ("sorry, you can't
+    // create it", scene/register_scene_types.cpp:1191) — it comes from
+    // `SceneTree.create_timer`. Its typed default is checked on the metadata.
+    assert!(instantiate("SceneTreeTimer").is_none());
+    assert_eq!(
+        get_property_list("SceneTreeTimer")
+            .into_iter()
+            .find(|p| p.name == "time_left")
+            .expect("time_left")
+            .default_value,
+        Variant::Float(0.0)
+    );
 
     let missing = instantiate("MissingNode").expect("instantiates");
     assert_eq!(

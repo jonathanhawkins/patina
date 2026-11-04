@@ -356,7 +356,7 @@ fn test_v1_uid_registry() {
     assert_eq!(registry.len(), 1);
 
     // 5. Parse a .tres with a uid= header — the Resource must carry the UID.
-    let source = r#"[gd_resource type="Resource" format=3 uid="uid://test_uid_registry"]
+    let source = r#"[gd_resource type="Resource" format=3 uid="uid://testuidregistry"]
 
 [resource]
 name = "UidGateTest"
@@ -479,7 +479,7 @@ fn test_v1_external_ref_resolution() {
 /// equivalent output that re-loads identically (including UID).
 #[test]
 fn test_v1_resource_roundtrip_equivalence() {
-    let source = r#"[gd_resource type="Resource" format=3 uid="uid://roundtrip_test"]
+    let source = r#"[gd_resource type="Resource" format=3 uid="uid://roundtriptest"]
 
 [sub_resource type="StyleBoxFlat" id="StyleBoxFlat_001"]
 bg_color = Color(0.2, 0.3, 0.4, 1)
@@ -2709,8 +2709,10 @@ fn test_v1_overall_parity_gate() {
     let output = std::process::Command::new("cargo")
         .arg("test")
         .arg("--test")
-        .arg("oracle_regression_test")
-        .arg("golden_all_scenes_property_parity_report")
+        // The oracle tests were consolidated into the `oracle_suite` binary;
+        // `oracle_regression_test` is now a module inside it.
+        .arg("oracle_suite")
+        .arg("oracle_regression_test::golden_all_scenes_property_parity_report")
         .arg("--")
         .arg("--nocapture")
         .current_dir(env!("CARGO_MANIFEST_DIR"))

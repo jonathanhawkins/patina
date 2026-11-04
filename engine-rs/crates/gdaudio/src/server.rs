@@ -248,6 +248,12 @@ impl AudioServer {
         self.output_channels
     }
 
+    /// Sets the interleaved channel count `mix` produces. Clamped to 1..=8, the
+    /// layouts Godot's `AudioServer` speaker modes cover.
+    pub fn set_output_channels(&mut self, channels: u16) {
+        self.output_channels = channels.clamp(1, 8);
+    }
+
     /// Starts playback of a decoded audio buffer. Returns a handle.
     pub fn play(&mut self, buffer: AudioBuffer) -> PlaybackId {
         let id = PlaybackId(self.next_id);
@@ -405,6 +411,44 @@ impl AudioServer {
     ///
     /// When any bus is soloed, only soloed (non-master) buses remain audible;
     /// `Master` itself is gated only by its own mute since it is the output sink.
+    /// Which buses are audible under solo: every soloed bus plus every bus on
+    /// its send chain. A send that names a missing bus, or one at an index not
+    /// above the source (Godot's "invalid, send to master"), continues at
+    /// Master. Index 0 is Master.
+    fn solo_chain_mask(&self, bus_count: usize) -> Vec<bool> {
+        let mut soloed = vec![false; bus_count];
+        for start in 1..bus_count {
+            if !self
+                .mixer
+                .get_bus(start)
+                .map(|b| b.is_solo())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let mut i = start;
+            soloed[i] = true;
+            while i != 0 {
+                let send = self
+                    .mixer
+                    .get_bus(i)
+                    .map(|b| b.send().to_string())
+                    .unwrap_or_default();
+                let name = if send.is_empty() {
+                    "Master"
+                } else {
+                    send.as_str()
+                };
+                i = match self.mixer.get_bus_by_name(name) {
+                    Some(t) if t < i => t,
+                    _ => 0,
+                };
+                soloed[i] = true;
+            }
+        }
+        soloed
+    }
+
     pub fn mix(&mut self, frame_count: usize) -> Vec<f32> {
         let out_ch = self.output_channels as usize;
         let num_samples = frame_count * out_ch;
@@ -444,7 +488,10 @@ impl AudioServer {
             let stream_linear =
                 AudioBus::db_to_linear(stream.playback.volume_db()) * stream.playback.linear_gain();
 
-            let pos_secs = stream.playback.get_playback_position();
+            // 🔑 f64 end to end (see `PlaybackStream::position_secs`): an f32
+            // cursor minutes into a track resolves only whole samples, which
+            // threw away the interpolation fraction and made long music crackle.
+            let pos_secs = stream.playback.playback_position_f64();
             let src_channels = stream.buffer.channels as usize;
             let src_rate = stream.buffer.sample_rate;
 
@@ -464,8 +511,8 @@ impl AudioServer {
             // shifts every stream's pitch AND tempo together — the same knob
             // Godot uses to fast-forward a whole game's audio.
             let pitch = stream.playback.pitch_scale().max(0.0) * speed;
-            let step = (src_rate as f32 / rate as f32) * pitch;
-            let src_pos_start = pos_secs * src_rate as f32;
+            let step = (f64::from(src_rate) / f64::from(rate)) * f64::from(pitch);
+            let src_pos_start = pos_secs * f64::from(src_rate);
             let frame_total = stream.buffer.frame_count();
             // Equal-power stereo pan gains (default 1.0/1.0 = center) supplied by
             // positional players (AudioStreamPlayer2D/3D) via `set_pan`.
@@ -543,14 +590,14 @@ impl AudioServer {
             // block boundary rather than exactly on the sample. At typical block
             // sizes that is well under a millisecond; fixing it means splitting
             // the block at the reflection point.
-            let direction = stream.playback.read_direction();
+            let direction = f64::from(stream.playback.read_direction());
             let looping = stream.playback.loop_mode() != LoopMode::None;
             let (win_begin_secs, win_end_secs) = stream.playback.loop_window();
-            let win0 = (win_begin_secs * src_rate as f32).max(0.0);
-            let win1 = (win_end_secs * src_rate as f32).min(frame_total as f32);
+            let win0 = (f64::from(win_begin_secs) * f64::from(src_rate)).max(0.0);
+            let win1 = (f64::from(win_end_secs) * f64::from(src_rate)).min(frame_total as f64);
 
             for frame in 0..frame_count {
-                let mut src_pos = src_pos_start + frame as f32 * step * direction;
+                let mut src_pos = src_pos_start + frame as f64 * step * direction;
                 if looping && win1 > win0 {
                     let span = win1 - win0;
                     // Only wrap once the cursor LEAVES the region. Wrapping
@@ -580,16 +627,45 @@ impl AudioServer {
                 if i0 >= frame_total {
                     break;
                 }
-                // Interpolate toward the next source frame (clamped at the end).
-                let i1 = (i0 + 1).min(frame_total - 1);
-                let frac = src_pos - i0 as f32;
+                // 🔑 Godot's resampler (`AudioStreamPlaybackResampled::mix`,
+                // `servers/audio/audio_stream.cpp:207-213`): 4-point cubic
+                // Hermite over frames i0-1..i0+2, not a 2-point lerp. Linear
+                // interpolation of a 44.1 kHz stream onto a 48 kHz device
+                // leaves audible high-frequency grit on music.
+                //
+                // ⚠️ The neighbours WRAP through the loop window. Godot fills its
+                // internal buffer continuously across a loop point, so the frames
+                // after the last one are the loop's FIRST frames; clamping them
+                // to the buffer end (as this did) put a seam tick in every loop.
+                let wrap_window = looping && win1 > win0;
+                let (w0, w1) = (win0 as usize, (win1 as usize).max(1));
+                let neighbour = |k: isize| -> usize {
+                    if wrap_window {
+                        let span = (w1 - w0.min(w1 - 1)) as isize;
+                        if k >= w1 as isize {
+                            return w0 + ((k - w1 as isize) % span) as usize;
+                        }
+                        if k < w0 as isize && i0 >= w0 {
+                            return w1 - 1 - (((w0 as isize - 1 - k) % span) as usize);
+                        }
+                    }
+                    k.clamp(0, frame_total as isize - 1) as usize
+                };
+                let i0s = i0 as isize;
+                let (im1, i1, i2) = (neighbour(i0s - 1), neighbour(i0s + 1), neighbour(i0s + 2));
+                let mu = (src_pos - i0 as f64) as f32;
+                let mu2 = mu * mu;
+                let h11 = mu2 * (mu - 1.0);
+                let z = mu2 - h11;
+                let h01 = z - h11;
+                let h10 = mu - z;
                 let dst_offset = frame * out_ch;
 
                 for ch in 0..out_ch {
                     let src_ch = if ch < src_channels { ch } else { 0 };
-                    let s0 = stream.buffer.samples[i0 * src_channels + src_ch];
-                    let s1 = stream.buffer.samples[i1 * src_channels + src_ch];
-                    let sample = s0 + (s1 - s0) * frac;
+                    let at = |k: usize| stream.buffer.samples[k * src_channels + src_ch];
+                    let (y0, y1, y2, y3) = (at(im1), at(i0), at(i1), at(i2));
+                    let sample = y1 + (y2 - y1) * h01 + ((y2 - y0) * h10 + (y3 - y1) * h11) * 0.5;
                     // The shelf runs on the SOURCE signal, before gain and pan
                     // — Godot filters the voice, not the panned result, so a
                     // hard-panned source is muffled by the same amount as a
@@ -612,12 +688,18 @@ impl AudioServer {
             // Advance source-stream time by the pitched amount so the reported
             // playback position, looping, and end-of-stream detection stay
             // consistent with the pitched read cursor.
-            stream.playback.advance(dt * pitch);
+            stream
+                .playback
+                .advance_f64(frame_count as f64 / f64::from(rate) * f64::from(pitch));
         }
 
-        // Any soloed non-master bus makes all other non-master buses inaudible.
-        let any_solo =
-            (1..bus_count).any(|i| self.mixer.get_bus(i).map(|b| b.is_solo()).unwrap_or(false));
+        // Solo chains, as Godot's `_mix_step` builds them
+        // (`audio_server.cpp:350-372`): a soloed bus marks EVERY bus along its
+        // send chain as soloed too, down to Master. Gating only the soloed bus
+        // itself silenced a soloed `A -> B -> Master` path at the non-soloed B,
+        // so soloing anything not wired straight into Master muted the mix.
+        let soloed = self.solo_chain_mask(bus_count);
+        let any_solo = soloed.iter().skip(1).any(|&s| s);
 
         // 2 + 3. Process non-master buses from highest index down, routing each
         // into its send target so the target is processed with the send applied.
@@ -671,12 +753,10 @@ impl AudioServer {
             }
 
             // Mute / solo audibility gate.
-            let (mute, solo) = self
-                .mixer
-                .get_bus(i)
-                .map(|b| (b.is_mute(), b.is_solo()))
-                .unwrap_or((false, false));
-            let audible = !mute && (!any_solo || solo);
+            // In solo mode Godot ignores `mute` and gates on the chain mark
+            // alone; otherwise only `mute` applies.
+            let mute = self.mixer.get_bus(i).map(|b| b.is_mute()).unwrap_or(false);
+            let audible = if any_solo { soloed[i] } else { !mute };
 
             // Resolve the send target (empty send => Master) and level.
             let (target_idx, send_lin) = {
@@ -795,7 +875,11 @@ impl AudioServer {
     /// than `name`, because seven Godot filter classes share one Rust type and
     /// `name()` cannot tell them apart.
     pub fn bus_effect_class(&self, bus_idx: usize, effect_idx: usize) -> Option<&str> {
-        let effect = self.mixer.get_bus(bus_idx)?.effects().effect_at(effect_idx)?;
+        let effect = self
+            .mixer
+            .get_bus(bus_idx)?
+            .effects()
+            .effect_at(effect_idx)?;
         // Fully qualified: this module does not import `AudioEffect`, and the
         // only other reference to it here spells out the path too.
         Some(crate::effects::AudioEffect::godot_class(effect))
@@ -815,7 +899,10 @@ impl AudioServer {
         bus_idx: usize,
         effect_idx: usize,
     ) -> Option<&crate::effects::AudioEffectCapture> {
-        self.mixer.get_bus(bus_idx)?.effects().capture_at(effect_idx)
+        self.mixer
+            .get_bus(bus_idx)?
+            .effects()
+            .capture_at(effect_idx)
     }
 
     /// Mutable twin of [`bus_capture`](Self::bus_capture) — draining a capture
@@ -1040,9 +1127,14 @@ bus/2/send = "Master"
         server.play(make_ramp_buffer(64, 22050));
 
         let out = server.mix(8); // stereo interleaved
+        // The resampler is Godot's 4-point cubic Hermite, which reproduces a
+        // straight line exactly — except at the very start, where the frame
+        // before frame 0 is silence (Godot seeds `CUBIC_INTERP_HISTORY` zeros,
+        // servers/audio/audio_stream.cpp), so frame 1 (cursor 0.5) bends to
+        // Hermite(0, 0, 1, 2; 0.5) = 0.4375 rather than the lerp's 0.5.
         for frame in 0..8 {
             let got = out[frame * 2];
-            let expected = 0.5 * frame as f32;
+            let expected = if frame == 1 { 0.4375 } else { 0.5 * frame as f32 };
             assert!(
                 (got - expected).abs() < 1e-4,
                 "frame {frame}: got {got}, want {expected}"
@@ -1474,12 +1566,39 @@ bus/2/send = "Master"
             a.set_send("B");
             a.set_solo(true);
         }
-        // A stream is soloed; a Master-direct stream must be silenced by the solo.
+        // Godot's solo CHAIN marks B soloed too (`audio_server.cpp:350-372`),
+        // so B passes A's send AND its own voice; a third bus C that is off
+        // the chain is silenced.
+        server.mixer_mut().add_bus("C");
         server.play_on_bus(make_dc_buffer(0.5, 44100), "A");
-        server.play_on_bus(make_dc_buffer(0.9, 44100), "B"); // B not soloed -> muted at B
+        server.play_on_bus(make_dc_buffer(0.25, 44100), "B");
+        server.play_on_bus(make_dc_buffer(0.125, 44100), "C"); // off-chain -> silent
 
         let output = server.mix(1);
-        // Only the soloed A path (0.5) reaches Master through B.
+        // A (0.5) through B, plus B's own 0.25; C's 0.125 must not reach Master.
+        assert!((output[0] - 0.75).abs() < 1e-4, "got {}", output[0]);
+    }
+
+    #[test]
+    fn solo_mode_ignores_mute_on_the_solo_chain() {
+        // Godot: in solo mode a bus's volume is zeroed only when it is NOT on a
+        // solo chain; `mute` is not consulted at all.
+        let mut server = AudioServer::new();
+        server.mixer_mut().add_bus("B");
+        let a_idx = server.mixer_mut().add_bus("A");
+        {
+            let a = server.mixer_mut().get_bus_mut(a_idx).unwrap();
+            a.set_send("B");
+            a.set_solo(true);
+        }
+        let b_idx = server.mixer_mut().get_bus_by_name("B").unwrap();
+        server
+            .mixer_mut()
+            .get_bus_mut(b_idx)
+            .unwrap()
+            .set_mute(true);
+        server.play_on_bus(make_dc_buffer(0.5, 44100), "A");
+        let output = server.mix(1);
         assert!((output[0] - 0.5).abs() < 1e-4, "got {}", output[0]);
     }
 

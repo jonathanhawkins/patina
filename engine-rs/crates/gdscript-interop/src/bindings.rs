@@ -159,6 +159,25 @@ pub trait ScriptInstance {
         Vec::new()
     }
 
+    /// [`Self::drain_print_output`] with each line's print stamp
+    /// (`interpreter::next_print_stamp`), so a host draining several scripts
+    /// can restore the order the lines were printed in. Defaults to stamp 0,
+    /// which keeps an unstamped instance's lines in drain order.
+    fn drain_print_output_stamped(&mut self) -> Vec<(u64, String)> {
+        self.drain_print_output()
+            .into_iter()
+            .map(|line| (0, line))
+            .collect()
+    }
+
+    /// The runtime error channel (`push_error`, `push_warning`, `printerr`),
+    /// drained — the error-stream twin of [`Self::drain_print_output`], for the
+    /// same reason: the buffer lives on the interpreter, which a host holding
+    /// `&mut dyn ScriptInstance` cannot otherwise reach. Defaults to empty.
+    fn drain_error_output(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Returns metadata for all properties exposed by this script.
     fn list_properties(&self) -> Vec<ScriptPropertyInfo>;
 
@@ -199,6 +218,15 @@ pub trait ScriptInstance {
 
     /// Returns the human-readable name of this script.
     fn get_script_name(&self) -> &str;
+
+    /// The `class_name`s this script IS, nearest first: its own (if it
+    /// declares one), then each base script's, then a base named by class
+    /// (`extends Enemy`). What `obj is Player` / `obj as Player` consult for a
+    /// script class, the way Godot's `is` walks the script's inheritance.
+    /// Defaults to none.
+    fn script_class_names(&self) -> Vec<String> {
+        Vec::new()
+    }
 
     /// The path of the `.gd` file this instance was built from, when the host
     /// loaded it from one (pat-fk17e.1).
@@ -790,6 +818,12 @@ pub trait SceneAccess {
     }
 
     /// Return the class name of a node.
+    /// The `class_name` chain of `node`'s attached script (see
+    /// `ScriptInstance::script_class_names`); empty when it has none.
+    fn script_class_chain(&self, _node: u64) -> Vec<String> {
+        Vec::new()
+    }
+
     fn get_class(&self, _node: u64) -> Option<String> {
         None
     }

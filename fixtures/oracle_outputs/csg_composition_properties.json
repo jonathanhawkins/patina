@@ -1,0 +1,303 @@
+{
+	"children": [
+		{
+			"children": [
+				{
+					"children": [
+						{
+							"children": [],
+							"class": "CSGBox3D",
+							"name": "Box",
+							"path": "/root/CSGWorld/Combiner/Box",
+							"properties": {
+								"size": {
+									"class_type": "",
+									"hint": 0,
+									"type": "Vector3",
+									"value": {
+										"x": 2.0,
+										"y": 2.0,
+										"z": 2.0
+									}
+								}
+							}
+						},
+						{
+							"children": [],
+							"class": "CSGSphere3D",
+							"name": "Sphere",
+							"path": "/root/CSGWorld/Combiner/Sphere",
+							"properties": {
+								"radius": {
+									"class_type": "",
+									"hint": 1,
+									"type": "float",
+									"value": 1.5
+								},
+								"transform": {
+									"class_type": "",
+									"hint": 0,
+									"type": "Transform3D",
+									"value": {
+										"basis": {
+											"x": {
+												"x": 1.0,
+												"y": 0.0,
+												"z": 0.0
+											},
+											"y": {
+												"x": 0.0,
+												"y": 1.0,
+												"z": 0.0
+											},
+											"z": {
+												"x": 0.0,
+												"y": 0.0,
+												"z": 1.0
+											}
+										},
+										"origin": {
+											"x": 1.0,
+											"y": 0.0,
+											"z": 0.0
+										}
+									}
+								}
+							}
+						},
+						{
+							"children": [],
+							"class": "CSGCylinder3D",
+							"name": "Cylinder",
+							"path": "/root/CSGWorld/Combiner/Cylinder",
+							"properties": {
+								"height": {
+									"class_type": "",
+									"hint": 1,
+									"type": "float",
+									"value": 3.0
+								},
+								"transform": {
+									"class_type": "",
+									"hint": 0,
+									"type": "Transform3D",
+									"value": {
+										"basis": {
+											"x": {
+												"x": 1.0,
+												"y": 0.0,
+												"z": 0.0
+											},
+											"y": {
+												"x": 0.0,
+												"y": 1.0,
+												"z": 0.0
+											},
+											"z": {
+												"x": 0.0,
+												"y": 0.0,
+												"z": 1.0
+											}
+										},
+										"origin": {
+											"x": 0.0,
+											"y": 2.0,
+											"z": 0.0
+										}
+									}
+								}
+							}
+						}
+					],
+					"class": "CSGCombiner3D",
+					"name": "Combiner",
+					"path": "/root/CSGWorld/Combiner",
+					"properties": {
+
+					}
+				},
+				{
+					"children": [],
+					"class": "CSGBox3D",
+					"name": "Standalone",
+					"path": "/root/CSGWorld/Standalone",
+					"properties": {
+						"transform": {
+							"class_type": "",
+							"hint": 0,
+							"type": "Transform3D",
+							"value": {
+								"basis": {
+									"x": {
+										"x": 1.0,
+										"y": 0.0,
+										"z": 0.0
+									},
+									"y": {
+										"x": 0.0,
+										"y": 1.0,
+										"z": 0.0
+									},
+									"z": {
+										"x": 0.0,
+										"y": 0.0,
+										"z": 1.0
+									}
+								},
+								"origin": {
+									"x": 5.0,
+									"y": 0.0,
+									"z": 0.0
+								}
+							}
+						}
+					}
+				},
+				{
+					"children": [],
+					"class": "ReflectionProbe",
+					"name": "Probe",
+					"path": "/root/CSGWorld/Probe",
+					"properties": {
+						"transform": {
+							"class_type": "",
+							"hint": 0,
+							"type": "Transform3D",
+							"value": {
+								"basis": {
+									"x": {
+										"x": 1.0,
+										"y": 0.0,
+										"z": 0.0
+									},
+									"y": {
+										"x": 0.0,
+										"y": 1.0,
+										"z": 0.0
+									},
+									"z": {
+										"x": 0.0,
+										"y": 0.0,
+										"z": 1.0
+									}
+								},
+								"origin": {
+									"x": 0.0,
+									"y": 3.0,
+									"z": 0.0
+								}
+							}
+						}
+					}
+				}
+			],
+			"class": "Node3D",
+			"name": "CSGWorld",
+			"path": "/root/CSGWorld",
+			"properties": {
+
+			}
+		}
+	],
+	"class": "Window",
+	"name": "root",
+	"path": "/root",
+	"properties": {
+		"audio_listener_enable_2d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"audio_listener_enable_3d": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"auto_translate_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_aspect": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"content_scale_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 1152,
+				"y": 648
+			}
+		},
+		"gui_embed_subwindows": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"min_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"physics_object_picking": {
+			"class_type": "",
+			"hint": 0,
+			"type": "bool",
+			"value": true
+		},
+		"positional_shadow_atlas_size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "int",
+			"value": 4096
+		},
+		"process_mode": {
+			"class_type": "",
+			"hint": 2,
+			"type": "int",
+			"value": 1
+		},
+		"size": {
+			"class_type": "",
+			"hint": 0,
+			"type": "Vector2i",
+			"value": {
+				"x": 64,
+				"y": 64
+			}
+		},
+		"title": {
+			"class_type": "",
+			"hint": 0,
+			"type": "String",
+			"value": "Patina Fixtures"
+		},
+		"world_3d": {
+			"class_type": "World3D",
+			"hint": 17,
+			"type": "Object",
+			"value": {
+				"_resource_class": "World3D",
+				"_resource_path": ""
+			}
+		}
+	}
+}

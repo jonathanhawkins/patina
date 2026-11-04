@@ -609,9 +609,16 @@ pub fn current_camera2d(tree: &SceneTree) -> Option<NodeId> {
         if node.class_name() != "Camera2D" {
             continue;
         }
+        // Godot 4's `Camera2D.enabled` defaults to TRUE (doc/classes/Camera2D.xml)
+        // and a `.tscn` only writes it when false. Reading an ABSENT key as
+        // "not enabled" — as this did, falling through to Godot 3's `current` —
+        // ignored every camera on a node the loader had not ClassDB-seeded:
+        // Pong's Camera2D (offset 320,200) never applied, so the expanded
+        // viewport showed the playfield flush at the top instead of centred.
+        // A Godot 3 `current = true` still claims it.
         let claims = match node.get_property("enabled") {
             Variant::Bool(b) => b,
-            _ => matches!(node.get_property("current"), Variant::Bool(true)),
+            _ => !matches!(node.get_property("current"), Variant::Bool(false)),
         };
         if claims {
             found = Some(id);

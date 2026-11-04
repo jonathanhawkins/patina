@@ -43,7 +43,9 @@ fn runner_outputs_valid_json() {
     // Verify tree root structure.
     let tree = &parsed["tree"];
     assert_eq!(tree["name"].as_str(), Some("root"));
-    assert_eq!(tree["class"].as_str(), Some("Node"));
+    // Godot's `SceneTree.root` is a `Window` (`scene/main/scene_tree.cpp`,
+    // `root = memnew(Window)`), not a plain Node.
+    assert_eq!(tree["class"].as_str(), Some("Window"));
     assert_eq!(tree["path"].as_str(), Some("/root"));
 
     // The instanced scene root should be a child of the tree root.

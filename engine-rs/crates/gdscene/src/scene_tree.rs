@@ -134,6 +134,25 @@ fn call_running_script_method(node_id: NodeId, method: &str, args: &[Variant]) -
 fn running_script_has_method(node_id: NodeId, method: &str) -> bool {
     with_active_script(node_id, |script| script.has_method(method)).unwrap_or(false)
 }
+
+/// The class-name chain of `node_id`'s **currently executing** script, or
+/// `None` when it is not running (it is then in `SceneTree::scripts`).
+pub(crate) fn running_script_class_names(node_id: NodeId) -> Option<Vec<String>> {
+    with_active_script(node_id, |script| script.script_class_names())
+}
+
+/// Whether `node_id`'s **currently executing** script declares `signal`.
+///
+/// A script is out of `SceneTree::scripts` for as long as one of its own
+/// methods runs, so a lookup through `get_script` cannot see the signals it
+/// declares from inside its own `_ready` — exactly where `my_signal.connect(..)`
+/// is written.
+pub(crate) fn running_script_declares_signal(node_id: NodeId, signal: &str) -> bool {
+    with_active_script(node_id, |script| {
+        script.list_signals().iter().any(|s| s == signal)
+    })
+    .unwrap_or(false)
+}
 use crate::tween::{Tween, TweenId, TweenProcessMode};
 
 /// Stable FNV-1a hash of a node path, used as the RPC `node_path` key on the
@@ -160,6 +179,10 @@ pub struct DeferredCall {
     pub method: String,
     /// Arguments passed to the method.
     pub args: Vec<Variant>,
+    /// A CONNECT_DEFERRED connection's Rust callback, run instead of
+    /// `method` when present. Kept in the SAME queue as method calls so
+    /// deferred deliveries keep Godot's single-MessageQueue FIFO order.
+    pub callback: Option<gdobject::signal::DeferredCall>,
 }
 
 /// Reads a `.tscn` path-ish property as a plain string (pat-s3rrv.17).
@@ -536,9 +559,27 @@ const USER_SIGNALS_KEY: &str = "__object_user_signals__";
 const CAN_TRANSLATE_KEY: &str = "__object_can_translate__";
 const TRANSLATION_DOMAIN_KEY: &str = "__object_translation_domain__";
 
+/// How many failed script calls [`SceneTree::drain_script_errors`] can hold
+/// between drains before the oldest are dropped.
+pub const SCRIPT_ERROR_LOG_CAP: usize = 1000;
+
+/// One drain of a running game's script output — see
+/// [`SceneTree::drain_script_output`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScriptOutput {
+    /// `print`/`prints`/`printt`/`print_rich` lines.
+    pub prints: Vec<String>,
+    /// `push_error`/`push_warning`/`printerr` lines, then failed script calls.
+    pub errors: Vec<String>,
+}
+
 pub struct SceneTree {
     /// Arena storage: every node in the tree lives here.
-    nodes: HashMap<NodeId, Node>,
+    /// FxHash, not std's SipHash: `get_node` is the single hottest lookup
+    /// in the engine (every transform, render and script access goes through
+    /// it), and NodeIds are engine-issued, not attacker-chosen. Iteration
+    /// order was already unspecified (std seeds randomly per map).
+    nodes: rustc_hash::FxHashMap<NodeId, Node>,
     /// The ID of the root node (always valid).
     root_id: NodeId,
     /// Seconds elapsed in the running loop, published for shader `TIME`
@@ -640,6 +681,21 @@ pub struct SceneTree {
     /// Snapshot of input state for the current frame, used by scripts
     /// that call `Input.is_action_pressed()` etc.
     input_snapshot: Option<crate::scripting::InputSnapshot>,
+    /// Script calls that failed at runtime, oldest first, as
+    /// `"<node path>: <method>(): <error>"`. Godot prints each one to the
+    /// debugger's Errors tab; before this buffer the failure went to
+    /// `tracing::debug!` only, so a `_process` that threw simply did nothing
+    /// and neither the editor nor an agent could see why. Drained by
+    /// [`Self::drain_script_errors`]; capped at [`SCRIPT_ERROR_LOG_CAP`].
+    script_errors: std::collections::VecDeque<String>,
+    /// Output buffered by scripts that were freed before it was drained — a
+    /// script that prints and then frees its node (`queue_free`, a scene
+    /// change) would otherwise take the line with it. Returned by the next
+    /// [`Self::drain_script_output`].
+    retired_output: ScriptOutput,
+    /// Prints of retired scripts, with their print stamps, awaiting the merge
+    /// in [`drain_script_output`](Self::drain_script_output).
+    retired_prints: Vec<(u64, String)>,
     /// Address of the [`crate::physics_server::PhysicsServer`] driving this
     /// frame, or 0 when no server is bound — the route that lets a script reach
     /// the `PhysicsServer2D` singleton (pat-0q2kx.200).
@@ -869,7 +925,7 @@ impl SceneTree {
         // The root node is always inside the tree.
         root.set_inside_tree(true);
         weak_ref::register_object(root_id.object_id());
-        let mut nodes = HashMap::new();
+        let mut nodes = rustc_hash::FxHashMap::default();
         nodes.insert(root_id, root);
         Self {
             shader_time: 0.0,
@@ -895,6 +951,9 @@ impl SceneTree {
             tweens: HashMap::new(),
             scripts: HashMap::new(),
             input_snapshot: None,
+            script_errors: std::collections::VecDeque::new(),
+            retired_output: ScriptOutput::default(),
+            retired_prints: Vec::new(),
             script_physics: 0,
             script_physics_delta: 0.0,
             script_process_delta: 0.0,
@@ -1570,13 +1629,27 @@ impl SceneTree {
         // Spawners whose own node has left the tree, kept so their registry
         // entries can be pruned once the sends below are done.
         let mut freed_spawners: Vec<NodeId> = Vec::new();
+        // Non-authority entries to drop WITHOUT sending a despawn.
+        let mut prune_only: Vec<(NodeId, NodeId)> = Vec::new();
         for (spawner_id, announced) in &self.replication.announced {
             let Some(spawner) = self.replication.spawners.get(spawner_id) else {
                 continue;
             };
             // Same rule as the spawn diff: a non-authority peer must not retract
-            // a node it never announced.
+            // a node it never announced. It still PRUNES what has gone, though:
+            // removal leaves `announced` to this pass (`forget_replication_entries`),
+            // so skipping outright would leak a freed spawner — or a locally
+            // freed child — into the registry forever.
             if !self.is_multiplayer_authority(*spawner_id) {
+                match self.get_node(*spawner_id) {
+                    None => freed_spawners.push(*spawner_id),
+                    Some(_) => prune_only.extend(
+                        announced
+                            .iter()
+                            .filter(|c| self.get_node(**c).is_none())
+                            .map(|c| (*spawner_id, *c)),
+                    ),
+                }
                 continue;
             }
             // ⚠️ Godot despawns a spawner's replicated nodes when the SPAWNER
@@ -1626,6 +1699,12 @@ impl SceneTree {
         // ⚠️ `freed_spawners` is checked too: a spawner can leave the tree
         // having announced nothing, and returning early there would leak its
         // registry entry forever.
+        for (spawner_id, child) in prune_only {
+            self.replication.spawn_net_ids.remove(&child);
+            if let Some(seen) = self.replication.announced.get_mut(&spawner_id) {
+                seen.remove(&child);
+            }
+        }
         if gone.is_empty() && freed_spawners.is_empty() {
             return;
         }
@@ -2475,6 +2554,8 @@ impl SceneTree {
                     )
                 }
             } else {
+                // SAFETY: same invariant as the `with_input` branch above — the
+                // accessor never outlives this frame and is cleared before return.
                 unsafe { crate::scripting::SceneTreeAccessor::new(self as *mut SceneTree) }
             };
             script.set_scene_access(Box::new(accessor), node_id.raw());
@@ -2929,6 +3010,17 @@ impl SceneTree {
         self.nodes.remove(&id)
     }
 
+    /// Inserts `node` into the arena with NO parent and runs no lifecycle: the
+    /// root of a subtree being assembled outside the tree (see
+    /// `packed_scene::instance_packed_scene_detached`). Children `add_child`ed
+    /// under it stay outside the tree too, until the root is attached.
+    pub fn insert_detached(&mut self, node: Node) -> NodeId {
+        let id = node.id();
+        weak_ref::register_object(id.object_id());
+        self.nodes.insert(id, node);
+        id
+    }
+
     /// Returns the total number of nodes in the tree (including root).
     pub fn node_count(&self) -> usize {
         self.nodes.len()
@@ -2949,6 +3041,17 @@ impl SceneTree {
         let child_id = node.id();
         weak_ref::register_object(child_id.object_id());
         node.set_parent(Some(parent_id));
+        // Register the groups the node already carries — a scene's
+        // `groups=[...]`, or groups added before it was parented. Godot does
+        // this as the node enters (`_propagate_enter_tree`:
+        // `data.tree->add_to_group(E.key, this)`, scene/main/node.cpp). Only
+        // `SceneTree::add_to_group` used to index, so every node whose groups
+        // came from a .tscn was invisible to `get_nodes_in_group` and
+        // `call_group` — Dodge the Creeps' restart `call_group("mobs",
+        // "queue_free")` reached no mob. Removal already unindexes them.
+        for group in node.groups() {
+            self.groups.entry(group.clone()).or_default().insert(child_id);
+        }
         self.nodes.insert(child_id, node);
 
         // Update parent's child list.
@@ -3207,15 +3310,34 @@ impl SceneTree {
     /// `announced` is cleaned from BOTH sides: a removed spawner drops its whole
     /// set, and a removed child is dropped from whichever spawner announced it —
     /// otherwise the child ids accumulate in a live spawner's set forever.
+    ///
+    /// 🔑 EXCEPT what the despawn pass still needs. A spawner that announced
+    /// anything, and a child some spawner announced, are left for
+    /// [`poll_replication_despawns`](Self::poll_replication_despawns), which
+    /// sends the DESPAWN and THEN prunes them. Dropping them here (as this did)
+    /// erased the very `announced` / `spawn_net_ids` entries that pass diffs
+    /// against one frame later, so a freed node — or everything a freed
+    /// spawner had announced — was never retracted and stayed on every client.
     fn forget_replication_entries(&mut self, nid: NodeId) {
-        self.replication.spawners.remove(&nid);
+        let spawner_with_announcements = self
+            .replication
+            .announced
+            .get(&nid)
+            .is_some_and(|set| !set.is_empty());
+        if !spawner_with_announcements {
+            self.replication.spawners.remove(&nid);
+            self.replication.registered.remove(&nid);
+            self.replication.announced.remove(&nid);
+        }
         self.replication.synchronizers.remove(&nid);
-        self.replication.registered.remove(&nid);
         self.replication.visibility_filters.remove(&nid);
-        self.replication.announced.remove(&nid);
-        self.replication.spawn_net_ids.remove(&nid);
-        for announced in self.replication.announced.values_mut() {
-            announced.remove(&nid);
+        let announced_child = self
+            .replication
+            .announced
+            .values()
+            .any(|set| set.contains(&nid));
+        if !announced_child {
+            self.replication.spawn_net_ids.remove(&nid);
         }
     }
 
@@ -3552,34 +3674,42 @@ impl SceneTree {
     /// scene root for a node with `unique_name == true` whose name matches
     /// `"Foo"`. The search starts from the owner of `from` (or `from`
     /// itself if it has no owner, i.e. it is a scene root).
+    ///
+    /// 🔑 Godot looks in `from`'s own `owned_unique_nodes`, then in its OWNER's
+    /// (`scene/main/node.cpp`, `get_node_or_null`): only a unique node OWNED BY
+    /// that scope answers. Searching the owner's whole SUBTREE instead let an
+    /// inner instanced scene's `%HealthBar` resolve from the outer scene, so a
+    /// `%Name` could bind to the wrong scene's node.
+    ///
+    /// ⚠️ A node with NO owner (a tree assembled in code, never instanced)
+    /// still matches as a fallback, so those keep resolving; a node owned by a
+    /// DIFFERENT scope never does.
     pub fn get_node_by_unique_name(&self, from: NodeId, name: &str) -> Option<NodeId> {
-        // Determine the owner scope root.
-        let owner_id = self
-            .nodes
-            .get(&from)
-            .and_then(|n| n.owner())
-            .unwrap_or(from);
-
-        // Breadth-first search through the owner's subtree.
-        self.find_unique_in_subtree(owner_id, name)
-    }
-
-    /// Searches a subtree (depth-first) for a node with `unique_name == true`
-    /// and the given name.
-    fn find_unique_in_subtree(&self, root: NodeId, name: &str) -> Option<NodeId> {
-        let mut stack = vec![root];
-        while let Some(id) = stack.pop() {
-            if let Some(node) = self.nodes.get(&id) {
+        let own_owner = self.nodes.get(&from).and_then(|n| n.owner());
+        let mut scopes = vec![from];
+        if let Some(owner) = own_owner {
+            scopes.push(owner);
+        }
+        let mut unowned_fallback = None;
+        for scope in scopes {
+            let mut stack = vec![scope];
+            while let Some(id) = stack.pop() {
+                let Some(node) = self.nodes.get(&id) else {
+                    continue;
+                };
                 if node.is_unique_name() && node.name() == name {
-                    return Some(id);
+                    match node.owner() {
+                        Some(owner) if owner == scope => return Some(id),
+                        None if unowned_fallback.is_none() => unowned_fallback = Some(id),
+                        _ => {}
+                    }
                 }
-                // Push children in reverse order so left-most is visited first.
                 for &child_id in node.children().iter().rev() {
                     stack.push(child_id);
                 }
             }
         }
-        None
+        unowned_fallback
     }
 
     // -- unique-name-in-owner (`%`) indicator -------------------------------
@@ -4270,10 +4400,29 @@ impl SceneTree {
             .unwrap_or_default();
 
         // Fire callback-based connections and remove one-shot connections.
-        let results = self
+        // A DEFERRED callback connection is queued, not run: Godot routes
+        // every CONNECT_DEFERRED delivery through the MessageQueue
+        // (object.cpp `emit_signalp`), and this fired them synchronously.
+        let (results, deferred_cbs) = self
             .signal_stores
             .get_mut(&source)
-            .map_or_else(Vec::new, |store| store.emit(signal_name, args));
+            .map_or_else(
+                || (Vec::new(), Vec::new()),
+                |store| store.emit_collecting_deferred(signal_name, args),
+            );
+        for (call, (target_id, method, ..)) in deferred_cbs
+            .into_iter()
+            .zip(connections.iter().filter(|c| c.3))
+        {
+            if call.has_callback() {
+                self.pending_deferred_calls.push(DeferredCall {
+                    node_id: NodeId::from_object_id(*target_id),
+                    method: method.clone(),
+                    args: call.args().to_vec(),
+                    callback: Some(call),
+                });
+            }
+        }
 
         // For connections without callbacks, dispatch to target node scripts.
         // Deferred connections are queued on the end-of-frame MessageQueue and
@@ -4434,8 +4583,8 @@ impl SceneTree {
             };
 
             let new_id = self.add_child(parent_for_clone, clone)?;
-            // Groups go through the tree so the group index stays in sync —
-            // `add_child` does not index them.
+            // `clone` carries no groups, so they are added through the tree
+            // here (add_child indexes only the groups a node arrives with).
             if flags.contains(DuplicateFlags::GROUPS) {
                 for group in groups {
                     self.add_to_group(new_id, &group)?;
@@ -4936,28 +5085,49 @@ impl SceneTree {
             // animates once `play()` — or `autoplay` — has started it. Autoplay
             // fires once, on the first frame the node is processed, and is
             // recorded so stopping a non-looping clip is not undone next frame.
+            // `animation` and `autoplay` are StringNames in Godot, and a `.tscn`
+            // writes them that way (`animation = &"right"`); a script may assign
+            // either spelling. Reading only `String` sent every scene-authored
+            // animation to the "default" fallback, which names no clip.
+            let name_of = |v: Variant| match v {
+                Variant::String(s) if !s.is_empty() => Some(s),
+                Variant::StringName(s) if !s.as_str().is_empty() => Some(s.as_str().to_string()),
+                _ => None,
+            };
             let mut autostart: Option<String> = None;
-            if !matches!(node.get_property("playing"), Variant::Bool(true)) {
-                let auto = match node.get_property("autoplay") {
-                    Variant::String(s) if !s.is_empty() => s,
-                    _ => continue,
-                };
-                if matches!(node.get_property("__sf_autoplayed"), Variant::Bool(true)) {
-                    continue;
-                }
-                autostart = Some(auto);
+            let playing = matches!(node.get_property("playing"), Variant::Bool(true));
+            if !playing
+                && !matches!(node.get_property("__sf_autoplayed"), Variant::Bool(true))
+            {
+                autostart = name_of(node.get_property("autoplay"));
             }
             let Some(frames) = sprite_frames_from_node(node) else {
                 continue;
             };
             let anim = match autostart.clone() {
                 Some(a) => a,
-                None => match node.get_property("animation") {
-                    Variant::String(s) if !s.is_empty() => s,
-                    // Godot's default animation name.
-                    _ => "default".to_string(),
-                },
+                // Godot's default animation name.
+                None => name_of(node.get_property("animation")).unwrap_or_else(|| "default".into()),
             };
+            if !playing && autostart.is_none() {
+                // 🔑 A STOPPED sprite still draws its current frame: Godot's
+                // `AnimatedSprite2D::_draw` reads `frames->get_frame_texture(
+                // animation, frame)` whether or not it is playing. This used to
+                // `continue` before publishing anything, so a sprite that was
+                // never played — or was `stop()`ped, as Dodge the Creeps' player
+                // is whenever it stands still — had no texture and drew NOTHING.
+                let frame = match node.get_property("frame") {
+                    Variant::Int(i) if i >= 0 => i as usize,
+                    _ => 0,
+                };
+                let still = frames.frame_texture(&anim, frame).map(str::to_string);
+                if let (Some(texture), Some(node)) = (still, self.nodes.get_mut(&node_id)) {
+                    if node.get_property("texture") != Variant::String(texture.clone()) {
+                        node.set_property("texture", Variant::String(texture));
+                    }
+                }
+                continue;
+            }
             let mut playback = AnimatedSpritePlayback::new(&anim);
             playback.frame = match node.get_property("frame") {
                 Variant::Int(i) if i >= 0 => i as usize,
@@ -5365,6 +5535,11 @@ impl SceneTree {
         id
     }
 
+    /// Returns a tween by ID, if it is live.
+    pub fn get_tween(&self, tween_id: TweenId) -> Option<&Tween> {
+        self.tweens.get(&tween_id).map(|(_, t)| t)
+    }
+
     /// Returns a mutable reference to a tween by ID.
     pub fn get_tween_mut(&mut self, tween_id: TweenId) -> Option<&mut Tween> {
         self.tweens.get_mut(&tween_id).map(|(_, t)| t)
@@ -5616,13 +5791,43 @@ impl SceneTree {
         // Doing it here rather than at each attach site is deliberate: the runner's
         // boot path, the runner's main path and the editor's Play path all funnel
         // through this method, so none of them can forget.
+        // Keys authored above `script = …` never reached Godot's script
+        // instance (see `packed_scene::PROPS_BEFORE_SCRIPT_KEY`).
+        let dropped: Vec<String> = match self
+            .nodes
+            .get_mut(&node_id)
+            .map(|n| n.remove_property(crate::packed_scene::PROPS_BEFORE_SCRIPT_KEY))
+        {
+            Some(Variant::Array(keys)) => keys
+                .to_vec()
+                .into_iter()
+                .filter_map(|k| match k {
+                    Variant::String(s) => Some(s),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        // Only a key the SCRIPT declares was Godot's dropped value; any other
+        // marked key may be a native property ClassDB just hasn't registered,
+        // so it stays on the node.
+        if !dropped.is_empty() {
+            let script_vars: Vec<String> =
+                script.list_properties().into_iter().map(|p| p.name).collect();
+            if let Some(node) = self.nodes.get_mut(&node_id) {
+                for key in dropped.iter().filter(|k| script_vars.contains(k)) {
+                    node.remove_property(key);
+                }
+            }
+        }
         if let Some(node) = self.nodes.get(&node_id) {
             let overrides: Vec<(String, Variant)> = script
                 .list_properties()
                 .into_iter()
                 .filter(|info| node.has_property(&info.name))
+                .filter(|info| !dropped.contains(&info.name))
                 .map(|info| {
-                    let value = node.get_property(&info.name);
+                    let value = scene_value_for_script(node, &info.name);
                     (info.name, value)
                 })
                 .collect();
@@ -6105,7 +6310,10 @@ impl SceneTree {
             match script.call_method(method, args) {
                 Ok(value) => result = Some(value),
                 Err(err) => {
-                    tracing::debug!("script call {method} on node {node_id} failed: {err}")
+                    tracing::debug!("script call {method} on node {node_id} failed: {err}");
+                    // `script` was removed from `self.scripts` above, so `self`
+                    // is free to borrow here.
+                    self.record_script_error(node_id, method, &err.to_string());
                 }
             }
             drop(published);
@@ -6142,6 +6350,77 @@ impl SceneTree {
     /// Whether `node_id` responds to `method`: its script's methods first, then
     /// its class's registered methods. Mirrors Godot's `Object.has_method`, which
     /// reports script and native methods alike.
+    /// Appends a failed script call to the error log, dropping the oldest entry
+    /// once [`SCRIPT_ERROR_LOG_CAP`] is reached so a script that fails every
+    /// frame cannot grow the buffer without bound.
+    fn record_script_error(&mut self, node_id: NodeId, method: &str, error: &str) {
+        let path = self
+            .node_path(node_id)
+            .unwrap_or_else(|| format!("<node {}>", node_id.raw()));
+        if self.script_errors.len() >= SCRIPT_ERROR_LOG_CAP {
+            self.script_errors.pop_front();
+        }
+        self.script_errors
+            .push_back(format!("{path}: {method}(): {error}"));
+    }
+
+    /// Drops a freed node's script, keeping whatever it printed or raised that
+    /// has not been drained yet.
+    fn retire_script(&mut self, node_id: NodeId) {
+        if let Some(mut script) = self.scripts.remove(&node_id) {
+            self.retired_prints
+                .extend(script.drain_print_output_stamped());
+            self.retired_output
+                .errors
+                .extend(script.drain_error_output());
+        }
+    }
+
+    /// Takes every script call that failed since the last drain, oldest first.
+    pub fn drain_script_errors(&mut self) -> Vec<String> {
+        self.script_errors.drain(..).collect()
+    }
+
+    /// Drains what the running game's scripts wrote since the last call: every
+    /// attached script's `print` and error channels, plus the failed-call log.
+    /// This is the one place a host (the editor's Play, an agent's playtest)
+    /// reads a game's stdout from — before it, `print()` in a played scene
+    /// reached nobody outside the tests.
+    ///
+    /// Scripts are visited in tree order and then orphans by id, so the result
+    /// is deterministic. Ordering ACROSS scripts within one drain is by node,
+    /// not by time: each interpreter buffers its own output.
+    pub fn drain_script_output(&mut self) -> ScriptOutput {
+        let mut order = self.all_nodes_in_tree_order();
+        let in_tree: HashSet<NodeId> = order.iter().copied().collect();
+        let mut orphans: Vec<NodeId> = self
+            .scripts
+            .keys()
+            .filter(|id| !in_tree.contains(id))
+            .copied()
+            .collect();
+        orphans.sort_by_key(|id| id.raw());
+        order.extend(orphans);
+        let mut out = std::mem::take(&mut self.retired_output);
+        // Every script buffers its own prints, so concatenating them in tree
+        // order regrouped a frame's output BY NODE: a scene root's `_enter_tree`
+        // and `_ready` lines came out together before any child's, although
+        // the child's `_ready` ran first. Godot prints each line to stdout as
+        // it happens, so merge by print stamp. The sort is stable, so
+        // unstamped (0) lines keep tree order.
+        let mut stamped = std::mem::take(&mut self.retired_prints);
+        for id in order {
+            if let Some(script) = self.scripts.get_mut(&id) {
+                stamped.extend(script.drain_print_output_stamped());
+                out.errors.extend(script.drain_error_output());
+            }
+        }
+        stamped.sort_by_key(|(stamp, _)| *stamp);
+        out.prints.extend(stamped.into_iter().map(|(_, line)| line));
+        out.errors.extend(self.drain_script_errors());
+        out
+    }
+
     pub fn node_has_method(&self, node_id: NodeId, method: &str) -> bool {
         if let Some(script) = self.scripts.get(&node_id) {
             if script.has_method(method) {
@@ -6211,6 +6490,8 @@ impl SceneTree {
                     )
                 }
             } else {
+                // SAFETY: same invariant as the `with_input` branch above — the
+                // accessor never outlives this frame and is cleared before return.
                 unsafe { crate::scripting::SceneTreeAccessor::new(self as *mut SceneTree) }
             };
             script.set_scene_access(Box::new(accessor), node_id.raw());
@@ -6257,6 +6538,8 @@ impl SceneTree {
                     )
                 }
             } else {
+                // SAFETY: same invariant as the `with_input` branch above — the
+                // accessor never outlives this frame and is cleared before return.
                 unsafe { crate::scripting::SceneTreeAccessor::new(self as *mut SceneTree) }
             };
             script.set_scene_access(Box::new(accessor), node_id.raw());
@@ -6323,6 +6606,7 @@ impl SceneTree {
         // dangling pointer can escape — the same invariant
         // `call_script_method` relies on.
         let accessor = if let Some(snapshot) = snapshot_clone {
+            // SAFETY: see the comment above — frame-scoped, cleared before return.
             unsafe {
                 crate::scripting::SceneTreeAccessor::with_input(self as *mut SceneTree, snapshot)
             }
@@ -8863,6 +9147,7 @@ impl SceneTree {
             node_id,
             method: method.to_string(),
             args: args.to_vec(),
+            callback: None,
         });
     }
 
@@ -8891,6 +9176,10 @@ impl SceneTree {
             let batch: Vec<DeferredCall> = self.pending_deferred_calls.drain(..).collect();
             for call in batch {
                 if !self.nodes.contains_key(&call.node_id) {
+                    continue;
+                }
+                if let Some(cb) = &call.callback {
+                    cb.call();
                     continue;
                 }
                 if call.method == "set" {
@@ -9141,7 +9430,7 @@ impl SceneTree {
             let mut subtree = Vec::new();
             self.collect_subtree_top_down(id, &mut subtree);
             for &nid in &subtree {
-                self.scripts.remove(&nid);
+                self.retire_script(nid);
             }
             let _ = self.remove_node(id);
         }
@@ -9176,7 +9465,7 @@ impl SceneTree {
         let mut subtree = Vec::new();
         self.collect_subtree_top_down(current, &mut subtree);
         for &nid in &subtree {
-            self.scripts.remove(&nid);
+            self.retire_script(nid);
             self.signal_stores.remove(&nid);
             self.animation_players.remove(&nid);
             self.animation_trees.remove(&nid);
@@ -9229,13 +9518,48 @@ impl SceneTree {
         &mut self,
         scene: &crate::packed_scene::PackedScene,
     ) -> EngineResult<NodeId> {
+        self.change_scene_to_packed_prepared(scene, &mut |_, _| {})
+    }
+
+    /// [`change_scene_to_packed`](Self::change_scene_to_packed), running
+    /// `prepare` on the fully built but still DETACHED scene before it enters
+    /// the tree — the host's chance to attach scripts, so `_enter_tree` and
+    /// `_ready` reach them in the one and only lifecycle pass.
+    ///
+    /// 🔑 Godot: `instantiate()` builds the subtree off-tree, then one
+    /// `add_child` propagates ENTER_TREE top-down and READY bottom-up
+    /// (`Node::_propagate_enter_tree` / `_propagate_ready`). Assembling under
+    /// the live root instead entered each node as it was added — before its
+    /// children existed — so READY ran parent-first, and the host's second
+    /// pass for the scripts entered and readied every node a second time.
+    pub fn change_scene_to_packed_prepared(
+        &mut self,
+        scene: &crate::packed_scene::PackedScene,
+        prepare: &mut dyn FnMut(&mut SceneTree, NodeId),
+    ) -> EngineResult<NodeId> {
         self.free_current_scene();
 
         // Remember the packed scene for reload_current_scene().
         self.current_packed_scene = Some(scene.clone());
 
-        // Instance the new scene under root.
-        let id = crate::packed_scene::add_packed_scene_to_tree(self, self.root_id, scene)?;
+        // Instance the new scene, expanding every `instance=ExtResource(..)`
+        // it contains. The plain instancer leaves an instanced sub-scene as a
+        // childless placeholder `Node`, so a level reached through
+        // `change_scene_to_file` ran without its player, its enemies or
+        // anything else it instanced.
+        crate::packed_scene::begin_subscene_session();
+        let id = crate::packed_scene::instance_packed_scene_detached(
+            self,
+            scene,
+            &crate::packed_scene::load_scene_from_res,
+        )?;
+        prepare(self, id);
+        let root_node = self.take_node(id).ok_or_else(|| {
+            EngineError::InvalidOperation("detached scene root vanished".into())
+        })?;
+        let root = self.root_id;
+        self.add_child(root, root_node)?;
+        crate::packed_scene::finish_attached_scene(self, id);
         self.current_scene_id = Some(id);
         self.emit_scene_changed();
         Ok(id)
@@ -9286,9 +9610,25 @@ impl SceneTree {
     /// Returns the new scene root's id when a swap occurred. Driven once per
     /// frame by `MainLoop::step` for Godot's end-of-frame deferred timing.
     pub fn process_deferred_scene_change(&mut self) -> EngineResult<Option<NodeId>> {
+        self.process_deferred_scene_change_prepared(&mut |_, _| {})
+    }
+
+    /// Whether the queued scene change is a packed scene (`change_scene_to_file`
+    /// / `_to_packed`), whose `prepare` hook runs before the scene enters.
+    pub fn pending_scene_change_is_packed(&self) -> bool {
+        matches!(self.pending_scene, Some(PendingSceneChange::Packed(_)))
+    }
+
+    /// [`process_deferred_scene_change`](Self::process_deferred_scene_change)
+    /// with a `prepare` hook for a packed scene (see
+    /// [`change_scene_to_packed_prepared`](Self::change_scene_to_packed_prepared)).
+    pub fn process_deferred_scene_change_prepared(
+        &mut self,
+        prepare: &mut dyn FnMut(&mut SceneTree, NodeId),
+    ) -> EngineResult<Option<NodeId>> {
         match self.pending_scene.take() {
             Some(PendingSceneChange::Packed(scene)) => {
-                Ok(Some(self.change_scene_to_packed(&scene)?))
+                Ok(Some(self.change_scene_to_packed_prepared(&scene, prepare)?))
             }
             Some(PendingSceneChange::Node(node)) => Ok(Some(self.change_scene_to_node(*node)?)),
             Some(PendingSceneChange::Unload) => {
@@ -9373,6 +9713,32 @@ impl Default for SceneTree {
 /// Root motion moves the owner node itself (matching Godot, where the mixer's
 /// parent/character consumes the delta) rather than driving an absolute value,
 /// so successive frames accumulate movement.
+/// The value a script property receives from its node's scene-stored value.
+///
+/// A resource the `.tscn` references (`mob_scene = ExtResource("2_50pww")`)
+/// sits on the node as that raw reference text, with its path parked in an
+/// `__extres__<prop>` companion so the scene round-trips. Godot hands the
+/// script the LOADED resource; Patina handed it the text, so an
+/// `@export var mob_scene: PackedScene` read back as a `String` and
+/// `mob_scene.instantiate()` failed — the official Dodge the Creeps demo could
+/// not spawn a single enemy. The resource is built by the same
+/// `load_resource_value` a script's own `preload` uses, so the two agree.
+fn scene_value_for_script(node: &Node, name: &str) -> Variant {
+    let value = node.get_property(name);
+    let is_ext_ref = match &value {
+        Variant::String(s) => s.starts_with("ExtResource(") || s.starts_with("ExtResource:"),
+        _ => false,
+    };
+    if is_ext_ref {
+        if let Variant::String(path) = node.get_property(&format!("__extres__{name}")) {
+            if !path.is_empty() {
+                return gdscript_interop::interpreter::load_resource_value(&path);
+            }
+        }
+    }
+    value
+}
+
 /// Rebuilds a node's [`SpriteFrames`] from the flat `__sf_*` companion keys the
 /// SpriteFrames editor authors (`editor_server.rs`, pat-0q2kx.74).
 ///
@@ -10702,8 +11068,10 @@ mod tests {
         fn get_script_name(&self) -> &str {
             "ProcessProbe"
         }
-        fn has_method(&self, _name: &str) -> bool {
-            true
+        fn has_method(&self, name: &str) -> bool {
+            // Every callback EXCEPT `_init`: `attach_script` runs a defined
+            // `_init` at construction (Godot), which would land in the log.
+            name != "_init"
         }
     }
 
@@ -11485,8 +11853,10 @@ mod tests {
             fn get_script_name(&self) -> &str {
                 "RecordingScript"
             }
-            fn has_method(&self, _name: &str) -> bool {
-                true
+            fn has_method(&self, name: &str) -> bool {
+                // Every callback EXCEPT `_init`: `attach_script` runs a defined
+                // `_init` at construction (Godot), which would land in the log.
+                name != "_init"
             }
         }
 
@@ -11674,6 +12044,10 @@ mod tests {
             let (mut tree, _sprite, tree_node, anim_tree) = tree_with_animation_tree(1.0);
             tree.attach_animation_tree(tree_node, anim_tree).unwrap();
             assert_eq!(tree.animation_tree_count(), 1);
+            // `Owner` is the running scene, as a boot path records it:
+            // `change_scene_*` frees `current_scene` only (Godot).
+            let owner = tree.get_node(tree_node).unwrap().parent().unwrap();
+            tree.set_current_scene(owner, None);
 
             tree.change_scene_to_node(Node::new("Next", "Node"))
                 .unwrap();
@@ -12967,8 +13341,19 @@ mod multiplayer_tests {
         fn get_script_name(&self) -> &str {
             "RecordingScript"
         }
-        fn has_method(&self, _name: &str) -> bool {
-            true
+        fn has_method(&self, name: &str) -> bool {
+            // Every callback EXCEPT `_init`: `attach_script` runs a defined
+            // `_init` at construction (Godot), which would land in the log.
+            name != "_init"
+        }
+        /// `@rpc("any_peer", "reliable") func take_damage(..)`: the inbound
+        /// gate drops a call to any method the receiver did not annotate
+        /// (Godot's `_process_rpc`, pat-mgixk.26).
+        fn rpc_methods(&self) -> Vec<(String, Vec<String>)> {
+            vec![(
+                "take_damage".to_string(),
+                vec!["any_peer".to_string(), "reliable".to_string()],
+            )]
         }
     }
 

@@ -114,6 +114,11 @@ size = Vector3(20, 20, 20)
 "#;
 
 fn tree(src: &str) -> SceneTree {
+    // ⚠️ The render list filters on `is_class("Node3D")`, which reads the
+    // ClassDB. Without this neither the mirror nor the wall is collected — only
+    // the literal `Node3D` root, as an orange editor marker — so these tests
+    // were measuring the reflection on that marker, never on the mirror.
+    gdobject::class_db::register_3d_classes();
     let packed = PackedScene::from_tscn(src).expect("parse tscn");
     let mut t = SceneTree::new();
     let root = t.root_id();

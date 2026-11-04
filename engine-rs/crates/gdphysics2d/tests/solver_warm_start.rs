@@ -98,13 +98,19 @@ fn starved_residual(cache: &mut ContactCache2D) -> f32 {
         ..ContactSolver2D::default()
     };
     let (floor, mut falling) = floor_and_box();
-    falling.linear_velocity = Vector2::new(0.0, 200.0);
+    // ⚠️ Sliding as well as approaching. The face-on-face normal pair is now
+    // solved as an exact 2x2 LCP (Box2D's block solver), so in ONE sweep the
+    // normal residual is 0 cold and warm alike and cannot show the seed.
+    // Friction can: it is clamped by the normal impulse ALREADY accumulated,
+    // which a cold first sweep has at 0 (no friction at all) and a warm one
+    // carries in from the cache.
+    falling.linear_velocity = Vector2::new(50.0, 200.0);
     let mut constraints = vec![contact_for(&falling, &floor)];
     let mut bodies = HashMap::new();
     bodies.insert(falling.id, falling.clone());
     bodies.insert(floor.id, floor.clone());
     solver.solve(&mut bodies, &mut constraints, cache);
-    bodies[&falling.id].linear_velocity.y.abs()
+    bodies[&falling.id].linear_velocity.length()
 }
 
 /// **The regression test.** Warm starting must carry impulses into the next

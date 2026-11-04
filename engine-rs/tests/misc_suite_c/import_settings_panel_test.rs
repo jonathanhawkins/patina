@@ -1,18 +1,27 @@
-//! pat-vyko1: Asset browser import settings panel for each resource type.
+//! pat-vyko1: the FileSystem dock's Import panel for each resource type.
 //!
-//! Integration tests covering:
-//! 1. GET /api/import_settings — returns defaults per extension
-//! 2. POST /api/import_settings — writes .import sidecar files
-//! 3. Roundtrip: set then get import settings
-//! 4. Import settings for different resource types (texture, audio, font, scene)
-//! 5. Error handling for missing parameters
+//! Rewritten 2026-11-03 against the route as it actually ships, and against
+//! GODOT'S OWN importer contract (Godot 4.6 `ResourceImporter*`):
+//!
+//! - importer ids are Godot's: `texture`, `wav`, `oggvorbisstr` (NOT the
+//!   invented `ogg_vorbis`), `font_data_dynamic`, `scene`;
+//! - option keys are Godot 4's `[params]` keys (`compress/mode`,
+//!   `mipmaps/generate`, `force/mono`, …). The old file asserted a mix of
+//!   Godot 3 keys (`flags/filter`) and a bulk `params` POST that never existed;
+//! - an enum is stored as its INDEX, as Godot writes it (`compress/mode=1`).
+//!
+//! Covers: GET defaults per extension, the empty state, POST writing a
+//! well-formed `.import`, and a set → get round trip.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use gdeditor::editor_server::{EditorServerHandle, EditorState};
+use gdscene::node::Node;
 use gdscene::SceneTree;
 
 fn free_port() -> u16 {
@@ -20,312 +29,206 @@ fn free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-fn make_server() -> (EditorServerHandle, u16) {
-    let port = free_port();
-    let tree = SceneTree::new();
-    let state = EditorState::new(tree);
-    let handle = EditorServerHandle::start(port, state);
-    thread::sleep(Duration::from_millis(300));
-    (handle, port)
-}
-
-fn http_get(port: u16, path: &str) -> String {
-    let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
-    http_request(port, &req)
-}
-
-fn http_post(port: u16, path: &str, body: &str) -> String {
-    let req = format!(
-        "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    http_request(port, &req)
-}
-
-fn http_request(port: u16, request: &str) -> String {
+fn http(port: u16, req: &str) -> String {
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
-    stream.write_all(request.as_bytes()).unwrap();
+    stream.write_all(req.as_bytes()).unwrap();
     let mut response = Vec::new();
     let _ = stream.read_to_end(&mut response);
     String::from_utf8_lossy(&response).to_string()
 }
 
-fn extract_body(resp: &str) -> &str {
-    resp.split("\r\n\r\n").nth(1).unwrap_or("")
+fn http_get(port: u16, path: &str) -> String {
+    http(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"))
+}
+
+fn http_post(port: u16, path: &str, body: &str) -> String {
+    http(
+        port,
+        &format!(
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+    )
+}
+
+fn json(resp: &str) -> serde_json::Value {
+    serde_json::from_str(resp.split("\r\n\r\n").nth(1).unwrap_or("")).expect("valid JSON")
+}
+
+/// A server re-rooted at a fresh temp project, so `res://` paths resolve
+/// inside the sandbox (an absolute path outside it is correctly refused).
+fn server() -> (EditorServerHandle, u16, PathBuf) {
+    static N: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "patina_import_panel_{}_{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("project.godot"), "[application]\nconfig/name=\"ImportPanel\"\n").unwrap();
+    for f in ["icon.png", "effect.wav", "music.ogg", "font.ttf", "model.glb"] {
+        std::fs::write(dir.join(f), b"stub").unwrap();
+    }
+    let port = free_port();
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    tree.add_child(root, Node::new("Main", "Node2D")).unwrap();
+    let handle = EditorServerHandle::start(port, EditorState::new(tree));
+    thread::sleep(Duration::from_millis(150));
+    let open = http_post(
+        port,
+        "/api/project/open",
+        &serde_json::json!({ "path": dir.display().to_string() }).to_string(),
+    );
+    assert!(open.contains("200 OK"), "project/open must succeed: {open}");
+    (handle, port, dir)
+}
+
+fn option<'a>(v: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    v["options"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no options in {v}"))
+        .iter()
+        .find(|o| o["name"] == name)
+        .unwrap_or_else(|| panic!("no `{name}` option in {v}"))
+}
+
+fn defaults(port: u16, file: &str) -> serde_json::Value {
+    json(&http_get(port, &format!("/api/import_settings?path=res://{file}")))
 }
 
 // ===========================================================================
-// 1. GET /api/import_settings — default params by extension
+// 1. GET — Godot's importer and option defaults per extension
 // ===========================================================================
 
 #[test]
-fn import_settings_missing_path_returns_400() {
-    let (handle, port) = make_server();
-    let resp = http_get(port, "/api/import_settings");
-    assert!(resp.contains("400"));
-    handle.stop();
+fn import_settings_missing_path_returns_the_empty_state() {
+    let (h, port, _) = server();
+    let v = json(&http_get(port, "/api/import_settings"));
+    assert_eq!(v["importable"], false, "no path = the dock's empty state: {v}");
+    h.stop();
 }
 
 #[test]
 fn import_settings_png_returns_texture_defaults() {
-    let (handle, port) = make_server();
-    let resp = http_get(port, "/api/import_settings?path=res://icon.png");
-    let body = extract_body(&resp);
-    let v: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
+    let (h, port, _) = server();
+    let v = defaults(port, "icon.png");
     assert_eq!(v["importer"], "texture");
-    assert_eq!(v["has_import_file"], false);
-    // Should have texture-specific params
-    let params = &v["params"];
-    assert!(params["compress/mode"].is_string());
-    assert!(params["mipmaps/generate"].is_boolean());
-    assert!(params["flags/filter"].is_boolean());
-    handle.stop();
+    let mode = option(&v, "compress/mode");
+    assert_eq!(mode["type"], "enum");
+    assert_eq!(mode["value"], "Lossless", "auto-detect preset defaults to Lossless");
+    assert_eq!(option(&v, "mipmaps/generate")["value"], false);
+    assert_eq!(option(&v, "process/fix_alpha_border")["value"], true);
+    h.stop();
 }
 
 #[test]
 fn import_settings_wav_returns_audio_defaults() {
-    let (handle, port) = make_server();
-    let resp = http_get(port, "/api/import_settings?path=res://sound.wav");
-    let body = extract_body(&resp);
-    let v: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
+    let (h, port, _) = server();
+    let v = defaults(port, "effect.wav");
     assert_eq!(v["importer"], "wav");
-    let params = &v["params"];
-    assert!(params["force/8_bit"].is_boolean());
-    assert!(params["force/mono"].is_boolean());
-    assert!(params["edit/trim"].is_boolean());
-    handle.stop();
+    for k in ["force/8_bit", "force/mono", "edit/trim", "edit/normalize"] {
+        assert_eq!(option(&v, k)["value"], false, "{k}");
+    }
+    assert_eq!(option(&v, "compress/mode")["value"], "Quite OK Audio");
+    h.stop();
 }
 
 #[test]
 fn import_settings_ogg_returns_vorbis_defaults() {
-    let (handle, port) = make_server();
-    let resp = http_get(port, "/api/import_settings?path=res://music.ogg");
-    let body = extract_body(&resp);
-    let v: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
-    assert_eq!(v["importer"], "ogg_vorbis");
-    let params = &v["params"];
-    assert!(params["loop"].is_boolean());
-    assert!(params["loop_offset"].is_number());
-    handle.stop();
+    let (h, port, _) = server();
+    let v = defaults(port, "music.ogg");
+    assert_eq!(v["importer"], "oggvorbisstr", "Godot's id, not `ogg_vorbis`");
+    assert_eq!(option(&v, "loop")["value"], false);
+    assert!(option(&v, "loop_offset")["value"].is_number());
+    assert_eq!(option(&v, "bar_beats")["value"], 4);
+    h.stop();
 }
 
 #[test]
 fn import_settings_ttf_returns_font_defaults() {
-    let (handle, port) = make_server();
-    let resp = http_get(port, "/api/import_settings?path=res://font.ttf");
-    let body = extract_body(&resp);
-    let v: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
+    let (h, port, _) = server();
+    let v = defaults(port, "font.ttf");
     assert_eq!(v["importer"], "font_data_dynamic");
-    let params = &v["params"];
-    assert!(params["antialiased"].is_boolean());
-    assert!(params["hinting"].is_string());
-    handle.stop();
+    assert_eq!(option(&v, "antialiasing")["value"], "Grayscale");
+    assert_eq!(option(&v, "hinting")["value"], "Light");
+    h.stop();
 }
 
 #[test]
 fn import_settings_glb_returns_scene_defaults() {
-    let (handle, port) = make_server();
-    let resp = http_get(port, "/api/import_settings?path=res://model.glb");
-    let body = extract_body(&resp);
-    let v: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
+    let (h, port, _) = server();
+    let v = defaults(port, "model.glb");
     assert_eq!(v["importer"], "scene");
-    let params = &v["params"];
-    assert!(params["animation/import"].is_boolean());
-    assert!(params["animation/fps"].is_number());
-    handle.stop();
+    assert_eq!(option(&v, "animation/import")["value"], true);
+    assert!(option(&v, "animation/fps")["value"].is_number());
+    h.stop();
 }
 
 #[test]
-fn import_settings_unknown_ext_returns_empty_params() {
-    let (handle, port) = make_server();
-    let resp = http_get(port, "/api/import_settings?path=res://data.bin");
-    let body = extract_body(&resp);
-    let v: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
-    assert_eq!(v["importer"], "unknown");
-    assert_eq!(v["params"], serde_json::json!({}));
-    handle.stop();
+fn import_settings_unknown_ext_is_not_importable() {
+    let (h, port, _) = server();
+    let v = defaults(port, "data.bin");
+    assert_eq!(v["importable"], false);
+    assert!(v.get("options").is_none(), "nothing to edit: {v}");
+    h.stop();
 }
 
 // ===========================================================================
-// 2. POST /api/import_settings — write .import sidecar
+// 2. POST — writes a well-formed `.import`
 // ===========================================================================
 
 #[test]
 fn set_import_settings_missing_path_returns_400() {
-    let (handle, port) = make_server();
-    let resp = http_post(port, "/api/import_settings", r#"{"params":{}}"#);
-    assert!(resp.contains("400"));
-    handle.stop();
+    let (h, port, _) = server();
+    let resp = http_post(port, "/api/import_settings", r#"{"option":"loop","value":true}"#);
+    assert!(resp.contains("400"), "{resp}");
+    h.stop();
 }
 
 #[test]
-fn set_import_settings_missing_params_returns_400() {
-    let (handle, port) = make_server();
+fn set_import_settings_missing_option_returns_400() {
+    let (h, port, _) = server();
     let resp = http_post(port, "/api/import_settings", r#"{"path":"res://icon.png"}"#);
-    assert!(resp.contains("400"));
-    handle.stop();
+    assert!(resp.contains("400"), "{resp}");
+    h.stop();
 }
 
 #[test]
 fn set_import_settings_writes_sidecar() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let png_path = dir.path().join("test_icon.png");
-    std::fs::write(&png_path, "PNG").unwrap();
-
-    let (handle, port) = make_server();
-    let rel = png_path.to_string_lossy().to_string();
-    let body = format!(
-        r#"{{"path":"{}","params":{{"compress/mode":"lossy","flags/filter":false}}}}"#,
-        rel
-    );
-    let resp = http_post(port, "/api/import_settings", &body);
-    let resp_body = extract_body(&resp);
-    let v: serde_json::Value = serde_json::from_str(resp_body).expect("valid JSON");
-    assert_eq!(v["ok"], true);
-    assert_eq!(v["importer"], "texture");
-
-    // Verify the .import sidecar was written
-    let import_path = png_path.with_extension("png.import");
-    assert!(import_path.exists(), ".import sidecar should be created");
-
-    let contents = std::fs::read_to_string(&import_path).unwrap();
-    assert!(contents.contains("[remap]"));
-    assert!(contents.contains("[deps]"));
-    assert!(contents.contains("[params]"));
-    assert!(contents.contains(r#"compress/mode="lossy""#));
-    assert!(contents.contains("flags/filter=false"));
-
-    // Clean up
-    std::fs::remove_file(&import_path).ok();
-    handle.stop();
+    let (h, port, dir) = server();
+    let v = json(&http_post(
+        port,
+        "/api/import_settings",
+        r#"{"path":"res://icon.png","option":"compress/mode","value":"Lossy"}"#,
+    ));
+    assert_eq!(v["ok"], true, "{v}");
+    let text = std::fs::read_to_string(dir.join("icon.png.import")).expect(".import written");
+    assert!(text.contains("[remap]") && text.contains("[deps]") && text.contains("[params]"), "{text}");
+    assert!(text.contains("importer=\"texture\""), "{text}");
+    // Godot stores an enum as its index: Lossless=0, Lossy=1.
+    assert!(text.contains("compress/mode=1"), "{text}");
+    h.stop();
 }
 
 // ===========================================================================
-// 3. Roundtrip: set then get
+// 3. Round trip — what was set is what the dock shows
 // ===========================================================================
 
 #[test]
 fn import_settings_roundtrip() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let wav_path = dir.path().join("effect.wav");
-    std::fs::write(&wav_path, "RIFF").unwrap();
-
-    let (handle, port) = make_server();
-    let rel = wav_path.to_string_lossy().to_string();
-
-    // Set import settings
-    let body = format!(
-        r#"{{"path":"{}","params":{{"force/mono":true,"edit/normalize":true}}}}"#,
-        rel
-    );
-    let resp = http_post(port, "/api/import_settings", &body);
-    let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
-    assert_eq!(v["ok"], true);
-
-    // Get import settings — should read from sidecar
-    let resp = http_get(
-        port,
-        &format!("/api/import_settings?path={}", url_encode(&rel)),
-    );
-    let v: serde_json::Value = serde_json::from_str(extract_body(&resp)).unwrap();
-    assert_eq!(v["has_import_file"], true);
+    let (h, port, _) = server();
+    for k in ["force/mono", "edit/normalize"] {
+        let body = format!(r#"{{"path":"res://effect.wav","option":"{k}","value":true}}"#);
+        assert_eq!(json(&http_post(port, "/api/import_settings", &body))["ok"], true);
+    }
+    let v = defaults(port, "effect.wav");
     assert_eq!(v["importer"], "wav");
-    // Params from sidecar should be present (merged as strings from INI parsing)
-    let params = &v["params"];
-    assert_eq!(params["force/mono"], "true");
-    assert_eq!(params["edit/normalize"], "true");
-
-    // Clean up
-    std::fs::remove_file(wav_path.with_extension("wav.import")).ok();
-    handle.stop();
-}
-
-/// Minimal URL encoding for query params.
-fn url_encode(s: &str) -> String {
-    s.replace('%', "%25")
-        .replace(' ', "%20")
-        .replace('/', "%2F")
-        .replace(':', "%3A")
-}
-
-// ===========================================================================
-// 4. ImportFile parsing (unit tests via gdresource)
-// ===========================================================================
-
-#[test]
-fn parse_import_file_with_params_section() {
-    let contents = r#"[remap]
-
-importer="texture"
-type="CompressedTexture2D"
-
-[deps]
-
-source_file="res://icon.png"
-
-[params]
-
-compress/mode="lossless"
-mipmaps/generate=false
-flags/filter=true
-"#;
-    let import = gdresource::parse_import_file(contents).unwrap();
-    assert_eq!(import.importer(), Some("texture"));
-    assert_eq!(import.resource_type(), Some("CompressedTexture2D"));
-    assert_eq!(import.source_file(), Some("res://icon.png"));
-
-    let params = import.other_sections.get("params").unwrap();
-    assert_eq!(params.get("compress/mode").unwrap(), "lossless");
-    assert_eq!(params.get("mipmaps/generate").unwrap(), "false");
-    assert_eq!(params.get("flags/filter").unwrap(), "true");
-}
-
-#[test]
-fn parse_import_file_without_params() {
-    let contents = r#"[remap]
-
-importer="wav"
-
-[deps]
-
-source_file="res://sound.wav"
-"#;
-    let import = gdresource::parse_import_file(contents).unwrap();
-    assert_eq!(import.importer(), Some("wav"));
-    assert!(import.other_sections.get("params").is_none());
-}
-
-// ===========================================================================
-// 5. Different image extensions map to texture importer
-// ===========================================================================
-
-#[test]
-fn jpg_maps_to_texture_importer() {
-    let (handle, port) = make_server();
-    let resp = http_get(port, "/api/import_settings?path=res://photo.jpg");
-    let body = extract_body(&resp);
-    let v: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
-    assert_eq!(v["importer"], "texture");
-    handle.stop();
-}
-
-#[test]
-fn webp_maps_to_texture_importer() {
-    let (handle, port) = make_server();
-    let resp = http_get(port, "/api/import_settings?path=res://sprite.webp");
-    let body = extract_body(&resp);
-    let v: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
-    assert_eq!(v["importer"], "texture");
-    handle.stop();
-}
-
-#[test]
-fn otf_maps_to_font_importer() {
-    let (handle, port) = make_server();
-    let resp = http_get(port, "/api/import_settings?path=res://heading.otf");
-    let body = extract_body(&resp);
-    let v: serde_json::Value = serde_json::from_str(body).expect("valid JSON");
-    assert_eq!(v["importer"], "font_data_dynamic");
-    handle.stop();
+    assert_eq!(option(&v, "force/mono")["value"], true);
+    assert_eq!(option(&v, "edit/normalize")["value"], true);
+    // Edge: an option never set keeps Godot's default.
+    assert_eq!(option(&v, "edit/trim")["value"], false);
+    h.stop();
 }

@@ -76,13 +76,21 @@ fn editor_script_mode_serves_script_editor_view() {
         body.contains(r#"id="script-main-host""#),
         "central script editor must have a host element for the relocated editor"
     );
+    // The per-mode `showScriptMode(bool)` helper was folded into ONE central
+    // swap, `setCentralView(mode)` (editor_ui.rs, "Mode buttons (pat-dj6)"),
+    // which hides every central view and shows exactly one. Pin the script
+    // branch of that swap: it reveals the script-editor panel and relocates
+    // the script editor into the central host.
     assert!(
-        body.contains("showScriptMode"),
-        "the mode switch must drive a central script-editor view (showScriptMode)"
+        body.contains("function setCentralView(mode)"),
+        "the mode switch must drive a central view swap (setCentralView)"
     );
     assert!(
-        body.contains("showScriptMode(mode === 'script')"),
-        "the mode-button handler must show the script editor when entering script mode"
+        body.contains(
+            "if (mode === 'script') {\n      if (sep) sep.style.display = 'flex';\n      if (panel && host && panel.parentElement !== host) host.appendChild(panel);"
+        ),
+        "entering script mode must show the central script-editor panel and move the \
+         script editor into its host"
     );
 
     // (2) The server reports a non-2D script_editor main view in script mode.

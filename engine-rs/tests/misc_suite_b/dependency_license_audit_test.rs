@@ -24,6 +24,11 @@ const ALLOWED_LICENSES: &[&str] = &[
     "cc0-1.0",
     "bsl-1.0",           // Boost
     "lgpl-2.1-or-later", // LGPL with "or later" is acceptable for linking
+    // MPL-2.0: file-level copyleft — modifications to the MPL files
+    // themselves must stay MPL, but linking them into a differently licensed
+    // work is permitted. Accepted by the project owner 2026-11-03 for
+    // `resvg` / `usvg` (SVG import).
+    "mpl-2.0",
 ];
 
 /// Licenses that are NOT compatible (copyleft without linking exception).

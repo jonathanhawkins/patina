@@ -1,15 +1,6 @@
 {
 	"children": [
 		{
-			"children": [],
-			"class": "Node",
-			"name": "Oracle",
-			"path": "/root/Oracle",
-			"properties": {
-
-			}
-		},
-		{
 			"children": [
 				{
 					"children": [
@@ -19,15 +10,7 @@
 							"name": "GrandChild",
 							"path": "/root/Root/Child1/GrandChild",
 							"properties": {
-								"position": {
-									"class_type": "",
-									"hint": 1,
-									"type": "Vector2",
-									"value": {
-										"x": 10.0,
-										"y": 20.0
-									}
-								}
+
 							}
 						}
 					],
@@ -35,15 +18,7 @@
 					"name": "Child1",
 					"path": "/root/Root/Child1",
 					"properties": {
-						"position": {
-							"class_type": "",
-							"hint": 1,
-							"type": "Vector2",
-							"value": {
-								"x": 50.0,
-								"y": 100.0
-							}
-						}
+
 					}
 				},
 				{
@@ -52,15 +27,7 @@
 					"name": "Child2",
 					"path": "/root/Root/Child2",
 					"properties": {
-						"position": {
-							"class_type": "",
-							"hint": 1,
-							"type": "Vector2",
-							"value": {
-								"x": 200.0,
-								"y": 300.0
-							}
-						}
+
 					}
 				}
 			],
@@ -68,18 +35,7 @@
 			"name": "Root",
 			"path": "/root/Root",
 			"properties": {
-				"child_count": {
-					"class_type": "",
-					"hint": 0,
-					"type": "int",
-					"value": 2
-				},
-				"tree_ready": {
-					"class_type": "",
-					"hint": 0,
-					"type": "bool",
-					"value": true
-				}
+
 			}
 		}
 	],
@@ -172,7 +128,7 @@
 			"class_type": "",
 			"hint": 0,
 			"type": "String",
-			"value": "test00"
+			"value": "Patina Fixtures"
 		},
 		"world_3d": {
 			"class_type": "World3D",

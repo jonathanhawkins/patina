@@ -39,7 +39,12 @@ pub struct AudioStreamPlayback {
     state: PlaybackState,
     volume_db: f32,
     loop_mode: LoopMode,
-    position_secs: f32,
+    /// ⚠️ f64, not f32. A music track minutes in sits millions of source
+    /// samples from the start; an f32 resolves ~8.8M samples (200 s at
+    /// 44.1 kHz) only to the nearest WHOLE sample, so the interpolation fraction
+    /// was lost and every sample snapped to a neighbour — gritty, crackling
+    /// distortion that grew with play time, on long streams only.
+    position_secs: f64,
     length_secs: f32,
     bus_name: String,
     /// Pitch multiplier applied during mixing (Godot default 1.0). Values > 1.0
@@ -123,7 +128,7 @@ impl AudioStreamPlayback {
 
     /// Seek to an absolute position in seconds, clamped to `[0, length]`.
     pub fn seek(&mut self, position: f32) {
-        self.position_secs = position.clamp(0.0, self.length_secs);
+        self.position_secs = f64::from(position.clamp(0.0, self.length_secs));
     }
 
     /// Return `true` if the stream is currently playing.
@@ -133,6 +138,12 @@ impl AudioStreamPlayback {
 
     /// Return the current playback position in seconds.
     pub fn get_playback_position(&self) -> f32 {
+        self.position_secs as f32
+    }
+
+    /// The playback position at full precision — what the mixer must use to
+    /// derive its read cursor (see `position_secs`).
+    pub fn playback_position_f64(&self) -> f64 {
         self.position_secs
     }
 
@@ -149,23 +160,29 @@ impl AudioStreamPlayback {
     ///   preserving overshoot so it keeps producing audio past its nominal
     ///   length.
     pub fn advance(&mut self, delta: f32) {
+        self.advance_f64(f64::from(delta));
+    }
+
+    /// [`advance`](Self::advance) at full precision, for the mixer.
+    pub fn advance_f64(&mut self, delta: f64) {
         if self.state != PlaybackState::Playing {
             return;
         }
 
         let (loop_begin, loop_end) = self.loop_window();
+        let (loop_begin, loop_end) = (f64::from(loop_begin), f64::from(loop_end));
 
         match self.loop_mode {
             LoopMode::None => {
                 self.position_secs += delta;
-                if self.position_secs >= self.length_secs {
+                if self.position_secs >= f64::from(self.length_secs) {
                     self.stop();
                 }
             }
             LoopMode::Forward => {
                 self.position_secs += delta;
                 if self.position_secs >= loop_end {
-                    let span = (loop_end - loop_begin).max(f32::EPSILON);
+                    let span = (loop_end - loop_begin).max(f64::from(f32::EPSILON));
                     self.position_secs =
                         loop_begin + (self.position_secs - loop_begin).rem_euclid(span);
                 }
@@ -175,7 +192,7 @@ impl AudioStreamPlayback {
                 // reflect off it, so the sample plays forwards, then backwards,
                 // forever. `rem_euclid` over twice the span handles a `delta`
                 // large enough to cross the region more than once.
-                let span = (loop_end - loop_begin).max(f32::EPSILON);
+                let span = (loop_end - loop_begin).max(f64::from(f32::EPSILON));
                 if self.ping_pong_forward {
                     self.position_secs += delta;
                 } else {
@@ -196,7 +213,7 @@ impl AudioStreamPlayback {
                 // back up to `loop_end`.
                 self.position_secs -= delta;
                 if self.position_secs <= loop_begin {
-                    let span = (loop_end - loop_begin).max(f32::EPSILON);
+                    let span = (loop_end - loop_begin).max(f64::from(f32::EPSILON));
                     self.position_secs =
                         loop_end - (loop_begin - self.position_secs).rem_euclid(span);
                 }
@@ -314,8 +331,8 @@ impl AudioStreamPlayback {
         // (pat-0q2kx.58).
         if mode == LoopMode::Backward {
             let (loop_begin, loop_end) = self.loop_window();
-            if self.position_secs <= loop_begin {
-                self.position_secs = loop_end;
+            if self.position_secs <= f64::from(loop_begin) {
+                self.position_secs = f64::from(loop_end);
             }
         }
         self.ping_pong_forward = true;

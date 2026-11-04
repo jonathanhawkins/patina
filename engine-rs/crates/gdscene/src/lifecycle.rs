@@ -11,7 +11,9 @@
 //! The [`LifecycleManager`] encapsulates this logic and operates on a
 //! [`SceneTree`].
 
-use gdobject::notification::{NOTIFICATION_ENTER_TREE, NOTIFICATION_EXIT_TREE, NOTIFICATION_READY};
+use gdobject::notification::{
+    NOTIFICATION_ENTER_TREE, NOTIFICATION_EXIT_TREE, NOTIFICATION_POST_ENTER_TREE, NOTIFICATION_READY,
+};
 
 use crate::node::NodeId;
 use crate::scene_tree::SceneTree;
@@ -108,7 +110,21 @@ impl LifecycleManager {
         for &id in &bottom_up {
             // Caller-supplied re-entry filter (pat-mgixk.406); empty for every
             // ordinary `enter_tree`.
+            //
+            // Godot's `_propagate_ready` (`scene/main/node.cpp:317-332`) sends
+            // `NOTIFICATION_POST_ENTER_TREE` on EVERY entry, then READY only the
+            // first time (`ready_first`). So a re-entered node gets the former
+            // and not the latter — and it is STILL ready: `is_node_ready()` is
+            // `!ready_first`, which a reparent does not reset. Skipping the whole
+            // body here left a reparented node reporting `is_ready() == false`.
+            if let Some(node) = tree.get_node_mut(id) {
+                node.receive_notification(NOTIFICATION_POST_ENTER_TREE);
+            }
+            tree.notify_script(id, NOTIFICATION_POST_ENTER_TREE.code() as i64);
             if skip_ready.contains(&id) {
+                if let Some(node) = tree.get_node_mut(id) {
+                    node.set_ready(true);
+                }
                 continue;
             }
             tree.trace_record(id, TraceEventType::Notification, "READY");
@@ -332,6 +348,7 @@ mod tests {
     use crate::node::Node;
     use crate::scene_tree::SceneTree;
     use gdobject::notification::{
+        NOTIFICATION_POST_ENTER_TREE,
         NOTIFICATION_CHILD_ORDER_CHANGED, NOTIFICATION_ENTER_TREE, NOTIFICATION_EXIT_TREE,
         NOTIFICATION_PARENTED, NOTIFICATION_POSTINITIALIZE, NOTIFICATION_READY,
         NOTIFICATION_UNPARENTED,
@@ -370,17 +387,20 @@ mod tests {
         assert_eq!(parent_log[2], NOTIFICATION_CHILD_ORDER_CHANGED);
         assert_eq!(parent_log[3], NOTIFICATION_CHILD_ORDER_CHANGED);
         assert_eq!(parent_log[4], NOTIFICATION_ENTER_TREE);
+        assert_eq!(parent_log[5], NOTIFICATION_POST_ENTER_TREE);
 
         // Children: POSTINITIALIZE + PARENTED + ENTER_TREE
         let c1_log = tree.get_node(child1_id).unwrap().notification_log();
         assert_eq!(c1_log[0], NOTIFICATION_POSTINITIALIZE);
         assert_eq!(c1_log[1], NOTIFICATION_PARENTED);
         assert_eq!(c1_log[2], NOTIFICATION_ENTER_TREE);
+        assert_eq!(c1_log[3], NOTIFICATION_POST_ENTER_TREE);
 
         let c2_log = tree.get_node(child2_id).unwrap().notification_log();
         assert_eq!(c2_log[0], NOTIFICATION_POSTINITIALIZE);
         assert_eq!(c2_log[1], NOTIFICATION_PARENTED);
         assert_eq!(c2_log[2], NOTIFICATION_ENTER_TREE);
+        assert_eq!(c2_log[3], NOTIFICATION_POST_ENTER_TREE);
     }
 
     #[test]
@@ -391,28 +411,31 @@ mod tests {
 
         // Parent: POSTINITIALIZE + PARENTED + 2x CHILD_ORDER_CHANGED + ENTER_TREE + READY = 6
         let parent_log = tree.get_node(parent_id).unwrap().notification_log();
-        assert_eq!(parent_log.len(), 6);
+        assert_eq!(parent_log.len(), 7);
         assert_eq!(parent_log[0], NOTIFICATION_POSTINITIALIZE);
         assert_eq!(parent_log[1], NOTIFICATION_PARENTED);
         assert_eq!(parent_log[2], NOTIFICATION_CHILD_ORDER_CHANGED);
         assert_eq!(parent_log[3], NOTIFICATION_CHILD_ORDER_CHANGED);
         assert_eq!(parent_log[4], NOTIFICATION_ENTER_TREE);
-        assert_eq!(parent_log[5], NOTIFICATION_READY);
+        assert_eq!(parent_log[5], NOTIFICATION_POST_ENTER_TREE);
+        assert_eq!(parent_log[6], NOTIFICATION_READY);
 
         // Children: POSTINITIALIZE + PARENTED + ENTER_TREE + READY = 4
         let c1_log = tree.get_node(child1_id).unwrap().notification_log();
-        assert_eq!(c1_log.len(), 4);
+        assert_eq!(c1_log.len(), 5);
         assert_eq!(c1_log[0], NOTIFICATION_POSTINITIALIZE);
         assert_eq!(c1_log[1], NOTIFICATION_PARENTED);
         assert_eq!(c1_log[2], NOTIFICATION_ENTER_TREE);
-        assert_eq!(c1_log[3], NOTIFICATION_READY);
+        assert_eq!(c1_log[3], NOTIFICATION_POST_ENTER_TREE);
+        assert_eq!(c1_log[4], NOTIFICATION_READY);
 
         let c2_log = tree.get_node(child2_id).unwrap().notification_log();
-        assert_eq!(c2_log.len(), 4);
+        assert_eq!(c2_log.len(), 5);
         assert_eq!(c2_log[0], NOTIFICATION_POSTINITIALIZE);
         assert_eq!(c2_log[1], NOTIFICATION_PARENTED);
         assert_eq!(c2_log[2], NOTIFICATION_ENTER_TREE);
-        assert_eq!(c2_log[3], NOTIFICATION_READY);
+        assert_eq!(c2_log[3], NOTIFICATION_POST_ENTER_TREE);
+        assert_eq!(c2_log[4], NOTIFICATION_READY);
     }
 
     #[test]
@@ -446,6 +469,7 @@ mod tests {
                 NOTIFICATION_CHILD_ORDER_CHANGED,
                 NOTIFICATION_CHILD_ORDER_CHANGED,
                 NOTIFICATION_ENTER_TREE,
+                NOTIFICATION_POST_ENTER_TREE,
                 NOTIFICATION_READY
             ]
         );
@@ -456,6 +480,7 @@ mod tests {
                 NOTIFICATION_POSTINITIALIZE,
                 NOTIFICATION_PARENTED,
                 NOTIFICATION_ENTER_TREE,
+                NOTIFICATION_POST_ENTER_TREE,
                 NOTIFICATION_READY
             ]
         );
@@ -465,6 +490,7 @@ mod tests {
                 NOTIFICATION_POSTINITIALIZE,
                 NOTIFICATION_PARENTED,
                 NOTIFICATION_ENTER_TREE,
+                NOTIFICATION_POST_ENTER_TREE,
                 NOTIFICATION_READY
             ]
         );
@@ -525,11 +551,12 @@ mod tests {
         LifecycleManager::enter_tree(&mut tree, leaf_id);
 
         let log = tree.get_node(leaf_id).unwrap().notification_log();
-        assert_eq!(log.len(), 4);
+        assert_eq!(log.len(), 5);
         assert_eq!(log[0], NOTIFICATION_POSTINITIALIZE);
         assert_eq!(log[1], NOTIFICATION_PARENTED);
         assert_eq!(log[2], NOTIFICATION_ENTER_TREE);
-        assert_eq!(log[3], NOTIFICATION_READY);
+        assert_eq!(log[3], NOTIFICATION_POST_ENTER_TREE);
+        assert_eq!(log[4], NOTIFICATION_READY);
         assert!(tree.get_node(leaf_id).unwrap().is_inside_tree());
         assert!(tree.get_node(leaf_id).unwrap().is_ready());
     }
@@ -582,6 +609,7 @@ mod tests {
                 NOTIFICATION_POSTINITIALIZE,
                 NOTIFICATION_PARENTED,
                 NOTIFICATION_ENTER_TREE,
+                NOTIFICATION_POST_ENTER_TREE,
                 NOTIFICATION_READY,
                 NOTIFICATION_EXIT_TREE,
             ]
@@ -596,6 +624,7 @@ mod tests {
                 NOTIFICATION_CHILD_ORDER_CHANGED,
                 NOTIFICATION_CHILD_ORDER_CHANGED,
                 NOTIFICATION_ENTER_TREE,
+                NOTIFICATION_POST_ENTER_TREE,
                 NOTIFICATION_READY,
                 NOTIFICATION_EXIT_TREE,
             ]

@@ -63,7 +63,12 @@ fn build_pck_archive(files: &[(&str, &[u8])]) -> Vec<u8> {
     buf.extend_from_slice(&4u32.to_le_bytes()); // ver_major
     buf.extend_from_slice(&3u32.to_le_bytes()); // ver_minor
     buf.extend_from_slice(&0u32.to_le_bytes()); // ver_patch
-    buf.extend_from_slice(&0u32.to_le_bytes()); // flags
+    buf.extend_from_slice(&0u32.to_le_bytes()); // pack_flags (no PACK_REL_FILEBASE)
+    // file_base (u64): Godot 4's v2 header carries it right after pack_flags
+    // (file_access_pack.cpp `try_open_pack`). 0 with REL_FILEBASE clear means
+    // entry offsets are absolute. This builder used to omit it, so every
+    // archive it wrote was shifted 8 bytes and failed to parse.
+    buf.extend_from_slice(&0u64.to_le_bytes());
 
     // Reserved: 16 x u32 = 64 bytes
     buf.extend(std::iter::repeat(0u8).take(64));
@@ -72,11 +77,11 @@ fn build_pck_archive(files: &[(&str, &[u8])]) -> Vec<u8> {
     buf.extend_from_slice(&(files.len() as u32).to_le_bytes());
 
     // Calculate where file data starts: after all directory entries.
-    // Each entry: 4 (path_len) + path_bytes (no padding) + 8 (offset) + 8 (size) + 16 (md5)
+    // Each entry: 4 (path_len) + path_bytes (no padding) + 8 (offset) + 8 (size) + 16 (md5) + 4 (flags)
     let dir_start = buf.len();
     let mut dir_size = 0usize;
     for (path, _) in files {
-        dir_size += 4 + path.as_bytes().len() + 8 + 8 + 16;
+        dir_size += 4 + path.as_bytes().len() + 8 + 8 + 16 + 4;
     }
 
     let data_start = dir_start + dir_size;
@@ -94,6 +99,7 @@ fn build_pck_archive(files: &[(&str, &[u8])]) -> Vec<u8> {
         buf.extend_from_slice(&file_offset.to_le_bytes());
         buf.extend_from_slice(&(content.len() as u64).to_le_bytes());
         buf.extend(std::iter::repeat(0u8).take(16)); // md5 zeroes
+        buf.extend_from_slice(&0u32.to_le_bytes()); // per-file flags (Godot 4)
 
         let aligned_size = (content.len() as u64 + 63) & !63;
         file_offset += aligned_size.max(64); // at least 64 byte alignment
@@ -421,11 +427,15 @@ fn pck_file_with_very_long_path() {
 }
 
 #[test]
-fn load_res_binary_always_returns_unsupported_for_valid_data() {
+fn load_res_binary_rejects_a_header_only_resource_without_panicking() {
+    // Binary `.res` loading is implemented now (res_loader.rs), so a VALID
+    // header no longer answers "not yet supported". A header with nothing
+    // after it is truncated: it must come back as an error, never a panic
+    // and never a half-built resource.
     let data = build_res_header(false, false, 4, 3, 5, b"AnimationLibrary");
     let err = load_res_binary(&data, "res://lib.res")
-        .unwrap_err()
+        .expect_err("a truncated binary resource must not load")
         .to_string();
-    assert!(err.contains("not yet supported"));
-    assert!(err.contains("AnimationLibrary"));
+    assert!(!err.contains("not yet supported"), "binary resources ARE supported: {err}");
+    eprintln!("truncated .res error: {err}");
 }

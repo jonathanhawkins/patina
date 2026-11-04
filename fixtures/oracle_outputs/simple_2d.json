@@ -290,10 +290,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "CircleShape2D",
-													"_resource_path": "res://real_godot/simple_2d.tscn::CircleShape2D_ghij5"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -652,14 +649,6 @@
 										"type": "int",
 										"value": 4
 									},
-									"metadata/jump_force": {
-										"type": "float",
-										"value": -450.0
-									},
-									"metadata/move_speed": {
-										"type": "float",
-										"value": 300.0
-									},
 									"modulate": {
 										"type": "Color",
 										"value": {
@@ -692,8 +681,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 100.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -1663,10 +1652,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "CircleShape2D",
-													"_resource_path": "res://real_godot/simple_2d.tscn::CircleShape2D_ghij5"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -2025,14 +2011,6 @@
 										"type": "int",
 										"value": 4
 									},
-									"metadata/jump_force": {
-										"type": "float",
-										"value": -450.0
-									},
-									"metadata/move_speed": {
-										"type": "float",
-										"value": 300.0
-									},
 									"modulate": {
 										"type": "Color",
 										"value": {
@@ -2065,8 +2043,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 100.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -3036,10 +3014,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "CircleShape2D",
-													"_resource_path": "res://real_godot/simple_2d.tscn::CircleShape2D_ghij5"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -3398,14 +3373,6 @@
 										"type": "int",
 										"value": 4
 									},
-									"metadata/jump_force": {
-										"type": "float",
-										"value": -450.0
-									},
-									"metadata/move_speed": {
-										"type": "float",
-										"value": 300.0
-									},
 									"modulate": {
 										"type": "Color",
 										"value": {
@@ -3438,8 +3405,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 100.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -4409,10 +4376,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "CircleShape2D",
-													"_resource_path": "res://real_godot/simple_2d.tscn::CircleShape2D_ghij5"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -4771,14 +4735,6 @@
 										"type": "int",
 										"value": 4
 									},
-									"metadata/jump_force": {
-										"type": "float",
-										"value": -450.0
-									},
-									"metadata/move_speed": {
-										"type": "float",
-										"value": 300.0
-									},
 									"modulate": {
 										"type": "Color",
 										"value": {
@@ -4811,8 +4767,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 100.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -5782,10 +5738,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "CircleShape2D",
-													"_resource_path": "res://real_godot/simple_2d.tscn::CircleShape2D_ghij5"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -6144,14 +6097,6 @@
 										"type": "int",
 										"value": 4
 									},
-									"metadata/jump_force": {
-										"type": "float",
-										"value": -450.0
-									},
-									"metadata/move_speed": {
-										"type": "float",
-										"value": 300.0
-									},
 									"modulate": {
 										"type": "Color",
 										"value": {
@@ -6184,8 +6129,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 100.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -7155,10 +7100,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "CircleShape2D",
-													"_resource_path": "res://real_godot/simple_2d.tscn::CircleShape2D_ghij5"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -7517,14 +7459,6 @@
 										"type": "int",
 										"value": 4
 									},
-									"metadata/jump_force": {
-										"type": "float",
-										"value": -450.0
-									},
-									"metadata/move_speed": {
-										"type": "float",
-										"value": 300.0
-									},
 									"modulate": {
 										"type": "Color",
 										"value": {
@@ -7557,8 +7491,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 100.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -8528,10 +8462,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "CircleShape2D",
-													"_resource_path": "res://real_godot/simple_2d.tscn::CircleShape2D_ghij5"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -8890,14 +8821,6 @@
 										"type": "int",
 										"value": 4
 									},
-									"metadata/jump_force": {
-										"type": "float",
-										"value": -450.0
-									},
-									"metadata/move_speed": {
-										"type": "float",
-										"value": 300.0
-									},
 									"modulate": {
 										"type": "Color",
 										"value": {
@@ -8930,8 +8853,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 100.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -9901,10 +9824,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "CircleShape2D",
-													"_resource_path": "res://real_godot/simple_2d.tscn::CircleShape2D_ghij5"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -10263,14 +10183,6 @@
 										"type": "int",
 										"value": 4
 									},
-									"metadata/jump_force": {
-										"type": "float",
-										"value": -450.0
-									},
-									"metadata/move_speed": {
-										"type": "float",
-										"value": 300.0
-									},
 									"modulate": {
 										"type": "Color",
 										"value": {
@@ -10303,8 +10215,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 100.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -11274,10 +11186,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "CircleShape2D",
-													"_resource_path": "res://real_godot/simple_2d.tscn::CircleShape2D_ghij5"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -11636,14 +11545,6 @@
 										"type": "int",
 										"value": 4
 									},
-									"metadata/jump_force": {
-										"type": "float",
-										"value": -450.0
-									},
-									"metadata/move_speed": {
-										"type": "float",
-										"value": 300.0
-									},
 									"modulate": {
 										"type": "Color",
 										"value": {
@@ -11676,8 +11577,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 100.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -12647,10 +12548,7 @@
 											},
 											"shape": {
 												"type": "Object",
-												"value": {
-													"_resource_class": "CircleShape2D",
-													"_resource_path": "res://real_godot/simple_2d.tscn::CircleShape2D_ghij5"
-												}
+												"value": null
 											},
 											"show_behind_parent": {
 												"type": "bool",
@@ -13009,14 +12907,6 @@
 										"type": "int",
 										"value": 4
 									},
-									"metadata/jump_force": {
-										"type": "float",
-										"value": -450.0
-									},
-									"metadata/move_speed": {
-										"type": "float",
-										"value": 300.0
-									},
 									"modulate": {
 										"type": "Color",
 										"value": {
@@ -13049,8 +12939,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 100.0,
-											"y": 200.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"process_mode": {
@@ -13734,7 +13624,7 @@
 		}
 	],
 	"frames_captured": 10,
-	"generated_at": "2026-03-20T13:39:38",
+	"generated_at": "2026-11-03T18:34:34",
 	"notification_trace": [],
 	"properties": {
 		"children": [
@@ -14022,10 +13912,7 @@
 									},
 									"shape": {
 										"type": "Object",
-										"value": {
-											"_resource_class": "CircleShape2D",
-											"_resource_path": "res://real_godot/simple_2d.tscn::CircleShape2D_ghij5"
-										}
+										"value": null
 									},
 									"show_behind_parent": {
 										"type": "bool",
@@ -14384,14 +14271,6 @@
 								"type": "int",
 								"value": 4
 							},
-							"metadata/jump_force": {
-								"type": "float",
-								"value": -450.0
-							},
-							"metadata/move_speed": {
-								"type": "float",
-								"value": 300.0
-							},
 							"modulate": {
 								"type": "Color",
 								"value": {
@@ -14424,8 +14303,8 @@
 							"position": {
 								"type": "Vector2",
 								"value": {
-									"x": 100.0,
-									"y": 200.0
+									"x": 0.0,
+									"y": 0.0
 								}
 							},
 							"process_mode": {

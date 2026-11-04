@@ -209,6 +209,12 @@ pub struct WebSocketMultiplayerPeer {
     /// (pat-0q2kx.96). Empty — the default — means the server names none, so
     /// the handshake omits `Sec-WebSocket-Protocol` entirely, exactly as before.
     supported_protocols: Vec<String>,
+    /// Godot `WebSocketMultiplayerPeer.inbound_buffer_size` /
+    /// `outbound_buffer_size` (default 65535), handed to every socket this
+    /// peer creates — `_create_peer`, modules/websocket/
+    /// websocket_multiplayer_peer.cpp:44-52.
+    inbound_buffer_size: i64,
+    outbound_buffer_size: i64,
 }
 
 impl WebSocketMultiplayerPeer {
@@ -226,7 +232,31 @@ impl WebSocketMultiplayerPeer {
             is_server_role: false,
             peer_state: MultiplayerPeerState::new(),
             supported_protocols: Vec::new(),
+            inbound_buffer_size: 65535,
+            outbound_buffer_size: 65535,
         }
+    }
+
+    /// Godot `inbound_buffer_size`: applies to sockets created after the call.
+    pub fn set_inbound_buffer_size(&mut self, size: i64) {
+        if size >= 0 {
+            self.inbound_buffer_size = size;
+        }
+    }
+
+    pub fn get_inbound_buffer_size(&self) -> i64 {
+        self.inbound_buffer_size
+    }
+
+    /// Godot `outbound_buffer_size`: applies to sockets created after the call.
+    pub fn set_outbound_buffer_size(&mut self, size: i64) {
+        if size >= 0 {
+            self.outbound_buffer_size = size;
+        }
+    }
+
+    pub fn get_outbound_buffer_size(&self) -> i64 {
+        self.outbound_buffer_size
     }
 
     /// Sets the subprotocols this server accepts, in the server's own order of
@@ -283,7 +313,10 @@ impl WebSocketMultiplayerPeer {
     /// that peer's public API either way.
     pub fn create_client(&mut self, url: &str) -> Result<()> {
         self.close();
+        // Godot's `_create_peer`: the socket inherits this peer's settings.
         let mut client = WebSocketPeer::new();
+        client.set_inbound_buffer_size(self.inbound_buffer_size);
+        client.set_outbound_buffer_size(self.outbound_buffer_size);
         client
             .connect_to_url(url)
             .map_err(|e| NetworkError::Transport(e.to_string()))?;

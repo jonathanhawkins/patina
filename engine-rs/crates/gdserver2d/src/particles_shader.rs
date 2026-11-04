@@ -145,13 +145,16 @@ pub fn parse_particles_shader(source: &str) -> ParticlesProgram {
         let Some(body) = extract_stage_body(source, stage) else {
             continue;
         };
-        for raw in body.split(';') {
-            let stmt = strip_comments(raw);
-            let stmt = stmt.trim();
+        for (raw, nested) in split_statements(&strip_comments(&body)) {
+            let stmt = raw.trim();
             if stmt.is_empty() {
                 continue;
             }
-            match parse_assignment(stmt) {
+            // A statement inside a nested block is CONDITIONAL (an `if`/loop
+            // body): running it unconditionally would be wrong, so report it
+            // like the block header itself.
+            let parsed = if nested { None } else { parse_assignment(stmt) };
+            match parsed {
                 Some(a) => {
                     if stage == "start" {
                         program.start.push(a);
@@ -166,6 +169,31 @@ pub fn parse_particles_shader(source: &str) -> ParticlesProgram {
         }
     }
     program
+}
+
+/// Splits a stage body into statements at `;`, `{` and `}`, tagging each with
+/// whether it sits inside a nested block. Splitting on `;` alone glued the
+/// `}` that closes an `if` onto the NEXT statement, which then failed to parse
+/// and was silently lost.
+fn split_statements(body: &str) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0usize;
+    for c in body.chars() {
+        match c {
+            ';' | '{' | '}' => {
+                out.push((std::mem::take(&mut cur), depth > 0));
+                if c == '{' {
+                    depth += 1;
+                } else if c == '}' {
+                    depth = depth.saturating_sub(1);
+                }
+            }
+            _ => cur.push(c),
+        }
+    }
+    out.push((cur, depth > 0));
+    out
 }
 
 /// The text between a stage's outermost braces, tracking nesting so a nested

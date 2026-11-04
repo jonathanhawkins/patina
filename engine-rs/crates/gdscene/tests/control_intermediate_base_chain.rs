@@ -89,25 +89,30 @@ fn control_intermediate_base_chain() {
     assert!(!node_is_base_button(&tree, label));
 }
 
-/// The three intermediates are abstract in Godot — categories, not widgets a
-/// scene instantiates.
+/// The three intermediates are NOT abstract in Godot, and must not be here.
 ///
-/// ⚠️ Asserted via `is_abstract`, not by expecting `instantiate` to fail:
-/// Patina's `instantiate` does not honour the abstract flag, so an `is_none()`
-/// assertion would fail for an unrelated reason.
+/// ⚠️ This test used to assert the opposite. Upstream registers them as
+/// `GDREGISTER_VIRTUAL_CLASS(BaseButton)` / `GDREGISTER_VIRTUAL_CLASS(Range)`
+/// and a plain `GDREGISTER_CLASS(BoxContainer)`
+/// (`scene/register_scene_types.cpp:466,469,499`). A VIRTUAL class still gets
+/// a `creation_func` (`core/object/class_db.h`) — only
+/// `GDREGISTER_ABSTRACT_CLASS` withholds one — so
+/// `ClassDB.can_instantiate("BaseButton")` is `true` in Godot.
 #[test]
-fn the_intermediate_bases_are_abstract() {
+fn the_intermediate_bases_are_not_abstract() {
     registered();
-    for base in ["BaseButton", "Range", "BoxContainer"] {
+    for class in [
+        "BaseButton",
+        "Range",
+        "BoxContainer",
+        "Button",
+        "ProgressBar",
+        "HBoxContainer",
+        "VBoxContainer",
+    ] {
         assert!(
-            gdobject::class_db::is_abstract(base),
-            "{base} is an abstract base in Godot"
-        );
-    }
-    for leaf in ["Button", "ProgressBar", "HBoxContainer", "VBoxContainer"] {
-        assert!(
-            !gdobject::class_db::is_abstract(leaf),
-            "{leaf} stays instantiable"
+            !gdobject::class_db::is_abstract(class),
+            "{class} is instantiable in Godot (VIRTUAL or plain registration)"
         );
     }
 }

@@ -15,11 +15,10 @@
 //! usual failure here, and it is why this test asserts the properties by name
 //! rather than by count.
 //!
-//! ⚠️ The four still-absent properties are asserted ABSENT on purpose. Nothing
-//! implements `heartbeat_interval`, `inbound_buffer_size`, `max_queued_packets`
-//! or `outbound_buffer_size`, and a declared-but-unbacked property is exactly
-//! the inert state this codebase keeps producing. If someone implements one,
-//! this test should fail and be updated in that change — not before.
+//! ⚠️ A property is registered only in the change that implements it: a
+//! declared-but-unbacked property is exactly the inert state this codebase
+//! keeps producing. All six are implemented now — `heartbeat_interval` and
+//! `max_queued_packets` in pat-s3rrv.79, the two buffer sizes after.
 //!
 //! Surface from `upstream/godot/modules/websocket/doc_classes/WebSocketPeer.xml`.
 //! Module classes keep their docs beside the module, not in `doc/classes/`.
@@ -119,23 +118,23 @@ fn the_heartbeat_and_queue_cap_are_registered_with_godots_defaults() {
     );
 }
 
-/// ⚠️ The unbacked two stay OUT, and that is the assertion.
-///
-/// Registering a property nothing implements makes the inspector show a control
-/// that changes nothing and `class_get_property_list` promise a setting that is
-/// never read. This test exists so that adding one is a deliberate act in the
-/// change that implements it.
+/// The two buffer sizes are registered NOW, in the change that implemented
+/// them in gdplatform (`set_inbound_buffer_size` / `set_outbound_buffer_size`,
+/// behaviour-tested there): inbound = max message length (1009 past it) plus
+/// the inbound queue's byte budget, outbound = per-send bound. They used to be
+/// asserted absent because nothing backed them; registering them without that
+/// was the inert-property state this test guards against.
 #[test]
-fn the_unimplemented_properties_are_deliberately_absent() {
-    // ⚠️ Narrowed in the change that implemented the other two, which is what
-    // the message below asks for. `heartbeat_interval` and `max_queued_packets`
-    // are now implemented in gdplatform and registered; these two are not, and
-    // cannot be until `send` grows an outbound queue for a size to bound.
+fn the_buffer_sizes_are_registered_with_accessors() {
     for name in ["inbound_buffer_size", "outbound_buffer_size"] {
-        assert!(
-            !has_property("WebSocketPeer", name),
-            "`{name}` has no implementation in gdplatform — register it in the \
-             change that implements it, and update this test there",
-        );
+        let class = info("WebSocketPeer");
+        let prop = class
+            .properties
+            .iter()
+            .find(|p| p.name == name)
+            .unwrap_or_else(|| panic!("`{name}` must be registered"));
+        assert_eq!(prop.default_value, Variant::Int(65535), "{name} default");
+        assert_eq!(prop.setter, format!("set_{name}"), "{name} setter");
+        assert_eq!(prop.getter, format!("get_{name}"), "{name} getter");
     }
 }

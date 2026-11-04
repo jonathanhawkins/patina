@@ -1592,6 +1592,23 @@ impl PhysicsServer {
         self.node_to_body.get(&node_id).copied()
     }
 
+    /// The gravity acting on a node's body — Godot's
+    /// `PhysicsDirectBodyState2D.get_total_gravity()`, which
+    /// `PhysicsBody2D.get_gravity()` returns: the space's default gravity
+    /// combined with every overlapping Area2D's override, by the same
+    /// `compute_body_gravity` the stepper uses. A node with no body yet (or
+    /// one this server does not know) feels the space default.
+    pub fn body_total_gravity(&self, node_id: NodeId) -> Vector2 {
+        let default_gravity = self.world.gravity();
+        match self
+            .body_for_node(node_id)
+            .and_then(|id| self.world.get_body(id))
+        {
+            Some(body) => self.area_store.compute_body_gravity(body, default_gravity),
+            None => default_gravity,
+        }
+    }
+
     /// Returns the scene node owning a body, if any (reverse of
     /// [`body_for_node`](Self::body_for_node)). Used to resolve a raycast hit's
     /// `body_id` back to the collider node for `RayCast2D.get_collider`.
@@ -1925,6 +1942,39 @@ impl PhysicsServer {
     pub fn sync_registrations(&mut self, tree: &SceneTree) {
         self.register_bodies(tree);
         self.prune_departed_nodes(tree);
+        self.place_static_bodies(tree);
+    }
+
+    /// Pushes every STATIC body's node transform into the world now.
+    ///
+    /// Godot applies a body's transform to the server the moment it is set
+    /// (`CollisionObject2D::_notification(NOTIFICATION_TRANSFORM_CHANGED)` ->
+    /// `body_set_state(.., BODY_STATE_TRANSFORM, ..)`), so a query issued on
+    /// the next tick sees the body where it now is. Here the transform only
+    /// reached the world in `sync_to_physics`, at the END of the tick — after
+    /// the RayCast2D/ShapeCast2D pass — so moving a wall aside left every cast
+    /// reporting the old hit for one extra tick.
+    ///
+    /// ⚠️ Static only. A rigid body's transform belongs to the solver, and an
+    /// `AnimatableBody2D` derives its rider-carrying velocity from the motion
+    /// `sync_to_physics` observes, which placing it early would zero.
+    fn place_static_bodies(&mut self, tree: &SceneTree) {
+        for (&node_id, &body_id) in &self.node_to_body {
+            let Some(node) = tree.get_node(node_id) else {
+                continue;
+            };
+            if node.class_name() != "StaticBody2D" {
+                continue;
+            }
+            let pos = crate::node2d::get_global_position(tree, node_id);
+            let rot = crate::node2d::get_global_rotation(tree, node_id);
+            if let Some(body) = self.world.get_body_mut(body_id) {
+                if body.body_type == gdphysics2d::body::BodyType::Static {
+                    body.position = pos;
+                    body.rotation = rot;
+                }
+            }
+        }
     }
 
     /// Frees every registration whose scene node has left the tree.
@@ -2104,12 +2154,23 @@ impl PhysicsServer {
                 Variant::PackedByteArray(bytes) => bytes,
                 _ => Vec::new(),
             };
-            let tile_size = match node.get_property("tile_size") {
-                Variant::Vector2i(v) => v,
-                Variant::Vector2(v) => Vector2i::new(v.x as i32, v.y as i32),
-                // Godot's TileSet default.
-                _ => Vector2i::new(16, 16),
+            // The TILE SET's cell size — the flattened `__tile_set__tile_size`
+            // the renderer places cells with. Reading only a node-level
+            // `tile_size` (which a TileMapLayer does not have) fell back to
+            // 16, so every tile body of a 64 px tile set sat at a QUARTER of
+            // its drawn position: the official 2D Platformer demo's level
+            // collided in a corner near the origin and its player fell
+            // through the visible floor. A node-level `tile_size` (legacy
+            // TileMap, hand-built trees) is still honoured after it.
+            let as_size = |v: Variant| match v {
+                Variant::Vector2i(v) => Some(v),
+                Variant::Vector2(v) => Some(Vector2i::new(v.x as i32, v.y as i32)),
+                _ => None,
             };
+            let tile_size = as_size(node.get_property(crate::tilemap::TILE_SET_TILE_SIZE))
+                .or_else(|| as_size(node.get_property("tile_size")))
+                // Godot's TileSet default.
+                .unwrap_or_else(|| Vector2i::new(16, 16));
             let origin = crate::node2d::get_global_position(tree, node_id);
 
             // Fingerprint everything that changes the generated bodies. Cheap
@@ -2139,12 +2200,30 @@ impl PhysicsServer {
                 &cells,
                 tile_size,
                 &physics_sources,
-                |source_id, atlas| {
-                    let points = match node
-                        .get_property(&crate::tilemap::tile_physics_points_key(source_id, atlas))
-                    {
-                        Variant::PackedVector2Array(p) => p,
-                        _ => Vec::new(),
+                |source_id, atlas, alternative| {
+                    // A cell painted with an alternative uses THAT tile's
+                    // polygon (a flipped variant's is mirrored), falling back
+                    // to the default tile's when the alternative declares none.
+                    let alt_points = (alternative != 0)
+                        .then(|| {
+                            node.get_property(&crate::tilemap::tile_physics_points_alt_key(
+                                source_id,
+                                atlas,
+                                alternative,
+                            ))
+                        })
+                        .and_then(|v| match v {
+                            Variant::PackedVector2Array(p) => Some(p),
+                            _ => None,
+                        });
+                    let points = match alt_points {
+                        Some(p) => p,
+                        None => match node.get_property(&crate::tilemap::tile_physics_points_key(
+                            source_id, atlas,
+                        )) {
+                            Variant::PackedVector2Array(p) => p,
+                            _ => Vec::new(),
+                        },
                     };
                     let one_way = matches!(
                         node.get_property(&crate::tilemap::tile_physics_one_way_key(
@@ -2162,6 +2241,21 @@ impl PhysicsServer {
                 tile_size,
                 origin,
             );
+            // The TileSet physics layer's bits (Godot default 1 and 1).
+            let bits = |key: &str| match node.get_property(key) {
+                Variant::Int(b) => b.max(0) as u32,
+                _ => 1,
+            };
+            let (layer, mask) = (
+                bits(crate::tilemap::TILE_PHYSICS_COLLISION_LAYER),
+                bits(crate::tilemap::TILE_PHYSICS_COLLISION_MASK),
+            );
+            for id in &result.body_ids {
+                if let Some(b) = self.world.get_body_mut(*id) {
+                    b.collision_layer = layer;
+                    b.collision_mask = mask;
+                }
+            }
             self.tilemap_bodies.insert(node_id, result.body_ids);
             self.tilemap_fingerprints.insert(node_id, fingerprint);
         }
@@ -3145,6 +3239,9 @@ impl PhysicsServer {
             return false;
         };
         let mut character = PhysicsCharacterBody2D::new(body.position, body.shape.clone());
+        // The CollisionShape2D's offset inside the body — without it the
+        // character collided as if its shape were centred on the origin.
+        character.shape_offset = body.shape_transform;
         character.collision_layer = body.collision_layer;
         character.collision_mask = body.collision_mask;
         let obstacles = self.obstacle_bodies(node_id);
@@ -3305,6 +3402,9 @@ impl PhysicsServer {
         // start and end positions (pat-s3rrv.97).
         let start_position = body.position;
         let mut character = PhysicsCharacterBody2D::new(body.position, body.shape.clone());
+        // The CollisionShape2D's offset inside the body — without it the
+        // character collided as if its shape were centred on the origin.
+        character.shape_offset = body.shape_transform;
         character.collision_layer = body.collision_layer;
         character.collision_mask = body.collision_mask;
         character.up_direction = vec2_prop(tree, node_id, "up_direction", Vector2::new(0.0, -1.0));

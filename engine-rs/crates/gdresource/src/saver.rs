@@ -395,6 +395,13 @@ fn format_variant(v: &Variant) -> String {
                 .replace('\t', "\\t");
             format!("&\"{escaped}\"")
         }
+        // Godot writes `NodePath("Player/Sprite2D")`. This fell through to the
+        // Display impl and wrote the BARE path, which no loader — ours or
+        // Godot's — can read back ("unrecognized value: Player/Sprite2D").
+        Variant::NodePath(np) => {
+            let escaped = np.to_string().replace('\\', "\\\\").replace('"', "\\\"");
+            format!("NodePath(\"{escaped}\")")
+        }
         // `{"key": value, ...}` with quoted keys, per `parse_dictionary`.
         //
         // ⚠️ SORTED by formatted key. `Dictionary` is hash-backed, so emitting

@@ -110,15 +110,18 @@ impl CSGBox3D {
             Vector3::new(hx, hy, -hz),   // 7
         ];
 
-        // 12 triangles (2 per face, CCW winding)
+        // 12 triangles (2 per face), wound CLOCKWISE seen from outside —
+        // Godot's front-face convention (`doc/classes/ArrayMesh.xml:49`), the
+        // same winding as the CSG sphere and cylinder. This box used to be the
+        // one CCW primitive, so under back-face culling it drew inside-out.
         let indices = vec![
             // Front
-            0, 1, 2, 0, 2, 3, // Back
-            4, 5, 6, 4, 6, 7, // Top
-            3, 2, 7, 3, 7, 6, // Bottom
-            5, 4, 1, 5, 1, 0, // Right
-            1, 4, 7, 1, 7, 2, // Left
-            5, 0, 3, 5, 3, 6,
+            0, 2, 1, 0, 3, 2, // Back
+            4, 6, 5, 4, 7, 6, // Top
+            3, 7, 2, 3, 6, 7, // Bottom
+            5, 1, 4, 5, 0, 1, // Right
+            1, 7, 4, 1, 2, 7, // Left
+            5, 3, 0, 5, 6, 3,
         ];
 
         Mesh3D {

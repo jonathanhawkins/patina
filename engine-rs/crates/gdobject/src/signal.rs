@@ -26,7 +26,22 @@ pub struct DeferredCall {
     args: Vec<Variant>,
 }
 
+impl std::fmt::Debug for DeferredCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeferredCall")
+            .field("method", &self.connection.method)
+            .field("args", &self.args)
+            .finish()
+    }
+}
+
 impl DeferredCall {
+    /// Whether this deferred call runs a Rust callback (rather than naming a
+    /// script/native method the caller must dispatch itself).
+    pub fn has_callback(&self) -> bool {
+        self.connection.has_callback()
+    }
+
     /// Execute the deferred call.
     pub fn call(&self) -> Variant {
         self.connection.call(&self.args)
@@ -338,7 +353,15 @@ impl Signal {
     ///
     /// One-shot connections are automatically removed after firing.
     pub fn emit(&mut self, args: &[Variant]) -> Vec<Variant> {
-        let results: Vec<Variant> = self.connections.iter().map(|c| c.call(args)).collect();
+        // Each connection gets ITS resolved argument list — unbinds dropped,
+        // binds appended — as `emit_collecting_deferred` already did. This
+        // passed the raw signal args, so every `.bind()`/`.unbind()` on a
+        // callback connection was silently ignored on the immediate path.
+        let results: Vec<Variant> = self
+            .connections
+            .iter()
+            .map(|c| c.call(&c.resolve_args(args)))
+            .collect();
         self.connections.retain(|c| !c.one_shot);
         results
     }

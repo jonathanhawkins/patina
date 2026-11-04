@@ -107,20 +107,13 @@ impl AwaitTarget {
                 name: name.clone(),
                 object_id: Some(*object_id),
             }),
-            // Bare float/int → treat as timer seconds (test convenience).
-            Variant::Float(f) => Some(Self::Timer {
-                remaining: (*f as f32).max(0.0),
-            }),
-            Variant::Int(i) if *i >= 0 => Some(Self::Timer {
-                remaining: *i as f32,
-            }),
-            // Bare string → signal name.
-            // A bare string names a signal with no owning object, so it stays
-            // in the legacy name-only form.
-            Variant::String(s) if !s.is_empty() => Some(Self::Signal {
-                name: s.clone(),
-                object_id: None,
-            }),
+            // Every other value — a number, a String, an array, Nil — is NOT
+            // awaitable: Godot's OPCODE_AWAIT returns it immediately as the
+            // await's result (`result.get_type() != Variant::SIGNAL` →
+            // `*target = result`, modules/gdscript/gdscript_vm.cpp). This used
+            // to map a bare number to a timer and a bare String to a signal
+            // name "for test convenience", so `var n = await compute()` slept
+            // `n` seconds and `await get_name()` parked forever.
             _ => None,
         }
     }

@@ -83,8 +83,12 @@ fn editor_play_game_view_wiring_test_play_switches_to_game_and_renders() {
         HTML.contains("game-screen-img"),
         "the rendered frame is mirrored into the Game view's screen image"
     );
+    // The live feed is the frame pump's long-poll of `/api/viewport?after=<seq>`
+    // (an uncompressed BMP, ~7x cheaper to encode than PNG — see the comment
+    // on `refreshViewport` in editor_ui.rs). The old `/api/viewport/png` poll
+    // was deliberately replaced; pin the endpoint the client really uses.
     assert!(
-        HTML.contains("/api/viewport/png"),
+        HTML.contains("fetch('/api/viewport?after='"),
         "the client polls the runtime-rendered frame to display it"
     );
 

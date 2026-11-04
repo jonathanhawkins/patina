@@ -146,7 +146,7 @@ pub fn local_transform_of(node: &crate::node::Node) -> Transform3D {
 ///
 /// `get_derived_property` can compute both on demand, but that only serves
 /// callers who go through it; a direct `Node::get_property` cannot.
-fn store_local_transform(node: &mut crate::node::Node, t: Transform3D) {
+pub(crate) fn store_local_transform(node: &mut crate::node::Node, t: Transform3D) {
     let (euler, scale) = decompose_basis_ordered(t.basis, rotation_order_of(node));
     node.set_property("transform", Variant::Transform3D(t));
     node.set_property("position", Variant::Vector3(t.origin));
@@ -720,9 +720,16 @@ pub fn set_projection_type(tree: &mut SceneTree, node_id: NodeId, projection: &s
 }
 
 /// Sets the `"current"` property on a Camera3D node.
+///
+/// Godot semantics: making a camera current clears every other Camera3D's
+/// flag (one current camera per viewport — `Camera3D::make_current`). This
+/// helper used to set only this camera's flag, so a second camera made current
+/// alongside the auto-current first one never rendered.
 pub fn set_camera_current(tree: &mut SceneTree, node_id: NodeId, current: bool) {
-    if let Some(node) = tree.get_node_mut(node_id) {
-        node.set_property("current", Variant::Bool(current));
+    if current {
+        crate::camera3d::make_current(tree, node_id);
+    } else if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property("current", Variant::Bool(false));
     }
 }
 

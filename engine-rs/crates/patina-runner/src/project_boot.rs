@@ -622,10 +622,30 @@ fn boot_from_project_text(
 /// failing the boot: Godot loads the rest of the scene when one script is
 /// broken, and a project with one bad file should still start.
 pub fn attach_scripts(tree: &mut SceneTree, project_dir: &Path) -> usize {
+    let ids = tree.all_nodes_in_tree_order();
+    attach_scripts_to(tree, ids, project_dir)
+}
+
+/// [`attach_scripts`] over a DETACHED subtree (not yet reachable from the
+/// root), so a scene's scripts are attached BEFORE its one lifecycle pass —
+/// attaching after it enters would skip every `_enter_tree`/`_ready`.
+pub fn attach_subtree_scripts(tree: &mut SceneTree, subtree_root: NodeId, project_dir: &Path) -> usize {
+    let mut ids = Vec::new();
+    let mut stack = vec![subtree_root];
+    while let Some(id) = stack.pop() {
+        if let Some(node) = tree.get_node(id) {
+            stack.extend(node.children().iter().rev().copied());
+            ids.push(id);
+        }
+    }
+    attach_scripts_to(tree, ids, project_dir)
+}
+
+fn attach_scripts_to(tree: &mut SceneTree, ids: Vec<NodeId>, project_dir: &Path) -> usize {
     // Collected first: attaching borrows the tree mutably, and the walk needs it
     // immutably.
     let mut scripts_to_load: Vec<(NodeId, PathBuf)> = Vec::new();
-    for node_id in tree.all_nodes_in_tree_order() {
+    for node_id in ids {
         if tree.get_script(node_id).is_some() {
             continue;
         }
@@ -839,7 +859,9 @@ fn load_scene_into_tree(
         .map_err(|e| format!("failed to read scene '{res_path}': {e}"))?;
     let packed = PackedScene::from_tscn(&source)
         .map_err(|e| format!("failed to parse scene '{res_path}': {e}"))?;
-    add_packed_scene_to_tree(tree, parent, &packed)
+    // Runtime load: expand every `instance=` sub-scene (the plain instancer
+    // leaves each as a childless placeholder `Node`).
+    gdscene::packed_scene::add_packed_scene_to_tree_from_res(tree, parent, &packed)
         .map_err(|e| format!("failed to instance scene '{res_path}': {e}"))
 }
 

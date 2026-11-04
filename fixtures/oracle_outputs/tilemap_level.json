@@ -62,8 +62,8 @@
 											"motion_scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 0.5,
-													"y": 0.5
+													"x": 1.0,
+													"y": 1.0
 												}
 											},
 											"physics_interpolation_mode": {
@@ -585,8 +585,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 128.0,
-													"y": 192.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -799,8 +799,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 256.0,
-													"y": 128.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -1013,8 +1013,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 384.0,
-													"y": 192.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -1264,14 +1264,6 @@
 										"type": "Object",
 										"value": null
 									},
-									"metadata/enemy_types": {
-										"type": "PackedStringArray",
-										"value": "[\"slime\", \"bat\", \"skeleton\"]"
-									},
-									"metadata/spawn_positions": {
-										"type": "PackedVector2Array",
-										"value": "[(64.0, 320.0), (512.0, 320.0), (256.0, 64.0)]"
-									},
 									"modulate": {
 										"type": "Color",
 										"value": {
@@ -1403,14 +1395,6 @@
 									"material": {
 										"type": "Object",
 										"value": null
-									},
-									"metadata/level_bounds": {
-										"type": "PackedFloat32Array",
-										"value": "[0.0, 0.0, 1024.0, 640.0]"
-									},
-									"metadata/tile_indices": {
-										"type": "PackedInt32Array",
-										"value": "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
 									},
 									"modulate": {
 										"type": "Color",
@@ -2182,8 +2166,8 @@
 											"motion_scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 0.5,
-													"y": 0.5
+													"x": 1.0,
+													"y": 1.0
 												}
 											},
 											"physics_interpolation_mode": {
@@ -2705,8 +2689,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 128.0,
-													"y": 192.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -2919,8 +2903,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 256.0,
-													"y": 128.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -3133,8 +3117,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 384.0,
-													"y": 192.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -3384,14 +3368,6 @@
 										"type": "Object",
 										"value": null
 									},
-									"metadata/enemy_types": {
-										"type": "PackedStringArray",
-										"value": "[\"slime\", \"bat\", \"skeleton\"]"
-									},
-									"metadata/spawn_positions": {
-										"type": "PackedVector2Array",
-										"value": "[(64.0, 320.0), (512.0, 320.0), (256.0, 64.0)]"
-									},
 									"modulate": {
 										"type": "Color",
 										"value": {
@@ -3523,14 +3499,6 @@
 									"material": {
 										"type": "Object",
 										"value": null
-									},
-									"metadata/level_bounds": {
-										"type": "PackedFloat32Array",
-										"value": "[0.0, 0.0, 1024.0, 640.0]"
-									},
-									"metadata/tile_indices": {
-										"type": "PackedInt32Array",
-										"value": "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
 									},
 									"modulate": {
 										"type": "Color",
@@ -4302,8 +4270,8 @@
 											"motion_scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 0.5,
-													"y": 0.5
+													"x": 1.0,
+													"y": 1.0
 												}
 											},
 											"physics_interpolation_mode": {
@@ -4825,8 +4793,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 128.0,
-													"y": 192.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -5039,8 +5007,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 256.0,
-													"y": 128.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -5253,8 +5221,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 384.0,
-													"y": 192.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -5504,14 +5472,6 @@
 										"type": "Object",
 										"value": null
 									},
-									"metadata/enemy_types": {
-										"type": "PackedStringArray",
-										"value": "[\"slime\", \"bat\", \"skeleton\"]"
-									},
-									"metadata/spawn_positions": {
-										"type": "PackedVector2Array",
-										"value": "[(64.0, 320.0), (512.0, 320.0), (256.0, 64.0)]"
-									},
 									"modulate": {
 										"type": "Color",
 										"value": {
@@ -5643,14 +5603,6 @@
 									"material": {
 										"type": "Object",
 										"value": null
-									},
-									"metadata/level_bounds": {
-										"type": "PackedFloat32Array",
-										"value": "[0.0, 0.0, 1024.0, 640.0]"
-									},
-									"metadata/tile_indices": {
-										"type": "PackedInt32Array",
-										"value": "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
 									},
 									"modulate": {
 										"type": "Color",
@@ -6422,8 +6374,8 @@
 											"motion_scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 0.5,
-													"y": 0.5
+													"x": 1.0,
+													"y": 1.0
 												}
 											},
 											"physics_interpolation_mode": {
@@ -6945,8 +6897,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 128.0,
-													"y": 192.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -7159,8 +7111,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 256.0,
-													"y": 128.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -7373,8 +7325,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 384.0,
-													"y": 192.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -7624,14 +7576,6 @@
 										"type": "Object",
 										"value": null
 									},
-									"metadata/enemy_types": {
-										"type": "PackedStringArray",
-										"value": "[\"slime\", \"bat\", \"skeleton\"]"
-									},
-									"metadata/spawn_positions": {
-										"type": "PackedVector2Array",
-										"value": "[(64.0, 320.0), (512.0, 320.0), (256.0, 64.0)]"
-									},
 									"modulate": {
 										"type": "Color",
 										"value": {
@@ -7763,14 +7707,6 @@
 									"material": {
 										"type": "Object",
 										"value": null
-									},
-									"metadata/level_bounds": {
-										"type": "PackedFloat32Array",
-										"value": "[0.0, 0.0, 1024.0, 640.0]"
-									},
-									"metadata/tile_indices": {
-										"type": "PackedInt32Array",
-										"value": "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
 									},
 									"modulate": {
 										"type": "Color",
@@ -8542,8 +8478,8 @@
 											"motion_scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 0.5,
-													"y": 0.5
+													"x": 1.0,
+													"y": 1.0
 												}
 											},
 											"physics_interpolation_mode": {
@@ -9065,8 +9001,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 128.0,
-													"y": 192.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -9279,8 +9215,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 256.0,
-													"y": 128.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -9493,8 +9429,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 384.0,
-													"y": 192.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -9744,14 +9680,6 @@
 										"type": "Object",
 										"value": null
 									},
-									"metadata/enemy_types": {
-										"type": "PackedStringArray",
-										"value": "[\"slime\", \"bat\", \"skeleton\"]"
-									},
-									"metadata/spawn_positions": {
-										"type": "PackedVector2Array",
-										"value": "[(64.0, 320.0), (512.0, 320.0), (256.0, 64.0)]"
-									},
 									"modulate": {
 										"type": "Color",
 										"value": {
@@ -9883,14 +9811,6 @@
 									"material": {
 										"type": "Object",
 										"value": null
-									},
-									"metadata/level_bounds": {
-										"type": "PackedFloat32Array",
-										"value": "[0.0, 0.0, 1024.0, 640.0]"
-									},
-									"metadata/tile_indices": {
-										"type": "PackedInt32Array",
-										"value": "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
 									},
 									"modulate": {
 										"type": "Color",
@@ -10662,8 +10582,8 @@
 											"motion_scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 0.5,
-													"y": 0.5
+													"x": 1.0,
+													"y": 1.0
 												}
 											},
 											"physics_interpolation_mode": {
@@ -11185,8 +11105,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 128.0,
-													"y": 192.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -11399,8 +11319,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 256.0,
-													"y": 128.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -11613,8 +11533,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 384.0,
-													"y": 192.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -11864,14 +11784,6 @@
 										"type": "Object",
 										"value": null
 									},
-									"metadata/enemy_types": {
-										"type": "PackedStringArray",
-										"value": "[\"slime\", \"bat\", \"skeleton\"]"
-									},
-									"metadata/spawn_positions": {
-										"type": "PackedVector2Array",
-										"value": "[(64.0, 320.0), (512.0, 320.0), (256.0, 64.0)]"
-									},
 									"modulate": {
 										"type": "Color",
 										"value": {
@@ -12003,14 +11915,6 @@
 									"material": {
 										"type": "Object",
 										"value": null
-									},
-									"metadata/level_bounds": {
-										"type": "PackedFloat32Array",
-										"value": "[0.0, 0.0, 1024.0, 640.0]"
-									},
-									"metadata/tile_indices": {
-										"type": "PackedInt32Array",
-										"value": "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
 									},
 									"modulate": {
 										"type": "Color",
@@ -12782,8 +12686,8 @@
 											"motion_scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 0.5,
-													"y": 0.5
+													"x": 1.0,
+													"y": 1.0
 												}
 											},
 											"physics_interpolation_mode": {
@@ -13305,8 +13209,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 128.0,
-													"y": 192.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -13519,8 +13423,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 256.0,
-													"y": 128.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -13733,8 +13637,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 384.0,
-													"y": 192.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -13984,14 +13888,6 @@
 										"type": "Object",
 										"value": null
 									},
-									"metadata/enemy_types": {
-										"type": "PackedStringArray",
-										"value": "[\"slime\", \"bat\", \"skeleton\"]"
-									},
-									"metadata/spawn_positions": {
-										"type": "PackedVector2Array",
-										"value": "[(64.0, 320.0), (512.0, 320.0), (256.0, 64.0)]"
-									},
 									"modulate": {
 										"type": "Color",
 										"value": {
@@ -14123,14 +14019,6 @@
 									"material": {
 										"type": "Object",
 										"value": null
-									},
-									"metadata/level_bounds": {
-										"type": "PackedFloat32Array",
-										"value": "[0.0, 0.0, 1024.0, 640.0]"
-									},
-									"metadata/tile_indices": {
-										"type": "PackedInt32Array",
-										"value": "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
 									},
 									"modulate": {
 										"type": "Color",
@@ -14902,8 +14790,8 @@
 											"motion_scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 0.5,
-													"y": 0.5
+													"x": 1.0,
+													"y": 1.0
 												}
 											},
 											"physics_interpolation_mode": {
@@ -15425,8 +15313,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 128.0,
-													"y": 192.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -15639,8 +15527,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 256.0,
-													"y": 128.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -15853,8 +15741,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 384.0,
-													"y": 192.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -16104,14 +15992,6 @@
 										"type": "Object",
 										"value": null
 									},
-									"metadata/enemy_types": {
-										"type": "PackedStringArray",
-										"value": "[\"slime\", \"bat\", \"skeleton\"]"
-									},
-									"metadata/spawn_positions": {
-										"type": "PackedVector2Array",
-										"value": "[(64.0, 320.0), (512.0, 320.0), (256.0, 64.0)]"
-									},
 									"modulate": {
 										"type": "Color",
 										"value": {
@@ -16243,14 +16123,6 @@
 									"material": {
 										"type": "Object",
 										"value": null
-									},
-									"metadata/level_bounds": {
-										"type": "PackedFloat32Array",
-										"value": "[0.0, 0.0, 1024.0, 640.0]"
-									},
-									"metadata/tile_indices": {
-										"type": "PackedInt32Array",
-										"value": "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
 									},
 									"modulate": {
 										"type": "Color",
@@ -17022,8 +16894,8 @@
 											"motion_scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 0.5,
-													"y": 0.5
+													"x": 1.0,
+													"y": 1.0
 												}
 											},
 											"physics_interpolation_mode": {
@@ -17545,8 +17417,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 128.0,
-													"y": 192.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -17759,8 +17631,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 256.0,
-													"y": 128.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -17973,8 +17845,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 384.0,
-													"y": 192.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -18224,14 +18096,6 @@
 										"type": "Object",
 										"value": null
 									},
-									"metadata/enemy_types": {
-										"type": "PackedStringArray",
-										"value": "[\"slime\", \"bat\", \"skeleton\"]"
-									},
-									"metadata/spawn_positions": {
-										"type": "PackedVector2Array",
-										"value": "[(64.0, 320.0), (512.0, 320.0), (256.0, 64.0)]"
-									},
 									"modulate": {
 										"type": "Color",
 										"value": {
@@ -18363,14 +18227,6 @@
 									"material": {
 										"type": "Object",
 										"value": null
-									},
-									"metadata/level_bounds": {
-										"type": "PackedFloat32Array",
-										"value": "[0.0, 0.0, 1024.0, 640.0]"
-									},
-									"metadata/tile_indices": {
-										"type": "PackedInt32Array",
-										"value": "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
 									},
 									"modulate": {
 										"type": "Color",
@@ -19142,8 +18998,8 @@
 											"motion_scale": {
 												"type": "Vector2",
 												"value": {
-													"x": 0.5,
-													"y": 0.5
+													"x": 1.0,
+													"y": 1.0
 												}
 											},
 											"physics_interpolation_mode": {
@@ -19665,8 +19521,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 128.0,
-													"y": 192.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -19879,8 +19735,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 256.0,
-													"y": 128.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -20093,8 +19949,8 @@
 											"position": {
 												"type": "Vector2",
 												"value": {
-													"x": 384.0,
-													"y": 192.0
+													"x": 0.0,
+													"y": 0.0
 												}
 											},
 											"priority": {
@@ -20344,14 +20200,6 @@
 										"type": "Object",
 										"value": null
 									},
-									"metadata/enemy_types": {
-										"type": "PackedStringArray",
-										"value": "[\"slime\", \"bat\", \"skeleton\"]"
-									},
-									"metadata/spawn_positions": {
-										"type": "PackedVector2Array",
-										"value": "[(64.0, 320.0), (512.0, 320.0), (256.0, 64.0)]"
-									},
 									"modulate": {
 										"type": "Color",
 										"value": {
@@ -20483,14 +20331,6 @@
 									"material": {
 										"type": "Object",
 										"value": null
-									},
-									"metadata/level_bounds": {
-										"type": "PackedFloat32Array",
-										"value": "[0.0, 0.0, 1024.0, 640.0]"
-									},
-									"metadata/tile_indices": {
-										"type": "PackedInt32Array",
-										"value": "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
 									},
 									"modulate": {
 										"type": "Color",
@@ -21204,7 +21044,7 @@
 		}
 	],
 	"frames_captured": 10,
-	"generated_at": "2026-03-20T13:39:39",
+	"generated_at": "2026-11-03T18:34:40",
 	"notification_trace": [],
 	"properties": {
 		"children": [
@@ -21264,8 +21104,8 @@
 									"motion_scale": {
 										"type": "Vector2",
 										"value": {
-											"x": 0.5,
-											"y": 0.5
+											"x": 1.0,
+											"y": 1.0
 										}
 									},
 									"physics_interpolation_mode": {
@@ -21787,8 +21627,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 128.0,
-											"y": 192.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"priority": {
@@ -22001,8 +21841,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 256.0,
-											"y": 128.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"priority": {
@@ -22215,8 +22055,8 @@
 									"position": {
 										"type": "Vector2",
 										"value": {
-											"x": 384.0,
-											"y": 192.0
+											"x": 0.0,
+											"y": 0.0
 										}
 									},
 									"priority": {
@@ -22466,14 +22306,6 @@
 								"type": "Object",
 								"value": null
 							},
-							"metadata/enemy_types": {
-								"type": "PackedStringArray",
-								"value": "[\"slime\", \"bat\", \"skeleton\"]"
-							},
-							"metadata/spawn_positions": {
-								"type": "PackedVector2Array",
-								"value": "[(64.0, 320.0), (512.0, 320.0), (256.0, 64.0)]"
-							},
 							"modulate": {
 								"type": "Color",
 								"value": {
@@ -22605,14 +22437,6 @@
 							"material": {
 								"type": "Object",
 								"value": null
-							},
-							"metadata/level_bounds": {
-								"type": "PackedFloat32Array",
-								"value": "[0.0, 0.0, 1024.0, 640.0]"
-							},
-							"metadata/tile_indices": {
-								"type": "PackedInt32Array",
-								"value": "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
 							},
 							"modulate": {
 								"type": "Color",

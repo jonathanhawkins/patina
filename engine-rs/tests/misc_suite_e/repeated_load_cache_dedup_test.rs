@@ -335,10 +335,10 @@ fn unified_invalidate_then_reload_by_uid() {
 fn unified_path_then_uid_dedup() {
     // Load by path first, then by UID — same Arc.
     let mut ul = UnifiedLoader::new(CountingLoader::new());
-    ul.register_uid_str("uid://shared_ref", "res://shared.tres");
+    ul.register_uid_str("uid://sharedref", "res://shared.tres");
 
     let by_path = ul.load("res://shared.tres").unwrap();
-    let by_uid = ul.load("uid://shared_ref").unwrap();
+    let by_uid = ul.load("uid://sharedref").unwrap();
 
     assert!(Arc::ptr_eq(&by_path, &by_uid), "path then UID must dedup");
     assert_eq!(ul.cache_len(), 1);

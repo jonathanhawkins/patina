@@ -320,6 +320,34 @@ impl GDScriptNodeInstance {
 }
 
 impl ScriptInstance for GDScriptNodeInstance {
+    fn script_class_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut def = Some(&self.instance.class_def);
+        while let Some(d) = def {
+            if let Some(n) = &d.name {
+                names.push(n.clone());
+            }
+            match d.base.as_deref() {
+                Some(base) => def = Some(base),
+                None => {
+                    // `extends Enemy` with no parsed base attached: the parent
+                    // is still a class this script IS. A path (`extends
+                    // "res://x.gd"`) or an engine class is not a script
+                    // class name and is answered by the native check.
+                    if let Some(p) = &d.parent_class {
+                        if !p.contains('/') && !p.ends_with(".gd")
+                            && !gdobject::class_db::class_exists(p)
+                        {
+                            names.push(p.clone());
+                        }
+                    }
+                    def = None;
+                }
+            }
+        }
+        names
+    }
+
     fn rpc_methods(&self) -> Vec<(String, Vec<String>)> {
         self.rpc_methods_impl()
     }
@@ -357,8 +385,20 @@ impl ScriptInstance for GDScriptNodeInstance {
         self.interpreter.take_output()
     }
 
+    fn drain_print_output_stamped(&mut self) -> Vec<(u64, String)> {
+        self.interpreter.take_output_stamped()
+    }
+
+    fn drain_error_output(&mut self) -> Vec<String> {
+        self.interpreter.take_errors()
+    }
+
     fn get_property(&self, name: &str) -> Option<Variant> {
-        self.instance.properties.get(name).cloned()
+        self.instance
+            .properties
+            .get(name)
+            .or_else(|| self.instance.constants.get(name))
+            .cloned()
     }
 
     fn set_property(&mut self, name: &str, value: Variant) -> bool {
@@ -1063,6 +1103,7 @@ impl SceneTreeAccessor {
         // above, so a non-zero one points at a live server. The server is a
         // sibling of the tree, never inside it, so this borrow cannot alias the
         // tree pointer.
+        // SAFETY: (summary of the above) non-zero addr = live, non-aliasing server.
         Some(unsafe { &*(addr as *const crate::physics_server_3d::PhysicsServer3D) })
     }
 
@@ -2593,6 +2634,11 @@ impl SceneAccess for SceneTreeAccessor {
             return Variant::Nil;
         }
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // `Control.layout_mode` is computed from the parent on every read
+        // (control.cpp:938) — see `control::layout_mode`.
+        if prop == "layout_mode" && crate::control::node_is_control(self.tree(), nid) {
+            return Variant::Int(crate::control::layout_mode(self.tree(), nid));
+        }
         // An AnimationTree's `parameters/...` values live on the attached graph,
         // which evaluation reads and writes — so report those rather than the
         // node's stored copy, mirroring Godot's `AnimationTree.get()`
@@ -2655,7 +2701,13 @@ impl SceneAccess for SceneTreeAccessor {
             if let Some(value) = crate::node3d::get_derived_property(self.tree(), nid, prop) {
                 return value;
             }
+            if let Some(value) = crate::node2d::get_derived_property(self.tree(), nid, prop) {
+                return value;
+            }
             let value = n.get_property(prop);
+            if let Some(resource) = sub_resource_value(n, prop, &value) {
+                return resource;
+            }
             if !value.is_nil() {
                 return value;
             }
@@ -2666,7 +2718,21 @@ impl SceneAccess for SceneTreeAccessor {
             // found `Nil`, so the interpreter's "is this a node property?" gate
             // said no and the read-modify-write died with "cannot assign member
             // 'y' on Nil" mid-frame — the body never fell (pat-0q2kx.33).
-            return builtin_property_default(n.class_name(), prop).unwrap_or(Variant::Nil);
+            if let Some(default) = builtin_property_default(n.class_name(), prop) {
+                return default;
+            }
+            // A built-in signal read as a value — `body_entered.connect(..)`,
+            // `$Button.pressed.connect(..)` — names this node's signal, as the
+            // SceneTree branch above already does for the tree's own signals.
+            // It read back Nil, so the canonical Godot 4 connect idiom failed
+            // with "undefined variable: 'body_entered'".
+            if gdobject::class_db::class_has_signal(n.class_name(), prop) {
+                return Variant::Signal {
+                    object_id: nid.raw(),
+                    name: prop.to_string(),
+                };
+            }
+            return Variant::Nil;
         }
         Variant::Nil
     }
@@ -2908,6 +2974,24 @@ impl SceneAccess for SceneTreeAccessor {
             return;
         }
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // `camera.current = true` — Godot's `Camera3D::set_current(true)` is
+        // `make_current()`: the viewport holds ONE current camera, so the
+        // previous one is cleared. A plain bag write left both flagged, and the
+        // renderer (first `current` camera in tree order) kept showing the OLD
+        // one — the standard camera-switch idiom did nothing visible.
+        if prop == "current"
+            && self
+                .tree()
+                .get_node(nid)
+                .is_some_and(|n| n.is_class("Camera3D"))
+        {
+            match value {
+                Variant::Bool(true) => crate::camera3d::make_current(self.tree_mut(), nid),
+                Variant::Bool(false) => crate::camera3d::clear_current(self.tree_mut(), nid),
+                _ => {}
+            }
+            return;
+        }
         // pat-mgixk.64 — `node.name = "x"`, Godot's documented spelling for a
         // rename. Measured before this change: it was a complete NO-OP. The
         // generic `set_property` below stored a `name` entry in the node's
@@ -3065,6 +3149,9 @@ impl SceneAccess for SceneTreeAccessor {
         // ahead of it would shadow a tested implementation rather than fill a
         // gap. Only the `global_*` names reach here, which it does not serve.
         if crate::node3d::set_derived_property(self.tree_mut(), nid, prop, &value) {
+            return;
+        }
+        if crate::node2d::set_derived_property(self.tree_mut(), nid, prop, &value) {
             return;
         }
         // Try script property first
@@ -3435,6 +3522,7 @@ impl SceneAccess for SceneTreeAccessor {
                 // move or drop, and the server is a sibling of the tree, never
                 // stored inside it, so this shared borrow cannot alias the
                 // `&mut SceneTree` taken on the next line.
+                // SAFETY: (summary) live, non-aliasing server — see above.
                 let physics = unsafe { &*(addr as *const crate::physics_server::PhysicsServer) };
                 crate::shapecast2d::force_shapecast_update(self.tree_mut(), physics, nid);
             }
@@ -4902,6 +4990,7 @@ impl SceneAccess for SceneTreeAccessor {
                     // out, because the slide mutates the world body. That makes
                     // this borrow EXCLUSIVE, so nothing else may call
                     // `self.physics()` while it is live — and nothing does.
+                    // SAFETY: (summary) live server, exclusive for this call — see above.
                     let physics =
                         unsafe { &mut *(addr as *mut crate::physics_server::PhysicsServer) };
                     physics.script_move_and_slide(self.tree_mut(), nid, dt)
@@ -5145,6 +5234,27 @@ impl SceneAccess for SceneTreeAccessor {
             // decides the answer, so it is read from whichever slot holds a
             // Vector2 and a bodyless/serverless call reports "not blocked"
             // rather than a false positive.
+            // `PhysicsBody2D.get_gravity()` (Godot 4.3+): the total gravity at
+            // the body, which a CharacterBody2D script adds to its velocity
+            // (`velocity += get_gravity() * delta`). It was missing, so every
+            // such script raised "method not found" each physics frame — the
+            // official 2D Platformer demo's enemies never fell or walked.
+            //
+            // ⚠️ PhysicsBody2D only: `Area2D.get_gravity()` is the getter of
+            // its float `gravity` property, so any other node declines and the
+            // generic accessor answers.
+            "get_gravity"
+                if self
+                    .tree()
+                    .get_node(nid)
+                    .is_some_and(|n| n.is_class("PhysicsBody2D")) =>
+            {
+                let g = self
+                    .physics()
+                    .map(|p| p.body_total_gravity(nid))
+                    .unwrap_or(gdphysics2d::world::DEFAULT_GRAVITY_2D);
+                Some(Variant::Vector2(g))
+            }
             "test_move" => {
                 let motion = args
                     .iter()
@@ -5718,7 +5828,16 @@ impl SceneAccess for SceneTreeAccessor {
                     .get_node(nid)
                     .map(|n| gdobject::class_db::class_has_signal(n.class_name(), &name))
                     .unwrap_or(false);
-                Some(Variant::Bool(declared || on_class))
+                // ...and a signal the attached SCRIPT declares — Godot's
+                // `Object::has_signal` asks the script first
+                // (`script->has_script_signal`). Both forms: the script calling
+                // `has_signal` on itself is out of the arena while it runs.
+                let in_script = crate::scene_tree::running_script_declares_signal(nid, &name)
+                    || self
+                        .tree()
+                        .get_script(nid)
+                        .is_some_and(|s| s.list_signals().iter().any(|sig| *sig == name));
+                Some(Variant::Bool(declared || on_class || in_script))
             }
             // `other.emit_signal("died", 5)` — emitting on ANOTHER node.
             //
@@ -7503,7 +7622,18 @@ impl SceneAccess for SceneTreeAccessor {
         // and names added at runtime by `add_user_signal`. Checking the node's
         // own class alone would reject every inherited signal and every user
         // signal, breaking working scripts.
-        if !self.node_has_signal(source, signal) {
+        //
+        // ⚠️ Refuse only when the source's class is KNOWN to ClassDB. Godot
+        // always has every class registered; a Patina host that never ran
+        // `register_all_classes` (an embedder, a tool, much of the test
+        // suite) has an EMPTY ClassDB, where this check refused every
+        // built-in signal — `v.connect("ready", ..)` on a Node2D returned
+        // ERR_INVALID_PARAMETER and nothing ever fired. An unknown class
+        // cannot be judged, so it keeps the pre-check's old (permissive)
+        // result. This lives HERE and not in `node_has_signal`, which also
+        // answers "is `obj.name` a signal?" for property reads — saying yes
+        // there turned every property of an unregistered node into a Signal.
+        if !self.node_has_signal(source, signal) && self.source_class_is_known(source) {
             return CONNECT_ERR_INVALID_PARAMETER;
         }
         let source_id = NodeId::from_object_id(ObjectId::from_raw(source));
@@ -7567,6 +7697,26 @@ impl SceneAccess for SceneTreeAccessor {
     fn node_has_signal(&self, node: u64, name: &str) -> bool {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
         let tree = self.tree();
+        // 0. A Tween is an OBJECT, not a node: `create_tween()` hands back a
+        //    TweenId, which names no node, so every check below found no class
+        //    and `tween.finished.connect(..)` / `t.connect("finished", ..)` was
+        //    refused with ERR_INVALID_PARAMETER — the handler never ran (the
+        //    connect pre-check, pat-mgixk.98, broke every tween callback).
+        if tree.get_tween(crate::tween::TweenId::from_raw(node)).is_some() {
+            return gdobject::class_db::class_has_signal("Tween", name)
+                || matches!(name, "finished" | "loop_finished" | "step_finished");
+        }
+        // 0b. The scene root carries the MultiplayerAPI / SceneMultiplayer
+        //     signals: `multiplayer_signal_object` binds `multiplayer.<sig>` to
+        //     the root because the per-frame drain emits them there
+        //     (pat-s3rrv.18). The root's own class declares none of them, so
+        //     the connect pre-check refused `multiplayer.peer_connected
+        //     .connect(cb)` — THE Godot multiplayer idiom — and it never fired.
+        if nid == tree.root_id()
+            && gdscript_interop::interpreter::MULTIPLAYER_SIGNALS.contains(&name)
+        {
+            return true;
+        }
         // 1. The attached script's `signal` declarations — the case the
         //    SignalStore misses, because a declared-but-unconnected signal has
         //    no store entry yet (pat-0q2kx.9).
@@ -7574,6 +7724,14 @@ impl SceneAccess for SceneTreeAccessor {
             if script.list_signals().iter().any(|s| s == name) {
                 return true;
             }
+        }
+        // 1b. The same, for a script that is executing right now. It is out of
+        //     the tree's script map while its own method runs, so the lookup
+        //     above missed every signal a script connected from its own
+        //     `_ready` — `pinged.connect(_on_pinged)` was refused with
+        //     ERR_INVALID_PARAMETER and never fired.
+        if crate::scene_tree::running_script_declares_signal(nid, name) {
+            return true;
         }
         // 2. A built-in signal on the node's class (`Button.pressed`).
         if let Some(node_ref) = tree.get_node(nid) {
@@ -8310,6 +8468,15 @@ impl SceneAccess for SceneTreeAccessor {
     fn process_timers(&mut self, delta: f64) -> Vec<String> {
         self.tree_mut().process_timers(delta);
         self.tree_mut().take_timeout_signals()
+    }
+
+    fn script_class_chain(&self, node: u64) -> Vec<String> {
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // The running script is out of the arena while it executes, so `self
+        // is Player` must ask the active-script registry first.
+        crate::scene_tree::running_script_class_names(nid)
+            .or_else(|| self.tree().get_script(nid).map(|s| s.script_class_names()))
+            .unwrap_or_default()
     }
 
     fn get_class(&self, node: u64) -> Option<String> {
@@ -10617,6 +10784,8 @@ mod tests {
         let mut tree = SceneTree::new();
         let tree_ptr = &mut tree as *mut SceneTree;
         let raw = {
+            // SAFETY: `tree_ptr` points at `tree`, which outlives this block, and
+            // nothing else borrows `tree` while `acc` is alive.
             let mut acc = unsafe { SceneTreeAccessor::new(tree_ptr) };
             acc.instantiate_script(&path_str)
         };
@@ -11373,6 +11542,9 @@ extends Node2D
 var connected = false
 func _ready():
     var p = get_parent()
+    # Godot 4 refuses to connect a signal the object does not have, so the
+    # (script-less) parent declares it first.
+    p.add_user_signal(\"test_sig\")
     p.connect(\"test_sig\", $Child2, \"on_test\")
     self.connected = true
 ";
@@ -13049,6 +13221,7 @@ func _on_signal_from_emitter():
         // `get_parent().get_node("Emitter").connect(...)`.
         let emitter_script = "\
 extends Node2D
+signal my_signal
 func _ready():
     var p = get_parent()
     var me = p.get_node(\"Emitter\")
@@ -14353,4 +14526,63 @@ func _ready():
             );
         }
     }
+}
+
+impl SceneTreeAccessor {
+    /// Whether ClassDB can judge `source`'s built-in signals: it names a node
+    /// (or tween) whose class is registered. See the connect pre-check.
+    fn source_class_is_known(&self, source: u64) -> bool {
+        let tree = self.tree();
+        if tree
+            .get_tween(crate::tween::TweenId::from_raw(source))
+            .is_some()
+        {
+            return true;
+        }
+        let nid = NodeId::from_object_id(ObjectId::from_raw(source));
+        tree.get_node(nid)
+            .map(|n| gdobject::class_db::class_exists(n.class_name()))
+            .unwrap_or(true)
+    }
+}
+
+/// A node property that holds an inline `SubResource` as the script sees it:
+/// the resource object, rebuilt from the `__subres__<prop>__*` companions the
+/// loader keeps (the scene's sub-resource table is gone by run time).
+///
+/// The stored value is the reference TEXT (`"SubResource:1"`), so a script
+/// reading `$AnimatedSprite2D.sprite_frames` got a String and every method on
+/// it failed — Dodge the Creeps' mobs died in `_ready` on
+/// `sprite_frames.get_animation_names()`.
+///
+/// ⚠️ Scoped to the classes whose methods the interpreter implements on a
+/// `Resource` value (SpriteFrames). Wrapping any other class would hand
+/// scripts an object with no methods, AND would change what a write-back
+/// (`a.shape = b.shape`) stores — that path relies on the raw text so the
+/// node's companions stay valid.
+fn sub_resource_value(node: &crate::node::Node, prop: &str, value: &Variant) -> Option<Variant> {
+    const SCRIPT_VISIBLE: &[&str] = &["SpriteFrames"];
+    let Variant::String(text) = value else {
+        return None;
+    };
+    if !text.starts_with("SubResource") {
+        return None;
+    }
+    let Variant::String(meta) = node.get_property(&format!("__resref__{prop}")) else {
+        return None;
+    };
+    let class = meta.rsplit_once("::").map(|(c, _)| c)?;
+    if !SCRIPT_VISIBLE.contains(&class) {
+        return None;
+    }
+    let prefix = format!("__subres__{prop}__");
+    let properties = node
+        .properties()
+        .filter_map(|(k, v)| k.strip_prefix(&prefix).map(|k| (k.to_string(), v.clone())))
+        .collect();
+    Some(Variant::Resource(Box::new(gdvariant::variant::ResourceRef {
+        path: String::new(),
+        class_name: class.to_string(),
+        properties,
+    })))
 }

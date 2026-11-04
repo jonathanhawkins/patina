@@ -2902,11 +2902,16 @@ mod tests {
     fn funnel_bends_around_corner() {
         // Around an L-bend the taut path cannot be a straight line — it must
         // round the inner corner at (10,10), yielding an intermediate waypoint.
+        //
+        // ⚠️ The target is NOT (15,15): the segment (5,5)->(15,15) runs
+        // exactly THROUGH the corner, so a straight line is already taut and
+        // a correct funnel returns no bend. (18,12) leaves the bottom square's
+        // top portal at x = 14.3 — outside it — so the path must turn.
         let mut server = NavigationServer2D::new();
         server.add_region(l_shaped_mesh());
 
         let from = Vector2::new(5.0, 5.0);
-        let to = Vector2::new(15.0, 15.0);
+        let to = Vector2::new(18.0, 12.0);
         let path = server.find_path(from, to);
 
         assert!(
@@ -3314,8 +3319,13 @@ mod tests {
     #[test]
     fn agent2d_avoidance_deflects_around_neighbor() {
         let mut a = straight_x_agent_2d(true);
-        // Neighbor slightly off the +y side of the straight path.
-        let others = [(Vector2::new(8.0, 1.0), 5.0)];
+        // Neighbor ahead, slightly off the +y side of the straight path.
+        //
+        // ⚠️ Not OVERLAPPING: at (8,1) the two radius-5 discs already
+        // intersect (|d| = 8.06 < 10), and RVO2's collision branch then backs
+        // the agent OUT within one step (x < 0) — correct ORCA, but not the
+        // "deflect around" case this test is about.
+        let others = [(Vector2::new(15.0, 2.0), 5.0)];
         let next = a.step(Vector2::ZERO, 1.0, &others);
         // Deflected to the -y side (away from the neighbor) and slowed in x.
         assert!(next.y < -0.1, "expected -y deflection, got y = {}", next.y);

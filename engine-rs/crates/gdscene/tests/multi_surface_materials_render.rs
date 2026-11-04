@@ -36,8 +36,9 @@ use gdvariant::Variant;
 const W: u32 = 64;
 const H: u32 = 64;
 
-/// A camera-facing quad spanning `x0..x1`, wound the way `Mesh3D::cube` winds
-/// its `+Z` face so it survives back-face culling.
+/// A camera-facing quad spanning `x0..x1`, wound CLOCKWISE as the camera on +Z
+/// sees it — Godot's front face (`doc/classes/ArrayMesh.xml:49`), the way
+/// `Mesh3D::cube` winds its `+Z` face — so it survives back-face culling.
 fn quad(x0: f32, x1: f32) -> (Vec<Vector3>, Vec<Vector3>, Vec<[f32; 2]>, Vec<u32>) {
     (
         vec![
@@ -48,7 +49,7 @@ fn quad(x0: f32, x1: f32) -> (Vec<Vector3>, Vec<Vector3>, Vec<[f32; 2]>, Vec<u32
         ],
         vec![Vector3::new(0.0, 0.0, 1.0); 4],
         vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
-        vec![0, 1, 2, 0, 2, 3],
+        vec![0, 2, 1, 0, 3, 2],
     )
 }
 

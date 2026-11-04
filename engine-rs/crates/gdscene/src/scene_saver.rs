@@ -1460,7 +1460,7 @@ struct ResourceTables {
 /// under a namespaced prefix so the runtime can reach it after the `PackedScene`
 /// is gone (`packed_scene.rs`). That cache is also the only surviving record of
 /// the sub-resource's contents at save time.
-fn companion_prefix_for(property: &str) -> Option<String> {
+pub fn companion_prefix_for(property: &str) -> Option<String> {
     // Per-surface overrides beyond surface 0 get an INDEXED prefix, so each
     // surface's material rebuilds into its own `[sub_resource]` body
     // (pat-s3rrv.187). Surface 0 deliberately stays on `__material__`: it is
@@ -1540,7 +1540,9 @@ fn collect_sub_resource_bodies(
                 .properties()
                 .filter_map(|(ck, cv)| {
                     let key = ck.strip_prefix(prefix.as_str())?;
-                    if key == "class" {
+                    // A Nil companion is an unset value — the editor clears a
+                    // replaced resource's keys to Nil so Undo can restore them.
+                    if key == "class" || cv.is_nil() {
                         return None;
                     }
                     Some((key.to_string(), cv.clone()))
@@ -1623,6 +1625,14 @@ fn is_internal_prop(key: &str) -> bool {
         // loader still reads the property into the node, so without this a
         // round trip would preserve it forever.
         || key.starts_with("__resref__")
+        // `__shortcut__events` / `__shortcut__actions` cache a Shortcut
+        // resource's accelerators for input-time matching (shortcut.rs). The
+        // node's own `shortcut` keeps the `SubResource` reference that
+        // round-trips; writing the caches would invent properties Godot has
+        // never heard of.
+        || key.starts_with("__shortcut__")
+        // The rect the Control layout last wrote (control.rs).
+        || key == crate::control::LAYOUT_RECT_KEY
         // `__resscript__<prop>` caches the script path of a SCRIPTED resource
         // held in `<prop>`, so render code can reach it with only the tree in
         // hand (pat-s3rrv.160). Derived from the sub-resource on load, so
@@ -1692,7 +1702,11 @@ fn is_internal_prop(key: &str) -> bool {
         || key.starts_with("__tile_occluder_")
         || key == "_instance"
         || key == "_instance_path"
+        // Runtime marker set when a Play tree expands an `instance=`
+        // placeholder (`packed_scene::expand_instance_placeholders`).
+        || key == crate::packed_scene::INSTANCE_EXPANDED_KEY
         || key == "_script_path"
+        || key == crate::packed_scene::PROPS_BEFORE_SCRIPT_KEY
         // `_camera2d_scroll_center` / `_camera2d_scroll_rotation` are the
         // Camera2D's running scroll state, republished every frame by
         // `behavioral_2d::process_camera2d_scroll` (pat-s3rrv.84). They are
@@ -1933,9 +1947,25 @@ fn write_node_section(
 
     // Write properties sorted for determinism. Internal companion keys are
     // skipped — they were folded into the resource tables / header attributes.
+    //
+    // 🔑 A value equal to the CLASS DEFAULT is omitted, as Godot's
+    // `SceneState::_parse_node` does (it stores a property only when it
+    // differs from the instantiated default). The loader seeds every ClassDB
+    // default onto each node, so without this a load -> save wrote ~20 default
+    // lines per node and no scene survived a round trip byte-for-byte. With an
+    // empty ClassDB the default list is empty and nothing is dropped.
+    let class_defaults = gdobject::class_db::get_property_list(node.class_name());
+    let is_class_default = |k: &str, v: &Variant| {
+        class_defaults
+            .iter()
+            .rev()
+            .find(|p| p.name == k)
+            .is_some_and(|p| &p.default_value == v)
+    };
     let mut props: Vec<(&String, &Variant)> = node
         .properties()
         .filter(|(k, _)| !is_internal_prop(k) && !skip_keys.contains(&k.as_str()))
+        .filter(|(k, v)| !is_class_default(k, v) || sub_ref.contains_key(k.as_str()))
         .collect();
     props.sort_by_key(|(k, _)| k.as_str().to_owned());
     for (key, value) in props {

@@ -805,6 +805,8 @@ fn region_enabled(node: &crate::node::Node) -> bool {
 impl MainLoop {
     /// Creates a new `MainLoop` that owns the given [`SceneTree`].
     pub fn new(tree: SceneTree) -> Self {
+        // Godot starts the OS tick clock at engine init.
+        gdplatform::os::start_clock();
         // NOTE: the `Engine` singleton state lives in process statics (scripts
         // can only reach the interpreter) and is deliberately NOT reset here —
         // in Godot the singleton outlives the main loop, and a script that set
@@ -1038,6 +1040,9 @@ impl MainLoop {
             // helper `read_emitter_3d` uses, so the two emitters cannot disagree
             // about what a ramp means.
             emitter.color_curve = color_ramp_curve(node);
+            // ...and `scale_curve`, flattened to `__scale_curve_samples` by the
+            // same pass, read with the same helper as the 3D emitter.
+            emitter.scale_curve = scale_curve_from_samples(node);
             if let Variant::Color(c) = node.get_property("color") {
                 emitter.material.start_color = c;
                 emitter.material.end_color = c;
@@ -2709,6 +2714,11 @@ impl MainLoop {
     pub fn configure_from_project_settings(&mut self, settings: &gdcore::ProjectSettings) {
         use gdcore::{SettingsValue, Vector2, Vector3};
 
+        // The root window's stretch (`display/window/stretch/*`). Idempotent,
+        // so a host that already installed it before building its tree (as it
+        // must, for `_ready`) loses nothing by this second call.
+        crate::project_runtime::install_root_window(&mut self.tree, settings);
+
         // Audio: `audio/driver/mix_rate` and the two global panning strengths
         // (pat-mgixk.88). `AudioServer::from_project_settings` existed with NO
         // caller, so every project mixed at 44100 however it was configured —
@@ -3057,6 +3067,15 @@ impl MainLoop {
     /// The bracket is as tight as the per-phase ones: `&mut self` means the
     /// bridge cannot move while the address is installed.
     pub fn enter_tree_with_scripts(&mut self, node: NodeId) {
+        self.bind_script_servers();
+        crate::lifecycle::LifecycleManager::enter_tree(&mut self.tree, node);
+        self.unbind_script_servers();
+    }
+
+    /// Binds the physics/audio servers (and physics delta) that script
+    /// callbacks reach through singletons, for a lifecycle pass run outside
+    /// the frame's own process phases. Pair with [`unbind_script_servers`].
+    fn bind_script_servers(&mut self) {
         // The physics TICK, not a frame delta: Godot's `move_and_slide()` uses
         // `get_physics_process_delta_time()` whichever callback calls it
         // (pat-mgixk.37), and `_ready` has no delta of its own at all.
@@ -3068,7 +3087,9 @@ impl MainLoop {
             .set_script_physics_server_3d(&mut self.physics_server_3d);
         self.tree
             .set_script_audio_server(self.audio_bridge.server_mut());
-        crate::lifecycle::LifecycleManager::enter_tree(&mut self.tree, node);
+    }
+
+    fn unbind_script_servers(&mut self) {
         self.tree.clear_script_audio_server();
         self.tree.clear_script_physics_server();
         self.tree.clear_script_physics_server_3d();
@@ -3997,6 +4018,32 @@ impl MainLoop {
         // -> _unhandled_input) before the physics and process phases, so a
         // script reacting to an event does so on the same frame it arrived.
         if !self.pending_input.is_empty() {
+            // 🔑 A Control's rect is resolved by LAYOUT, and layout only ran in
+            // the render pass. Pointer hit-testing therefore used whatever
+            // rect the last render wrote — none at all in a run that steps
+            // without rendering (the agent interface's frame-exact `play`), or
+            // one from a different window size: an anchored Start button
+            // could not be clicked. Godot lays Controls out in the scene tree,
+            // independent of drawing; this resolves it before the GUI routes a
+            // pointer event, with the render's own pass so the two agree.
+            // Only when a pointer event is pending, so a frame with no clicks
+            // costs nothing extra.
+            let has_pointer = self.pending_input.iter().any(|e| {
+                matches!(
+                    e,
+                    InputEvent::MouseButton { .. }
+                        | InputEvent::MouseMotion { .. }
+                        | InputEvent::ScreenTouch { .. }
+                        | InputEvent::ScreenDrag { .. }
+                )
+            });
+            if has_pointer {
+                let window = *self.tree.root_window();
+                let size = crate::canvas_render::canvas_size_of(&window);
+                let root = self.tree.root_id();
+                let _ =
+                    crate::canvas_render::build_control_render_items(&mut self.tree, root, size);
+            }
             for event in std::mem::take(&mut self.pending_input) {
                 self.tree.push_input(&event);
                 // Physics object picking is Godot's LAST input stage, after
@@ -4045,12 +4092,17 @@ impl MainLoop {
         // While paused the accumulator is still fed, so unpausing does not
         // suddenly run a burst of catch-up ticks for the paused interval — it is
         // drained below instead.
+        //
+        // 🔑 Paused, the tick STILL iterates — Godot's `Main::iteration` runs
+        // `physics_process` every fixed step whatever the pause state, and
+        // `set_pause` only calls `PhysicsServer2D/3D::set_active(false)`. So
+        // `physics_frame` fires, `Engine.get_physics_frames()` advances, and a
+        // `PROCESS_MODE_ALWAYS` / `WHEN_PAUSED` node's `_physics_process` runs
+        // (the script, timer and tween phases filter per node). What stops is
+        // every server/solver/mixer pass, guarded by `simulate`. The whole
+        // loop used to be skipped, so an "always" node froze under pause.
+        let simulate = !paused;
         self.physics_accumulator += delta_secs;
-        if paused {
-            // Godot's servers are inactive while paused; drop the accumulated
-            // time so resuming continues from now rather than fast-forwarding.
-            self.physics_accumulator = 0.0;
-        }
         let mut physics_steps = 0u32;
         // `Engine.is_in_physics_frame()` is true for the whole fixed-step
         // section, so a script called from `_physics_process` can tell which
@@ -4071,66 +4123,68 @@ impl MainLoop {
             // Registration only: `sync_to_physics` also applies `constant_force`
             // and drains the one-shot `_pending_*` properties, so calling the
             // whole thing twice in a tick would double every constant force.
-            self.physics_server.sync_registrations(&self.tree);
+            if simulate {
+                self.physics_server.sync_registrations(&self.tree);
 
-            // 3D physics: sync -> step -> sync (pat-u3l8c.1).
-            // `_integrate_forces` runs before the sync for the same reason the
-            // 2D pass does: the sync is what carries a rigid body's velocity
-            // into the solver, so a script's write has to be on the node by
-            // then (pat-s3rrv.94).
-            crate::integrate_forces::run_integrate_forces_3d(
-                &mut self.tree,
-                self.physics_server_3d.gravity(),
-                physics_dt as f32,
-            );
-            self.physics_server_3d.sync_to_physics(&self.tree);
-            self.physics_server_3d.step(physics_dt as f32);
-            self.physics_server_3d.sync_from_physics(&mut self.tree);
+                // 3D physics: sync -> step -> sync (pat-u3l8c.1).
+                // `_integrate_forces` runs before the sync for the same reason the
+                // 2D pass does: the sync is what carries a rigid body's velocity
+                // into the solver, so a script's write has to be on the node by
+                // then (pat-s3rrv.94).
+                crate::integrate_forces::run_integrate_forces_3d(
+                    &mut self.tree,
+                    self.physics_server_3d.gravity(),
+                    physics_dt as f32,
+                );
+                self.physics_server_3d.sync_to_physics(&self.tree);
+                self.physics_server_3d.step(physics_dt as f32);
+                self.physics_server_3d.sync_from_physics(&mut self.tree);
 
-            // -- ragdoll writeback (pat-0q2kx.203) --
-            // Simulated PhysicalBone3D bodies push their transforms onto the
-            // Skeleton3D bone poses, so the skinned mesh follows the ragdoll.
-            // After sync_from_physics so it writes THIS tick's solved bodies.
-            self.physics_server_3d
-                .write_back_ragdoll_poses(&mut self.tree);
+                // -- ragdoll writeback (pat-0q2kx.203) --
+                // Simulated PhysicalBone3D bodies push their transforms onto the
+                // Skeleton3D bone poses, so the skinned mesh follows the ragdoll.
+                // After sync_from_physics so it writes THIS tick's solved bodies.
+                self.physics_server_3d
+                    .write_back_ragdoll_poses(&mut self.tree);
 
-            // Drive CharacterBody3D nodes, mirroring the 2D character pass
-            // above. Runs AFTER step/sync so the sweep tests against this
-            // tick's body positions. Nothing called the (already complete)
-            // 3D move_and_slide before this, so a CharacterBody3D in a scene
-            // never moved and `is_on_floor()` was always false (pat-0q2kx.36).
-            crate::character3d::process_character_movement(
-                &mut self.tree,
-                &self.physics_server_3d,
-                physics_dt as f32,
-            );
+                // Drive CharacterBody3D nodes, mirroring the 2D character pass
+                // above. Runs AFTER step/sync so the sweep tests against this
+                // tick's body positions. Nothing called the (already complete)
+                // 3D move_and_slide before this, so a CharacterBody3D in a scene
+                // never moved and `is_on_floor()` was always false (pat-0q2kx.36).
+                crate::character3d::process_character_movement(
+                    &mut self.tree,
+                    &self.physics_server_3d,
+                    physics_dt as f32,
+                );
 
-            // -- navigation avoidance phase (pat-nzgdu.116) --
-            // ORCA runs per physics tick, like Godot's NavigationServer: agents
-            // with a desired velocity get a safe one back via velocity_computed.
-            // Emitted before the script phase so a _physics_process handler sees
-            // the velocity solved for this very tick.
-            self.process_navigation_avoidance(physics_dt as f32);
+                // -- navigation avoidance phase (pat-nzgdu.116) --
+                // ORCA runs per physics tick, like Godot's NavigationServer: agents
+                // with a desired velocity get a safe one back via velocity_computed.
+                // Emitted before the script phase so a _physics_process handler sees
+                // the velocity solved for this very tick.
+                self.process_navigation_avoidance(physics_dt as f32);
 
-            // Animation players whose `callback_mode_process` is PHYSICS advance
-            // here rather than in the idle phase below, so an animation driving a
-            // body samples once per tick in lockstep with the solver — Godot's
-            // `AnimationMixer::_physics_process` (pat-0q2kx.1). Before the script
-            // phase, so a `_physics_process` handler reads this tick's pose.
-            self.tree.process_animations_in_mode(
-                physics_dt,
-                crate::animation::AnimationCallbackMode::Physics,
-            );
-            // pat-s3rrv.23: AnimationTree honours `callback_mode_process` too —
-            // it extends AnimationMixer, where the property lives. Trees used to
-            // advance unconditionally in the idle phase below, so a tree set to
-            // PHYSICS sampled once per rendered frame instead of once per tick.
-            // After the players, matching the idle phase's ordering, so a tree's
-            // blended pose still wins where both write the same property.
-            self.tree.process_animation_trees_in_mode(
-                physics_dt,
-                crate::animation::AnimationCallbackMode::Physics,
-            );
+                // Animation players whose `callback_mode_process` is PHYSICS advance
+                // here rather than in the idle phase below, so an animation driving a
+                // body samples once per tick in lockstep with the solver — Godot's
+                // `AnimationMixer::_physics_process` (pat-0q2kx.1). Before the script
+                // phase, so a `_physics_process` handler reads this tick's pose.
+                self.tree.process_animations_in_mode(
+                    physics_dt,
+                    crate::animation::AnimationCallbackMode::Physics,
+                );
+                // pat-s3rrv.23: AnimationTree honours `callback_mode_process` too —
+                // it extends AnimationMixer, where the property lives. Trees used to
+                // advance unconditionally in the idle phase below, so a tree set to
+                // PHYSICS sampled once per rendered frame instead of once per tick.
+                // After the players, matching the idle phase's ordering, so a tree's
+                // blended pose still wins where both write the same property.
+                self.tree.process_animation_trees_in_mode(
+                    physics_dt,
+                    crate::animation::AnimationCallbackMode::Physics,
+                );
+            } // end `if simulate` (servers, solvers, mixers)
 
             // `TWEEN_PROCESS_PHYSICS` tweens advance here — once per fixed tick,
             // in lockstep with the solver — instead of at render rate in the
@@ -4139,13 +4193,9 @@ impl MainLoop {
             // step is not scaled, so there is no separate unscaled step to hand
             // an `ignore_time_scale` tween here.
             //
-            // ⚠️ Known gap: this loop does not run at all while the tree is
-            // paused (the accumulator is zeroed above, mirroring Godot's
-            // `PhysicsServer::set_active(false)`), so a tween that is BOTH
-            // `TWEEN_PROCESS_PHYSICS` and `TWEEN_PAUSE_PROCESS` still stops
-            // under pause. Godot keeps iterating physics frames while paused
-            // and filters per node; changing that is the pause-model work
-            // pat-0q2kx.140 left open, not this bead's.
+            // Runs paused too: `can_process` filters each tween by the pause
+            // state, so a `TWEEN_PROCESS_PHYSICS` + `TWEEN_PAUSE_PROCESS`
+            // tween keeps advancing under pause, as in Godot.
             self.tree.process_tweens_in_mode(
                 physics_dt,
                 physics_dt,
@@ -4168,21 +4218,23 @@ impl MainLoop {
             // `is_colliding()` read false for the whole first frame — the exact
             // thing this bead is about — and ran it once per frame rather than
             // once per physics tick.
-            self.process_raycasts();
-            self.process_shapecasts();
-            // The 3D twin, moved into the tick for the same reason
-            // (pat-s3rrv.106). `process_queries_3d` drives RayCast3D,
-            // ShapeCast3D and SpringArm3D, and its only caller was the per-FRAME
-            // idle block AFTER this script phase — so a `_physics_process`
-            // handler read `is_colliding()` from the PREVIOUS frame, and false
-            // for the whole first one. Godot updates these under
-            // `NOTIFICATION_INTERNAL_PHYSICS_PROCESS`, i.e. before any script
-            // runs, exactly as the 2D pair above now do.
-            //
-            // ⚠️ It also ran once per FRAME rather than once per physics TICK.
-            // With several fixed steps in one frame, every tick after the first
-            // saw a stale cast.
-            self.process_queries_3d();
+            if simulate {
+                self.process_raycasts();
+                self.process_shapecasts();
+                // The 3D twin, moved into the tick for the same reason
+                // (pat-s3rrv.106). `process_queries_3d` drives RayCast3D,
+                // ShapeCast3D and SpringArm3D, and its only caller was the per-FRAME
+                // idle block AFTER this script phase — so a `_physics_process`
+                // handler read `is_colliding()` from the PREVIOUS frame, and false
+                // for the whole first one. Godot updates these under
+                // `NOTIFICATION_INTERNAL_PHYSICS_PROCESS`, i.e. before any script
+                // runs, exactly as the 2D pair above now do.
+                //
+                // ⚠️ It also ran once per FRAME rather than once per physics TICK.
+                // With several fixed steps in one frame, every tick after the first
+                // saw a stale cast.
+                self.process_queries_3d();
+            }
             // Bind the physics server for the script phase so a
             // `_physics_process` handler can drive `PhysicsServer2D` directly
             // (pat-0q2kx.200). Bracketed tightly around the phase: the tree
@@ -4228,71 +4280,73 @@ impl MainLoop {
             // only `register_bodies` used to re-read — so a scripted `set_cell`
             // showed up in pixels but never in physics. Fingerprinted per layer,
             // so an unchanged map costs one comparison.
-            self.physics_server.refresh_tilemap_bodies(&self.tree);
-            // `_integrate_forces` runs BEFORE the sync, not after: the script's
-            // writes to the state land on the node, and `sync_to_physics` is
-            // what carries a rigid body's velocity and pending forces into the
-            // solver. Running it after would leave those writes on the node
-            // until the next tick — one frame late (pat-s3rrv.94).
-            // The server is passed in so the state can report the SOLVER's
-            // inverse inertia rather than a recomputation (pat-mgixk.38).
-            // `tree` and `physics_server` are disjoint fields, so the mutable
-            // and shared borrows do not overlap.
-            let gravity_2d = self.physics_server.gravity();
-            crate::integrate_forces::run_integrate_forces_2d(
-                &mut self.tree,
-                &self.physics_server,
-                gravity_2d,
-                physics_dt as f32,
-            );
-            self.physics_server.sync_to_physics(&mut self.tree);
-            self.physics_server.step_physics(physics_dt as f32);
-            self.physics_server.sync_from_physics(&mut self.tree);
+            if simulate {
+                self.physics_server.refresh_tilemap_bodies(&self.tree);
+                // `_integrate_forces` runs BEFORE the sync, not after: the script's
+                // writes to the state land on the node, and `sync_to_physics` is
+                // what carries a rigid body's velocity and pending forces into the
+                // solver. Running it after would leave those writes on the node
+                // until the next tick — one frame late (pat-s3rrv.94).
+                // The server is passed in so the state can report the SOLVER's
+                // inverse inertia rather than a recomputation (pat-mgixk.38).
+                // `tree` and `physics_server` are disjoint fields, so the mutable
+                // and shared borrows do not overlap.
+                let gravity_2d = self.physics_server.gravity();
+                crate::integrate_forces::run_integrate_forces_2d(
+                    &mut self.tree,
+                    &self.physics_server,
+                    gravity_2d,
+                    physics_dt as f32,
+                );
+                self.physics_server.sync_to_physics(&mut self.tree);
+                self.physics_server.step_physics(physics_dt as f32);
+                self.physics_server.sync_from_physics(&mut self.tree);
 
-            // Emit body_entered / body_exited signals on Area2D nodes.
-            self.physics_server.process_overlap_signals(&mut self.tree);
+                // Emit body_entered / body_exited signals on Area2D nodes.
+                self.physics_server.process_overlap_signals(&mut self.tree);
 
-            // Emit area_entered / area_exited signals between overlapping Area2D
-            // nodes (pat-u3l8c.51).
-            self.physics_server
-                .process_area_overlap_signals(&mut self.tree);
+                // Emit area_entered / area_exited signals between overlapping Area2D
+                // nodes (pat-u3l8c.51).
+                self.physics_server
+                    .process_area_overlap_signals(&mut self.tree);
 
-            // Emit body_entered / body_exited signals on contact-monitoring
-            // RigidBody2D nodes (contact_monitor + max_contacts_reported).
-            self.physics_server
-                .process_body_contact_signals(&mut self.tree);
+                // Emit body_entered / body_exited signals on contact-monitoring
+                // RigidBody2D nodes (contact_monitor + max_contacts_reported).
+                self.physics_server
+                    .process_body_contact_signals(&mut self.tree);
 
-            // Publish this step's contacts for `_integrate_forces(state)` to
-            // report (pat-s3rrv.94).
-            //
-            // ⚠️ Separate from the signal pass above, which reports enter/exit
-            // EDGES and skips persisting contacts — a body resting on a floor
-            // persists, so it would otherwise be visible for one frame only.
-            //
-            // The `_integrate_forces` callback runs BEFORE the step, so what a
-            // script reads is the previous step's contact set. That is Godot's
-            // behaviour too: the state reports the last solve, not one that has
-            // not happened yet.
-            self.physics_server.publish_body_contacts(&mut self.tree);
+                // Publish this step's contacts for `_integrate_forces(state)` to
+                // report (pat-s3rrv.94).
+                //
+                // ⚠️ Separate from the signal pass above, which reports enter/exit
+                // EDGES and skips persisting contacts — a body resting on a floor
+                // persists, so it would otherwise be visible for one frame only.
+                //
+                // The `_integrate_forces` callback runs BEFORE the step, so what a
+                // script reads is the previous step's contact set. That is Godot's
+                // behaviour too: the state reports the last solve, not one that has
+                // not happened yet.
+                self.physics_server.publish_body_contacts(&mut self.tree);
 
-            // Run move_and_slide for CharacterBody2D nodes with velocity.
-            self.physics_server
-                .process_character_movement(physics_dt as f32, &mut self.tree);
+                // Run move_and_slide for CharacterBody2D nodes with velocity.
+                self.physics_server
+                    .process_character_movement(physics_dt as f32, &mut self.tree);
 
-            self.physics_server.record_trace(&self.tree);
-            // -- interpolation capture (pat-0q2kx.219) --
-            // End of the tick: record the transforms this tick settled on,
-            // rolling the previous ones back a slot. Runs after the script
-            // phase so a `_physics_process` that moved a body is included —
-            // the rendered blend must interpolate what actually happened.
-            if self.physics_interpolation_enabled {
-                self.physics_interpolation.capture(&self.tree);
-                // The 3D bodies settle in the same tick (pat-0q2kx.250), so
-                // they are captured here too rather than on a separate cadence
-                // — a second capture point would drift out of step with the 2D
-                // one and publish blends from different ticks.
-                self.physics_interpolation_3d.capture(&self.tree);
-            }
+                self.physics_server.record_trace(&self.tree);
+                // -- interpolation capture (pat-0q2kx.219) --
+                // End of the tick: record the transforms this tick settled on,
+                // rolling the previous ones back a slot. Runs after the script
+                // phase so a `_physics_process` that moved a body is included —
+                // the rendered blend must interpolate what actually happened.
+                if self.physics_interpolation_enabled {
+                    self.physics_interpolation.capture(&self.tree);
+                    // The 3D bodies settle in the same tick (pat-0q2kx.250), so
+                    // they are captured here too rather than on a separate cadence
+                    // — a second capture point would drift out of step with the 2D
+                    // one and publish blends from different ticks.
+                    self.physics_interpolation_3d.capture(&self.tree);
+                }
+            } // end `if simulate` (2D solver, contacts, interpolation)
 
             // SceneTreeTimers created with `process_in_physics = true` advance
             // here, on the fixed tick, and are skipped by the idle pass
@@ -4630,6 +4684,20 @@ impl MainLoop {
         // singletons unbound and the callbacks silently no-op.
         // Bound before the match so the mutable borrow of `self.tree` provably
         // ends here, leaving the arm free to take it again.
+        // 🔑 A PACKED scene is built detached, its scripts attached in the
+        // `prepare` hook, and only then added — so its one lifecycle pass
+        // reaches the scripts in Godot's order (ENTER top-down, READY
+        // bottom-up) and no node is entered twice. The servers are bound
+        // around it for the same reason `enter_tree_with_scripts` binds them.
+        if self.tree.pending_scene_change_is_packed() {
+            self.bind_script_servers();
+            let _ = self
+                .tree
+                .process_deferred_scene_change_prepared(&mut |tree, root| {
+                    crate::scripting::attach_subtree_scripts_from_res(tree, root);
+                });
+            self.unbind_script_servers();
+        }
         let swapped = self.tree.process_deferred_scene_change();
         match swapped {
             Ok(Some(new_root)) => {
@@ -5148,6 +5216,7 @@ mod tests {
         }
     }
     use gdobject::notification::{
+        NOTIFICATION_POST_ENTER_TREE,
         NOTIFICATION_ENTER_TREE, NOTIFICATION_INTERNAL_PHYSICS_PROCESS,
         NOTIFICATION_INTERNAL_PROCESS, NOTIFICATION_PARENTED, NOTIFICATION_PHYSICS_PROCESS,
         NOTIFICATION_POSTINITIALIZE, NOTIFICATION_PROCESS, NOTIFICATION_READY,
@@ -5734,6 +5803,54 @@ mod tests {
         );
     }
 
+    /// One frame of a game that steers by its agent, as Godot projects do:
+    /// the engine ticks, then "the body's script" moves the agent node toward
+    /// the published `next_path_position` at `speed` units/s.
+    ///
+    /// 🔑 The NavigationAgent is PASSIVE in Godot (pat-s3rrv.20) — it never
+    /// moves anything. These tests were written for an agent that walked its
+    /// own path, so after that fix nothing moved it and they waited forever.
+    fn step_steering_2d(ml: &mut MainLoop, id: crate::node::NodeId, speed: f32) {
+        let dt = 1.0 / 60.0;
+        ml.step(dt as f64);
+        let next = match ml
+            .tree()
+            .get_node(id)
+            .map(|n| n.get_property("next_path_position"))
+        {
+            Some(gdvariant::Variant::Vector2(v)) => v,
+            _ => return,
+        };
+        let pos = crate::node2d::get_position(ml.tree(), id);
+        let to = next - pos;
+        let step = (speed * dt).min(to.length());
+        if step > 0.0 {
+            let moved = pos + to.normalized() * step;
+            crate::node2d::set_position(ml.tree_mut(), id, moved);
+        }
+    }
+
+    /// The 3D twin of [`step_steering_2d`].
+    fn step_steering_3d(ml: &mut MainLoop, id: crate::node::NodeId, speed: f32) {
+        let dt = 1.0 / 60.0;
+        ml.step(dt as f64);
+        let next = match ml
+            .tree()
+            .get_node(id)
+            .map(|n| n.get_property("next_path_position"))
+        {
+            Some(gdvariant::Variant::Vector3(v)) => v,
+            _ => return,
+        };
+        let pos = crate::node3d::get_position(ml.tree(), id);
+        let to = next - pos;
+        let step = (speed * dt).min(to.length());
+        if step > 0.0 {
+            let moved = pos + to.normalized() * step;
+            crate::node3d::set_position(ml.tree_mut(), id, moved);
+        }
+    }
+
     /// App-level: a NavigationAgent2D with a target advances along a computed
     /// multi-waypoint path across frames, its `get_next_path_position` guidance
     /// progressing from an intermediate waypoint to the target (pat-u3l8c.5).
@@ -5743,7 +5860,13 @@ mod tests {
         let mut tree = SceneTree::new();
         let root = tree.root_id();
 
-        // Three adjacent navmesh polygons forming a corridor along +X.
+        // Three adjacent navmesh polygons forming an L: along +X, then up +Y.
+        //
+        // ⚠️ Not a straight corridor any more: Godot's default
+        // `path_postprocessing` (CORRIDORFUNNEL) pulls a straight corridor
+        // taut to `[start, end]`, so it has no intermediate waypoint. The old
+        // (50,0) expectation was a polygon CENTROID, which only the
+        // pre-funnel pathing produced.
         let regions = [
             vec![
                 Vector2::new(-10.0, -10.0),
@@ -5758,10 +5881,10 @@ mod tests {
                 Vector2::new(30.0, 10.0),
             ],
             vec![
-                Vector2::new(70.0, -10.0),
-                Vector2::new(110.0, -10.0),
-                Vector2::new(110.0, 10.0),
+                Vector2::new(30.0, 10.0),
                 Vector2::new(70.0, 10.0),
+                Vector2::new(70.0, 50.0),
+                Vector2::new(30.0, 50.0),
             ],
         ];
         for verts in regions {
@@ -5787,7 +5910,7 @@ mod tests {
         );
         agent.set_property(
             "target_position",
-            gdvariant::Variant::Vector2(Vector2::new(100.0, 0.0)),
+            gdvariant::Variant::Vector2(Vector2::new(50.0, 40.0)),
         );
         let aid = tree.add_child(root, agent).unwrap();
 
@@ -5805,10 +5928,10 @@ mod tests {
             }
         }
 
-        // Early: a 3-waypoint path exists; guidance is the first intermediate
-        // waypoint (~(50,0)) and the agent has begun moving along +X.
+        // Early: a 3-waypoint path exists; guidance is the inner corner
+        // (30,10) and the steered body has begun moving.
         for _ in 0..5 {
-            ml.step(1.0 / 60.0);
+            step_steering_2d(&mut ml, aid, 100.0);
         }
         assert!(
             ml.nav_agent_path_len_2d(aid) >= 3,
@@ -5818,20 +5941,20 @@ mod tests {
         let next_early = next2(&ml, aid);
         let pos_early = crate::node2d::get_position(ml.tree(), aid);
         assert!(
-            pos_early.x > 0.0 && pos_early.x < 50.0,
+            pos_early.x > 0.0 && pos_early.x < 30.0,
             "agent should have started moving, x={}",
             pos_early.x,
         );
         assert!(
-            (next_early.x - 50.0).abs() < 1e-2,
-            "first guidance should be the intermediate waypoint ~(50,0), got {:?}",
+            (next_early - Vector2::new(30.0, 10.0)).length() < 1e-2,
+            "first guidance should be the inner corner ~(30,10), got {:?}",
             next_early,
         );
 
         // Later: the intermediate waypoint is consumed, so guidance advances to
         // the target and the agent has moved further along.
         for _ in 0..90 {
-            ml.step(1.0 / 60.0);
+            step_steering_2d(&mut ml, aid, 100.0);
         }
         let next_late = next2(&ml, aid);
         let pos_late = crate::node2d::get_position(ml.tree(), aid);
@@ -5842,20 +5965,20 @@ mod tests {
             pos_late.x,
         );
         assert!(
-            (next_late.x - 100.0).abs() < 1e-2,
-            "guidance should advance to the target ~(100,0), got {:?}",
+            (next_late - Vector2::new(50.0, 40.0)).length() < 1e-2,
+            "guidance should advance to the target ~(50,40), got {:?}",
             next_late,
         );
         assert!(
-            (next_late.x - next_early.x).abs() > 1.0,
+            (next_late - next_early).length() > 1.0,
             "get_next_path_position must change across frames ({:?} -> {:?})",
             next_early,
             next_late,
         );
         assert!(
-            pos_late.x > 90.0,
-            "agent should reach near the target, x={}",
-            pos_late.x
+            (pos_late - Vector2::new(50.0, 40.0)).length() < 10.0,
+            "agent should reach near the target, at {:?}",
+            pos_late
         );
     }
 
@@ -5945,7 +6068,7 @@ mod tests {
         // Tick to the goal, sampling guidance to confirm monotonic advancement.
         let mut samples: Vec<f32> = Vec::new();
         for i in 0..200 {
-            ml.step(1.0 / 60.0);
+            step_steering_2d(&mut ml, aid, 100.0);
             if i % 10 == 0 {
                 samples.push(next_x(&ml, aid));
             }
@@ -5967,7 +6090,7 @@ mod tests {
             "agent should reach near the target, x={}",
             pos.x
         );
-        // Guidance advanced monotonically toward +X (never regressed).
+        // Guidance never regressed.
         assert!(samples.len() >= 2, "expected multiple guidance samples");
         for w in samples.windows(2) {
             assert!(
@@ -5977,9 +6100,12 @@ mod tests {
                 w[1],
             );
         }
+        // A straight corridor funnels to `[start, target]` (Godot's default
+        // CORRIDORFUNNEL), so the guidance IS the target from the first frame
+        // — there is no interior waypoint for it to progress through.
         assert!(
-            samples.last().unwrap() - samples.first().unwrap() > 1.0,
-            "guidance must progress across frames ({:?})",
+            samples.iter().all(|x| (x - 100.0).abs() < 1e-3),
+            "a straight corridor's guidance is the target throughout ({:?})",
             samples,
         );
     }
@@ -6022,7 +6148,7 @@ mod tests {
 
         let start = crate::node3d::get_position(ml.tree(), aid);
         for _ in 0..30 {
-            ml.step(1.0 / 60.0);
+            step_steering_3d(&mut ml, aid, 10.0);
         }
         let mid = crate::node3d::get_position(ml.tree(), aid);
         assert!(
@@ -6039,7 +6165,7 @@ mod tests {
 
         // Enough frames (3D default max_speed is 10) to arrive.
         for _ in 0..600 {
-            ml.step(1.0 / 60.0);
+            step_steering_3d(&mut ml, aid, 10.0);
         }
         let end = crate::node3d::get_position(ml.tree(), aid);
         assert!(
@@ -6383,15 +6509,16 @@ mod tests {
         let log = ml.tree().get_node(child_id).unwrap().notification_log();
         // POSTINITIALIZE + PARENTED + ENTER_TREE + READY from add_child to live root,
         // then per frame: INTERNAL_PHYSICS -> PHYSICS -> INTERNAL_PROCESS -> PROCESS
-        assert_eq!(log.len(), 8);
+        assert_eq!(log.len(), 9);
         assert_eq!(log[0], NOTIFICATION_POSTINITIALIZE);
         assert_eq!(log[1], NOTIFICATION_PARENTED);
         assert_eq!(log[2], NOTIFICATION_ENTER_TREE);
-        assert_eq!(log[3], NOTIFICATION_READY);
-        assert_eq!(log[4], NOTIFICATION_INTERNAL_PHYSICS_PROCESS);
-        assert_eq!(log[5], NOTIFICATION_PHYSICS_PROCESS);
-        assert_eq!(log[6], NOTIFICATION_INTERNAL_PROCESS);
-        assert_eq!(log[7], NOTIFICATION_PROCESS);
+        assert_eq!(log[3], NOTIFICATION_POST_ENTER_TREE);
+        assert_eq!(log[4], NOTIFICATION_READY);
+        assert_eq!(log[5], NOTIFICATION_INTERNAL_PHYSICS_PROCESS);
+        assert_eq!(log[6], NOTIFICATION_PHYSICS_PROCESS);
+        assert_eq!(log[7], NOTIFICATION_INTERNAL_PROCESS);
+        assert_eq!(log[8], NOTIFICATION_PROCESS);
     }
 
     #[test]
@@ -6456,6 +6583,7 @@ mod tests {
                 NOTIFICATION_POSTINITIALIZE,
                 NOTIFICATION_PARENTED,
                 NOTIFICATION_ENTER_TREE,
+                NOTIFICATION_POST_ENTER_TREE,
                 NOTIFICATION_READY,
             ]
         );
@@ -6665,6 +6793,7 @@ mod tests {
                 NOTIFICATION_POSTINITIALIZE,
                 NOTIFICATION_PARENTED,
                 NOTIFICATION_ENTER_TREE,
+                NOTIFICATION_POST_ENTER_TREE,
                 NOTIFICATION_READY,
                 NOTIFICATION_INTERNAL_PHYSICS_PROCESS,
                 NOTIFICATION_PHYSICS_PROCESS,
@@ -6685,9 +6814,11 @@ mod tests {
         assert_eq!(log[0], NOTIFICATION_POSTINITIALIZE);
         assert_eq!(log[1], NOTIFICATION_PARENTED);
         assert_eq!(log[2], NOTIFICATION_ENTER_TREE);
-        assert_eq!(log[3], NOTIFICATION_READY);
+        assert_eq!(log[3], NOTIFICATION_POST_ENTER_TREE);
+        assert_eq!(log[4], NOTIFICATION_READY);
         for frame in 0..5 {
-            let base = 4 + frame * 4; // +4 for leading lifecycle
+            // +5 for the leading lifecycle (POST_ENTER_TREE is Godot's too).
+            let base = 5 + frame * 4;
             assert_eq!(
                 log[base], NOTIFICATION_INTERNAL_PHYSICS_PROCESS,
                 "frame {frame}: expected INTERNAL_PHYSICS_PROCESS at pos {base}"
@@ -6733,8 +6864,9 @@ mod tests {
 
         // Parent: POSTINITIALIZE + PARENTED + ENTER_TREE + READY + CHILD_ORDER_CHANGED + 4 frame = 9
         // Child: POSTINITIALIZE + PARENTED + ENTER_TREE + READY + 4 frame = 8
-        assert_eq!(parent_log.len(), 9);
-        assert_eq!(child_log.len(), 8);
+        // +1 each for NOTIFICATION_POST_ENTER_TREE (Godot `_propagate_ready`).
+        assert_eq!(parent_log.len(), 10);
+        assert_eq!(child_log.len(), 9);
 
         // Verify tree order via all_nodes_in_tree_order.
         let order = ml.tree().all_nodes_in_tree_order();
@@ -6795,7 +6927,8 @@ mod tests {
             let log = ml.tree().get_node(child_id).unwrap().notification_log();
             // 4 lifecycle from add_child (POSTINITIALIZE + PARENTED + ENTER_TREE + READY)
             // + each frame adds 4 notifications.
-            let expected_len = 4 + (frame as usize) * 4;
+            // 5 lifecycle: POST_ENTER_TREE follows ENTER_TREE, as in Godot.
+            let expected_len = 5 + (frame as usize) * 4;
             assert_eq!(
                 log.len(),
                 expected_len,
@@ -7008,11 +7141,12 @@ mod tests {
         // CHILD_ORDER_CHANGED + 4 frame notifications.
         // A and B each have one child added, so they get CHILD_ORDER_CHANGED too.
         let a_log = ml.tree().get_node(a_id).unwrap().notification_log();
-        assert_eq!(a_log.len(), 9); // 4 lifecycle + CHILD_ORDER_CHANGED + 4 frame
+        // 5 lifecycle (incl. POST_ENTER_TREE) + CHILD_ORDER_CHANGED + 4 frame
+        assert_eq!(a_log.len(), 10);
         let b_log = ml.tree().get_node(b_id).unwrap().notification_log();
-        assert_eq!(b_log.len(), 9); // 4 lifecycle + CHILD_ORDER_CHANGED + 4 frame
+        assert_eq!(b_log.len(), 10);
         let c_log = ml.tree().get_node(c_id).unwrap().notification_log();
-        assert_eq!(c_log.len(), 8); // 4 lifecycle + 4 frame (no children)
+        assert_eq!(c_log.len(), 9); // 5 lifecycle + 4 frame (no children)
     }
 
     #[test]

@@ -83,7 +83,14 @@ fn stylebox_family_registers_properties() {
 
     // `StyleBoxEmpty` adds nothing of its own — the base margins are its whole
     // purpose, so it must expose them and nothing more exotic.
-    let empty = props("StyleBoxEmpty");
+    // Minus Resource's own three (`resource_local_to_scene`, `resource_name`,
+    // `resource_path`), which every StyleBox inherits now that Resource is
+    // registered from one canonical definition.
+    let resource = props("Resource");
+    let empty: Vec<_> = props("StyleBoxEmpty")
+        .into_iter()
+        .filter(|p| !resource.contains(p))
+        .collect();
     assert_eq!(
         empty.len(),
         4,

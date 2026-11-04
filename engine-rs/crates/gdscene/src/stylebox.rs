@@ -968,8 +968,11 @@ mod tests {
             Vector2::new(10.0, 10.0),
             Vector2::new(80.0, 60.0),
         ));
-        // border layer (2 bars + 4 discs) + bg layer (2 bars + 4 discs) = 12.
-        assert_eq!(cmds.len(), 12);
+        // border layer (3 bands + 4 discs) + bg layer (3 bands + 4 discs) = 14.
+        // Three bands, not a two-bar cross: each corner keeps its OWN radius
+        // (`each_corner_keeps_its_own_radius`), so the top and bottom bands are
+        // inset by their own corners rather than one shared max.
+        assert_eq!(cmds.len(), 14);
         let circles = cmds
             .iter()
             .filter(|c| matches!(c, DrawCommand::DrawCircle { .. }))

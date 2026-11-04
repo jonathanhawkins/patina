@@ -896,9 +896,15 @@ pub fn pbr_shade(input: &FragmentInput, uniforms: &ShaderUniforms) -> Color {
         albedo.b * (1.0 - metallic),
     ];
 
-    let mut r = uniforms.ambient.r * albedo.r;
-    let mut g = uniforms.ambient.g * albedo.g;
-    let mut b = uniforms.ambient.b * albedo.b;
+    // Ambient is DIFFUSE light, so a metal takes none of it: Godot multiplies
+    // it by albedo (`scene_forward_clustered.glsl:2147`) and then by
+    // `1.0 - metallic` (`:2931`) — `albedo_lin` is exactly that product. Using
+    // the raw albedo left a full grey ambient under every metal, so a mirror
+    // showed the probe's reflection ADDED to a grey base (pink, not the red it
+    // reflected) — the same defect the Lambert path's `keep` factor fixes.
+    let mut r = uniforms.ambient.r * albedo_lin[0];
+    let mut g = uniforms.ambient.g * albedo_lin[1];
+    let mut b = uniforms.ambient.b * albedo_lin[2];
 
     // Image-based specular from a captured ReflectionProbe (pat-s3rrv.206).
     //
@@ -1065,6 +1071,46 @@ pub struct CustomFragmentShader {
     time: f32,
 }
 
+/// The parameter map a fragment shader evaluates against, with every
+/// `source_color` uniform decoded sRGB → linear — its set value, or its
+/// declared default when unset.
+///
+/// 🔑 Godot treats a `source_color` uniform as an sRGB authoring value and
+/// converts it to linear before the shader reads it (material uniform upload,
+/// `Color::srgb_to_linear`, alpha kept). The hint was parsed into
+/// `ShaderHint::SourceColor` and then ignored here, so the shader computed with
+/// the sRGB number as if it were linear and the output encode brightened it a
+/// second time: an unshaded `albedo_color` of 0.5 displayed as 0.73.
+pub fn linearize_source_color_uniforms(
+    compiled: &gdserver3d::CompiledShader3D,
+    parameters: &std::collections::HashMap<String, gdvariant::Variant>,
+) -> std::collections::HashMap<String, gdvariant::Variant> {
+    use gdvariant::Variant;
+    let mut out = parameters.clone();
+    for u in &compiled.uniforms {
+        let is_source_color = u
+            .hint
+            .as_deref()
+            .and_then(gdserver3d::shader::parse_shader_hint)
+            .is_some_and(|h| h == gdserver3d::shader::ShaderHint::SourceColor);
+        if !is_source_color {
+            continue;
+        }
+        let value = parameters.get(&u.name).unwrap_or(&u.default_value);
+        let linear = match value {
+            Variant::Color(c) => Variant::Color(c.srgb_to_linear()),
+            Variant::Vector3(v) => Variant::Vector3(gdcore::math::Vector3::new(
+                gdcore::math::srgb_to_linear_channel(v.x),
+                gdcore::math::srgb_to_linear_channel(v.y),
+                gdcore::math::srgb_to_linear_channel(v.z),
+            )),
+            _ => continue,
+        };
+        out.insert(u.name.clone(), linear);
+    }
+    out
+}
+
 impl CustomFragmentShader {
     /// Creates a custom fragment shader from a `ShaderMaterial3D`.
     ///
@@ -1082,9 +1128,10 @@ impl CustomFragmentShader {
             compiler.compile_cached(gdserver3d::ShaderType3D::Spatial, "")
         };
         let fragment_body = compiled.fragment_body.clone();
+        let parameters = linearize_source_color_uniforms(&compiled, &material.parameters);
         Self {
             compiled,
-            parameters: material.parameters.clone(),
+            parameters,
             fragment_body,
             // pat-s3rrv.122: carry the material's bound sampler images through.
             // This was `HashMap::new()` unconditionally, so `texture(tex, UV)`
@@ -1103,6 +1150,7 @@ impl CustomFragmentShader {
         parameters: std::collections::HashMap<String, gdvariant::Variant>,
     ) -> Self {
         let fragment_body = compiled.fragment_body.clone();
+        let parameters = linearize_source_color_uniforms(&compiled, &parameters);
         Self {
             compiled,
             parameters,
@@ -2115,6 +2163,41 @@ mod tests {
         assert!((out.r - 1.0).abs() < 1e-5);
         assert!((out.g - 1.0).abs() < 1e-5);
         assert!((out.b - 1.0).abs() < 1e-5);
+    }
+
+    /// `source_color` uniforms reach the shader LINEAR — both a set value and
+    /// an unset uniform's declared default — and an unhinted vec4 is left
+    /// alone (Godot decodes only `HINT_SOURCE_COLOR`).
+    #[test]
+    fn source_color_uniforms_are_linearized_set_or_default() {
+        let src = "shader_type spatial;\n\
+                   uniform vec4 tint : source_color;\n\
+                   uniform vec4 base : source_color = vec4(0.5, 0.5, 0.5, 0.25);\n\
+                   uniform vec4 raw = vec4(0.5, 0.5, 0.5, 1.0);\n";
+        let compiled = gdserver3d::ShaderCompiler3D::new()
+            .compile_cached(gdserver3d::ShaderType3D::Spatial, src);
+        let mut params = std::collections::HashMap::new();
+        params.insert(
+            "tint".to_string(),
+            gdvariant::Variant::Color(Color::new(0.5, 1.0, 0.0, 0.75)),
+        );
+        let out = linearize_source_color_uniforms(&compiled, &params);
+        let lin = gdcore::math::srgb_to_linear_channel(0.5);
+        match out.get("tint") {
+            Some(gdvariant::Variant::Color(c)) => {
+                assert!((c.r - lin).abs() < 1e-5 && (c.g - 1.0).abs() < 1e-5, "{c:?}");
+                assert!((c.a - 0.75).abs() < 1e-6, "alpha kept");
+            }
+            other => panic!("tint: {other:?}"),
+        }
+        match out.get("base") {
+            Some(gdvariant::Variant::Color(c)) => {
+                assert!((c.r - lin).abs() < 1e-5, "default linearized: {c:?}");
+                assert!((c.a - 0.25).abs() < 1e-6, "alpha kept");
+            }
+            other => panic!("base default: {other:?}"),
+        }
+        assert!(out.get("raw").is_none(), "an unhinted uniform is not touched");
     }
 
     #[test]

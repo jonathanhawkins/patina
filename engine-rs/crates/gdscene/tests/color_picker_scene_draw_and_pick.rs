@@ -397,7 +397,10 @@ fn a_picker_narrower_than_its_hue_bar_has_no_negative_rects() {
     gdobject::class_db::register_all_classes();
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    let picker = Node::new("Tiny", "ColorPicker");
+    // `Node::new` is the RAW constructor: unlike a `.tscn` node it seeds no
+    // ClassDB defaults, so `color` read back Nil. Godot's default is white.
+    let mut picker = Node::new("Tiny", "ColorPicker");
+    picker.set_property("color", Variant::Color(Color::new(1.0, 1.0, 1.0, 1.0)));
     let id = tree.add_child(root, picker).expect("picker added");
     set_offset_left(&mut tree, id, 100.0);
     set_offset_top(&mut tree, id, 100.0);
@@ -412,9 +415,26 @@ fn a_picker_narrower_than_its_hue_bar_has_no_negative_rects() {
             "no draw item may have a negative extent: {r:?}"
         );
     }
+    // Every part stays INSIDE the control, alpha bar included. Squeezed below
+    // bar + gap, the alpha bar used to be placed BAR_GAP px under the rect
+    // (y 104..112 for a 100..108 control) and caught presses below the picker.
+    let rect = Rect2::new(Vector2::new(100.0, 100.0), Vector2::new(10.0, 8.0));
+    let layout = gdscene::color_picker::picker_layout(rect, true);
+    let alpha = layout.alpha.expect("edit_alpha draws an alpha bar");
+    for part in [layout.sv, layout.hue, alpha] {
+        assert!(
+            part.position.y >= rect.position.y
+                && part.position.y + part.size.y <= rect.position.y + rect.size.y + 1e-4,
+            "a picker part must stay inside the control: {part:?} vs {rect:?}"
+        );
+    }
     // The gap between SV and hue bar belongs to neither part, and a press there
     // must resolve to nothing rather than snapping to whichever rect was tested
-    // first. With `sv_w` clamped to 0 the whole control is gap.
+    // first. With `sv_w` clamped to 0 the whole control is gap — once the
+    // alpha bar (which spans the full width) is off, as it is here.
+    tree.get_node_mut(id)
+        .unwrap()
+        .set_property("edit_alpha", Variant::Bool(false));
     let before = color_of(&tree, id);
     tree.push_input(&press(104.0, 104.0));
     assert_eq!(

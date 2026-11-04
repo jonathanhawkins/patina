@@ -23,6 +23,14 @@ use gdscene::MainLoop;
 
 /// Load a `.tscn` string into a fresh `SceneTree`, returning the tree.
 fn load(tscn: &str) -> SceneTree {
+    // ⚠️ The canvas walk keeps only nodes for which `is_class("CanvasItem")`
+    // holds, and that answer comes from the ClassDB's inheritance chain. With
+    // an empty ClassDB every node fails it and `build_runtime_render_list`
+    // returns `[]` — so the particles were simulated but never collected, and
+    // the frame read as "0 lit px". A real run always has the ClassDB
+    // populated; this fixture has to populate it too (same as
+    // script_draw_and_gui_input_virtuals.rs).
+    gdobject::class_db::register_2d_classes();
     let scene = PackedScene::from_tscn(tscn).expect("parse tscn");
     let mut tree = SceneTree::new();
     let root = tree.root_id();

@@ -305,6 +305,18 @@ fn empty_bone_list_simulates_all_bones() {
 #[test]
 fn restart_is_clean() {
     let mut rig = build_rig();
+    // Pin the two simulated bones to their parents. Godot's `joint_type`
+    // defaults to JOINT_TYPE_NONE (`doc/classes/PhysicalBone3D.xml:96`,
+    // `default="0"`), so an unauthored bone creates NO joint — and the
+    // "releases the two auto-created joints" check below underflowed on
+    // `0 - 2`. JOINT_TYPE_PIN = 1.
+    for node in [rig.thigh, rig.shin] {
+        rig.ml
+            .tree_mut()
+            .get_node_mut(node)
+            .unwrap()
+            .set_property("joint_type", Variant::Int(1));
+    }
     rig.ml.step(1.0 / 60.0);
 
     let only = ["thigh".to_string(), "shin".to_string()];

@@ -128,9 +128,19 @@ impl FrameBuffer {
     ///
     /// Uses standard "source over" compositing: `out = src * src.a + dst * (1 - src.a)`.
     /// No-op if out of bounds or scissored away.
+    #[inline]
     pub fn blend_pixel(&mut self, x: u32, y: u32, color: Color) {
         if x < self.width && y < self.height && self.in_scissor(x, y) {
             let idx = (y * self.width + x) as usize;
+            // Fast path, bit-identical to `blend`: an OPAQUE source under MIX
+            // is `src·1 + dst·0` per channel and alpha `min(1 + dst·0, 1)`,
+            // i.e. exactly the source with alpha 1. Skipping the read and the
+            // arithmetic matters because most texels a 2D game draws (sky,
+            // terrain, sprite bodies) are opaque, and this runs per pixel.
+            if self.blend_mode == canvas_material::BlendMode::Mix && color.a >= 1.0 {
+                self.pixels[idx] = Color::new(color.r, color.g, color.b, 1.0);
+                return;
+            }
             let dst = self.pixels[idx];
             // `Mix` here is exactly the source-over this used to inline; any
             // other mode is the item's CanvasItemMaterial talking.
@@ -1154,7 +1164,11 @@ mod tests {
                 text: "Ag".to_string(),
                 position: Vector2::new(4.0, 4.0),
                 color: Color::WHITE,
-                font_size: 3,
+                // PIXELS. This read `3` from when the field was the 5x7
+                // bitmap's integer SCALE (3 x 7 = 21px); since it became the
+                // pixel size (pat-s3rrv.37), 3px TTF glyphs never reach 50%
+                // coverage and "TTF text drawn" could not pass.
+                font_size: 21,
             });
             vp.add_canvas_item(item);
             renderer.render_frame(&vp)

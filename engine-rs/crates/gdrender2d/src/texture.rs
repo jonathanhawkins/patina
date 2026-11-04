@@ -31,6 +31,7 @@ impl Texture2D {
     /// # Panics
     ///
     /// Panics if `(x, y)` is out of bounds.
+    #[inline]
     pub fn get_pixel(&self, x: u32, y: u32) -> Color {
         self.pixels[(y * self.width + x) as usize]
     }
@@ -101,8 +102,17 @@ pub fn load_png(path: &str) -> Option<Texture2D> {
 
 /// Decodes PNG image data from raw bytes into a [`Texture2D`].
 ///
-/// Supports 8-bit RGB (color type 2), RGBA (color type 6), and
-/// grayscale (color type 0) images. Returns `None` on decode failure.
+/// Supports every colour type and bit depth the PNG spec allows — grayscale
+/// (1/2/4/8/16-bit), RGB (8/16), **palette** (1/2/4/8, with `tRNS` alpha),
+/// grayscale+alpha and RGBA (8/16) — and Adam7 interlacing. Returns `None` on
+/// malformed data rather than guessing.
+///
+/// 🔑 This used to accept 8-bit RGB/RGBA/gray only and returned `None` for a
+/// palette image, so the sprite drew NOTHING: the official Godot demo "Dodge
+/// the Creeps" ships its enemies as 8-bit palette PNGs (as do Kenney's packs
+/// and anything run through pngquant/optipng), and every mob was invisible.
+/// An interlaced image was worse — the interlace flag was never read, so it
+/// decoded as scrambled rows.
 pub fn decode_png(data: &[u8]) -> Option<Texture2D> {
     use miniz_oxide::inflate::decompress_to_vec_zlib;
 
@@ -111,155 +121,150 @@ pub fn decode_png(data: &[u8]) -> Option<Texture2D> {
         return None;
     }
 
-    // Parse IHDR chunk.
+    // Parse IHDR chunk. The interlace method is its last byte (offset 12 of
+    // the 13-byte body, which starts at file offset 16).
+    let interlaced = *data.get(16 + 12)? == 1;
     let mut pos = 8;
     let (width, height, bit_depth, color_type) = parse_ihdr(data, &mut pos)?;
-
-    if bit_depth != 8 {
-        return None; // Only 8-bit depth supported.
+    if width == 0 || height == 0 {
+        return None;
     }
+    let channels: usize = match (color_type, bit_depth) {
+        (0, 1 | 2 | 4 | 8 | 16) => 1,
+        (3, 1 | 2 | 4 | 8) => 1,
+        (2, 8 | 16) => 3,
+        (4, 8 | 16) => 2,
+        (6, 8 | 16) => 4,
+        _ => return None,
+    };
 
-    // Collect all IDAT chunks.
+    // Collect IDAT, plus the palette and transparency chunks.
     let mut idat_data = Vec::new();
+    let mut palette: &[u8] = &[];
+    let mut trns: &[u8] = &[];
     while pos + 12 <= data.len() {
         let chunk_len =
             u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         let chunk_type = &data[pos + 4..pos + 8];
-        if chunk_type == b"IDAT" {
-            if pos + 8 + chunk_len > data.len() {
-                return None;
-            }
-            idat_data.extend_from_slice(&data[pos + 8..pos + 8 + chunk_len]);
-        } else if chunk_type == b"IEND" {
-            break;
+        if pos + 8 + chunk_len > data.len() {
+            return None;
+        }
+        let body = &data[pos + 8..pos + 8 + chunk_len];
+        match chunk_type {
+            b"IDAT" => idat_data.extend_from_slice(body),
+            b"PLTE" => palette = body,
+            b"tRNS" => trns = body,
+            b"IEND" => break,
+            _ => {}
         }
         pos += 12 + chunk_len; // 4 len + 4 type + data + 4 crc
+    }
+    if color_type == 3 && palette.is_empty() {
+        return None;
     }
 
     // Decompress.
     let raw = decompress_to_vec_zlib(&idat_data).ok()?;
 
-    // Determine bytes per pixel.
-    let bpp: usize = match color_type {
-        0 => 1, // Grayscale
-        2 => 3, // RGB
-        4 => 2, // Grayscale + Alpha
-        6 => 4, // RGBA
-        _ => return None,
-    };
+    let bits_per_pixel = channels * bit_depth as usize;
+    // The filter's byte distance: one pixel, at least one byte.
+    let filter_bpp = (bits_per_pixel / 8).max(1);
+    let max_sample = ((1u32 << bit_depth) - 1) as f32;
 
-    // Unfilter scanlines.
-    let stride = width as usize * bpp;
-    let row_bytes = 1 + stride; // filter byte + pixel data
-    if raw.len() < row_bytes * height as usize {
-        return None;
-    }
-
-    let mut unfiltered = vec![0u8; stride * height as usize];
-    for y in 0..height as usize {
-        let filter_byte = raw[y * row_bytes];
-        let src = &raw[y * row_bytes + 1..y * row_bytes + 1 + stride];
-        let dst_offset = y * stride;
-
-        match filter_byte {
-            0 => {
-                // None
-                unfiltered[dst_offset..dst_offset + stride].copy_from_slice(src);
+    // Reads channel `c` of pixel `x` from an unfiltered scanline.
+    let sample = |row: &[u8], x: usize, c: usize| -> u16 {
+        match bit_depth {
+            16 => {
+                let i = (x * channels + c) * 2;
+                u16::from_be_bytes([row[i], row[i + 1]])
             }
-            1 => {
-                // Sub
-                for i in 0..stride {
-                    let a = if i >= bpp {
-                        unfiltered[dst_offset + i - bpp]
-                    } else {
-                        0
-                    };
-                    unfiltered[dst_offset + i] = src[i].wrapping_add(a);
-                }
+            8 => row[x * channels + c] as u16,
+            depth => {
+                // Sub-byte depths are single-channel (gray or palette index),
+                // packed most-significant bit first.
+                let depth = depth as usize;
+                let bit = x * depth;
+                let byte = row[bit / 8];
+                let shift = 8 - depth - (bit % 8);
+                ((byte >> shift) & ((1u8 << depth) - 1)) as u16
+            }
+        }
+    };
+    let trns_u16 = |i: usize| -> Option<u16> {
+        Some(u16::from_be_bytes([
+            *trns.get(i * 2)?,
+            *trns.get(i * 2 + 1)?,
+        ]))
+    };
+    let to_color = |row: &[u8], x: usize| -> Color {
+        let unit = |v: u16| v as f32 / max_sample;
+        match color_type {
+            0 => {
+                let v = sample(row, x, 0);
+                let a = if trns_u16(0) == Some(v) { 0.0 } else { 1.0 };
+                let g = unit(v);
+                Color::new(g, g, g, a)
             }
             2 => {
-                // Up
-                for i in 0..stride {
-                    let b = if y > 0 {
-                        unfiltered[(y - 1) * stride + i]
-                    } else {
-                        0
-                    };
-                    unfiltered[dst_offset + i] = src[i].wrapping_add(b);
-                }
+                let (r, g, b) = (sample(row, x, 0), sample(row, x, 1), sample(row, x, 2));
+                let keyed =
+                    trns_u16(0) == Some(r) && trns_u16(1) == Some(g) && trns_u16(2) == Some(b);
+                Color::new(unit(r), unit(g), unit(b), if keyed { 0.0 } else { 1.0 })
             }
             3 => {
-                // Average
-                for i in 0..stride {
-                    let a = if i >= bpp {
-                        unfiltered[dst_offset + i - bpp] as u16
-                    } else {
-                        0
-                    };
-                    let b = if y > 0 {
-                        unfiltered[(y - 1) * stride + i] as u16
-                    } else {
-                        0
-                    };
-                    unfiltered[dst_offset + i] = src[i].wrapping_add(((a + b) / 2) as u8);
-                }
+                let i = sample(row, x, 0) as usize;
+                let rgb = palette.get(i * 3..i * 3 + 3).unwrap_or(&[0, 0, 0]);
+                // Entries past the end of `tRNS` are opaque (PNG spec 11.3.2.1).
+                let a = trns.get(i).copied().unwrap_or(255);
+                Color::new(
+                    rgb[0] as f32 / 255.0,
+                    rgb[1] as f32 / 255.0,
+                    rgb[2] as f32 / 255.0,
+                    a as f32 / 255.0,
+                )
             }
             4 => {
-                // Paeth
-                for i in 0..stride {
-                    let a = if i >= bpp {
-                        unfiltered[dst_offset + i - bpp]
-                    } else {
-                        0
-                    };
-                    let b = if y > 0 {
-                        unfiltered[(y - 1) * stride + i]
-                    } else {
-                        0
-                    };
-                    let c = if y > 0 && i >= bpp {
-                        unfiltered[(y - 1) * stride + i - bpp]
-                    } else {
-                        0
-                    };
-                    unfiltered[dst_offset + i] = src[i].wrapping_add(paeth_predictor(a, b, c));
-                }
+                let g = unit(sample(row, x, 0));
+                Color::new(g, g, g, unit(sample(row, x, 1)))
             }
-            _ => return None,
+            _ => Color::new(
+                unit(sample(row, x, 0)),
+                unit(sample(row, x, 1)),
+                unit(sample(row, x, 2)),
+                unit(sample(row, x, 3)),
+            ),
         }
-    }
+    };
 
-    // Convert to Color pixels.
-    let mut pixels = Vec::with_capacity((width * height) as usize);
-    for y in 0..height as usize {
-        for x in 0..width as usize {
-            let idx = y * stride + x * bpp;
-            let color = match color_type {
-                0 => {
-                    let g = unfiltered[idx] as f32 / 255.0;
-                    Color::new(g, g, g, 1.0)
-                }
-                2 => {
-                    let r = unfiltered[idx] as f32 / 255.0;
-                    let g = unfiltered[idx + 1] as f32 / 255.0;
-                    let b = unfiltered[idx + 2] as f32 / 255.0;
-                    Color::new(r, g, b, 1.0)
-                }
-                4 => {
-                    let g = unfiltered[idx] as f32 / 255.0;
-                    let a = unfiltered[idx + 1] as f32 / 255.0;
-                    Color::new(g, g, g, a)
-                }
-                6 => {
-                    let r = unfiltered[idx] as f32 / 255.0;
-                    let g = unfiltered[idx + 1] as f32 / 255.0;
-                    let b = unfiltered[idx + 2] as f32 / 255.0;
-                    let a = unfiltered[idx + 3] as f32 / 255.0;
-                    Color::new(r, g, b, a)
-                }
-                _ => Color::TRANSPARENT,
-            };
-            pixels.push(color);
+    let mut pixels = vec![Color::TRANSPARENT; (width * height) as usize];
+    // Adam7's seven passes as (x0, y0, dx, dy); a plain image is one pass.
+    const ADAM7: [(usize, usize, usize, usize); 7] = [
+        (0, 0, 8, 8),
+        (4, 0, 8, 8),
+        (0, 4, 4, 8),
+        (2, 0, 4, 4),
+        (0, 2, 2, 4),
+        (1, 0, 2, 2),
+        (0, 1, 1, 2),
+    ];
+    let passes: &[(usize, usize, usize, usize)] = if interlaced { &ADAM7 } else { &[(0, 0, 1, 1)] };
+    let (w, h) = (width as usize, height as usize);
+    let mut offset = 0usize;
+    for &(x0, y0, dx, dy) in passes {
+        if x0 >= w || y0 >= h {
+            continue; // An empty pass contributes no bytes at all.
+        }
+        let pw = (w - x0).div_ceil(dx);
+        let ph = (h - y0).div_ceil(dy);
+        let stride = (pw * bits_per_pixel).div_ceil(8);
+        let rows = unfilter(raw.get(offset..)?, stride, ph, filter_bpp)?;
+        offset += (stride + 1) * ph;
+        for py in 0..ph {
+            let row = &rows[py * stride..(py + 1) * stride];
+            for px in 0..pw {
+                let (x, y) = (x0 + px * dx, y0 + py * dy);
+                pixels[y * w + x] = to_color(row, px);
+            }
         }
     }
 
@@ -268,6 +273,43 @@ pub fn decode_png(data: &[u8]) -> Option<Texture2D> {
         height,
         pixels,
     })
+}
+
+/// Reverses PNG scanline filtering for `height` rows of `stride` bytes, each
+/// preceded by its filter-type byte. `bpp` is the filter's byte distance.
+fn unfilter(raw: &[u8], stride: usize, height: usize, bpp: usize) -> Option<Vec<u8>> {
+    let row_bytes = 1 + stride;
+    if raw.len() < row_bytes * height {
+        return None;
+    }
+    let mut out = vec![0u8; stride * height];
+    for y in 0..height {
+        let filter = raw[y * row_bytes];
+        let src = &raw[y * row_bytes + 1..y * row_bytes + 1 + stride];
+        for i in 0..stride {
+            let a = if i >= bpp {
+                out[y * stride + i - bpp]
+            } else {
+                0
+            };
+            let b = if y > 0 { out[(y - 1) * stride + i] } else { 0 };
+            let c = if y > 0 && i >= bpp {
+                out[(y - 1) * stride + i - bpp]
+            } else {
+                0
+            };
+            let predicted = match filter {
+                0 => 0,
+                1 => a,
+                2 => b,
+                3 => ((a as u16 + b as u16) / 2) as u8,
+                4 => paeth_predictor(a, b, c),
+                _ => return None,
+            };
+            out[y * stride + i] = src[i].wrapping_add(predicted);
+        }
+    }
+    Some(out)
 }
 
 /// Parses the IHDR chunk, returning (width, height, bit_depth, color_type).

@@ -52,6 +52,13 @@ fn undocumented_but_registered(class: &str) -> &'static [&'static str] {
         // DYNAMIC property. Godot's doc XML documents `get_modification_stack` /
         // `set_modification_stack` as methods and lists no `<member>` at all.
         "Skeleton2D" => &["modification_stack"],
+        // scene/2d/skeleton_2d.cpp:86-88 — `Bone2D::_get_property_list()` pushes
+        //   PropertyInfo(Variant::FLOAT, PNAME("length"), PROPERTY_HINT_RANGE, "1, 1024, 1",
+        //       PROPERTY_USAGE_DEFAULT)
+        // (when `auto_calculate_length_and_angle` is off), read/written through
+        // `_get`/`_set` at :44 / :66. A DYNAMIC property: the doc XML lists the
+        // `get_length`/`set_length` methods and no `<member>`.
+        "Bone2D" => &["length"],
         _ => &[],
     }
 }

@@ -210,11 +210,10 @@ fn benchmark_evidence_files_exist() {
         "bench_render_baselines.rs",
     ];
     for file in &expected_files {
-        let path = tests_dir.join(file);
         assert!(
-            path.exists(),
-            "evidence file must exist: {}",
-            path.display()
+            find_test_file(&tests_dir, file).is_some(),
+            "evidence file must exist somewhere under {}: {file}",
+            tests_dir.display()
         );
     }
 }
@@ -263,4 +262,21 @@ fn parse_baseline_rows(doc: &str) -> Vec<(String, f64)> {
         }
     }
     results
+}
+
+/// Finds a test file by name anywhere under `tests/`, including the suite
+/// folders (`tests/<suite>/`) the integration tests were consolidated into.
+fn find_test_file(tests_dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    let mut stack = vec![tests_dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.file_name().map_or(false, |n| n == name) {
+                return Some(p);
+            }
+        }
+    }
+    None
 }

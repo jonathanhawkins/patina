@@ -1,15 +1,6 @@
 {
 	"children": [
 		{
-			"children": [],
-			"class": "Node",
-			"name": "Oracle",
-			"path": "/root/Oracle",
-			"properties": {
-
-			}
-		},
-		{
 			"children": [
 				{
 					"children": [],
@@ -17,12 +8,7 @@
 					"name": "Counter",
 					"path": "/root/World/Counter",
 					"properties": {
-						"count": {
-							"class_type": "",
-							"hint": 0,
-							"type": "int",
-							"value": 10
-						}
+
 					}
 				},
 				{
@@ -31,21 +17,7 @@
 					"name": "Reader",
 					"path": "/root/World/Reader",
 					"properties": {
-						"last_read": {
-							"class_type": "",
-							"hint": 0,
-							"type": "int",
-							"value": 0
-						},
-						"position": {
-							"class_type": "",
-							"hint": 1,
-							"type": "Vector2",
-							"value": {
-								"x": 100.0,
-								"y": 0.0
-							}
-						}
+
 					}
 				},
 				{
@@ -54,27 +26,7 @@
 					"name": "Mover",
 					"path": "/root/World/Mover",
 					"properties": {
-						"position": {
-							"class_type": "",
-							"hint": 1,
-							"type": "Vector2",
-							"value": {
-								"x": 200.0,
-								"y": 100.0
-							}
-						},
-						"speed": {
-							"class_type": "",
-							"hint": 0,
-							"type": "float",
-							"value": 50.0
-						},
-						"total_moved": {
-							"class_type": "",
-							"hint": 0,
-							"type": "float",
-							"value": 0.0
-						}
+
 					}
 				}
 			],
@@ -175,7 +127,7 @@
 			"class_type": "",
 			"hint": 0,
 			"type": "String",
-			"value": "test00"
+			"value": "Patina Fixtures"
 		},
 		"world_3d": {
 			"class_type": "World3D",

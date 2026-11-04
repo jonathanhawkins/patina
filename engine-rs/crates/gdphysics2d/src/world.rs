@@ -217,22 +217,76 @@ impl Default for SpaceParams2D {
 /// multiplied by `physics/2d/default_gravity_vector` ((0, 1), i.e. down).
 pub const DEFAULT_GRAVITY_2D: Vector2 = Vector2::new(0.0, 980.0);
 
-/// Radius of a circle centred on the shape's local origin that contains the
-/// whole shape — the conservative bound a swept test needs.
+/// World-space AABB `(min, max)` of a body's primary collider: the local
+/// bounding rect through the collider's own transform, then the body's.
 ///
-/// ⚠️ Measured from the ORIGIN, not from the bounding rect's centre. A
-/// `Segment` or `SeparationRay` sits entirely off to one side of its origin, so
-/// halving the rect's diagonal would under-cover it and let a sweep pass
-/// through the far end.
-fn bounding_radius(shape: &crate::shape::Shape2D) -> f32 {
-    let r = shape.bounding_rect();
-    let (x0, y0) = (r.position.x, r.position.y);
-    let (x1, y1) = (x0 + r.size.x, y0 + r.size.y);
-    let corner = |x: f32, y: f32| (x * x + y * y).sqrt();
-    corner(x0, y0)
-        .max(corner(x1, y0))
-        .max(corner(x0, y1))
-        .max(corner(x1, y1))
+/// ⚠️ A `WorldBoundary`'s rect is ±1e9 — far past where f32 keeps unit
+/// precision — so callers get a box every sweep starts inside of, which the
+/// sweep then (correctly) leaves to the narrow phase.
+fn world_aabb(body: &PhysicsBody2D) -> (Vector2, Vector2) {
+    let r = body.shape.bounding_rect();
+    let (c, s) = (body.rotation.cos(), body.rotation.sin());
+    let mut lo = Vector2::new(f32::MAX, f32::MAX);
+    let mut hi = Vector2::new(f32::MIN, f32::MIN);
+    for (x, y) in [
+        (r.position.x, r.position.y),
+        (r.position.x + r.size.x, r.position.y),
+        (r.position.x, r.position.y + r.size.y),
+        (r.position.x + r.size.x, r.position.y + r.size.y),
+    ] {
+        let p = body.shape_transform.xform(Vector2::new(x, y));
+        let w = body.position + Vector2::new(p.x * c - p.y * s, p.x * s + p.y * c);
+        lo = Vector2::new(lo.x.min(w.x), lo.y.min(w.y));
+        hi = Vector2::new(hi.x.max(w.x), hi.y.max(w.y));
+    }
+    (lo, hi)
+}
+
+/// Earliest `t ∈ [0, 1]` at which box `[a_min, a_max]` moved by `motion` first
+/// touches box `[b_min, b_max]`, or `None`.
+///
+/// ⚠️ A sweep that STARTS overlapping (penetration deeper than a hair) is
+/// `None`: the narrow phase owns overlaps, and clamping there would pin a body
+/// to its previous position forever. One that starts merely TOUCHING and moves
+/// INTO the box answers `Some(0.0)` — the frame after a CCD clamp leaves the
+/// body exactly in contact, and skipping that case lets it tunnel next tick.
+fn swept_aabb_toi(
+    a_min: Vector2,
+    a_max: Vector2,
+    motion: Vector2,
+    b_min: Vector2,
+    b_max: Vector2,
+) -> Option<f32> {
+    const TOUCH: f32 = 1e-3;
+    let axis = |a0: f32, a1: f32, d: f32, b0: f32, b1: f32| -> Option<(f32, f32)> {
+        if d.abs() < 1e-9 {
+            // Not moving on this axis: overlapping (or touching) for all t, or never.
+            if a1 <= b0 - TOUCH || a0 >= b1 + TOUCH {
+                None
+            } else {
+                Some((f32::NEG_INFINITY, f32::INFINITY))
+            }
+        } else {
+            let t0 = (b0 - a1) / d;
+            let t1 = (b1 - a0) / d;
+            Some((t0.min(t1), t0.max(t1)))
+        }
+    };
+    let (ex, lx) = axis(a_min.x, a_max.x, motion.x, b_min.x, b_max.x)?;
+    let (ey, ly) = axis(a_min.y, a_max.y, motion.y, b_min.y, b_max.y)?;
+    let enter = ex.max(ey);
+    let exit = lx.min(ly);
+    if enter > exit || enter > 1.0 || exit <= 0.0 {
+        return None;
+    }
+    // Penetration at t = 0 on every axis it enters through means a real
+    // overlap rather than a touch: in units of the step, `-enter * |motion|`
+    // is how deep the start already is.
+    let depth = -enter * motion.length();
+    if enter < 0.0 && depth > TOUCH {
+        return None;
+    }
+    Some(enter.max(0.0))
 }
 
 impl PhysicsWorld2D {
@@ -397,13 +451,13 @@ impl PhysicsWorld2D {
     /// bullet passed straight through a wall while the inspector showed the
     /// setting enabled.
     fn ccd_clamp(&mut self, id: BodyId, prev: Vector2) {
-        let (new_pos, r_self, self_layer, self_mask) = match self.bodies.get(&id) {
-            Some(b) => (
-                b.position,
-                bounding_radius(&b.shape),
-                b.collision_layer,
-                b.collision_mask,
-            ),
+        let (new_pos, self_min, self_max, self_layer, self_mask) = match self.bodies.get(&id) {
+            Some(b) => {
+                // The body's AABB at its PREVIOUS position: the sweep's start.
+                let (lo, hi) = world_aabb(b);
+                let back = prev - b.position;
+                (b.position, lo + back, hi + back, b.collision_layer, b.collision_mask)
+            }
             None => return,
         };
         let motion = new_pos - prev;
@@ -411,6 +465,11 @@ impl PhysicsWorld2D {
             return;
         }
 
+        // 🔑 Swept AABB vs AABB (slab method), not bounding CIRCLES. A thin
+        // wall — the canonical thing a bullet tunnels through — has a bounding
+        // circle as large as its LENGTH (a 4x400 wall: r ≈ 200), so every sweep
+        // that started within 200 px of it began "inside" the circle, answered
+        // `t = 0`, and was skipped: CCD could never fire against a wall.
         let mut earliest: Option<f32> = None;
         for other in self.bodies.values() {
             // Only against things that do not move under the solver: two rigid
@@ -424,19 +483,10 @@ impl PhysicsWorld2D {
             {
                 continue;
             }
-            let r = r_self + bounding_radius(&other.shape);
-            let Some(t) = crate::ccd::ray_circle_toi(prev, motion, other.position, r) else {
+            let (o_min, o_max) = world_aabb(other);
+            let Some(t) = swept_aabb_toi(self_min, self_max, motion, o_min, o_max) else {
                 continue;
             };
-            // ⚠️ `ray_circle_toi` answers `Some(0.0)` when the sweep STARTS
-            // inside the radius. Clamping on that would pin a body already
-            // resting against something to its previous position forever — the
-            // regular narrow-phase owns overlaps, CCD only owns the gap that was
-            // skipped. It also silently drops `WorldBoundary`, whose bounding
-            // rect is ±1e9 so every sweep begins "inside" it.
-            if t <= 1e-4 {
-                continue;
-            }
             if earliest.map_or(true, |e| t < e) {
                 earliest = Some(t);
             }
@@ -565,10 +615,31 @@ impl PhysicsWorld2D {
         let mut events = Vec::new();
         let mut constraints: Vec<ContactConstraint2D> = Vec::new();
 
+        // Rigid-ness per id, read once: the pair rule below is asked of every
+        // pair, so a HashMap lookup per side per pair would dominate it.
+        let rigid: Vec<bool> = ids
+            .iter()
+            .map(|id| self.bodies[id].body_type == BodyType::Rigid)
+            .collect();
+
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
                 let id_a = ids[i];
                 let id_b = ids[j];
+
+                // 🔑 Godot forms no pair between two NON-dynamic bodies:
+                // `GodotBodyPair2D::setup` sets `collide_A/B = mode >
+                // BODY_MODE_KINEMATIC`, and with neither side colliding and no
+                // contact reporting (a RigidBody2D-only feature) returns
+                // `collided = false` (godot_body_pair_2d.cpp:258-268). This loop
+                // used to narrow-phase every static/kinematic pair anyway — a
+                // TileMapLayer's hundreds of static tile bodies made it
+                // quadratic in the LEVEL size: the official 2D Platformer demo's
+                // 341 tiles cost ~58k useless pairs per step and starved the
+                // editor.
+                if !rigid[i] && !rigid[j] {
+                    continue;
+                }
 
                 // Skip collision between jointed body pairs
                 let pair_key = if id_a.0 < id_b.0 {
@@ -644,7 +715,15 @@ impl PhysicsWorld2D {
                         if let Some(result) =
                             collision::test_collision(shape_a, tf_a, shape_b, tf_b)
                         {
-                            if result.colliding && result.depth > 0.0 {
+                            // `>= 0`, not `> 0`: shapes exactly TOUCHING collide.
+                            // Godot's SAT separates only on a strict gap
+                            // (`min_A > max_B || min_B > max_A`,
+                            // godot_collision_solver_2d_sat.cpp `test_axis`), and
+                            // `test_collision` already reports depth 0 as
+                            // colliding. Dropping it here made a body that
+                            // started resting on a floor fall into it for one
+                            // step before any impulse or friction applied.
+                            if result.colliding && result.depth >= 0.0 {
                                 // One-way collision check, per SHAPE: the flags
                                 // come off the owner, so A's solid collider still
                                 // blocks even when A's one-way collider lets B
@@ -1799,6 +1878,20 @@ mod tests {
         assert_eq!(b.linear_velocity, Vector2::ZERO);
     }
 
+    /// Steps `world` with no gravity until an overlap has settled.
+    ///
+    /// 🔑 Not `step(0.0)`: the solver resolves penetration with a bias
+    /// VELOCITY integrated over `dt` and then dropped (Godot's
+    /// `GodotBodyPair2D` bias, so pushing an overlap apart never becomes
+    /// kinetic energy). A zero-dt step therefore moves nothing — these tests
+    /// were written for the old instant position projection.
+    fn settle(world: &mut PhysicsWorld2D) {
+        world.set_gravity(Vector2::ZERO);
+        for _ in 0..30 {
+            world.step(1.0 / 60.0);
+        }
+    }
+
     #[test]
     fn world_two_bodies_collide_and_separate() {
         let mut world = PhysicsWorld2D::new();
@@ -1807,16 +1900,20 @@ mod tests {
         let id_a = world.add_body(make_rigid_circle(Vector2::new(0.0, 0.0), 5.0));
         let id_b = world.add_body(make_rigid_circle(Vector2::new(8.0, 0.0), 5.0));
 
-        world.step(0.0); // zero dt — just collision detection
+        settle(&mut world);
 
         let a = world.get_body(id_a).unwrap();
         let b = world.get_body(id_b).unwrap();
-        // Bodies should have been pushed apart
+        // Pushed apart to touching, less Godot's resting slop
+        // (`contact_max_allowed_penetration`, 0.3): 10 - 0.3 = 9.7 exactly.
         let dist = (b.position - a.position).length();
+        let want = 10.0 - crate::solver::DEFAULT_MAX_PENETRATION;
         assert!(
-            dist >= 10.0 - EPSILON,
-            "Bodies should be separated: dist = {dist}"
+            (dist - want).abs() < 1e-2,
+            "Bodies should settle at {want}: dist = {dist}"
         );
+        // ...and the push-out injects no kinetic energy.
+        assert!(a.linear_velocity.length() < 1e-2 && b.linear_velocity.length() < 1e-2);
     }
 
     #[test]
@@ -1825,7 +1922,7 @@ mod tests {
         let static_id = world.add_body(make_static_rect(Vector2::ZERO, 5.0));
         let rigid_id = world.add_body(make_rigid_circle(Vector2::new(6.0, 0.0), 2.0));
 
-        world.step(0.0);
+        settle(&mut world);
 
         let s = world.get_body(static_id).unwrap();
         assert_eq!(s.position, Vector2::ZERO, "Static body must not move");
@@ -2186,16 +2283,22 @@ mod tests {
         let id_a = world.add_body(body_a);
         let id_b = world.add_body(body_b);
 
-        let events = world.step(0.0);
+        world.set_gravity(Vector2::ZERO);
+        let events = world.step(1.0 / 60.0);
         assert!(
             !events.is_empty(),
             "Matching layer/mask should produce collision events"
         );
+        settle(&mut world);
 
         let a = world.get_body(id_a).unwrap();
         let b = world.get_body(id_b).unwrap();
         let dist = (b.position - a.position).length();
-        assert!(dist >= 10.0 - EPSILON, "Bodies should be separated");
+        // Started at 8: resolved to touching less the 0.3 resting slop.
+        assert!(
+            dist >= 10.0 - crate::solver::DEFAULT_MAX_PENETRATION - 1e-2,
+            "Bodies should be separated: dist = {dist}"
+        );
     }
 
     #[test]
@@ -2239,7 +2342,11 @@ mod tests {
 
         // Rotating bar A by 90° makes it span Y ∈ [-2, 2] and reach bar B.
         let mut rotated_world = PhysicsWorld2D::new();
-        rotated_world.add_body(make_bar(Vector2::new(0.0, 0.0), FRAC_PI_2));
+        // Bar A is dynamic: two static bars form no pair (Godot never pairs
+        // two non-dynamic bodies), so the contact needs one rigid side.
+        let mut bar_a = make_bar(Vector2::new(0.0, 0.0), FRAC_PI_2);
+        bar_a.body_type = BodyType::Rigid;
+        rotated_world.add_body(bar_a);
         rotated_world.add_body(make_bar(Vector2::new(0.0, 1.2), 0.0));
         assert!(
             !rotated_world.step(0.0).is_empty(),
@@ -2250,8 +2357,12 @@ mod tests {
     #[test]
     fn persisting_contact_detected() {
         let mut world = PhysicsWorld2D::new();
-        // Two overlapping static rects — they won't move apart
-        let id_a = world.add_body(make_static_rect(Vector2::new(0.0, 0.0), 5.0));
+        // A rigid rect overlapping a static one, stepped with dt = 0 so it does
+        // not move apart. Two STATIC rects form no pair at all in Godot
+        // (godot_body_pair_2d.cpp:258-268), which this sweep now matches.
+        let mut a = make_static_rect(Vector2::new(0.0, 0.0), 5.0);
+        a.body_type = BodyType::Rigid;
+        let id_a = world.add_body(a);
         let id_b = world.add_body(make_static_rect(Vector2::new(4.0, 0.0), 5.0));
 
         let events1 = world.step(0.0);
@@ -2679,10 +2790,12 @@ mod determinism_order_tests {
             // Staggered rather than coincident: every pair still overlaps (the
             // spread is 11 px against 100 px half-extents) but no two centres
             // share a point, so the narrow phase returns a well-defined normal.
-            ids.push(world.add_body(static_rect(
-                Vector2::new(i as f32, 0.0),
-                Vector2::new(100.0, 100.0),
-            )));
+            // RIGID, not static: Godot forms no contact pair between two
+            // non-dynamic bodies (godot_body_pair_2d.cpp:258-268), and the
+            // sweep now skips them the same way.
+            let mut b = static_rect(Vector2::new(i as f32, 0.0), Vector2::new(100.0, 100.0));
+            b.body_type = BodyType::Rigid;
+            ids.push(world.add_body(b));
         }
         // Read the ids back rather than assuming a base: `add_body` hands them
         // out from `next_id`, which starts at 1, not 0.

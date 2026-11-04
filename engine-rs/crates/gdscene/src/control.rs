@@ -1530,6 +1530,40 @@ pub fn resolve_control_layout(tree: &mut SceneTree, node_id: NodeId, parent: Vec
     let ar = get_anchor_right(tree, node_id);
     let ab = get_anchor_bottom(tree, node_id);
 
+    // 🔑 Godot keeps the OFFSETS as a Control's truth, and `set_position` /
+    // `set_size` rewrite them (`Control::_set_position`, `_set_size`). This
+    // layout only ever read offsets and wrote position/size, so a rect that
+    // arrived through position/size — authored in a `.tscn` with no offsets, or
+    // assigned by a script (`$Panel.position = ...`) — was overwritten by the
+    // offset rect on the next layout: such a ColorRect vanished from frame 2 of
+    // Play on. A position/size that differs from what this function last wrote
+    // is therefore taken as the new rect, and the offsets follow it.
+    let pos = get_position(tree, node_id);
+    let size = get_size(tree, node_id);
+    let last = tree
+        .get_node(node_id)
+        .map(|n| n.get_property(LAYOUT_RECT_KEY))
+        .unwrap_or(Variant::Nil);
+    let offsets_authored = [
+        get_offset_left(tree, node_id),
+        get_offset_top(tree, node_id),
+        get_offset_right(tree, node_id),
+        get_offset_bottom(tree, node_id),
+    ]
+    .iter()
+    .any(|o| *o != 0.0);
+    let set_from_outside = match last {
+        Variant::Rect2(r) => r.position != pos || r.size != size,
+        // First layout: an authored rect with no authored offsets is the rect.
+        _ => !offsets_authored && (pos != Vector2::ZERO || size != Vector2::ZERO),
+    };
+    if set_from_outside {
+        set_offset_left(tree, node_id, pos.x - parent.x * al);
+        set_offset_top(tree, node_id, pos.y - parent.y * at);
+        set_offset_right(tree, node_id, pos.x + size.x - parent.x * ar);
+        set_offset_bottom(tree, node_id, pos.y + size.y - parent.y * ab);
+    }
+
     let ol = get_offset_left(tree, node_id);
     let ot = get_offset_top(tree, node_id);
     let or_ = get_offset_right(tree, node_id);
@@ -1573,12 +1607,104 @@ pub fn resolve_control_layout(tree: &mut SceneTree, node_id: NodeId, parent: Vec
 
     set_position(tree, node_id, Vector2::new(x1, y1));
     set_size(tree, node_id, Vector2::new(x2 - x1, y2 - y1));
+    if let Some(node) = tree.get_node_mut(node_id) {
+        node.set_property(
+            LAYOUT_RECT_KEY,
+            Variant::Rect2(gdcore::math::Rect2::new(
+                Vector2::new(x1, y1),
+                Vector2::new(x2 - x1, y2 - y1),
+            )),
+        );
+    }
 }
+
+/// The rect [`resolve_control_layout`] last wrote, so the next layout can tell
+/// a position/size someone else set (which must move the offsets) from its own
+/// output. Runtime-only; the saver never writes it.
+pub const LAYOUT_RECT_KEY: &str = "__layout_rect";
 
 fn effective_min(tree: &SceneTree, node_id: NodeId) -> Vector2 {
     let cm = get_custom_minimum_size(tree, node_id);
     let mm = get_min_size(tree, node_id);
-    Vector2::new(cm.x.max(mm.x), cm.y.max(mm.y))
+    let content = content_minimum_size(tree, node_id);
+    Vector2::new(cm.x.max(mm.x).max(content.x), cm.y.max(mm.y).max(content.y))
+}
+
+/// Godot's own `get_minimum_size()` for the controls whose content decides it
+/// — the half of `get_combined_minimum_size()` that `custom_minimum_size` does
+/// not cover. Without it every Label and Button in a container had a zero
+/// minimum, so a VBoxContainer stacked all of them on the same line.
+///
+/// * Label: one line height per line of text, at its font size; as wide as its
+///   longest line unless it autowraps (Godot's minimum width is then 0).
+/// * Button family: the text plus the default stylebox's content margins.
+pub fn content_minimum_size(tree: &SceneTree, node_id: NodeId) -> Vector2 {
+    let Some(node) = tree.get_node(node_id) else {
+        return Vector2::ZERO;
+    };
+    let class = node.class_name();
+    let text = match node.get_property("text") {
+        Variant::String(s) => s,
+        _ => String::new(),
+    };
+    let font_size = match node.get_property("theme_override_font_sizes/font_size") {
+        Variant::Int(i) if i > 0 => i as f32,
+        Variant::Float(f) if f > 0.0 => f as f32,
+        _ => DEFAULT_FONT_SIZE,
+    };
+    let line_h = crate::control_render::line_height_px(font_size);
+    // The face the control is drawn with, so the minimum size agrees with what
+    // the layout measures and the rasterizer paints.
+    let font_path = crate::control_render::font_override_path(tree, node_id);
+    let text_w = |t: &str| {
+        t.lines()
+            .map(|l| {
+                crate::control_render::measure_text_px_in(l, font_size, font_path.as_deref())
+            })
+            .fold(0.0f32, f32::max)
+    };
+    if class == "Label" {
+        let lines = text.lines().count().max(1) as f32;
+        let wraps = !matches!(
+            node.get_property("autowrap_mode"),
+            Variant::Nil | Variant::Int(0)
+        );
+        let width = if wraps { 0.0 } else { text_w(&text) };
+        return Vector2::new(width, lines * line_h);
+    }
+    if gdobject::class_db::is_parent_class(class, "BaseButton") {
+        return Vector2::new(
+            text_w(&text) + 2.0 * BUTTON_CONTENT_MARGIN,
+            line_h + 2.0 * BUTTON_CONTENT_MARGIN,
+        );
+    }
+    Vector2::ZERO
+}
+
+/// Godot's default theme font size.
+const DEFAULT_FONT_SIZE: f32 = 16.0;
+/// Content margin on each side of the default button stylebox.
+const BUTTON_CONTENT_MARGIN: f32 = 4.0;
+
+/// A Control's size as its anchors and offsets give it inside its parent —
+/// the parent Control's own anchored size, or `viewport` for a Control whose
+/// parent is not one (a CanvasLayer, a Node2D, the root).
+pub fn anchored_size(tree: &SceneTree, node_id: NodeId, viewport: Vector2) -> Vector2 {
+    let parent = tree.get_node(node_id).and_then(|n| n.parent()).filter(|p| {
+        tree.get_node(*p)
+            .is_some_and(|n| gdobject::class_db::is_parent_class(n.class_name(), "Control"))
+    });
+    let parent_size = match parent {
+        Some(p) => anchored_size(tree, p, viewport),
+        None => viewport,
+    };
+    let w = (get_anchor_right(tree, node_id) - get_anchor_left(tree, node_id)) * parent_size.x
+        + get_offset_right(tree, node_id)
+        - get_offset_left(tree, node_id);
+    let h = (get_anchor_bottom(tree, node_id) - get_anchor_top(tree, node_id)) * parent_size.y
+        + get_offset_bottom(tree, node_id)
+        - get_offset_top(tree, node_id);
+    Vector2::new(w.max(0.0), h.max(0.0))
 }
 
 /// Places `child` inside the cell `(cell_pos, cell_size)` its container just
@@ -2368,6 +2494,57 @@ pub fn is_container_class_name(class: &str) -> bool {
             | "SubViewportContainer"
             | "FoldableContainer"
     )
+}
+
+/// Godot's `Control.layout_mode` as a READ returns — computed from the tree,
+/// not the stored value (`Control::_get_layout_mode`, control.cpp:938):
+///
+/// - no parent Control (scene root, under a `Node`/`Window`/`CanvasLayer`, or
+///   detached) → `3` UNCONTROLLED;
+/// - parent is a Container → `2` CONTAINER;
+/// - anchors off the top-left preset (only consulted when the stored mode is
+///   UNCONTROLLED or ANCHORS, `_get_anchors_layout_preset` control.cpp:1031)
+///   → `1` ANCHORS;
+/// - otherwise the stored mode if it is POSITION/ANCHORS, else `0` POSITION.
+///
+/// ⚠️ Patina stored no `layout_mode` at all, so `control.layout_mode` read
+/// `Nil` from script and the property dump never reported it.
+pub fn layout_mode(tree: &SceneTree, node_id: NodeId) -> i64 {
+    const POSITION: i64 = 0;
+    const ANCHORS: i64 = 1;
+    const CONTAINER: i64 = 2;
+    const UNCONTROLLED: i64 = 3;
+    let Some(node) = tree.get_node(node_id) else {
+        return UNCONTROLLED;
+    };
+    let Some(parent) = node.parent().filter(|p| node_is_control(tree, *p)) else {
+        return UNCONTROLLED;
+    };
+    if tree
+        .get_node(parent)
+        .is_some_and(|p| is_container_class_name(p.class_name()))
+    {
+        return CONTAINER;
+    }
+    let stored = match node.get_property("layout_mode") {
+        Variant::Int(v) => v,
+        _ => POSITION,
+    };
+    if stored == UNCONTROLLED || stored == ANCHORS {
+        let custom = matches!(node.get_property("anchors_preset"), Variant::Int(-1));
+        let off_top_left = get_anchor_left(tree, node_id) != 0.0
+            || get_anchor_top(tree, node_id) != 0.0
+            || get_anchor_right(tree, node_id) != 0.0
+            || get_anchor_bottom(tree, node_id) != 0.0;
+        if custom || off_top_left {
+            return ANCHORS;
+        }
+    }
+    if stored == POSITION || stored == ANCHORS {
+        stored
+    } else {
+        POSITION
+    }
 }
 
 /// Sets the SplitContainer `"split_offset"` — the pixel amount the divider is

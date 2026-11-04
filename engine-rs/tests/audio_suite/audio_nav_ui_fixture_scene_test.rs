@@ -404,7 +404,12 @@ fn r6sku_fixture_transition_audio_to_nav() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    add_packed_scene_to_tree(&mut tree, root, &packed_audio).unwrap();
+    // The starting scene must be the CURRENT scene: Godot's change_scene_* frees
+    // only `current_scene` (scene_tree.cpp `_flush_scene_change`) — other root
+    // children such as autoloads survive. These tests used to add it to root
+    // without making it current, relying on a free-every-root-child behaviour.
+    let _ = root;
+    tree.change_scene_to_packed(&packed_audio).unwrap();
     let mut main_loop = MainLoop::new(tree);
 
     main_loop.run_frames(10, DT);
@@ -452,7 +457,12 @@ fn r6sku_fixture_transition_ui_to_gameplay() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    add_packed_scene_to_tree(&mut tree, root, &packed_ui).unwrap();
+    // The starting scene must be the CURRENT scene: Godot's change_scene_* frees
+    // only `current_scene` (scene_tree.cpp `_flush_scene_change`) — other root
+    // children such as autoloads survive. These tests used to add it to root
+    // without making it current, relying on a free-every-root-child behaviour.
+    let _ = root;
+    tree.change_scene_to_packed(&packed_ui).unwrap();
     let mut main_loop = MainLoop::new(tree);
 
     main_loop.run_frames(30, DT);

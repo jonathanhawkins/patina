@@ -448,19 +448,23 @@ fn play_view_applies_a_shader_material_to_a_mesh() {
 /// `surfaces[i]` — which Godot spells `surface_material_override/{i + 1}`. So a
 /// two-surface mesh is the smallest fixture on which `/1` can mean anything at
 /// all, and it is reachable from a script without an imported asset.
+// Each triangle is wound CLOCKWISE as the camera on +Z sees it — Godot's front
+// face (`doc/classes/ArrayMesh.xml:49`), so CULL_BACK keeps it. It used to be
+// counter-clockwise, which only drew while the renderer's cull had the
+// convention inverted; in Godot that fixture would draw nothing.
 const TWO_SURFACE_GD: &str = "\
 extends MeshInstance3D
 func _ready():
     var m = ImmediateMesh.new()
     m.surface_begin(3)
     m.surface_add_vertex(Vector3(-1.4, -0.6, 0))
-    m.surface_add_vertex(Vector3(-0.2, -0.6, 0))
     m.surface_add_vertex(Vector3(-0.8, 0.6, 0))
+    m.surface_add_vertex(Vector3(-0.2, -0.6, 0))
     m.surface_end()
     m.surface_begin(3)
     m.surface_add_vertex(Vector3(0.2, -0.6, 0))
-    m.surface_add_vertex(Vector3(1.4, -0.6, 0))
     m.surface_add_vertex(Vector3(0.8, 0.6, 0))
+    m.surface_add_vertex(Vector3(1.4, -0.6, 0))
     m.surface_end()
     self.mesh = m
 ";

@@ -395,11 +395,15 @@ fn duplicate_connections_both_fire() {
         signal.connect(conn);
     }
 
+    // Godot refuses a duplicate connect of the same callable unless it passes
+    // `CONNECT_REFERENCE_COUNTED` (`core/object/object.cpp:1646-1650`,
+    // "already connected to given callable"), as the engine does since
+    // pat-mgixk.98. These tests predated that and asserted duplicates stack.
     signal.emit(&[]);
     assert_eq!(
         *counter.lock().unwrap(),
-        3,
-        "All duplicate connections should fire"
+        1,
+        "a duplicate connect is refused, so the callable fires once"
     );
 }
 
@@ -417,18 +421,25 @@ fn disconnect_removes_first_only() {
         let conn = Connection::with_callback(ObjectId::from_raw(1), "handler", move |_| {
             *c.lock().unwrap() += 1;
             Variant::Nil
-        });
+        })
+        // The Godot-legal way to connect one callable three times.
+        .with_flags(gdobject::signal::CONNECT_REFERENCE_COUNTED);
         signal.connect(conn);
     }
 
-    // Disconnect one
+    // Godot refuses a duplicate connect of the same callable unless it passes
+    // `CONNECT_REFERENCE_COUNTED` (`core/object/object.cpp:1646-1650`,
+    // "already connected to given callable"), as the engine does since
+    // pat-mgixk.98. These tests predated that and asserted duplicates stack.
+    // With REFERENCE_COUNTED the three connects are ONE connection at refcount
+    // 3; one disconnect drops it to 2 and leaves it live (object.cpp:1666).
     signal.disconnect(ObjectId::from_raw(1), "handler");
 
     signal.emit(&[]);
     assert_eq!(
         *counter.lock().unwrap(),
-        2,
-        "After disconnecting one of three dups, two should remain"
+        1,
+        "a refcounted connection survives one of three disconnects and fires once"
     );
 }
 

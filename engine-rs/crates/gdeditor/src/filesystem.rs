@@ -208,6 +208,15 @@ impl EditorFileSystem {
                 continue;
             }
             let is_directory = path.is_dir();
+            // Godot's EditorFileSystem skips a folder holding a `.gdignore`
+            // or ANOTHER `project.godot` (a nested project) —
+            // editor_file_system.cpp:3455-3464. Neither was honoured, so a
+            // `.gdignore`d build directory showed up in the FileSystem dock.
+            if is_directory
+                && (path.join(".gdignore").exists() || path.join("project.godot").exists())
+            {
+                continue;
+            }
             let icon = if is_directory {
                 FileIcon::Directory
             } else {
@@ -1543,5 +1552,29 @@ mod tests {
         let main = dock.entries().iter().find(|e| e.name == "main.tscn");
         assert!(main.is_some());
         assert_eq!(main.unwrap().res_path, "res://scenes/main.tscn");
+    }
+}
+
+#[cfg(test)]
+mod gdignore_tests {
+    use super::*;
+
+    #[test]
+    fn list_dir_skips_gdignored_and_nested_project_folders() {
+        let dir = std::env::temp_dir().join(format!("patina_gdignore_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(dir.join("ignored"));
+        let _ = std::fs::create_dir_all(dir.join("nested_project"));
+        let _ = std::fs::create_dir_all(dir.join("kept"));
+        std::fs::write(dir.join("project.godot"), "").unwrap();
+        std::fs::write(dir.join("ignored/.gdignore"), "").unwrap();
+        std::fs::write(dir.join("nested_project/project.godot"), "").unwrap();
+        let fs = EditorFileSystem::new(&dir);
+        let names: Vec<String> =
+            fs.list_dir("res://").unwrap().into_iter().map(|c| c.name).collect();
+        assert!(names.contains(&"kept".to_string()), "{names:?}");
+        assert!(!names.contains(&"ignored".to_string()), "{names:?}");
+        assert!(!names.contains(&"nested_project".to_string()), "{names:?}");
+        // Edge: the ROOT's own project.godot is a file, still listed.
+        assert!(names.contains(&"project.godot".to_string()), "{names:?}");
     }
 }

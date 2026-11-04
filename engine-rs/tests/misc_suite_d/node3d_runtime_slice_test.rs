@@ -121,8 +121,17 @@ fn register_3d_classes_registers_area3d() {
 #[test]
 fn register_3d_classes_total_count() {
     let _g = setup();
-    // Object + Node + 10 3D classes = 12 total.
-    assert_eq!(class_db::class_count(), 12);
+    // The 3D registration grew from the original 10 classes to Godot's full 3D
+    // surface, so an exact total only tracks unrelated registrations; assert
+    // the original 12 are all there instead.
+    for class in [
+        "Object", "Node", "Node3D", "Camera3D", "MeshInstance3D", "DirectionalLight3D",
+        "OmniLight3D", "SpotLight3D", "RigidBody3D", "StaticBody3D", "CharacterBody3D",
+        "Area3D",
+    ] {
+        assert!(class_db::class_exists(class), "{class} registered");
+    }
+    assert!(class_db::class_count() >= 12);
 }
 
 // ===========================================================================
@@ -147,7 +156,11 @@ fn camera3d_inheritance_chain() {
 fn rigid_body3d_inheritance_chain() {
     let _g = setup();
     let chain = class_db::inheritance_chain("RigidBody3D");
-    assert_eq!(chain, vec!["RigidBody3D", "Node3D", "Node", "Object"]);
+    // Godot: RigidBody3D : PhysicsBody3D : CollisionObject3D : Node3D.
+    assert_eq!(
+        chain,
+        vec!["RigidBody3D", "PhysicsBody3D", "CollisionObject3D", "Node3D", "Node", "Object"]
+    );
 }
 
 // ===========================================================================

@@ -53,10 +53,18 @@ fn pump_for_packet(
 }
 
 fn connected_pair() -> (WebSocketMultiplayerPeer, WebSocketMultiplayerPeer) {
+    connected_pair_with(|_| {})
+}
+
+/// [`connected_pair`], configuring the CLIENT before it dials.
+fn connected_pair_with(
+    setup: impl FnOnce(&mut WebSocketMultiplayerPeer),
+) -> (WebSocketMultiplayerPeer, WebSocketMultiplayerPeer) {
     let mut server = WebSocketMultiplayerPeer::new();
     let addr = server.create_server("127.0.0.1:0").expect("server binds");
 
     let mut client = WebSocketMultiplayerPeer::new();
+    setup(&mut client);
     client
         .create_client(&format!("ws://127.0.0.1:{}/", addr.port()))
         .expect("client dials");
@@ -158,7 +166,13 @@ fn packets_flow_from_server_to_client() {
 
 #[test]
 fn large_payload_survives_extended_frame_lengths() {
-    let (mut server, mut client) = connected_pair();
+    // Godot's 65535-byte default `outbound_buffer_size` refuses a 70 KiB
+    // message (ERR_OUT_OF_MEMORY, wsl_peer.cpp:784), so a project sending one
+    // raises the limit first — as this does.
+    let (mut server, mut client) = connected_pair_with(|c| {
+        c.set_outbound_buffer_size(128 * 1024);
+        c.set_inbound_buffer_size(128 * 1024);
+    });
     let client_id = client.get_unique_id();
 
     // 70 KiB forces the 64-bit extended length path in the frame codec.
@@ -177,6 +191,26 @@ fn large_payload_survives_extended_frame_lengths() {
 
     let packet = pump_for_packet(&mut client, &mut server, &payload);
     assert_eq!(packet.data.len(), payload.len());
+}
+
+#[test]
+fn a_payload_over_the_default_outbound_buffer_is_refused() {
+    // The multiplayer peer hands its 65535-byte default to the socket
+    // (`_create_peer`), and the socket refuses a larger message rather than
+    // sending it.
+    let (_server, mut client) = connected_pair();
+    assert_eq!(client.get_outbound_buffer_size(), 65535);
+    let client_id = client.get_unique_id();
+    let err = client.send_packet(
+        PeerId::SERVER,
+        Packet {
+            sender: client_id,
+            channel: 0,
+            data: vec![0u8; 70 * 1024],
+            transfer_mode: TransferMode::Reliable,
+        },
+    );
+    assert!(err.is_err(), "70 KiB over a 65535-byte outbound buffer must be refused");
 }
 
 #[test]

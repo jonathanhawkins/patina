@@ -20,6 +20,15 @@
 //!
 //! This test pins the SEAM rather than either side of it, so a future change to
 //! either the screen mapping or the cull comparison has to keep them agreeing.
+//!
+//! ⚠️ CORRECTED convention. The account above judged "front" against
+//! `Mesh3D::cube`, which was then wound counter-clockwise on its X/Z faces and
+//! clockwise on its Y faces, and against wgpu's `FrontFace::Ccw`. Godot's front
+//! face is CLOCKWISE (`doc/classes/ArrayMesh.xml:49`) — every primitive ported
+//! from `primitive_meshes.cpp` is wound that way — so that rule culled a
+//! `PlaneMesh` floor seen from above entirely. The cube is now clockwise on all
+//! six faces, wgpu uses `FrontFace::Cw`, and the faces below are read from the
+//! real `Mesh3D::cube` rather than retyped.
 
 use gdcore::math::{Vector2, Vector3};
 use gdrender3d::render_modes::{should_cull, signed_area, CullMode};
@@ -61,25 +70,35 @@ fn screen_triangle(a: Vector3, b: Vector3, c: Vector3) -> (Vector2, Vector2, Vec
     )
 }
 
-/// The camera-facing (+Z) face of `Mesh3D::cube(2.0)` sitting at z = -4, wound
-/// exactly the way `Mesh3D::cube` winds it: `center - u - v`, `center + u - v`,
-/// `center + u + v`, with `u_dir = +X` and `v_dir = +Y` (`mesh.rs`).
-fn front_face() -> (Vector2, Vector2, Vector2) {
-    screen_triangle(
-        Vector3::new(-1.0, -1.0, -3.0),
-        Vector3::new(1.0, -1.0, -3.0),
-        Vector3::new(1.0, 1.0, -3.0),
-    )
+/// The first triangle of `Mesh3D::cube(2.0)` whose vertex normal is `normal`,
+/// with the cube moved to z = -4, projected to screen — read from the REAL mesh
+/// rather than retyped, so a change to the cube's winding is judged here too.
+///
+/// ⚠️ This used to hardcode the cube's +Z face as `(-1,-1) (1,-1) (1,1)` —
+/// counter-clockwise from outside — and pin that as the front face. Godot's
+/// front face is CLOCKWISE (`doc/classes/ArrayMesh.xml:49`), and every primitive
+/// ported from `primitive_meshes.cpp` is wound that way, so the pinned
+/// convention made each of them inside-out (a `PlaneMesh` floor seen from above
+/// was culled entirely). The cube is now CW on all six faces.
+fn cube_face(normal: Vector3) -> (Vector2, Vector2, Vector2) {
+    let cube = gdserver3d::mesh::Mesh3D::cube(2.0);
+    let tri = cube
+        .indices
+        .chunks(3)
+        .find(|t| (cube.normals[t[0] as usize] - normal).length() < 1e-6)
+        .expect("the cube has a face with this normal");
+    let at = |i: u32| cube.vertices[i as usize] + Vector3::new(0.0, 0.0, -4.0);
+    screen_triangle(at(tri[0]), at(tri[1]), at(tri[2]))
 }
 
-/// The opposite (-Z) face of the same cube, wound the same way from its own
-/// `u_dir = -X`. It is the face that was wrongly drawn.
+/// The camera-facing (+Z) face of the cube.
+fn front_face() -> (Vector2, Vector2, Vector2) {
+    cube_face(Vector3::new(0.0, 0.0, 1.0))
+}
+
+/// The opposite (-Z) face of the same cube — the one hidden behind it.
 fn back_face() -> (Vector2, Vector2, Vector2) {
-    screen_triangle(
-        Vector3::new(1.0, -1.0, -5.0),
-        Vector3::new(-1.0, -1.0, -5.0),
-        Vector3::new(-1.0, 1.0, -5.0),
-    )
+    cube_face(Vector3::new(0.0, 0.0, -1.0))
 }
 
 /// ⚠️ Asserted first: every other reading here is meaningless if the two faces
@@ -106,13 +125,13 @@ fn the_two_faces_of_a_cube_have_opposite_screen_winding() {
 /// The sign itself, stated once so the reason for `should_cull`'s comparisons
 /// is discoverable from a test rather than only from a comment.
 #[test]
-fn a_camera_facing_triangle_has_negative_screen_area() {
+fn a_camera_facing_triangle_has_positive_screen_area() {
     let (a, b, c) = front_face();
     let area = signed_area(a, b, c);
     assert!(
-        area < 0.0,
-        "screen Y grows downward, so a front face (counter-clockwise in NDC) is \
-         CLOCKWISE on screen and its signed area is negative — got {area}"
+        area > 0.0,
+        "screen Y grows downward, so a Godot front face (CLOCKWISE as the camera \
+         sees it, `ArrayMesh.xml:49`) has a POSITIVE signed area — got {area}"
     );
 }
 

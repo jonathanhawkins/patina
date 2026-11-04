@@ -679,13 +679,18 @@ fn oracle_connection_flags_match_behavior() {
 
     let counter = Arc::new(AtomicU64::new(0));
     let cc = counter.clone();
-    let conn = Connection::with_callback(hud_id.object_id(), "_on_enemy_defeated", move |_| {
+    // ⚠️ Its own method name: the scene ALREADY connects `defeated` to
+    // `HUD._on_enemy_defeated` (flags=4), and Godot rejects a second
+    // connection of the same (target, method) as ERR_INVALID_PARAMETER
+    // "already connected" — so reusing the name silently registered nothing.
+    let conn = Connection::with_callback(hud_id.object_id(), "_probe_enemy_defeated", move |_| {
         cc.fetch_add(1, Ordering::SeqCst);
         Variant::Nil
     })
     .as_one_shot();
 
-    tree.connect_signal(enemy_id, "defeated", conn);
+    tree.try_connect_signal(enemy_id, "defeated", conn)
+        .expect("a distinct method is a new connection");
 
     tree.event_trace_mut().enable();
     tree.event_trace_mut().clear();
@@ -788,4 +793,83 @@ fn full_oracle_emission_trace_comparison() {
         );
         panic!("Full oracle emission trace comparison failed:\n{report}");
     }
+}
+
+// ===========================================================================
+// Oracle fixtures: deferred delivery and registration order
+// ===========================================================================
+
+/// `fixtures/golden/traces/signal_deferred_oracle.json`: immediate callbacks
+/// fire at emit, CONNECT_DEFERRED ones at the end-of-frame flush, and every
+/// emit is traced at emission time. Drives the exact scenario the oracle
+/// describes and compares both the callback order and the SignalEmit trace.
+#[test]
+fn signal_deferred_oracle_matches() {
+    let oracle = load_trace_fixture("signal_deferred_oracle.json");
+    let order = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    let emitter = tree.add_child(root, Node::new("Emitter", "Node")).unwrap();
+    let recv = tree.add_child(root, Node::new("Receiver", "Node")).unwrap();
+    let conn = |label: &'static str, deferred: bool| {
+        let o = order.clone();
+        let c = Connection::with_callback(recv.object_id(), label, move |_| {
+            o.lock().unwrap().push(label.to_string());
+            Variant::Nil
+        });
+        if deferred { c.as_deferred() } else { c }
+    };
+    tree.connect_signal(emitter, "sig_mixed", conn("immediate_A", false));
+    tree.connect_signal(emitter, "sig_mixed", conn("immediate_B", false));
+    tree.connect_signal(emitter, "sig_mixed", conn("deferred_C", true));
+    tree.connect_signal(emitter, "sig_deferred_only", conn("deferred_D", true));
+    tree.connect_signal(emitter, "sig_frame1", conn("immediate_E", false));
+
+    tree.event_trace_mut().enable();
+    tree.event_trace_mut().clear();
+    tree.set_trace_frame(0);
+    tree.emit_signal(emitter, "sig_mixed", &[]);
+    tree.emit_signal(emitter, "sig_deferred_only", &[]);
+    assert_eq!(
+        *order.lock().unwrap(),
+        vec!["immediate_A", "immediate_B"],
+        "deferred callbacks must not run inside emit_signal"
+    );
+    tree.process_deferred_calls(); // end-of-frame flush
+    tree.set_trace_frame(1);
+    tree.emit_signal(emitter, "sig_frame1", &[]);
+
+    let expected: Vec<String> = oracle["expected_callback_order"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["label"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(*order.lock().unwrap(), expected);
+    let diffs = compare_traces(&parse_events(&oracle["event_trace"]), &signal_emit_trace_events(&tree));
+    assert!(diffs.is_empty(), "trace diverges from the oracle: {diffs:?}");
+}
+
+/// `fixtures/golden/traces/signal_registration_order_oracle.json`: one
+/// SignalEmit per emit, in declaration order, for signal_instantiation.tscn.
+#[test]
+fn signal_registration_order_oracle_matches() {
+    let oracle = load_trace_fixture("signal_registration_order_oracle.json");
+    let expected = parse_events(&oracle["event_trace"]);
+    let mut tree = load_signal_instantiation_scene();
+    tree.event_trace_mut().enable();
+    tree.event_trace_mut().clear();
+    tree.set_trace_frame(0);
+    for e in &expected {
+        let id = tree.get_node_by_path(&e.node_path).unwrap_or_else(|| panic!("{}", e.node_path));
+        tree.emit_signal(id, &e.detail, &[]);
+    }
+    let diffs = compare_traces(&expected, &signal_emit_trace_events(&tree));
+    assert!(diffs.is_empty(), "registration-order trace diverges: {diffs:?}");
+}
+
+fn load_trace_fixture(name: &str) -> Value {
+    let path = fixtures_dir().join("golden").join("traces").join(name);
+    serde_json::from_str(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())))
+        .expect("oracle JSON")
 }

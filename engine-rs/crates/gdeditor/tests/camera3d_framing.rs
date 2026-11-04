@@ -65,6 +65,17 @@ fn frame(
                 origin: Vector3::new(0.0, 0.0, -z),
             }),
         );
+        // A real mesh, not a mesh-less MeshInstance3D: the Play path strips the
+        // `Primitive::Box` placeholder a mesh-less instance falls back to
+        // (`is_editor_only_marker`, pat-mgixk.51), because Godot draws nothing
+        // for a VisualInstance3D with no geometry (a null mesh leaves the
+        // instance with no base — scene/3d/mesh_instance_3d.cpp:132
+        // `set_base(RID())`). Without this every frame
+        // was empty and the clip assertions passed vacuously.
+        tree.get_node_mut(mesh).unwrap().set_property(
+            "mesh",
+            Variant::String("primitive:BoxMesh".to_string()),
+        );
     }
     tree.add_child(root, Node::new("Sun", "DirectionalLight3D"))
         .unwrap();

@@ -241,7 +241,10 @@ fn set_clear_set_cycle() {
 
 #[test]
 fn classdb_display_server_has_clipboard_methods() {
-    gdobject::class_db::register_3d_classes();
+    // DisplayServer is a root-chain singleton, registered by
+    // `register_root_window_chain` (part of `register_all_classes`), not by
+    // the 3D pass this test used to call.
+    gdobject::class_db::register_all_classes();
     assert!(gdobject::class_db::class_has_method(
         "DisplayServer",
         "clipboard_get"

@@ -58,9 +58,37 @@ impl TresLoader {
         // this way since pat-nzgdu.78; this is the same rule for `.tres`.
         let mut pending_prop = Option::<(String, String)>::None;
 
-        for (line_num, line) in source.lines().enumerate() {
+        for (line_num, raw_line) in source.lines().enumerate() {
             let line_num = line_num + 1; // 1-based
-            let line = line.trim();
+            let line = raw_line.trim();
+
+            // Inside a multi-line STRING the line is the string's own text:
+            // kept verbatim, blank lines included, so this runs before the
+            // empty-line skip below.
+            if let Some((key, mut acc)) = pending_prop.take() {
+                if ends_inside_string(&acc) {
+                    acc.push('\n');
+                    acc.push_str(raw_line);
+                    if value_continues(&acc) {
+                        pending_prop = Some((key, acc));
+                        continue;
+                    }
+                    let value = parse_variant_value(acc.trim()).map_err(|e| {
+                        EngineError::Parse(format!("{} (at line {} in {})", e, line_num, path))
+                    })?;
+                    store_property(
+                        &mut resource,
+                        &mut current_sub,
+                        current_section,
+                        &key,
+                        value,
+                        line_num,
+                        path,
+                    )?;
+                    continue;
+                }
+                pending_prop = Some((key, acc));
+            }
 
             // Skip empty lines and comments.
             if line.is_empty() || line.starts_with(';') {
@@ -75,7 +103,7 @@ impl TresLoader {
             if let Some((key, mut acc)) = pending_prop.take() {
                 acc.push('\n');
                 acc.push_str(line);
-                if bracket_depth(&acc) > 0 {
+                if value_continues(&acc) {
                     pending_prop = Some((key, acc));
                     continue;
                 }
@@ -128,7 +156,7 @@ impl TresLoader {
             if let Some((key, value_str)) = line.split_once('=') {
                 let key = key.trim().to_string();
                 let value_str = value_str.trim();
-                if bracket_depth(value_str) > 0 {
+                if value_continues(value_str) {
                     pending_prop = Some((key, value_str.to_string()));
                     continue;
                 }
@@ -200,12 +228,39 @@ fn store_property(
     Ok(())
 }
 
+/// Whether a property value that ends here continues onto the next line of a
+/// `.tscn`/`.tres`: it opens more brackets than it closes, OR it ends inside
+/// an unterminated string.
+///
+/// 🔑 Godot writes a newline inside a string LITERALLY — a Label's
+/// `text = "Dodge the` then `Creeps"` on the next line (the official demo's
+/// HUD). Balancing only brackets read the first line alone, failed to parse it,
+/// and dropped the property, so the label came up empty. Shared by this loader
+/// and `gdscene::packed_scene` so the two parsers cannot drift.
+pub fn value_continues(s: &str) -> bool {
+    let (depth, in_string) = scan_value(s);
+    depth > 0 || in_string
+}
+
+/// Whether `s` ends inside an open string literal — the next line is then the
+/// string's own text, joined by the newline it really contains and kept
+/// verbatim (not trimmed, and kept even when blank).
+pub fn ends_inside_string(s: &str) -> bool {
+    scan_value(s).1
+}
+
 /// Net bracket/paren/brace depth of `s`, ignoring anything inside a string.
 ///
 /// ⚠️ The string tracking is not optional. A `"{"` or a Windows path inside a
 /// quoted value would otherwise skew the depth and swallow the rest of the
 /// file. Mirrors `packed_scene.rs`'s scanner of the same name.
+#[cfg(test)]
 fn bracket_depth(s: &str) -> i32 {
+    scan_value(s).0
+}
+
+/// `(bracket depth, ends inside a string)` for a property value.
+fn scan_value(s: &str) -> (i32, bool) {
     let mut depth = 0i32;
     let mut in_string = false;
     let mut escape = false;
@@ -229,7 +284,7 @@ fn bracket_depth(s: &str) -> i32 {
             _ => {}
         }
     }
-    depth
+    (depth, in_string)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

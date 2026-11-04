@@ -157,7 +157,14 @@ fn node_from_editor(v: &serde_json::Value) -> DomNode {
 /// node carries `name`, `class`, `children`. We use the first entry as
 /// the scene root.
 fn normalize_golden(snapshot_json: &serde_json::Value) -> Option<DomNode> {
-    let arr = snapshot_json.get("nodes")?.as_array()?;
+    // A Godot capture written through the conformance pipeline wraps its
+    // payload in an envelope (`fixture_id`, `upstream_version`, …, `data`);
+    // `minimal_3d.json` is one. Read the nodes from inside it.
+    let (arr, flat) = match snapshot_json.get("nodes") {
+        Some(n) => (n.as_array()?.clone(), false),
+        None => (snapshot_json.get("data")?.get("nodes")?.as_array()?.clone(), true),
+    };
+    let arr = if flat { nest_flat_golden(&arr) } else { arr };
     let scene_root = arr.first()?;
     Some(node_from_golden(scene_root))
 }
@@ -329,4 +336,45 @@ fn dom_parity_test_covers_at_least_five_scenes() {
         "pat-dnyao requires at least five reference scenes; got {}",
         REFERENCE_SCENES.len()
     );
+}
+
+/// The conformance-envelope golden (`data.nodes`) is a FLAT list whose
+/// `children` are NAMES; the other goldens nest child OBJECTS. Rebuild the
+/// nesting from `path` so both shapes walk the same way.
+fn nest_flat_golden(nodes: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let by_path: std::collections::HashMap<String, &serde_json::Value> = nodes
+        .iter()
+        .filter_map(|n| Some((n.get("path")?.as_str()?.to_string(), n)))
+        .collect();
+    fn build(
+        n: &serde_json::Value,
+        by_path: &std::collections::HashMap<String, &serde_json::Value>,
+    ) -> serde_json::Value {
+        let mut out = n.clone();
+        let path = n.get("path").and_then(|p| p.as_str()).unwrap_or("");
+        if let Some(kids) = n.get("children").and_then(|c| c.as_array()) {
+            let nested: Vec<serde_json::Value> = kids
+                .iter()
+                .map(|k| match k.as_str() {
+                    Some(name) => by_path
+                        .get(&format!("{path}/{name}"))
+                        .map(|c| build(c, by_path))
+                        .unwrap_or(serde_json::Value::Null),
+                    None => k.clone(),
+                })
+                .filter(|v| !v.is_null())
+                .collect();
+            out["children"] = serde_json::Value::Array(nested);
+        }
+        out
+    }
+    nodes
+        .iter()
+        .filter(|n| {
+            let path = n.get("path").and_then(|p| p.as_str()).unwrap_or("");
+            let parent = path.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+            !by_path.contains_key(parent)
+        })
+        .map(|n| build(n, &by_path))
+        .collect()
 }

@@ -128,6 +128,8 @@ This is the first audit pass, not the final matrix.
 | animation/theme/tilemap tooling | `animation_editor`, `theme_editor`, `tilemap_editor` | Measured for selected tooling slices | `animation_editor_parity_test.rs`, `theme_editor_live_preview_test.rs`, `tilemap_editor_painting_test.rs` | missing breadth | `pat-4vy88` | reuse milestone evidence |
 | import pipeline/editor import settings | `gdeditor::import`, `import_settings` | Implemented, partly measured | `audio_import_pipeline_test.rs`, `import_settings_panel_test.rs` | missing-test / docs-overclaim | none active specific | classify as bounded import tooling support |
 | editor architecture / roadmap doc | `docs/EDITOR_ARCHITECTURE.md` | Implemented plan, not parity proof | `editor_architecture_plan_test.rs`, doc itself | docs-overclaim | `editor architecture plan` live bead | narrow claims and keep as source-of-truth plan |
+| editor compatibility layer (Godot names/adapters) | `gdeditor::editor_compat` | Measured for explicit API slice | `editor_compat_layer_test.rs`, `editor_compat_layer_surface_test.rs` | missing breadth | `pat-6m9ky` | reuse evidence; naming/adapter layer only |
+| FileSystem / Import dock against Godot's importer contract | `gdeditor::filesystem`, `editor_server` import routes | Measured for tested slice (Godot 4.6.1 option keys, `.gdignore`) | `import_dock_persists_options_and_reimports.rs`, `editor_import_dock_test.rs`, `import_settings_panel_test.rs` | missing breadth | none active specific | reuse evidence |
 
 ### Browser / Compatibility Layer Notes
 
@@ -193,6 +195,42 @@ This is the first audit pass, not the final matrix.
   - Some language currently reads closer to “broad editor parity/work is the
     primary focus” than the measured evidence supports.
   - This should remain a planning artifact, not evidence of full editor parity.
+
+## Phase 8 Scope
+
+Phase 8 measures a **minimal browser-served editor shell** plus a
+minimal `EditorInterface` compatibility layer (`gdeditor::editor_interface`, with
+Godot-named adapters in `gdeditor::editor_compat`) — not the full editor. What
+is claimed is the measured minimal browser/editor-shell slice above; evidence is
+weaker for breadth (dock coverage, plugin hosting, every inspector editor), and
+nothing here claims broad parity against the full native Godot editor. Broader
+Godot editor parity is tracked separately (`pat-6m9ky`) and in
+`docs/EDITOR_ARCHITECTURE.md`.
+
+### Selected Tooling Milestone Inventory
+
+Generated from `prd/TOOLING_MILESTONES_SPEC.md` (one row per `### Milestone N:`
+heading; the classification is the spec's own, with its exit evidence listed
+there).
+
+| # | Milestone | Tooling family | Classification |
+|---|-----------|----------------|----------------|
+| 1 | Editor Crate Structure | Editor crate structure | Measured (structural) |
+| 2 | Inspector Typed Editors | Inspector typed editors | Measured for tested slice |
+| 3 | Undo/Redo Command Pattern | Undo/redo command pattern | Measured for tested slice |
+| 4 | Dock Panels | Dock panels | Measured for tested slice |
+| 5 | Script Editor Core | Script editor core | Measured for tested slice |
+| 6 | Export Dialog | Export dialog | Measured for local model slice |
+| 7 | Editor/Project Settings | Editor/project settings | Measured for local model slice |
+| 8 | VCS Integration | VCS integration | Measured for local model slice |
+| 9 | Shader Editor | Shader editor | Measured for tested slice |
+| 10 | Theme Editor | Theme editor | Measured for tested slice |
+| 11 | Command Palette | Command palette | Measured for tested slice |
+| 12 | Import Pipeline | Import pipeline | Implemented, not yet measured |
+| 13 | Editor Server | Editor server | Measured for bounded slice |
+| 14 | Profiler Panel | Profiler panel | Measured for tested slice |
+| 15 | Module Count Gate | Module count gate | Measured (structural) |
+| 16 | Editor Test Coverage Gate | Editor test coverage gate | Measured (structural) |
 
 ## Existing Beads To Reuse
 

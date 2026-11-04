@@ -20,6 +20,9 @@ fn mapping_2x() -> CanvasMapping {
     CanvasMapping {
         origin_css: Vector2::new(40.0, 20.0),
         device_pixel_ratio: 2.0,
+        // A non-stretching project (pat-mgixk.74 added the stretch mapping and
+        // left these initializers uncompilable).
+        ..Default::default()
     }
 }
 

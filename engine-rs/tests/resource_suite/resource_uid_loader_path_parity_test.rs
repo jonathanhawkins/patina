@@ -285,18 +285,19 @@ fn fixture_theme_tres_uid_round_trips() {
         .parse_str(&content, "res://resources/theme.tres")
         .unwrap();
 
-    assert!(parsed.uid.is_valid());
+    // ⚠️ `uid://theme_res` is not a UID Godot can represent: `ResourceUID::
+    // text_to_id` (core/io/resource_uid.cpp:90) accepts only `a-z`/`0-9`
+    // after `uid://` and returns INVALID_ID at the `_`. So the header parses to
+    // an invalid UID and is ignored — exactly what Godot does with it.
+    assert!(!parsed.uid.is_valid(), "an underscore makes the header UID invalid");
     assert_eq!(parsed.class_name, "Theme");
+    assert_eq!(parsed.uid, parse_uid_string("uid://theme_res"));
 
-    // The parsed UID should match the string-derived UID.
-    let uid_from_str = parse_uid_string("uid://theme_res");
-    assert_eq!(parsed.uid, uid_from_str);
-
-    // Register and load through UnifiedLoader.
+    // A VALID uid for the same file registers and round-trips.
     let mut ul = UnifiedLoader::new(TrackingLoader::new());
-    ul.register_uid_str("uid://theme_res", "res://resources/theme.tres");
+    ul.register_uid_str("uid://themeres", "res://resources/theme.tres");
 
-    let by_uid = ul.load("uid://theme_res").unwrap();
+    let by_uid = ul.load("uid://themeres").unwrap();
     let by_path = ul.load("res://resources/theme.tres").unwrap();
     assert!(Arc::ptr_eq(&by_uid, &by_path));
 }
@@ -601,15 +602,18 @@ fn fixture_scene_uid_parse_and_resolve() {
     // Verify the fixture has the expected UID.
     assert!(content.contains("uid=\"uid://test_scripts\""));
 
-    // Derive the UID from the string.
-    let uid = parse_uid_string("uid://test_scripts");
+    // ⚠️ The header's `uid://test_scripts` is INVALID in Godot (`_` is not
+    // in ResourceUID's base-34 alphabet, core/io/resource_uid.cpp:90), so it
+    // is ignored; a valid UID for the scene registers and resolves.
+    assert!(!parse_uid_string("uid://test_scripts").is_valid());
+    let uid = parse_uid_string("uid://testscripts");
     assert!(uid.is_valid());
 
     // Register and load.
     let mut ul = UnifiedLoader::new(TrackingLoader::new());
-    ul.register_uid_str("uid://test_scripts", "res://scenes/test_scripts.tscn");
+    ul.register_uid_str("uid://testscripts", "res://scenes/test_scripts.tscn");
 
-    let res = ul.load("uid://test_scripts").unwrap();
+    let res = ul.load("uid://testscripts").unwrap();
     assert_eq!(res.path, "res://scenes/test_scripts.tscn");
 
     // Verify registry reverse lookup.

@@ -44,7 +44,7 @@
 									},
 									"anchor_bottom": {
 										"type": "float",
-										"value": 1.0
+										"value": 0.0
 									},
 									"anchor_left": {
 										"type": "float",
@@ -52,7 +52,7 @@
 									},
 									"anchor_right": {
 										"type": "float",
-										"value": 1.0
+										"value": 0.0
 									},
 									"anchor_top": {
 										"type": "float",
@@ -60,7 +60,7 @@
 									},
 									"anchors_preset": {
 										"type": "int",
-										"value": 15
+										"value": 0
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -78,9 +78,9 @@
 										"type": "Color",
 										"value": {
 											"a": 1.0,
-											"b": 0.180000007152557,
-											"g": 0.119999997317791,
-											"r": 0.119999997317791
+											"b": 1.0,
+											"g": 1.0,
+											"r": 1.0
 										}
 									},
 									"custom_minimum_size": {
@@ -128,11 +128,11 @@
 									},
 									"grow_horizontal": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"grow_vertical": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"layout_direction": {
 										"type": "int",
@@ -140,7 +140,7 @@
 									},
 									"layout_mode": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"light_mask": {
 										"type": "int",
@@ -526,7 +526,7 @@
 											},
 											"stretch_mode": {
 												"type": "int",
-												"value": 5
+												"value": 0
 											},
 											"texture": {
 												"type": "Object",
@@ -697,7 +697,7 @@
 											},
 											"horizontal_alignment": {
 												"type": "int",
-												"value": 1
+												"value": 0
 											},
 											"justification_flags": {
 												"type": "int",
@@ -831,7 +831,7 @@
 											},
 											"text": {
 												"type": "String",
-												"value": "Welcome to Patina"
+												"value": "Game Title"
 											},
 											"text_direction": {
 												"type": "int",
@@ -1176,7 +1176,7 @@
 											},
 											"text": {
 												"type": "String",
-												"value": "Start Game"
+												"value": "Start"
 											},
 											"text_direction": {
 												"type": "int",
@@ -1957,23 +1957,23 @@
 									},
 									"anchor_bottom": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_left": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_right": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_top": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchors_preset": {
 										"type": "int",
-										"value": 8
+										"value": 0
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -2032,11 +2032,11 @@
 									},
 									"grow_horizontal": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"grow_vertical": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"layout_direction": {
 										"type": "int",
@@ -2044,7 +2044,7 @@
 									},
 									"layout_mode": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"light_mask": {
 										"type": "int",
@@ -2085,19 +2085,19 @@
 									},
 									"offset_bottom": {
 										"type": "float",
-										"value": 150.0
+										"value": 0.0
 									},
 									"offset_left": {
 										"type": "float",
-										"value": -200.0
+										"value": 0.0
 									},
 									"offset_right": {
 										"type": "float",
-										"value": 200.0
+										"value": 0.0
 									},
 									"offset_top": {
 										"type": "float",
-										"value": -150.0
+										"value": 0.0
 									},
 									"physics_interpolation_mode": {
 										"type": "int",
@@ -2266,7 +2266,7 @@
 							},
 							"anchor_bottom": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_left": {
 								"type": "float",
@@ -2274,7 +2274,7 @@
 							},
 							"anchor_right": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_top": {
 								"type": "float",
@@ -2282,7 +2282,7 @@
 							},
 							"anchors_preset": {
 								"type": "int",
-								"value": 15
+								"value": 0
 							},
 							"auto_translate_mode": {
 								"type": "int",
@@ -2341,11 +2341,11 @@
 							},
 							"grow_horizontal": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"grow_vertical": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"layout_direction": {
 								"type": "int",
@@ -3036,7 +3036,7 @@
 									},
 									"anchor_bottom": {
 										"type": "float",
-										"value": 1.0
+										"value": 0.0
 									},
 									"anchor_left": {
 										"type": "float",
@@ -3044,7 +3044,7 @@
 									},
 									"anchor_right": {
 										"type": "float",
-										"value": 1.0
+										"value": 0.0
 									},
 									"anchor_top": {
 										"type": "float",
@@ -3052,7 +3052,7 @@
 									},
 									"anchors_preset": {
 										"type": "int",
-										"value": 15
+										"value": 0
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -3070,9 +3070,9 @@
 										"type": "Color",
 										"value": {
 											"a": 1.0,
-											"b": 0.180000007152557,
-											"g": 0.119999997317791,
-											"r": 0.119999997317791
+											"b": 1.0,
+											"g": 1.0,
+											"r": 1.0
 										}
 									},
 									"custom_minimum_size": {
@@ -3120,11 +3120,11 @@
 									},
 									"grow_horizontal": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"grow_vertical": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"layout_direction": {
 										"type": "int",
@@ -3132,7 +3132,7 @@
 									},
 									"layout_mode": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"light_mask": {
 										"type": "int",
@@ -3518,7 +3518,7 @@
 											},
 											"stretch_mode": {
 												"type": "int",
-												"value": 5
+												"value": 0
 											},
 											"texture": {
 												"type": "Object",
@@ -3689,7 +3689,7 @@
 											},
 											"horizontal_alignment": {
 												"type": "int",
-												"value": 1
+												"value": 0
 											},
 											"justification_flags": {
 												"type": "int",
@@ -3823,7 +3823,7 @@
 											},
 											"text": {
 												"type": "String",
-												"value": "Welcome to Patina"
+												"value": "Game Title"
 											},
 											"text_direction": {
 												"type": "int",
@@ -4168,7 +4168,7 @@
 											},
 											"text": {
 												"type": "String",
-												"value": "Start Game"
+												"value": "Start"
 											},
 											"text_direction": {
 												"type": "int",
@@ -4949,23 +4949,23 @@
 									},
 									"anchor_bottom": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_left": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_right": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_top": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchors_preset": {
 										"type": "int",
-										"value": 8
+										"value": 0
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -5024,11 +5024,11 @@
 									},
 									"grow_horizontal": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"grow_vertical": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"layout_direction": {
 										"type": "int",
@@ -5036,7 +5036,7 @@
 									},
 									"layout_mode": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"light_mask": {
 										"type": "int",
@@ -5077,19 +5077,19 @@
 									},
 									"offset_bottom": {
 										"type": "float",
-										"value": 150.0
+										"value": 0.0
 									},
 									"offset_left": {
 										"type": "float",
-										"value": -200.0
+										"value": 0.0
 									},
 									"offset_right": {
 										"type": "float",
-										"value": 200.0
+										"value": 0.0
 									},
 									"offset_top": {
 										"type": "float",
-										"value": -150.0
+										"value": 0.0
 									},
 									"physics_interpolation_mode": {
 										"type": "int",
@@ -5258,7 +5258,7 @@
 							},
 							"anchor_bottom": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_left": {
 								"type": "float",
@@ -5266,7 +5266,7 @@
 							},
 							"anchor_right": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_top": {
 								"type": "float",
@@ -5274,7 +5274,7 @@
 							},
 							"anchors_preset": {
 								"type": "int",
-								"value": 15
+								"value": 0
 							},
 							"auto_translate_mode": {
 								"type": "int",
@@ -5333,11 +5333,11 @@
 							},
 							"grow_horizontal": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"grow_vertical": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"layout_direction": {
 								"type": "int",
@@ -6028,7 +6028,7 @@
 									},
 									"anchor_bottom": {
 										"type": "float",
-										"value": 1.0
+										"value": 0.0
 									},
 									"anchor_left": {
 										"type": "float",
@@ -6036,7 +6036,7 @@
 									},
 									"anchor_right": {
 										"type": "float",
-										"value": 1.0
+										"value": 0.0
 									},
 									"anchor_top": {
 										"type": "float",
@@ -6044,7 +6044,7 @@
 									},
 									"anchors_preset": {
 										"type": "int",
-										"value": 15
+										"value": 0
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -6062,9 +6062,9 @@
 										"type": "Color",
 										"value": {
 											"a": 1.0,
-											"b": 0.180000007152557,
-											"g": 0.119999997317791,
-											"r": 0.119999997317791
+											"b": 1.0,
+											"g": 1.0,
+											"r": 1.0
 										}
 									},
 									"custom_minimum_size": {
@@ -6112,11 +6112,11 @@
 									},
 									"grow_horizontal": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"grow_vertical": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"layout_direction": {
 										"type": "int",
@@ -6124,7 +6124,7 @@
 									},
 									"layout_mode": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"light_mask": {
 										"type": "int",
@@ -6510,7 +6510,7 @@
 											},
 											"stretch_mode": {
 												"type": "int",
-												"value": 5
+												"value": 0
 											},
 											"texture": {
 												"type": "Object",
@@ -6681,7 +6681,7 @@
 											},
 											"horizontal_alignment": {
 												"type": "int",
-												"value": 1
+												"value": 0
 											},
 											"justification_flags": {
 												"type": "int",
@@ -6815,7 +6815,7 @@
 											},
 											"text": {
 												"type": "String",
-												"value": "Welcome to Patina"
+												"value": "Game Title"
 											},
 											"text_direction": {
 												"type": "int",
@@ -7160,7 +7160,7 @@
 											},
 											"text": {
 												"type": "String",
-												"value": "Start Game"
+												"value": "Start"
 											},
 											"text_direction": {
 												"type": "int",
@@ -7941,23 +7941,23 @@
 									},
 									"anchor_bottom": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_left": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_right": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_top": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchors_preset": {
 										"type": "int",
-										"value": 8
+										"value": 0
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -8016,11 +8016,11 @@
 									},
 									"grow_horizontal": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"grow_vertical": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"layout_direction": {
 										"type": "int",
@@ -8028,7 +8028,7 @@
 									},
 									"layout_mode": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"light_mask": {
 										"type": "int",
@@ -8069,19 +8069,19 @@
 									},
 									"offset_bottom": {
 										"type": "float",
-										"value": 150.0
+										"value": 0.0
 									},
 									"offset_left": {
 										"type": "float",
-										"value": -200.0
+										"value": 0.0
 									},
 									"offset_right": {
 										"type": "float",
-										"value": 200.0
+										"value": 0.0
 									},
 									"offset_top": {
 										"type": "float",
-										"value": -150.0
+										"value": 0.0
 									},
 									"physics_interpolation_mode": {
 										"type": "int",
@@ -8250,7 +8250,7 @@
 							},
 							"anchor_bottom": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_left": {
 								"type": "float",
@@ -8258,7 +8258,7 @@
 							},
 							"anchor_right": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_top": {
 								"type": "float",
@@ -8266,7 +8266,7 @@
 							},
 							"anchors_preset": {
 								"type": "int",
-								"value": 15
+								"value": 0
 							},
 							"auto_translate_mode": {
 								"type": "int",
@@ -8325,11 +8325,11 @@
 							},
 							"grow_horizontal": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"grow_vertical": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"layout_direction": {
 								"type": "int",
@@ -9020,7 +9020,7 @@
 									},
 									"anchor_bottom": {
 										"type": "float",
-										"value": 1.0
+										"value": 0.0
 									},
 									"anchor_left": {
 										"type": "float",
@@ -9028,7 +9028,7 @@
 									},
 									"anchor_right": {
 										"type": "float",
-										"value": 1.0
+										"value": 0.0
 									},
 									"anchor_top": {
 										"type": "float",
@@ -9036,7 +9036,7 @@
 									},
 									"anchors_preset": {
 										"type": "int",
-										"value": 15
+										"value": 0
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -9054,9 +9054,9 @@
 										"type": "Color",
 										"value": {
 											"a": 1.0,
-											"b": 0.180000007152557,
-											"g": 0.119999997317791,
-											"r": 0.119999997317791
+											"b": 1.0,
+											"g": 1.0,
+											"r": 1.0
 										}
 									},
 									"custom_minimum_size": {
@@ -9104,11 +9104,11 @@
 									},
 									"grow_horizontal": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"grow_vertical": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"layout_direction": {
 										"type": "int",
@@ -9116,7 +9116,7 @@
 									},
 									"layout_mode": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"light_mask": {
 										"type": "int",
@@ -9502,7 +9502,7 @@
 											},
 											"stretch_mode": {
 												"type": "int",
-												"value": 5
+												"value": 0
 											},
 											"texture": {
 												"type": "Object",
@@ -9673,7 +9673,7 @@
 											},
 											"horizontal_alignment": {
 												"type": "int",
-												"value": 1
+												"value": 0
 											},
 											"justification_flags": {
 												"type": "int",
@@ -9807,7 +9807,7 @@
 											},
 											"text": {
 												"type": "String",
-												"value": "Welcome to Patina"
+												"value": "Game Title"
 											},
 											"text_direction": {
 												"type": "int",
@@ -10152,7 +10152,7 @@
 											},
 											"text": {
 												"type": "String",
-												"value": "Start Game"
+												"value": "Start"
 											},
 											"text_direction": {
 												"type": "int",
@@ -10933,23 +10933,23 @@
 									},
 									"anchor_bottom": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_left": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_right": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_top": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchors_preset": {
 										"type": "int",
-										"value": 8
+										"value": 0
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -11008,11 +11008,11 @@
 									},
 									"grow_horizontal": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"grow_vertical": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"layout_direction": {
 										"type": "int",
@@ -11020,7 +11020,7 @@
 									},
 									"layout_mode": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"light_mask": {
 										"type": "int",
@@ -11061,19 +11061,19 @@
 									},
 									"offset_bottom": {
 										"type": "float",
-										"value": 150.0
+										"value": 0.0
 									},
 									"offset_left": {
 										"type": "float",
-										"value": -200.0
+										"value": 0.0
 									},
 									"offset_right": {
 										"type": "float",
-										"value": 200.0
+										"value": 0.0
 									},
 									"offset_top": {
 										"type": "float",
-										"value": -150.0
+										"value": 0.0
 									},
 									"physics_interpolation_mode": {
 										"type": "int",
@@ -11242,7 +11242,7 @@
 							},
 							"anchor_bottom": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_left": {
 								"type": "float",
@@ -11250,7 +11250,7 @@
 							},
 							"anchor_right": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_top": {
 								"type": "float",
@@ -11258,7 +11258,7 @@
 							},
 							"anchors_preset": {
 								"type": "int",
-								"value": 15
+								"value": 0
 							},
 							"auto_translate_mode": {
 								"type": "int",
@@ -11317,11 +11317,11 @@
 							},
 							"grow_horizontal": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"grow_vertical": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"layout_direction": {
 								"type": "int",
@@ -12012,7 +12012,7 @@
 									},
 									"anchor_bottom": {
 										"type": "float",
-										"value": 1.0
+										"value": 0.0
 									},
 									"anchor_left": {
 										"type": "float",
@@ -12020,7 +12020,7 @@
 									},
 									"anchor_right": {
 										"type": "float",
-										"value": 1.0
+										"value": 0.0
 									},
 									"anchor_top": {
 										"type": "float",
@@ -12028,7 +12028,7 @@
 									},
 									"anchors_preset": {
 										"type": "int",
-										"value": 15
+										"value": 0
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -12046,9 +12046,9 @@
 										"type": "Color",
 										"value": {
 											"a": 1.0,
-											"b": 0.180000007152557,
-											"g": 0.119999997317791,
-											"r": 0.119999997317791
+											"b": 1.0,
+											"g": 1.0,
+											"r": 1.0
 										}
 									},
 									"custom_minimum_size": {
@@ -12096,11 +12096,11 @@
 									},
 									"grow_horizontal": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"grow_vertical": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"layout_direction": {
 										"type": "int",
@@ -12108,7 +12108,7 @@
 									},
 									"layout_mode": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"light_mask": {
 										"type": "int",
@@ -12494,7 +12494,7 @@
 											},
 											"stretch_mode": {
 												"type": "int",
-												"value": 5
+												"value": 0
 											},
 											"texture": {
 												"type": "Object",
@@ -12665,7 +12665,7 @@
 											},
 											"horizontal_alignment": {
 												"type": "int",
-												"value": 1
+												"value": 0
 											},
 											"justification_flags": {
 												"type": "int",
@@ -12799,7 +12799,7 @@
 											},
 											"text": {
 												"type": "String",
-												"value": "Welcome to Patina"
+												"value": "Game Title"
 											},
 											"text_direction": {
 												"type": "int",
@@ -13144,7 +13144,7 @@
 											},
 											"text": {
 												"type": "String",
-												"value": "Start Game"
+												"value": "Start"
 											},
 											"text_direction": {
 												"type": "int",
@@ -13925,23 +13925,23 @@
 									},
 									"anchor_bottom": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_left": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_right": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_top": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchors_preset": {
 										"type": "int",
-										"value": 8
+										"value": 0
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -14000,11 +14000,11 @@
 									},
 									"grow_horizontal": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"grow_vertical": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"layout_direction": {
 										"type": "int",
@@ -14012,7 +14012,7 @@
 									},
 									"layout_mode": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"light_mask": {
 										"type": "int",
@@ -14053,19 +14053,19 @@
 									},
 									"offset_bottom": {
 										"type": "float",
-										"value": 150.0
+										"value": 0.0
 									},
 									"offset_left": {
 										"type": "float",
-										"value": -200.0
+										"value": 0.0
 									},
 									"offset_right": {
 										"type": "float",
-										"value": 200.0
+										"value": 0.0
 									},
 									"offset_top": {
 										"type": "float",
-										"value": -150.0
+										"value": 0.0
 									},
 									"physics_interpolation_mode": {
 										"type": "int",
@@ -14234,7 +14234,7 @@
 							},
 							"anchor_bottom": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_left": {
 								"type": "float",
@@ -14242,7 +14242,7 @@
 							},
 							"anchor_right": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_top": {
 								"type": "float",
@@ -14250,7 +14250,7 @@
 							},
 							"anchors_preset": {
 								"type": "int",
-								"value": 15
+								"value": 0
 							},
 							"auto_translate_mode": {
 								"type": "int",
@@ -14309,11 +14309,11 @@
 							},
 							"grow_horizontal": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"grow_vertical": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"layout_direction": {
 								"type": "int",
@@ -15004,7 +15004,7 @@
 									},
 									"anchor_bottom": {
 										"type": "float",
-										"value": 1.0
+										"value": 0.0
 									},
 									"anchor_left": {
 										"type": "float",
@@ -15012,7 +15012,7 @@
 									},
 									"anchor_right": {
 										"type": "float",
-										"value": 1.0
+										"value": 0.0
 									},
 									"anchor_top": {
 										"type": "float",
@@ -15020,7 +15020,7 @@
 									},
 									"anchors_preset": {
 										"type": "int",
-										"value": 15
+										"value": 0
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -15038,9 +15038,9 @@
 										"type": "Color",
 										"value": {
 											"a": 1.0,
-											"b": 0.180000007152557,
-											"g": 0.119999997317791,
-											"r": 0.119999997317791
+											"b": 1.0,
+											"g": 1.0,
+											"r": 1.0
 										}
 									},
 									"custom_minimum_size": {
@@ -15088,11 +15088,11 @@
 									},
 									"grow_horizontal": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"grow_vertical": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"layout_direction": {
 										"type": "int",
@@ -15100,7 +15100,7 @@
 									},
 									"layout_mode": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"light_mask": {
 										"type": "int",
@@ -15486,7 +15486,7 @@
 											},
 											"stretch_mode": {
 												"type": "int",
-												"value": 5
+												"value": 0
 											},
 											"texture": {
 												"type": "Object",
@@ -15657,7 +15657,7 @@
 											},
 											"horizontal_alignment": {
 												"type": "int",
-												"value": 1
+												"value": 0
 											},
 											"justification_flags": {
 												"type": "int",
@@ -15791,7 +15791,7 @@
 											},
 											"text": {
 												"type": "String",
-												"value": "Welcome to Patina"
+												"value": "Game Title"
 											},
 											"text_direction": {
 												"type": "int",
@@ -16136,7 +16136,7 @@
 											},
 											"text": {
 												"type": "String",
-												"value": "Start Game"
+												"value": "Start"
 											},
 											"text_direction": {
 												"type": "int",
@@ -16917,23 +16917,23 @@
 									},
 									"anchor_bottom": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_left": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_right": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_top": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchors_preset": {
 										"type": "int",
-										"value": 8
+										"value": 0
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -16992,11 +16992,11 @@
 									},
 									"grow_horizontal": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"grow_vertical": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"layout_direction": {
 										"type": "int",
@@ -17004,7 +17004,7 @@
 									},
 									"layout_mode": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"light_mask": {
 										"type": "int",
@@ -17045,19 +17045,19 @@
 									},
 									"offset_bottom": {
 										"type": "float",
-										"value": 150.0
+										"value": 0.0
 									},
 									"offset_left": {
 										"type": "float",
-										"value": -200.0
+										"value": 0.0
 									},
 									"offset_right": {
 										"type": "float",
-										"value": 200.0
+										"value": 0.0
 									},
 									"offset_top": {
 										"type": "float",
-										"value": -150.0
+										"value": 0.0
 									},
 									"physics_interpolation_mode": {
 										"type": "int",
@@ -17226,7 +17226,7 @@
 							},
 							"anchor_bottom": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_left": {
 								"type": "float",
@@ -17234,7 +17234,7 @@
 							},
 							"anchor_right": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_top": {
 								"type": "float",
@@ -17242,7 +17242,7 @@
 							},
 							"anchors_preset": {
 								"type": "int",
-								"value": 15
+								"value": 0
 							},
 							"auto_translate_mode": {
 								"type": "int",
@@ -17301,11 +17301,11 @@
 							},
 							"grow_horizontal": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"grow_vertical": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"layout_direction": {
 								"type": "int",
@@ -17996,7 +17996,7 @@
 									},
 									"anchor_bottom": {
 										"type": "float",
-										"value": 1.0
+										"value": 0.0
 									},
 									"anchor_left": {
 										"type": "float",
@@ -18004,7 +18004,7 @@
 									},
 									"anchor_right": {
 										"type": "float",
-										"value": 1.0
+										"value": 0.0
 									},
 									"anchor_top": {
 										"type": "float",
@@ -18012,7 +18012,7 @@
 									},
 									"anchors_preset": {
 										"type": "int",
-										"value": 15
+										"value": 0
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -18030,9 +18030,9 @@
 										"type": "Color",
 										"value": {
 											"a": 1.0,
-											"b": 0.180000007152557,
-											"g": 0.119999997317791,
-											"r": 0.119999997317791
+											"b": 1.0,
+											"g": 1.0,
+											"r": 1.0
 										}
 									},
 									"custom_minimum_size": {
@@ -18080,11 +18080,11 @@
 									},
 									"grow_horizontal": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"grow_vertical": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"layout_direction": {
 										"type": "int",
@@ -18092,7 +18092,7 @@
 									},
 									"layout_mode": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"light_mask": {
 										"type": "int",
@@ -18478,7 +18478,7 @@
 											},
 											"stretch_mode": {
 												"type": "int",
-												"value": 5
+												"value": 0
 											},
 											"texture": {
 												"type": "Object",
@@ -18649,7 +18649,7 @@
 											},
 											"horizontal_alignment": {
 												"type": "int",
-												"value": 1
+												"value": 0
 											},
 											"justification_flags": {
 												"type": "int",
@@ -18783,7 +18783,7 @@
 											},
 											"text": {
 												"type": "String",
-												"value": "Welcome to Patina"
+												"value": "Game Title"
 											},
 											"text_direction": {
 												"type": "int",
@@ -19128,7 +19128,7 @@
 											},
 											"text": {
 												"type": "String",
-												"value": "Start Game"
+												"value": "Start"
 											},
 											"text_direction": {
 												"type": "int",
@@ -19909,23 +19909,23 @@
 									},
 									"anchor_bottom": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_left": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_right": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_top": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchors_preset": {
 										"type": "int",
-										"value": 8
+										"value": 0
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -19984,11 +19984,11 @@
 									},
 									"grow_horizontal": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"grow_vertical": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"layout_direction": {
 										"type": "int",
@@ -19996,7 +19996,7 @@
 									},
 									"layout_mode": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"light_mask": {
 										"type": "int",
@@ -20037,19 +20037,19 @@
 									},
 									"offset_bottom": {
 										"type": "float",
-										"value": 150.0
+										"value": 0.0
 									},
 									"offset_left": {
 										"type": "float",
-										"value": -200.0
+										"value": 0.0
 									},
 									"offset_right": {
 										"type": "float",
-										"value": 200.0
+										"value": 0.0
 									},
 									"offset_top": {
 										"type": "float",
-										"value": -150.0
+										"value": 0.0
 									},
 									"physics_interpolation_mode": {
 										"type": "int",
@@ -20218,7 +20218,7 @@
 							},
 							"anchor_bottom": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_left": {
 								"type": "float",
@@ -20226,7 +20226,7 @@
 							},
 							"anchor_right": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_top": {
 								"type": "float",
@@ -20234,7 +20234,7 @@
 							},
 							"anchors_preset": {
 								"type": "int",
-								"value": 15
+								"value": 0
 							},
 							"auto_translate_mode": {
 								"type": "int",
@@ -20293,11 +20293,11 @@
 							},
 							"grow_horizontal": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"grow_vertical": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"layout_direction": {
 								"type": "int",
@@ -20988,7 +20988,7 @@
 									},
 									"anchor_bottom": {
 										"type": "float",
-										"value": 1.0
+										"value": 0.0
 									},
 									"anchor_left": {
 										"type": "float",
@@ -20996,7 +20996,7 @@
 									},
 									"anchor_right": {
 										"type": "float",
-										"value": 1.0
+										"value": 0.0
 									},
 									"anchor_top": {
 										"type": "float",
@@ -21004,7 +21004,7 @@
 									},
 									"anchors_preset": {
 										"type": "int",
-										"value": 15
+										"value": 0
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -21022,9 +21022,9 @@
 										"type": "Color",
 										"value": {
 											"a": 1.0,
-											"b": 0.180000007152557,
-											"g": 0.119999997317791,
-											"r": 0.119999997317791
+											"b": 1.0,
+											"g": 1.0,
+											"r": 1.0
 										}
 									},
 									"custom_minimum_size": {
@@ -21072,11 +21072,11 @@
 									},
 									"grow_horizontal": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"grow_vertical": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"layout_direction": {
 										"type": "int",
@@ -21084,7 +21084,7 @@
 									},
 									"layout_mode": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"light_mask": {
 										"type": "int",
@@ -21470,7 +21470,7 @@
 											},
 											"stretch_mode": {
 												"type": "int",
-												"value": 5
+												"value": 0
 											},
 											"texture": {
 												"type": "Object",
@@ -21641,7 +21641,7 @@
 											},
 											"horizontal_alignment": {
 												"type": "int",
-												"value": 1
+												"value": 0
 											},
 											"justification_flags": {
 												"type": "int",
@@ -21775,7 +21775,7 @@
 											},
 											"text": {
 												"type": "String",
-												"value": "Welcome to Patina"
+												"value": "Game Title"
 											},
 											"text_direction": {
 												"type": "int",
@@ -22120,7 +22120,7 @@
 											},
 											"text": {
 												"type": "String",
-												"value": "Start Game"
+												"value": "Start"
 											},
 											"text_direction": {
 												"type": "int",
@@ -22901,23 +22901,23 @@
 									},
 									"anchor_bottom": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_left": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_right": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_top": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchors_preset": {
 										"type": "int",
-										"value": 8
+										"value": 0
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -22976,11 +22976,11 @@
 									},
 									"grow_horizontal": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"grow_vertical": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"layout_direction": {
 										"type": "int",
@@ -22988,7 +22988,7 @@
 									},
 									"layout_mode": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"light_mask": {
 										"type": "int",
@@ -23029,19 +23029,19 @@
 									},
 									"offset_bottom": {
 										"type": "float",
-										"value": 150.0
+										"value": 0.0
 									},
 									"offset_left": {
 										"type": "float",
-										"value": -200.0
+										"value": 0.0
 									},
 									"offset_right": {
 										"type": "float",
-										"value": 200.0
+										"value": 0.0
 									},
 									"offset_top": {
 										"type": "float",
-										"value": -150.0
+										"value": 0.0
 									},
 									"physics_interpolation_mode": {
 										"type": "int",
@@ -23210,7 +23210,7 @@
 							},
 							"anchor_bottom": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_left": {
 								"type": "float",
@@ -23218,7 +23218,7 @@
 							},
 							"anchor_right": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_top": {
 								"type": "float",
@@ -23226,7 +23226,7 @@
 							},
 							"anchors_preset": {
 								"type": "int",
-								"value": 15
+								"value": 0
 							},
 							"auto_translate_mode": {
 								"type": "int",
@@ -23285,11 +23285,11 @@
 							},
 							"grow_horizontal": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"grow_vertical": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"layout_direction": {
 								"type": "int",
@@ -23980,7 +23980,7 @@
 									},
 									"anchor_bottom": {
 										"type": "float",
-										"value": 1.0
+										"value": 0.0
 									},
 									"anchor_left": {
 										"type": "float",
@@ -23988,7 +23988,7 @@
 									},
 									"anchor_right": {
 										"type": "float",
-										"value": 1.0
+										"value": 0.0
 									},
 									"anchor_top": {
 										"type": "float",
@@ -23996,7 +23996,7 @@
 									},
 									"anchors_preset": {
 										"type": "int",
-										"value": 15
+										"value": 0
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -24014,9 +24014,9 @@
 										"type": "Color",
 										"value": {
 											"a": 1.0,
-											"b": 0.180000007152557,
-											"g": 0.119999997317791,
-											"r": 0.119999997317791
+											"b": 1.0,
+											"g": 1.0,
+											"r": 1.0
 										}
 									},
 									"custom_minimum_size": {
@@ -24064,11 +24064,11 @@
 									},
 									"grow_horizontal": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"grow_vertical": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"layout_direction": {
 										"type": "int",
@@ -24076,7 +24076,7 @@
 									},
 									"layout_mode": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"light_mask": {
 										"type": "int",
@@ -24462,7 +24462,7 @@
 											},
 											"stretch_mode": {
 												"type": "int",
-												"value": 5
+												"value": 0
 											},
 											"texture": {
 												"type": "Object",
@@ -24633,7 +24633,7 @@
 											},
 											"horizontal_alignment": {
 												"type": "int",
-												"value": 1
+												"value": 0
 											},
 											"justification_flags": {
 												"type": "int",
@@ -24767,7 +24767,7 @@
 											},
 											"text": {
 												"type": "String",
-												"value": "Welcome to Patina"
+												"value": "Game Title"
 											},
 											"text_direction": {
 												"type": "int",
@@ -25112,7 +25112,7 @@
 											},
 											"text": {
 												"type": "String",
-												"value": "Start Game"
+												"value": "Start"
 											},
 											"text_direction": {
 												"type": "int",
@@ -25893,23 +25893,23 @@
 									},
 									"anchor_bottom": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_left": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_right": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_top": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchors_preset": {
 										"type": "int",
-										"value": 8
+										"value": 0
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -25968,11 +25968,11 @@
 									},
 									"grow_horizontal": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"grow_vertical": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"layout_direction": {
 										"type": "int",
@@ -25980,7 +25980,7 @@
 									},
 									"layout_mode": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"light_mask": {
 										"type": "int",
@@ -26021,19 +26021,19 @@
 									},
 									"offset_bottom": {
 										"type": "float",
-										"value": 150.0
+										"value": 0.0
 									},
 									"offset_left": {
 										"type": "float",
-										"value": -200.0
+										"value": 0.0
 									},
 									"offset_right": {
 										"type": "float",
-										"value": 200.0
+										"value": 0.0
 									},
 									"offset_top": {
 										"type": "float",
-										"value": -150.0
+										"value": 0.0
 									},
 									"physics_interpolation_mode": {
 										"type": "int",
@@ -26202,7 +26202,7 @@
 							},
 							"anchor_bottom": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_left": {
 								"type": "float",
@@ -26210,7 +26210,7 @@
 							},
 							"anchor_right": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_top": {
 								"type": "float",
@@ -26218,7 +26218,7 @@
 							},
 							"anchors_preset": {
 								"type": "int",
-								"value": 15
+								"value": 0
 							},
 							"auto_translate_mode": {
 								"type": "int",
@@ -26277,11 +26277,11 @@
 							},
 							"grow_horizontal": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"grow_vertical": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"layout_direction": {
 								"type": "int",
@@ -26972,7 +26972,7 @@
 									},
 									"anchor_bottom": {
 										"type": "float",
-										"value": 1.0
+										"value": 0.0
 									},
 									"anchor_left": {
 										"type": "float",
@@ -26980,7 +26980,7 @@
 									},
 									"anchor_right": {
 										"type": "float",
-										"value": 1.0
+										"value": 0.0
 									},
 									"anchor_top": {
 										"type": "float",
@@ -26988,7 +26988,7 @@
 									},
 									"anchors_preset": {
 										"type": "int",
-										"value": 15
+										"value": 0
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -27006,9 +27006,9 @@
 										"type": "Color",
 										"value": {
 											"a": 1.0,
-											"b": 0.180000007152557,
-											"g": 0.119999997317791,
-											"r": 0.119999997317791
+											"b": 1.0,
+											"g": 1.0,
+											"r": 1.0
 										}
 									},
 									"custom_minimum_size": {
@@ -27056,11 +27056,11 @@
 									},
 									"grow_horizontal": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"grow_vertical": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"layout_direction": {
 										"type": "int",
@@ -27068,7 +27068,7 @@
 									},
 									"layout_mode": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"light_mask": {
 										"type": "int",
@@ -27454,7 +27454,7 @@
 											},
 											"stretch_mode": {
 												"type": "int",
-												"value": 5
+												"value": 0
 											},
 											"texture": {
 												"type": "Object",
@@ -27625,7 +27625,7 @@
 											},
 											"horizontal_alignment": {
 												"type": "int",
-												"value": 1
+												"value": 0
 											},
 											"justification_flags": {
 												"type": "int",
@@ -27759,7 +27759,7 @@
 											},
 											"text": {
 												"type": "String",
-												"value": "Welcome to Patina"
+												"value": "Game Title"
 											},
 											"text_direction": {
 												"type": "int",
@@ -28104,7 +28104,7 @@
 											},
 											"text": {
 												"type": "String",
-												"value": "Start Game"
+												"value": "Start"
 											},
 											"text_direction": {
 												"type": "int",
@@ -28885,23 +28885,23 @@
 									},
 									"anchor_bottom": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_left": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_right": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchor_top": {
 										"type": "float",
-										"value": 0.5
+										"value": 0.0
 									},
 									"anchors_preset": {
 										"type": "int",
-										"value": 8
+										"value": 0
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -28960,11 +28960,11 @@
 									},
 									"grow_horizontal": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"grow_vertical": {
 										"type": "int",
-										"value": 2
+										"value": 1
 									},
 									"layout_direction": {
 										"type": "int",
@@ -28972,7 +28972,7 @@
 									},
 									"layout_mode": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"light_mask": {
 										"type": "int",
@@ -29013,19 +29013,19 @@
 									},
 									"offset_bottom": {
 										"type": "float",
-										"value": 150.0
+										"value": 0.0
 									},
 									"offset_left": {
 										"type": "float",
-										"value": -200.0
+										"value": 0.0
 									},
 									"offset_right": {
 										"type": "float",
-										"value": 200.0
+										"value": 0.0
 									},
 									"offset_top": {
 										"type": "float",
-										"value": -150.0
+										"value": 0.0
 									},
 									"physics_interpolation_mode": {
 										"type": "int",
@@ -29194,7 +29194,7 @@
 							},
 							"anchor_bottom": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_left": {
 								"type": "float",
@@ -29202,7 +29202,7 @@
 							},
 							"anchor_right": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_top": {
 								"type": "float",
@@ -29210,7 +29210,7 @@
 							},
 							"anchors_preset": {
 								"type": "int",
-								"value": 15
+								"value": 0
 							},
 							"auto_translate_mode": {
 								"type": "int",
@@ -29269,11 +29269,11 @@
 							},
 							"grow_horizontal": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"grow_vertical": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"layout_direction": {
 								"type": "int",
@@ -29924,7 +29924,7 @@
 		}
 	],
 	"frames_captured": 10,
-	"generated_at": "2026-03-20T13:39:40",
+	"generated_at": "2026-11-03T18:34:42",
 	"notification_trace": [],
 	"properties": {
 		"children": [
@@ -29966,7 +29966,7 @@
 							},
 							"anchor_bottom": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_left": {
 								"type": "float",
@@ -29974,7 +29974,7 @@
 							},
 							"anchor_right": {
 								"type": "float",
-								"value": 1.0
+								"value": 0.0
 							},
 							"anchor_top": {
 								"type": "float",
@@ -29982,7 +29982,7 @@
 							},
 							"anchors_preset": {
 								"type": "int",
-								"value": 15
+								"value": 0
 							},
 							"auto_translate_mode": {
 								"type": "int",
@@ -30000,9 +30000,9 @@
 								"type": "Color",
 								"value": {
 									"a": 1.0,
-									"b": 0.180000007152557,
-									"g": 0.119999997317791,
-									"r": 0.119999997317791
+									"b": 1.0,
+									"g": 1.0,
+									"r": 1.0
 								}
 							},
 							"custom_minimum_size": {
@@ -30050,11 +30050,11 @@
 							},
 							"grow_horizontal": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"grow_vertical": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"layout_direction": {
 								"type": "int",
@@ -30062,7 +30062,7 @@
 							},
 							"layout_mode": {
 								"type": "int",
-								"value": 1
+								"value": 0
 							},
 							"light_mask": {
 								"type": "int",
@@ -30448,7 +30448,7 @@
 									},
 									"stretch_mode": {
 										"type": "int",
-										"value": 5
+										"value": 0
 									},
 									"texture": {
 										"type": "Object",
@@ -30619,7 +30619,7 @@
 									},
 									"horizontal_alignment": {
 										"type": "int",
-										"value": 1
+										"value": 0
 									},
 									"justification_flags": {
 										"type": "int",
@@ -30753,7 +30753,7 @@
 									},
 									"text": {
 										"type": "String",
-										"value": "Welcome to Patina"
+										"value": "Game Title"
 									},
 									"text_direction": {
 										"type": "int",
@@ -31098,7 +31098,7 @@
 									},
 									"text": {
 										"type": "String",
-										"value": "Start Game"
+										"value": "Start"
 									},
 									"text_direction": {
 										"type": "int",
@@ -31879,23 +31879,23 @@
 							},
 							"anchor_bottom": {
 								"type": "float",
-								"value": 0.5
+								"value": 0.0
 							},
 							"anchor_left": {
 								"type": "float",
-								"value": 0.5
+								"value": 0.0
 							},
 							"anchor_right": {
 								"type": "float",
-								"value": 0.5
+								"value": 0.0
 							},
 							"anchor_top": {
 								"type": "float",
-								"value": 0.5
+								"value": 0.0
 							},
 							"anchors_preset": {
 								"type": "int",
-								"value": 8
+								"value": 0
 							},
 							"auto_translate_mode": {
 								"type": "int",
@@ -31954,11 +31954,11 @@
 							},
 							"grow_horizontal": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"grow_vertical": {
 								"type": "int",
-								"value": 2
+								"value": 1
 							},
 							"layout_direction": {
 								"type": "int",
@@ -31966,7 +31966,7 @@
 							},
 							"layout_mode": {
 								"type": "int",
-								"value": 1
+								"value": 0
 							},
 							"light_mask": {
 								"type": "int",
@@ -32007,19 +32007,19 @@
 							},
 							"offset_bottom": {
 								"type": "float",
-								"value": 150.0
+								"value": 0.0
 							},
 							"offset_left": {
 								"type": "float",
-								"value": -200.0
+								"value": 0.0
 							},
 							"offset_right": {
 								"type": "float",
-								"value": 200.0
+								"value": 0.0
 							},
 							"offset_top": {
 								"type": "float",
-								"value": -150.0
+								"value": 0.0
 							},
 							"physics_interpolation_mode": {
 								"type": "int",
@@ -32188,7 +32188,7 @@
 					},
 					"anchor_bottom": {
 						"type": "float",
-						"value": 1.0
+						"value": 0.0
 					},
 					"anchor_left": {
 						"type": "float",
@@ -32196,7 +32196,7 @@
 					},
 					"anchor_right": {
 						"type": "float",
-						"value": 1.0
+						"value": 0.0
 					},
 					"anchor_top": {
 						"type": "float",
@@ -32204,7 +32204,7 @@
 					},
 					"anchors_preset": {
 						"type": "int",
-						"value": 15
+						"value": 0
 					},
 					"auto_translate_mode": {
 						"type": "int",
@@ -32263,11 +32263,11 @@
 					},
 					"grow_horizontal": {
 						"type": "int",
-						"value": 2
+						"value": 1
 					},
 					"grow_vertical": {
 						"type": "int",
-						"value": 2
+						"value": 1
 					},
 					"layout_direction": {
 						"type": "int",
@@ -32962,12 +32962,6 @@
 			"args": [],
 			"frame_number": 0,
 			"signal_name": "item_rect_changed",
-			"source_path": "/root/UIRoot/VBoxContainer/Title"
-		},
-		{
-			"args": [],
-			"frame_number": 0,
-			"signal_name": "resized",
 			"source_path": "/root/UIRoot/VBoxContainer/Title"
 		},
 		{

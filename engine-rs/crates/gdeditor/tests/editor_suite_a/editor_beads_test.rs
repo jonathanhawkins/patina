@@ -516,6 +516,20 @@ fn test_qg1_scene_tabs_and_info() {
 }
 
 // pat-kj4: Project settings API
+//
+// Categories are looked up by `id`, not by index: an "Input Devices" category
+// (`input_devices/pointing/emulate_*_from_*`, pat-mgixk.43 PROJECT_SETTING_MAP)
+// was added between Display and Physics, which shifted Physics from index 2.
+// The order of the dialog's tabs is not what these tests pin — the values are.
+fn settings_category<'a>(v: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
+    v["categories"]
+        .as_array()
+        .expect("categories array")
+        .iter()
+        .find(|c| c["id"] == id)
+        .unwrap_or_else(|| panic!("no `{id}` category in {v}"))
+}
+
 #[test]
 fn test_kj4_project_settings_get() {
     let (handle, port) = make_server();
@@ -524,13 +538,12 @@ fn test_kj4_project_settings_get() {
     let v: serde_json::Value = serde_json::from_str(body).unwrap();
     assert_eq!(v["project_name"], "New Project");
     // resolution_w etc. are nested in categories
-    let cats = &v["categories"];
-    let display = &cats[1]["properties"];
+    let display = &settings_category(&v, "display")["properties"];
     assert_eq!(display[0]["key"], "resolution_w");
     assert_eq!(display[0]["value"], 1152);
     assert_eq!(display[1]["key"], "resolution_h");
     assert_eq!(display[1]["value"], 648);
-    let physics = &cats[2]["properties"];
+    let physics = &settings_category(&v, "physics")["properties"];
     assert_eq!(physics[0]["key"], "physics_fps");
     assert_eq!(physics[0]["value"], 60);
     assert_eq!(physics[1]["key"], "gravity");
@@ -550,9 +563,11 @@ fn test_kj4_project_settings_set() {
     let v: serde_json::Value = serde_json::from_str(extract_body(&resp2)).unwrap();
     assert_eq!(v["project_name"], "MyGame");
     assert_eq!(v["main_scene"], "res://main.tscn");
-    let display = &v["categories"][1]["properties"];
+    let display = &settings_category(&v, "display")["properties"];
+    assert_eq!(display[0]["key"], "resolution_w");
     assert_eq!(display[0]["value"], 1920);
-    let physics = &v["categories"][2]["properties"];
+    let physics = &settings_category(&v, "physics")["properties"];
+    assert_eq!(physics[0]["key"], "physics_fps");
     assert_eq!(physics[0]["value"], 120);
     handle.stop();
 }
@@ -596,23 +611,42 @@ fn test_mn3_shared_properties() {
 }
 
 // pat-flr: Filesystem operations
+//
+// The filesystem endpoints are sandboxed to the project root (pat-aivim,
+// `sandbox_path` in editor_server.rs): an ABSOLUTE path is refused with 403,
+// exactly as Godot's FileSystemDock only ever operates on `res://` paths. These
+// tests used to drive the endpoints with an absolute `temp_dir()` path, which
+// the sandbox now (correctly) rejects — so they work in a project-relative
+// scratch directory, and additionally pin that the absolute form is refused.
+fn flr_scratch_dir(tag: &str) -> (std::path::PathBuf, String) {
+    let rel = format!(".patina_fs_test_{tag}_{}", std::process::id());
+    let abs = std::env::current_dir().unwrap().join(&rel);
+    let _ = std::fs::remove_dir_all(&abs);
+    std::fs::create_dir_all(&abs).unwrap();
+    (abs, rel)
+}
+
 #[test]
 fn test_flr_filesystem_mkdir_and_delete() {
     let (handle, port) = make_server();
-    let tmp = std::env::temp_dir().join("patina_fs_test_flr");
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
+    let (tmp, rel) = flr_scratch_dir("flr");
+
+    // An absolute path outside the project root is a sandbox violation.
+    let outside = std::env::temp_dir().join("patina_fs_test_flr_outside");
+    let body = format!(r#"{{"path":"{}"}}"#, outside.display());
+    let resp = http_post(port, "/api/filesystem/mkdir", &body);
+    assert!(resp.contains("403"), "absolute mkdir must be refused: {resp}");
 
     // Create a subfolder
-    let body = format!(r#"{{"path":"{}"}}"#, tmp.join("newdir").display());
+    let body = format!(r#"{{"path":"res://{rel}/newdir"}}"#);
     let resp = http_post(port, "/api/filesystem/mkdir", &body);
-    assert!(resp.contains("200 OK"), "mkdir should succeed");
+    assert!(resp.contains("200 OK"), "mkdir should succeed: {resp}");
     assert!(tmp.join("newdir").is_dir(), "Directory should exist");
 
     // Delete the subfolder
-    let body = format!(r#"{{"path":"{}"}}"#, tmp.join("newdir").display());
+    let body = format!(r#"{{"path":"res://{rel}/newdir"}}"#);
     let resp = http_post(port, "/api/filesystem/delete", &body);
-    assert!(resp.contains("200 OK"), "delete should succeed");
+    assert!(resp.contains("200 OK"), "delete should succeed: {resp}");
     assert!(!tmp.join("newdir").exists(), "Directory should be deleted");
 
     let _ = std::fs::remove_dir_all(&tmp);
@@ -622,17 +656,12 @@ fn test_flr_filesystem_mkdir_and_delete() {
 #[test]
 fn test_flr_filesystem_rename() {
     let (handle, port) = make_server();
-    let tmp = std::env::temp_dir().join("patina_fs_test_rename");
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
+    let (tmp, rel) = flr_scratch_dir("rename");
     std::fs::write(tmp.join("old.txt"), "hello").unwrap();
 
-    let body = format!(
-        r#"{{"old_path":"{}","new_name":"new.txt"}}"#,
-        tmp.join("old.txt").display()
-    );
+    let body = format!(r#"{{"old_path":"res://{rel}/old.txt","new_name":"new.txt"}}"#);
     let resp = http_post(port, "/api/filesystem/rename", &body);
-    assert!(resp.contains("200 OK"), "rename should succeed");
+    assert!(resp.contains("200 OK"), "rename should succeed: {resp}");
     assert!(tmp.join("new.txt").exists(), "New file should exist");
     assert!(!tmp.join("old.txt").exists(), "Old file should be gone");
 

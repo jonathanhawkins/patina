@@ -1158,8 +1158,13 @@ fn main_loop_scene_change_mid_execution() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    tree.add_child(root, Node::new("OldNode", "Node2D"))
+    let old_scene = tree.add_child(root, Node::new("OldNode", "Node2D"))
         .unwrap();
+    // The starting scene must be the CURRENT scene: Godot's change_scene_* frees
+    // only `current_scene` (scene_tree.cpp `_flush_scene_change`) — other root
+    // children such as autoloads survive. These tests used to add it to root
+    // without making it current, relying on a free-every-root-child behaviour.
+    tree.set_current_scene(old_scene, None);
 
     let mut main_loop = MainLoop::new(tree);
     main_loop.run_frames(5, 1.0 / 60.0);

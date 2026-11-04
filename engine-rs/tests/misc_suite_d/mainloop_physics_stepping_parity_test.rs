@@ -693,10 +693,11 @@ fn paused_skips_physics_notifications_but_world_steps() {
         physics_notifs.len()
     );
 
-    // The physics world DID step though, so position may have changed
-    // (sync_to/step/sync_from still run in the MainLoop step).
-    // This is the current behavior — the paused gate is at the
-    // notification/script level, not the physics server level.
+    // The physics world does NOT step while paused: Godot's
+    // `SceneTree::set_pause` deactivates both physics servers
+    // (`PhysicsServer2D::set_active(!p_enabled)`, scene/main/scene_tree.cpp:1111-1114),
+    // so a paused game's bodies stay where they are. This used to assert the
+    // opposite as "the current behavior".
     let pos_after_pause = match ml
         .tree()
         .get_node(rigid_id)
@@ -706,10 +707,9 @@ fn paused_skips_physics_notifications_but_world_steps() {
         Variant::Vector2(v) => v,
         _ => panic!("expected Vector2"),
     };
-    // Position changed because physics world stepped.
-    assert!(
-        pos_after_pause.y > pos_after_5.y,
-        "physics world still steps while paused (positions advance)"
+    assert_eq!(
+        pos_after_pause, pos_after_5,
+        "a paused tree's physics does not step (bodies stay put)"
     );
 }
 

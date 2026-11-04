@@ -1980,12 +1980,15 @@ fn reparent_instanced_node_fires_lifecycle_notifications() {
 
     tree.reparent(player, container).unwrap();
 
-    // Reparent should fire EXIT_TREE then ENTER_TREE and READY.
+    // Reparent fires EXIT_TREE then ENTER_TREE — and NOT READY again: Godot's
+    // `_propagate_ready` sends READY only while `ready_first` is set
+    // (scene/main/node.cpp:328-332). The moved node stays ready.
     let log = tree.get_node(player).unwrap().notification_log();
     let has_enter = log.iter().any(|n| *n == NOTIFICATION_ENTER_TREE);
     let has_ready = log.iter().any(|n| *n == NOTIFICATION_READY);
     assert!(has_enter, "Reparent must fire ENTER_TREE on the moved node");
-    assert!(has_ready, "Reparent must fire READY on the moved node");
+    assert!(!has_ready, "Reparent must not ready the moved node a second time");
+    assert!(tree.get_node(player).unwrap().is_ready(), "it is still ready");
 }
 
 // ---------------------------------------------------------------------------

@@ -59,7 +59,10 @@ fn collision_shape_3d_has_expected_properties() {
     let _g = init_classdb();
     let info = class_db::get_class_info("CollisionShape3D").unwrap();
     let prop_names: Vec<&str> = info.properties.iter().map(|p| p.name.as_str()).collect();
-    for expected in &["shape", "disabled", "radius", "height", "size"] {
+    // Godot's CollisionShape3D members (doc/classes/CollisionShape3D.xml).
+    // `radius` / `height` / `size` are properties of the SHAPE resources
+    // (SphereShape3D, CapsuleShape3D, BoxShape3D), not of this node.
+    for expected in &["shape", "disabled", "debug_color", "debug_fill"] {
         assert!(
             prop_names.contains(expected),
             "CollisionShape3D missing property: {expected}"

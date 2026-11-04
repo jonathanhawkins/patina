@@ -60,11 +60,22 @@ fn parse_scene(tscn: &str) -> PackedScene {
     PackedScene::from_tscn(tscn).expect("failed to parse scene")
 }
 
+/// Mounts `packed` as the MAIN scene, the way Godot's boot does: added under
+/// the root AND made `current_scene`. Godot's `change_scene_to_*` frees only
+/// `current_scene` (scene_tree.cpp `_flush_scene_change`), so a scene added by
+/// a bare `add_child` would — correctly — survive the transition; these
+/// workflows model a game's main scene, which is current.
+fn mount_main_scene(tree: &mut SceneTree, packed: &PackedScene) -> gdscene::node::NodeId {
+    let root = tree.root_id();
+    let id = add_packed_scene_to_tree(tree, root, packed).unwrap();
+    tree.set_current_scene(id, Some(packed.clone()));
+    id
+}
+
 fn load_scene(tscn: &str) -> (SceneTree, gdscene::node::NodeId) {
     let packed = parse_scene(tscn);
     let mut tree = SceneTree::new();
-    let root = tree.root_id();
-    let scene_root = add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
+    let scene_root = mount_main_scene(&mut tree, &packed);
     (tree, scene_root)
 }
 
@@ -79,7 +90,7 @@ fn s6w_scene_transition_replaces_tree_and_continues_stepping() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    add_packed_scene_to_tree(&mut tree, root, &packed_a).unwrap();
+    mount_main_scene(&mut tree, &packed_a);
     let mut main_loop = MainLoop::new(tree);
 
     // Step scene A for 30 frames.
@@ -406,7 +417,7 @@ fn s6w_same_scene_reloaded_produces_consistent_state() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
+    mount_main_scene(&mut tree, &packed);
     let mut main_loop = MainLoop::new(tree);
 
     // Run and modify state.
@@ -556,7 +567,7 @@ fn s6w_scene_transitions_no_node_accumulation() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    add_packed_scene_to_tree(&mut tree, root, &packed_plat).unwrap();
+    mount_main_scene(&mut tree, &packed_plat);
 
     // Count nodes with platformer loaded.
     let plat_count = tree.all_nodes_in_tree_order().len();
@@ -723,7 +734,7 @@ fn s6w_all_fixtures_round_trip_through_change_scene() {
     // Start with first scene.
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    add_packed_scene_to_tree(&mut tree, root, &packed_scenes[0].1).unwrap();
+    mount_main_scene(&mut tree, &packed_scenes[0].1);
     let mut main_loop = MainLoop::new(tree);
 
     // Cycle through all scenes twice: A→B→C→...→J→A→B→...→J.
@@ -792,7 +803,7 @@ fn s6w_modify_position_transition_reload_resets() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    add_packed_scene_to_tree(&mut tree, root, &packed_plat).unwrap();
+    mount_main_scene(&mut tree, &packed_plat);
     let mut main_loop = MainLoop::new(tree);
 
     // Modify player position.
@@ -938,7 +949,7 @@ fn s6w_rapid_scene_transitions_100_cycles() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    add_packed_scene_to_tree(&mut tree, root, &packed_min).unwrap();
+    mount_main_scene(&mut tree, &packed_min);
     let mut main_loop = MainLoop::new(tree);
 
     // Rapidly alternate between two scenes, 1 frame each.
@@ -973,7 +984,7 @@ fn s6w_signal_instantiation_scene_transition_workflow() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    add_packed_scene_to_tree(&mut tree, root, &packed_sig_inst).unwrap();
+    mount_main_scene(&mut tree, &packed_sig_inst);
     let mut main_loop = MainLoop::new(tree);
 
     // Verify signal scene structure.
@@ -1085,7 +1096,7 @@ fn s6w_3d_scene_parse_load_step_workflow() {
     // Start with 3D scene.
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    add_packed_scene_to_tree(&mut tree, root, &packed_3d).unwrap();
+    mount_main_scene(&mut tree, &packed_3d);
     let mut main_loop = MainLoop::new(tree);
 
     // Verify 3D structure.
@@ -1156,7 +1167,7 @@ fn s6w_3d_hierarchy_scene_transition_workflow() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    add_packed_scene_to_tree(&mut tree, root, &packed_hier3d).unwrap();
+    mount_main_scene(&mut tree, &packed_hier3d);
     let mut main_loop = MainLoop::new(tree);
 
     // Step hierarchy_3d.
@@ -1215,7 +1226,7 @@ fn s6w_expanded_lifecycle_all_fixtures_2d_and_3d() {
     // Start with first scene.
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    add_packed_scene_to_tree(&mut tree, root, &packed[0].1).unwrap();
+    mount_main_scene(&mut tree, &packed[0].1);
     let mut main_loop = MainLoop::new(tree);
     main_loop.run_frames(5, DT);
 
@@ -1320,7 +1331,7 @@ fn s6w_all_3d_scenes_sequential_transitions() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    add_packed_scene_to_tree(&mut tree, root, &packed[0].1).unwrap();
+    mount_main_scene(&mut tree, &packed[0].1);
     let mut main_loop = MainLoop::new(tree);
     main_loop.run_frames(10, DT);
 
@@ -1345,7 +1356,7 @@ fn s6w_3d_to_2d_to_3d_scene_transition() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    add_packed_scene_to_tree(&mut tree, root, &packed_3d).unwrap();
+    mount_main_scene(&mut tree, &packed_3d);
     let mut main_loop = MainLoop::new(tree);
 
     // Start in 3D.
@@ -1399,7 +1410,7 @@ fn s6w_full_18_scene_project_lifecycle() {
 
     let mut tree = SceneTree::new();
     let root = tree.root_id();
-    add_packed_scene_to_tree(&mut tree, root, &packed[0].1).unwrap();
+    mount_main_scene(&mut tree, &packed[0].1);
     let mut main_loop = MainLoop::new(tree);
     main_loop.run_frames(3, DT);
 
@@ -1433,7 +1444,7 @@ fn s6w_3d_scene_transition_determinism() {
 
         let mut tree = SceneTree::new();
         let root = tree.root_id();
-        add_packed_scene_to_tree(&mut tree, root, &packed_a).unwrap();
+        mount_main_scene(&mut tree, &packed_a);
         let mut main_loop = MainLoop::new(tree);
         main_loop.run_frames(10, DT);
 

@@ -571,6 +571,17 @@ pub struct EditorState {
     pub viewport_mode: ViewportMode,
     /// Output log from script print() calls.
     pub output_entries: VecDeque<String>,
+    /// The runtime thread every piece of game code runs on (see
+    /// [`run_on_game_thread`]). `None` until the server starts it, and in
+    /// states built without a server, where game code runs inline.
+    pub runtime_thread: Option<RuntimeThread>,
+    /// Measured stream and game frame rates (see [`FrameStats`]).
+    pub frame_stats: FrameStats,
+    /// The running game's prints and errors, tagged with the frame that
+    /// produced them, for the agent interface (`/mcp`). The Output and Errors
+    /// panels get the same lines through `log_entries`/`debug_errors`; this
+    /// copy keeps the frame number and a sequence a client can resume from.
+    pub game_log: crate::agent_mcp::GameLog,
     /// Project settings (pat-kj4 / pat-c4zlm).
     pub project_name: String,
     /// Project description.
@@ -1008,6 +1019,9 @@ impl EditorState {
             keybindings: EditorKeyBinding::defaults(),
             viewport_mode: ViewportMode::Select,
             output_entries: VecDeque::new(),
+            game_log: crate::agent_mcp::GameLog::default(),
+            runtime_thread: None,
+            frame_stats: FrameStats::default(),
             project_name: "New Project".to_string(),
             project_description: String::new(),
             project_icon: String::new(),
@@ -1087,6 +1101,20 @@ impl EditorState {
         map.insert("ui_accept".into(), vec!["Enter".into(), " ".into()]);
         map.insert("ui_cancel".into(), vec!["Escape".into()]);
         map
+    }
+
+    /// The held key, if any, that puts Play on the fallback input snapshot: a
+    /// character key the engine has no keycode for. While it is held the
+    /// scripts see the editor's own map instead of the project's actions (see
+    /// `advance_running_main_loop`), so a stuck one freezes a game's controls.
+    pub fn input_fallback_key(&self) -> Option<&str> {
+        let mut keys: Vec<&String> = self.pressed_keys.iter().collect();
+        keys.sort();
+        keys.into_iter()
+            .find(|name| {
+                gdplatform::input::Key::from_name(name).is_none() && !is_non_character_key(name)
+            })
+            .map(String::as_str)
     }
 
     /// Returns true if any key mapped to the given action is currently pressed.
@@ -1440,6 +1468,142 @@ pub struct ViewportCache {
     pub png: Mutex<Option<Vec<u8>>>,
     /// Cached BMP bytes.
     pub bmp: Mutex<Option<Vec<u8>>>,
+    /// Incremented on every published frame, so a client can ask for the frame
+    /// AFTER the one it has (`GET /api/viewport?after=<seq>`) instead of
+    /// polling on a timer and re-downloading the same picture.
+    pub seq: std::sync::atomic::AtomicU64,
+    /// The last published frame, which `GET /api/viewport/png` encodes on
+    /// demand. Deflating a PNG of every frame cost ~40 ms in a debug build and
+    /// capped Play at ~14 fps although nothing reads the PNG while streaming.
+    latest_fb: Mutex<Option<FrameBuffer>>,
+    /// The `seq` the cached PNG was encoded from.
+    png_seq: std::sync::atomic::AtomicU64,
+    /// When each frame of the last second was handed to a viewer. This is
+    /// what the browser actually RECEIVED, as opposed to what was rendered:
+    /// the two differ when the page polls too slowly or requests are refused.
+    served: Mutex<VecDeque<std::time::Instant>>,
+    /// Frame requests waiting right now for a newer frame (`?after=`).
+    waiting: std::sync::atomic::AtomicUsize,
+}
+
+impl ViewportCache {
+    fn mark_served(&self) {
+        let mut served = self.served.lock().unwrap_or_else(|e| e.into_inner());
+        FrameStats::mark(&mut served);
+    }
+
+    /// Frames served in the last second, and how long ago the last one went.
+    pub fn served_per_second(&self) -> (usize, Option<Duration>) {
+        let served = self.served.lock().unwrap_or_else(|e| e.into_inner());
+        (
+            FrameStats::per_second(&served),
+            served.back().map(|t| t.elapsed()),
+        )
+    }
+
+    /// Frame requests currently held open waiting for the next frame.
+    pub fn waiting_viewers(&self) -> usize {
+        self.waiting.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Sequence number of the latest published frame.
+    pub fn frame_seq(&self) -> u64 {
+        self.seq.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// Measured frame rates for the runtime status and the editor's FPS counter:
+/// the old `fps` field was `1 / delta_time` — the TARGET rate — so it read 60
+/// whatever the game or the stream actually managed. Also keeps the requests
+/// the rate limiter refused, which the agent's `diagnose` reports: a refused
+/// frame or key request looks like a frozen view or a dropped key.
+#[derive(Debug, Default)]
+pub struct FrameStats {
+    /// When each of the last second's frames was published to the viewport.
+    publishes: VecDeque<std::time::Instant>,
+    /// When each of the last second's game frames was stepped.
+    sim_steps: VecDeque<std::time::Instant>,
+    /// Smoothed time to render one runtime frame, in milliseconds.
+    render_ms: f64,
+    /// Requests refused with 429 in the last minute: when, and the route.
+    refused: VecDeque<(std::time::Instant, String)>,
+}
+
+impl FrameStats {
+    fn mark(window: &mut VecDeque<std::time::Instant>) {
+        let now = std::time::Instant::now();
+        window.push_back(now);
+        while window
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > Duration::from_secs(1))
+        {
+            window.pop_front();
+        }
+    }
+
+    fn per_second(window: &VecDeque<std::time::Instant>) -> usize {
+        let now = std::time::Instant::now();
+        window
+            .iter()
+            .filter(|t| now.duration_since(**t) <= Duration::from_secs(1))
+            .count()
+    }
+
+    /// Frames published in the last second.
+    pub fn render_fps(&self) -> usize {
+        Self::per_second(&self.publishes)
+    }
+
+    /// Game frames stepped in the last second.
+    pub fn sim_fps(&self) -> usize {
+        Self::per_second(&self.sim_steps)
+    }
+
+    /// Smoothed render time per frame, ms.
+    pub fn render_ms(&self) -> f64 {
+        self.render_ms
+    }
+
+    /// Records a request the rate limiter refused.
+    pub fn note_refused(&mut self, path: &str) {
+        let now = std::time::Instant::now();
+        self.refused.push_back((now, path.to_string()));
+        while self.refused.len() > 512
+            || self
+                .refused
+                .front()
+                .is_some_and(|(t, _)| now.duration_since(*t) > Duration::from_secs(60))
+        {
+            self.refused.pop_front();
+        }
+    }
+
+    /// Requests refused within `window`, counted per route, busiest first.
+    pub fn refused_within(&self, window: Duration) -> Vec<(String, usize)> {
+        let mut counts: Vec<(String, usize)> = Vec::new();
+        for (t, path) in &self.refused {
+            if t.elapsed() > window {
+                continue;
+            }
+            match counts.iter_mut().find(|(p, _)| p == path) {
+                Some((_, n)) => *n += 1,
+                None => counts.push((path.clone(), 1)),
+            }
+        }
+        counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        counts
+    }
+}
+
+/// `"debug"` or `"release"`: the profile this editor was compiled with. A debug
+/// build software-renders a Play frame ~10x slower, which is easy to mistake
+/// for an engine performance bug.
+pub fn build_profile() -> &'static str {
+    if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    }
 }
 
 /// Handle returned by [`start`], used to interact with the running server.
@@ -1496,6 +1660,17 @@ fn is_rate_limit_exempt(path: &str) -> bool {
     matches!(
         path,
         "/api/viewport/png"
+            // The BMP frame stream the Game view pulls once per frame, and the
+            // live game input that travels with it: a 60 fps stream plus key
+            // repeat would exhaust a 60 req/s budget, and a dropped keyup
+            // leaves a key held in the running game.
+            | "/api/viewport"
+            | "/api/runtime/input/key_down"
+            | "/api/runtime/input/key_up"
+            | "/api/runtime/input/mouse_move"
+            | "/api/runtime/input/mouse_down"
+            | "/api/runtime/input/mouse_up"
+            | "/api/runtime/input/mouse_wheel"
             | "/api/viewport/3d/state"
             | "/api/viewport/3d/orbit"
             | "/api/viewport/3d/pan"
@@ -1861,6 +2036,11 @@ impl EditorServerHandle {
         let viewport_cache = Arc::new(ViewportCache {
             png: Mutex::new(None),
             bmp: Mutex::new(None),
+            seq: std::sync::atomic::AtomicU64::new(0),
+            latest_fb: Mutex::new(None),
+            png_seq: std::sync::atomic::AtomicU64::new(u64::MAX),
+            served: Mutex::new(VecDeque::new()),
+            waiting: std::sync::atomic::AtomicUsize::new(0),
         });
         let running = Arc::new(AtomicBool::new(true));
         let auth: Arc<Option<String>> = Arc::new(auth_token);
@@ -1917,9 +2097,15 @@ impl EditorServerHandle {
         // the server is stopped.
         let driver_state = Arc::clone(&state);
         let driver_running = Arc::clone(&running);
-        let driver_thread = Some(thread::spawn(move || {
-            run_runtime_driver(driver_state, driver_running);
-        }));
+        let (job_tx, job_rx) = std::sync::mpsc::channel::<RuntimeJob>();
+        let driver = thread::spawn(move || {
+            run_runtime_driver(driver_state, driver_running, job_rx);
+        });
+        state.lock().unwrap().runtime_thread = Some(RuntimeThread {
+            id: driver.thread().id(),
+            jobs: job_tx,
+        });
+        let driver_thread = Some(driver);
 
         Self {
             state,
@@ -1931,21 +2117,19 @@ impl EditorServerHandle {
         }
     }
 
-    /// Updates the latest frame buffer for viewport endpoints, encoding both the
-    /// PNG and BMP caches. Equivalent to `update_frame_ex(fb, true)`.
+    /// Updates the latest frame buffer for viewport endpoints (BMP now, PNG on
+    /// first request). Equivalent to `update_frame_ex(fb, true)`.
     pub fn update_frame(&self, fb: FrameBuffer) {
         self.update_frame_ex(fb, true);
     }
 
     /// Updates the latest frame, encoding the live-stream image(s).
     ///
-    /// The live 3D viewport streams **BMP** (a memcpy-cheap encode: ~2ms vs ~15ms
-    /// to deflate a PNG), so BMP is always encoded. **PNG** is only encoded when
-    /// `full_quality` is true — full-resolution frames (camera stopped, 2D, or a
-    /// running game). During a low-resolution 3D camera *motion* frame the client
-    /// only consumes the BMP, so re-compressing a PNG nobody fetches would just tax
-    /// the render loop and cap the interactive framerate; `full_quality = false`
-    /// skips it. The PNG cache therefore stays fresh for every non-motion consumer.
+    /// The live viewport streams **BMP** (a memcpy-cheap encode: ~2ms vs ~15ms
+    /// to deflate a PNG), so BMP is always encoded. **PNG** is encoded lazily, by
+    /// the first `GET /api/viewport/png` after a `full_quality` frame (camera
+    /// stopped, 2D, or a running game). During a low-resolution 3D camera
+    /// *motion* frame (`full_quality = false`) the PNG keeps the last full frame.
     ///
     /// The `PERF_STREAM` knob can force a single format for benchmarking
     /// (1 = PNG only, 2 = BMP only); `0` (default) uses the logic above.
@@ -1957,9 +2141,23 @@ impl EditorServerHandle {
             let bmp = encode_bmp(&fb);
             *self.viewport_cache.bmp.lock().unwrap() = Some(bmp);
         }
-        if fmt != 2 && (full_quality || fmt == 1) {
+        if fmt == 1 {
+            // PNG-only streaming encodes eagerly, as it always has.
             let png = encode_png_fast(&fb);
             *self.viewport_cache.png.lock().unwrap() = Some(png);
+        } else if fmt != 2 && full_quality {
+            // Everyone else gets the PNG on demand (see `latest_fb`).
+            *self.viewport_cache.latest_fb.lock().unwrap() = Some(fb.clone());
+        }
+        // Bumped (Release) only once the frame is stored, so a reader that
+        // loads the new `seq` (Acquire) also sees the new frame.
+        let seq = self
+            .viewport_cache
+            .seq
+            .fetch_add(1, std::sync::atomic::Ordering::Release)
+            + 1;
+        if fmt == 1 {
+            self.viewport_cache.png_seq.store(seq, Relaxed);
         }
         PERF_LAST_ENCODE_US.store(
             _enc_t.elapsed().as_micros().min(u32::MAX as u128) as u32,
@@ -1968,9 +2166,19 @@ impl EditorServerHandle {
         PERF_FRAME_COUNT.fetch_add(1, Relaxed);
         // Update scene state
         let mut state = self.state.lock().unwrap();
+        FrameStats::mark(&mut state.frame_stats.publishes);
         state.viewport_width = fb.width;
         state.viewport_height = fb.height;
         state.frame_buffer = Some(fb);
+    }
+
+    /// Records how long the render loop took to produce the last runtime frame
+    /// (raster + composite + encode), smoothed for the FPS readout.
+    pub fn note_render_time(&self, took: Duration) {
+        let ms = took.as_secs_f64() * 1000.0;
+        let mut state = self.state.lock().unwrap();
+        let prev = state.frame_stats.render_ms;
+        state.frame_stats.render_ms = if prev == 0.0 { ms } else { prev * 0.8 + ms * 0.2 };
     }
 
     /// Byte-native frame update for the GPU editor path (pat-ism62): stores a
@@ -1984,8 +2192,12 @@ impl EditorServerHandle {
     pub fn update_frame_bmp(&self, bmp: Vec<u8>, width: u32, height: u32) {
         use std::sync::atomic::Ordering::Relaxed;
         *self.viewport_cache.bmp.lock().unwrap() = Some(bmp);
+        self.viewport_cache
+            .seq
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
         PERF_FRAME_COUNT.fetch_add(1, Relaxed);
         let mut state = self.state.lock().unwrap();
+        FrameStats::mark(&mut state.frame_stats.publishes);
         state.viewport_width = width;
         state.viewport_height = height;
     }
@@ -2069,6 +2281,75 @@ fn run_server(
     }
 }
 
+/// Work for the runtime thread: game code to run there, given the shared state.
+pub type RuntimeJob = Box<dyn FnOnce(&Arc<Mutex<EditorState>>) + Send>;
+
+/// Handle to the runtime thread, held in [`EditorState::runtime_thread`].
+pub struct RuntimeThread {
+    id: thread::ThreadId,
+    jobs: std::sync::mpsc::Sender<RuntimeJob>,
+}
+
+/// Runs `f` on the runtime thread and returns its result — inline when the
+/// caller already is that thread, or when no runtime thread exists.
+///
+/// Godot runs a game on ONE thread, and Patina's interpreter relies on it:
+/// RandomNumberGenerator, Image, JSON, RegEx, Expression, UndoRedo and dozens
+/// of other script-created objects live in thread-local registries. Play used
+/// to boot the game (`_ready`) on whichever HTTP connection thread served
+/// `/api/runtime/play` and step it on the driver thread, so an object made in
+/// `_ready` was gone one frame later: `rng.randf_range()` answered
+/// "RandomNumberGenerator has no method 'randf_range'". Every route that runs
+/// game code goes through here.
+///
+/// ⚠️ Never call this while holding the state lock: the job locks it.
+pub(crate) fn run_on_game_thread<R, F>(state: &Arc<Mutex<EditorState>>, f: F) -> R
+where
+    R: Send + 'static,
+    F: FnOnce(&Arc<Mutex<EditorState>>) -> R + Send + 'static,
+{
+    let sender = {
+        let st = state.lock().unwrap();
+        match &st.runtime_thread {
+            Some(rt) if rt.id != thread::current().id() => Some(rt.jobs.clone()),
+            _ => None,
+        }
+    };
+    let Some(sender) = sender else {
+        return f(state);
+    };
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let job: RuntimeJob = Box::new(move |st| {
+        let _ = done_tx.send(f(st));
+    });
+    if let Err(std::sync::mpsc::SendError(job)) = sender.send(job) {
+        // The runtime thread is gone (server stopping): run it here instead.
+        job(state);
+    }
+    done_rx.recv().expect("every accepted job sends its result")
+}
+
+/// Serves a route whose handler runs game code: the handler runs on the
+/// runtime thread, writing to a clone of the connection.
+fn serve_on_game_thread<F>(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream, handler: F)
+where
+    F: FnOnce(&Arc<Mutex<EditorState>>, &mut TcpStream) + Send + 'static,
+{
+    match stream.try_clone() {
+        Ok(mut clone) => {
+            // The audit log reads the response status from a thread-local, so
+            // carry it back from the thread that actually wrote the response.
+            let status = run_on_game_thread(state, move |st| {
+                audit_reset_status();
+                handler(st, &mut clone);
+                audit_current_status()
+            });
+            audit_set_status(status);
+        }
+        Err(_) => handler(state, stream),
+    }
+}
+
 /// pat-nzgdu.19: continuous runtime driver loop.
 ///
 /// Runs on a dedicated background thread for the server's lifetime and advances
@@ -2087,13 +2368,33 @@ fn run_server(
 /// exists; otherwise the thread idles at the frame cadence, cheaply re-checking.
 /// `runtime_time_scale` is honored inside [`advance_running_main_loop`]. The
 /// loop exits as soon as `running` is cleared (server stop).
-fn run_runtime_driver(state: Arc<Mutex<EditorState>>, running: Arc<AtomicBool>) {
+///
+/// It is also the game's ONE thread: jobs queued through
+/// [`run_on_game_thread`] (Play's boot, Stop, manual steps, an agent's
+/// playtest) run here between frames, so every line of game code executes on
+/// the same thread, as in Godot.
+fn run_runtime_driver(
+    state: Arc<Mutex<EditorState>>,
+    running: Arc<AtomicBool>,
+    jobs: std::sync::mpsc::Receiver<RuntimeJob>,
+) {
     // Bound the per-frame sleep so a pathological `delta_time` cannot wedge the
     // driver: too small would busy-spin the CPU, too large would make Stop/Pause
     // feel unresponsive (the loop only re-checks `running` once per sleep).
     const MIN_FRAME_SECS: f64 = 1.0 / 1000.0;
     const MAX_FRAME_SECS: f64 = 1.0 / 15.0;
+    let mut next_frame = std::time::Instant::now();
     while running.load(Ordering::Relaxed) {
+        // Jobs wake the thread at once; frames keep their own cadence.
+        let wait = next_frame.saturating_duration_since(std::time::Instant::now());
+        match jobs.recv_timeout(wait) {
+            Ok(job) => {
+                job(&state);
+                continue;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => thread::sleep(wait),
+        }
         let frame_secs = {
             let mut st = state.lock().unwrap();
             // pat-mgixk.14: a live debug pause freezes the game exactly as the
@@ -2120,10 +2421,20 @@ fn run_runtime_driver(state: Arc<Mutex<EditorState>>, running: Arc<AtomicBool>) 
                 process_tool_scripts(&mut st, delta);
             }
             st.delta_time
-        }; // lock dropped here — never held across the sleep below.
-        thread::sleep(Duration::from_secs_f64(
-            frame_secs.clamp(MIN_FRAME_SECS, MAX_FRAME_SECS),
-        ));
+        }; // lock dropped here — never held across the wait above.
+           // A fixed cadence measured from the last frame's slot, not from now:
+           // scheduling "a frame interval after this frame finished" stretched
+           // every frame by its own cost, so a 60 fps game ran at ~46. A frame
+           // that overran simply runs the next one late instead of bursting.
+        let now = std::time::Instant::now();
+        next_frame += Duration::from_secs_f64(frame_secs.clamp(MIN_FRAME_SECS, MAX_FRAME_SECS));
+        if next_frame < now {
+            next_frame = now;
+        }
+    }
+    // Run whatever was queued before the stop, so no caller waits forever.
+    while let Ok(job) = jobs.try_recv() {
+        job(&state);
     }
 }
 
@@ -2154,6 +2465,11 @@ struct HttpRequest {
     /// header (case-insensitive). Used to route `/api/events` into the
     /// WebSocket handler instead of the normal dispatch table.
     upgrade_websocket: bool,
+    /// `X-Patina-Agent` header: the per-process key the `/mcp` agent interface
+    /// stamps on the `/api` calls it makes to this same server. A match exempts
+    /// the call from the rate limiter — one agent batch edit is dozens of calls
+    /// in a few milliseconds, and it must not spend the browser's budget.
+    agent_key: Option<String>,
 }
 
 /// Reads the editor server's expected bearer token from the environment.
@@ -2310,6 +2626,14 @@ fn parse_request(stream: &mut TcpStream) -> Option<HttpRequest> {
         }
     });
 
+    let agent_key: Option<String> = header_str.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case("x-patina-agent") {
+            return None;
+        }
+        Some(value.trim().to_string())
+    });
+
     // pat-zzgh5: detect `Upgrade: websocket` header (case-insensitive value).
     let upgrade_websocket: bool = header_str.lines().any(|line| {
         let Some((name, value)) = line.split_once(':') else {
@@ -2347,6 +2671,7 @@ fn parse_request(stream: &mut TcpStream) -> Option<HttpRequest> {
         idempotency_key,
         sec_websocket_key,
         upgrade_websocket,
+        agent_key,
     })
 }
 
@@ -2410,7 +2735,8 @@ fn handle_connection(
         cors_set_allow_origin(origin);
     }
 
-    if req.method != "OPTIONS" && req.path.starts_with("/api/") {
+    // `/mcp` drives everything `/api` does, so it sits behind the same token.
+    if req.method != "OPTIONS" && (req.path.starts_with("/api/") || req.path == "/mcp") {
         if let Some(expected) = auth_token.as_ref().as_ref() {
             let provided = req.auth_token.as_deref();
             if provided != Some(expected.as_str()) {
@@ -2443,7 +2769,8 @@ fn handle_connection(
         // touch ephemeral view state; scene- and file-mutating endpoints are NOT
         // exempt, so the abuse protection still applies where it matters.
         let client_token = req.auth_token.as_deref().unwrap_or("anonymous");
-        if !is_rate_limit_exempt(req.path.as_str()) {
+        let from_agent = req.agent_key.as_deref() == Some(crate::agent_mcp::agent_key());
+        if !from_agent && !is_rate_limit_exempt(req.path.as_str()) {
             if let Err(retry_after) = rate_limiter.check(client_token) {
                 let response = format!(
                     "HTTP/1.1 429 Too Many Requests\r\n\
@@ -2459,6 +2786,9 @@ fn handle_connection(
                 let _ = stream.write_all(response.as_bytes());
                 audit_set_status(429);
                 audit_log_request(&req, auth_token.as_ref().as_deref());
+                if let Ok(mut s) = state.lock() {
+                    s.frame_stats.note_refused(&req.path);
+                }
                 return;
             }
         }
@@ -2528,6 +2858,22 @@ fn handle_connection(
         ("OPTIONS", _) => serve_cors_preflight(&mut stream),
         ("GET", "/favicon.ico") => serve_404(&mut stream),
         ("GET", "/editor") => serve_editor_html(&mut stream),
+        ("POST", "/mcp") => crate::agent_mcp::handle_mcp(
+            state,
+            viewport_cache,
+            &req.body,
+            &mut stream,
+            auth_token.as_ref().as_deref(),
+            // With an explicit CORS allowlist the gate above has already
+            // refused every other origin; the default (open) allowlist checks
+            // nothing, so /mcp then admits only this machine's origins.
+            if cors_allowlist.is_open() {
+                req.origin.as_deref()
+            } else {
+                None
+            },
+        ),
+        ("GET", "/mcp") | ("DELETE", "/mcp") => crate::agent_mcp::reject_non_post(&mut stream),
         ("GET", "/api/capabilities") => api_get_capabilities(&mut stream),
         ("GET", "/api/scene") => api_get_scene(state, &mut stream),
         ("GET", "/api/node/signals") => api_get_node_signals(state, &req.query, &mut stream),
@@ -2546,7 +2892,7 @@ fn handle_connection(
         ("POST", "/api/inspector/history/select") => {
             api_inspector_history_select(state, &req.body, &mut stream)
         }
-        ("GET", "/api/viewport") => api_get_viewport_bmp(viewport_cache, &mut stream),
+        ("GET", "/api/viewport") => api_get_viewport_bmp(viewport_cache, &req.query, &mut stream),
         ("GET", "/api/viewport/png") => api_get_viewport_png(viewport_cache, &mut stream),
         // pat-nzgdu.173: render a PNG from a scene Camera3D's viewpoint (the
         // camera-preview inset; `?cinematic=1` renders through the active camera).
@@ -2726,7 +3072,7 @@ fn handle_connection(
         }
         ("POST", "/api/project/open") => api_open_project(state, &req.body, &mut stream),
         ("GET", "/api/preview/file") => api_get_file_preview(&req.query, &mut stream),
-        ("GET", "/api/script") => api_get_script(&req.query, &mut stream),
+        ("GET", "/api/script") => api_get_script(state, &req.query, &mut stream),
         ("GET", "/api/assetlib/list") => api_get_assetlib_list(state, &mut stream),
         ("POST", "/api/assetlib/install") => api_assetlib_install(state, &req.body, &mut stream),
         ("POST", "/api/assetlib/download") => api_assetlib_download(state, &req.body, &mut stream),
@@ -2734,7 +3080,9 @@ fn handle_connection(
         ("GET", "/api/script/main_view") => api_script_main_view(state, &req.query, &mut stream),
         ("GET", "/api/script/templates") => api_script_templates(state, &req.query, &mut stream),
         ("POST", "/api/script/create") => api_script_create(state, &req.body, &mut stream),
-        ("POST", "/api/script/save") => api_save_script(&req.body, &mut stream),
+        ("POST", "/api/script/save") => api_save_script(state, &req.body, &mut stream),
+        ("POST", "/api/script/validate") => api_script_validate(&req.body, &mut stream),
+        ("POST", "/api/script/highlight") => api_script_highlight(&req.body, &mut stream),
         ("POST", "/api/node/signals/connect") => api_connect_signal(state, &req.body, &mut stream),
         ("POST", "/api/node/groups/add") => api_add_group(state, &req.body, &mut stream),
         ("POST", "/api/node/groups/remove") => api_remove_group(state, &req.body, &mut stream),
@@ -2766,6 +3114,9 @@ fn handle_connection(
         ("POST", "/api/keybindings") => api_set_keybinding(state, &req.body, &mut stream),
         ("POST", "/api/viewport/box_select") => api_box_select(state, &req.body, &mut stream),
         ("POST", "/api/viewport/drop") => api_viewport_drop(state, &req.body, &mut stream),
+        ("POST", "/api/asset/drop_to_viewport") => {
+            api_asset_drop_to_viewport(state, &req.body, &mut stream)
+        }
         ("POST", "/api/viewport/drag_multi") => {
             api_viewport_drag_multi(state, &req.body, &mut stream)
         }
@@ -2822,11 +3173,19 @@ fn handle_connection(
         ("POST", "/api/animation/seek") => api_seek_animation(state, &req.body, &mut stream),
         ("POST", "/api/animation/record") => api_toggle_recording(state, &req.body, &mut stream),
         ("POST", "/api/animation/blend") => api_animation_blend(state, &req.body, &mut stream),
-        ("POST", "/api/runtime/play") => api_runtime_play(state, &req.body, &mut stream),
-        ("POST", "/api/runtime/stop") => api_runtime_stop(state, &mut stream),
+        ("POST", "/api/runtime/play") => {
+            let body = req.body.clone();
+            serve_on_game_thread(state, &mut stream, move |st, s| {
+                api_runtime_play(st, &body, s)
+            })
+        }
+        ("POST", "/api/runtime/stop") => serve_on_game_thread(state, &mut stream, api_runtime_stop),
         ("POST", "/api/runtime/pause") => api_runtime_pause(state, &mut stream),
-        ("POST", "/api/runtime/step") => api_runtime_step(state, &mut stream),
+        ("POST", "/api/runtime/step") => serve_on_game_thread(state, &mut stream, api_runtime_step),
         ("GET", "/api/runtime/status") => api_runtime_status(state, &mut stream),
+        // What the audio DEVICE actually played: queue counters plus a measured
+        // analysis (clicks, gaps, clipping) — the ear for debugging crackle.
+        ("GET", "/api/runtime/audio") => api_runtime_audio(&req.query, &mut stream),
         // pat-nzgdu.171: download the Movie Maker frame sequence for the run.
         ("GET", "/api/runtime/movie") => api_runtime_movie(state, &mut stream),
         // pat-nzgdu.23: live node inspection of the running scene (remote tree).
@@ -2968,7 +3327,9 @@ fn handle_connection(
         // pat-zf49m: Debugger panel with breakpoint, step, and variable inspection
         ("GET", "/api/debug/state") => api_get_debug_state(state, &mut stream),
         ("GET", "/api/debug/locals") => api_get_debug_locals(state, &req.query, &mut stream),
-        ("POST", "/api/debug/continue") => api_debug_continue(state, &mut stream),
+        ("POST", "/api/debug/continue") => {
+            serve_on_game_thread(state, &mut stream, api_debug_continue)
+        }
         // pat-j906k: debugger sub-tab data + session actions
         ("GET", "/api/debug/errors") => api_get_debug_errors(state, &mut stream),
         ("POST", "/api/debug/record_error") => {
@@ -2991,9 +3352,15 @@ fn handle_connection(
             api_set_network_autostart(state, &req.body, &mut stream)
         }
         ("POST", "/api/debug/network_clear") => api_clear_network(state, &mut stream),
-        ("POST", "/api/debug/step_in") => api_debug_step_in(state, &mut stream),
-        ("POST", "/api/debug/step_over") => api_debug_step_over(state, &mut stream),
-        ("POST", "/api/debug/step_out") => api_debug_step_out(state, &mut stream),
+        ("POST", "/api/debug/step_in") => {
+            serve_on_game_thread(state, &mut stream, api_debug_step_in)
+        }
+        ("POST", "/api/debug/step_over") => {
+            serve_on_game_thread(state, &mut stream, api_debug_step_over)
+        }
+        ("POST", "/api/debug/step_out") => {
+            serve_on_game_thread(state, &mut stream, api_debug_step_out)
+        }
         ("POST", "/api/debug/remove_breakpoint") => {
             api_debug_remove_breakpoint(state, &req.body, &mut stream)
         }
@@ -3090,8 +3457,8 @@ fn handle_connection(
         ("GET", "/api/commands") => api_get_commands(&mut stream),
         ("POST", "/api/command/execute") => api_execute_command(state, &req.body, &mut stream),
         // pat-omfrq: Filesystem tree and dir
-        ("GET", "/api/filesystem/tree") => api_filesystem_tree(&req.query, &mut stream),
-        ("GET", "/api/filesystem/dir") => api_filesystem_dir(&req.query, &mut stream),
+        ("GET", "/api/filesystem/tree") => api_filesystem_tree(state, &req.query, &mut stream),
+        ("GET", "/api/filesystem/dir") => api_filesystem_dir(state, &req.query, &mut stream),
         // pat-vyko1: Import settings
         ("GET", "/api/import_settings") => api_get_import_settings(state, &req.query, &mut stream),
         ("POST", "/api/import_settings") => api_set_import_settings(state, &req.body, &mut stream),
@@ -3161,6 +3528,96 @@ fn audit_reset_status() {
 
 fn audit_current_status() -> u16 {
     LAST_RESPONSE_STATUS.with(|c| c.get())
+}
+
+/// `POST /api/script/highlight` — `{"content"}` → `{"spans": [{"line","col",
+/// "text","kind"}]}` from [`crate::gdscript_highlight::highlight`] (1-based
+/// line/col, col counted in characters). The highlighter existed but no route
+/// exposed it.
+fn api_script_highlight(body: &str, stream: &mut TcpStream) {
+    let Some(parsed) = parse_json_body(body) else {
+        send_error(stream, 400, "invalid JSON");
+        return;
+    };
+    let Some(content) = parsed.get("content").and_then(|v| v.as_str()) else {
+        send_error(stream, 400, "missing content");
+        return;
+    };
+    let spans: Vec<serde_json::Value> = crate::gdscript_highlight::highlight(content)
+        .into_iter()
+        .filter(|sp| sp.end <= content.len() && sp.start < sp.end)
+        .map(|sp| {
+            let before = &content[..sp.start];
+            let line = before.matches('\n').count() + 1;
+            let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let col = content[line_start..sp.start].chars().count() + 1;
+            serde_json::json!({
+                "line": line,
+                "col": col,
+                "text": &content[sp.start..sp.end],
+                "kind": format!("{:?}", sp.kind),
+            })
+        })
+        .collect();
+    send_json(stream, &serde_json::json!({"spans": spans}).to_string());
+}
+
+/// GDScript diagnostics for a source, as Godot's script editor shows them
+/// while typing: `(line, col, message, is_error)`, 1-based. A parse/lex error
+/// is fatal (the script will not load); static-check findings are warnings.
+pub fn gdscript_diagnostics(source: &str) -> Vec<(usize, usize, String, bool)> {
+    use gdscript_interop::parser::ParseError;
+    use gdscript_interop::tokenizer::LexError;
+    use gdscript_interop::type_checker::{type_check, TypeCheckError};
+    match type_check(source) {
+        Ok(findings) => findings.into_iter().map(|e| (0, 0, e.message, false)).collect(),
+        Err(TypeCheckError::Parse(ParseError::UnexpectedToken { token, expected, line, col, .. })) => {
+            vec![(line, col, format!("unexpected {token}, expected {expected}"), true)]
+        }
+        // No position on EOF: Godot reports it at the end of the file.
+        Err(TypeCheckError::Parse(ParseError::UnexpectedEof)) => {
+            let last = source.lines().count().max(1);
+            vec![(last, 1, "unexpected end of file".to_string(), true)]
+        }
+        Err(TypeCheckError::Lex(e)) => {
+            let (line, col) = match &e {
+                LexError::UnterminatedString { line, col, .. }
+                | LexError::UnexpectedChar { line, col, .. }
+                | LexError::InvalidEscape { line, col, .. } => (*line, *col),
+                #[allow(unreachable_patterns)]
+                _ => (0, 0),
+            };
+            vec![(line, col, e.to_string(), true)]
+        }
+    }
+}
+
+/// `POST /api/script/validate` — `{"content": "<gdscript>"}` →
+/// `{"ok": bool, "diagnostics": [{"line","col","message","severity"}]}`.
+/// `ok` is false only for errors that stop the script loading.
+fn api_script_validate(body: &str, stream: &mut TcpStream) {
+    let Some(parsed) = parse_json_body(body) else {
+        send_error(stream, 400, "invalid JSON");
+        return;
+    };
+    let Some(content) = parsed.get("content").and_then(|v| v.as_str()) else {
+        send_error(stream, 400, "missing content");
+        return;
+    };
+    let diags = gdscript_diagnostics(content);
+    let ok = !diags.iter().any(|d| d.3);
+    let list: Vec<serde_json::Value> = diags
+        .into_iter()
+        .map(|(line, col, message, is_error)| {
+            serde_json::json!({
+                "line": line,
+                "col": col,
+                "message": message,
+                "severity": if is_error { "error" } else { "warning" },
+            })
+        })
+        .collect();
+    send_json(stream, &serde_json::json!({"ok": ok, "diagnostics": list}).to_string());
 }
 
 fn send_json(stream: &mut TcpStream, json: &str) {
@@ -3452,7 +3909,7 @@ fn sha1_digest(data: &[u8]) -> [u8; 20] {
 
 /// Standard base64 encoder (RFC 4648, with `=` padding). Output uses the
 /// `A-Z a-z 0-9 + /` alphabet expected by the WebSocket handshake.
-fn base64_encode(data: &[u8]) -> String {
+pub(crate) fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
     for chunk in data.chunks(3) {
@@ -3937,7 +4394,7 @@ fn property_entry(
 /// currently exposed is lost (and leaf-class properties still surface when the
 /// class resolves to a base schema). Classes with no seeded schema fall back to
 /// the original stored-only enumeration.
-fn node_properties_json(
+pub(crate) fn node_properties_json(
     tree: &SceneTree,
     node_id: NodeId,
     scene_res: Option<&str>,
@@ -7716,6 +8173,35 @@ fn api_set_resource_property(state: &Arc<Mutex<EditorState>>, body: &str, stream
             r.properties.insert(sub_property.clone(), new_sub_value);
             Variant::Resource(r)
         }
+        // An inline resource made by `/api/property/resource/new` (the
+        // Inspector's "New <Type>") is a `SubResource("id")` marker, and so is
+        // a loaded one (`SubResource:<id>`): its values are node companions,
+        // so the edit goes to the companion every consumer reads. Refusing it,
+        // as this used to, made a freshly created shape impossible to size.
+        Variant::String(marker) if marker.starts_with("SubResource") => {
+            let mut cmd = EditorCommand::SetProperty {
+                node_id,
+                property: format!(
+                    "{}{sub_property}",
+                    sub_resource_companion_prefix(&resource_property)
+                ),
+                new_value: new_sub_value,
+                old_value: Variant::Nil,
+            };
+            if let Err(e) = cmd.execute(&mut state.scene_tree) {
+                send_error(stream, 500, &e.to_string());
+                return;
+            }
+            state.undo_stack.push(cmd);
+            state.redo_stack.clear();
+            state.scene_modified = true;
+            state.add_log(
+                "info",
+                format!("Changed resource property '{resource_property}.{sub_property}'"),
+            );
+            send_json(stream, r#"{"ok":true}"#);
+            return;
+        }
         _ => {
             send_error(stream, 400, "property is not a Resource type");
             return;
@@ -8279,6 +8765,15 @@ fn api_assign_resource_property(
     send_json(stream, &json);
 }
 
+/// Where an inline sub-resource on `property` keeps its values: the saver's own
+/// companion prefix (`__shape__`, `__material__`, ...) or its verbatim fallback
+/// `__subres__<property>__`, so editor writes land exactly where the saver and
+/// the runtime read.
+fn sub_resource_companion_prefix(property: &str) -> String {
+    gdscene::scene_saver::companion_prefix_for(property)
+        .unwrap_or_else(|| format!("__subres__{property}__"))
+}
+
 /// `POST /api/property/resource/new` — creates a fresh inline resource of a named
 /// class and assigns it, as Godot's picker "New <Type>" does.
 ///
@@ -8704,11 +9199,60 @@ fn api_new_resource_property(state: &Arc<Mutex<EditorState>>, body: &str, stream
     let used = used_resource_ids(&state.scene_tree, tree_root);
     let id = next_resource_id(&used, &class_name);
 
-    let mut cmd = EditorCommand::SetProperty {
+    // An inline resource's VALUES live under the property's companion prefix,
+    // which is where the saver writes the `[sub_resource]` body from and — for
+    // `shape` — where the physics server builds the body from
+    // (`__shape__class` + `__shape__<key>`, the copies the .tscn loader makes).
+    // Without the class there a "New RectangleShape2D" collided as nothing.
+    // The new resource starts with only its class, so a previous resource's
+    // keys cannot leak into it; the old keys are cleared to Nil (which the
+    // saver and every reader treat as unset) INSIDE the same undo step, so
+    // Undo brings the previous resource back whole.
+    //
+    // ⚠️ Not for a prefix several properties share: `material`,
+    // `material_override` and `surface_material_override/0` all keep their
+    // values under `__material__`, and clearing it for one would erase the
+    // others'.
+    let prefix = sub_resource_companion_prefix(&property);
+    let exclusive = !matches!(
+        property.as_str(),
+        "material" | "material_override" | "surface_material_override/0"
+    );
+    let mut commands = vec![EditorCommand::SetProperty {
         node_id,
         property: property.clone(),
         new_value: Variant::String(format!("SubResource(\"{id}\")")),
         old_value: Variant::Nil,
+    }];
+    if exclusive {
+        let stale: Vec<String> = state
+            .scene_tree
+            .get_node(node_id)
+            .map(|node| {
+                node.properties()
+                    .filter(|(k, v)| k.starts_with(&prefix) && !v.is_nil())
+                    .map(|(k, _)| k.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for key in stale {
+            commands.push(EditorCommand::SetProperty {
+                node_id,
+                property: key,
+                new_value: Variant::Nil,
+                old_value: Variant::Nil,
+            });
+        }
+        commands.push(EditorCommand::SetProperty {
+            node_id,
+            property: format!("{prefix}class"),
+            new_value: Variant::String(class_name.clone()),
+            old_value: Variant::Nil,
+        });
+    }
+    let mut cmd = EditorCommand::Group {
+        label: format!("New {class_name}"),
+        commands,
     };
     if let Err(e) = cmd.execute(&mut state.scene_tree) {
         send_error(stream, 500, &e.to_string());
@@ -8737,6 +9281,119 @@ fn api_new_resource_property(state: &Arc<Mutex<EditorState>>, body: &str, stream
         stream,
         &format!(r#"{{"ok":true,"class_name":"{class_name}","id":"{id}"}}"#),
     );
+}
+
+/// The value to store under `property` and the companion writes an edit of it
+/// needs, for the properties whose value lives in more than one place. They
+/// are applied as ONE undo step.
+///
+/// * `script` given a `res://` path: a loaded scene holds `_script_path` (what
+///   Play attaches from) and `script = ExtResource("id")` (what the saver turns
+///   into an `[ext_resource]`). The Create Script dialog sent the bare path, so
+///   the script never ran in Play and the scene saved as `script = "res://x.gd"`,
+///   which Godot rejects.
+/// * a Control's `position`/`size`: layout is resolved from the anchors and
+///   `offset_*`, so writing only the rect was undone by the next reflow — the
+///   following edit snapped the control back to its old offsets and the scene
+///   saved `size = Vector2(0, 0)`. Godot's `Control::_set_position`/`_set_size`
+///   move the offsets; this does the same.
+fn property_companion_writes(
+    tree: &SceneTree,
+    node_id: NodeId,
+    property: &str,
+    value: &Variant,
+    viewport_size: Vector2,
+) -> (Variant, Vec<(String, Variant)>) {
+    let Some(node) = tree.get_node(node_id) else {
+        return (value.clone(), Vec::new());
+    };
+    if property == "script" {
+        if let Variant::String(path) = value {
+            if path.starts_with("res://") {
+                let used = used_resource_ids(tree, tree.root_id());
+                let id = next_resource_id(&used, "script");
+                return (
+                    Variant::String(format!("ExtResource(\"{id}\")")),
+                    vec![("_script_path".to_string(), Variant::String(path.clone()))],
+                );
+            }
+        }
+        return (value.clone(), Vec::new());
+    }
+    let Variant::Vector2(v) = value else {
+        return (value.clone(), Vec::new());
+    };
+    if !(property == "position" || property == "size")
+        || !gdobject::class_db::is_parent_class(node.class_name(), "Control")
+    {
+        return (value.clone(), Vec::new());
+    }
+    let num = |key: &str| match node.get_property(key) {
+        Variant::Float(f) => f as f32,
+        Variant::Int(i) => i as f32,
+        _ => 0.0,
+    };
+    // The rect the anchors are fractions of: a Control parent's own anchored
+    // rect (falling back to the size a container gave it), else the GAME's
+    // viewport — never the editor panel's size, which is not what the game
+    // will lay this control out against.
+    let parent = node
+        .parent()
+        .filter(|p| {
+            tree.get_node(*p)
+                .is_some_and(|n| gdobject::class_db::is_parent_class(n.class_name(), "Control"))
+        })
+        .map(|p| {
+            let anchored = gdscene::control::anchored_size(tree, p, viewport_size);
+            if anchored.x > 0.0 && anchored.y > 0.0 {
+                anchored
+            } else {
+                gdscene::control::get_size(tree, p)
+            }
+        })
+        .unwrap_or(viewport_size);
+    let (al, at, ar, ab) = (
+        num("anchor_left"),
+        num("anchor_top"),
+        num("anchor_right"),
+        num("anchor_bottom"),
+    );
+    let left = al * parent.x + num("offset_left");
+    let top = at * parent.y + num("offset_top");
+    let width = ar * parent.x + num("offset_right") - left;
+    let height = ab * parent.y + num("offset_bottom") - top;
+    let (l, t, w, h) = if property == "position" {
+        (v.x, v.y, width, height)
+    } else {
+        (left, top, v.x, v.y)
+    };
+    let offsets = [
+        ("offset_left", l - al * parent.x),
+        ("offset_top", t - at * parent.y),
+        ("offset_right", l + w - ar * parent.x),
+        ("offset_bottom", t + h - ab * parent.y),
+    ];
+    (
+        value.clone(),
+        offsets
+            .into_iter()
+            .map(|(k, x)| (k.to_string(), Variant::Float(x as f64)))
+            .collect(),
+    )
+}
+
+/// The project's base viewport (`display/window/size/viewport_*`), Godot's
+/// 1152x648 when unset — the rect a top-level Control is anchored to in game.
+fn project_viewport_size(settings: &gdcore::ProjectSettings) -> Vector2 {
+    let read = |key: &str, default: f32| match settings.get(key) {
+        Some(gdcore::SettingsValue::Int(i)) if *i > 0 => *i as f32,
+        Some(gdcore::SettingsValue::Float(f)) if *f > 0.0 => *f as f32,
+        _ => default,
+    };
+    Vector2::new(
+        read("display/window/size/viewport_width", 1152.0),
+        read("display/window/size/viewport_height", 648.0),
+    )
 }
 
 /// `POST /api/property/set` — sets a property on a node.
@@ -8843,14 +9500,39 @@ fn api_set_property(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     };
 
     let prop_name = property.clone();
+    let game_viewport = project_viewport_size(&state.project_settings);
+    let (new_value, companions) = property_companion_writes(
+        &state.scene_tree,
+        node_id,
+        &property,
+        &new_value,
+        game_viewport,
+    );
     // Cloned before the command takes ownership, so auto-key can record the
     // same value the edit applied.
     let keyed_value = new_value.clone();
-    let mut cmd = EditorCommand::SetProperty {
+    let main = EditorCommand::SetProperty {
         node_id,
         property,
         new_value,
         old_value: Variant::Nil,
+    };
+    let mut cmd = if companions.is_empty() {
+        main
+    } else {
+        EditorCommand::Group {
+            label: format!("Set {prop_name}"),
+            commands: std::iter::once(main)
+                .chain(companions.into_iter().map(|(property, new_value)| {
+                    EditorCommand::SetProperty {
+                        node_id,
+                        property,
+                        new_value,
+                        old_value: Variant::Nil,
+                    }
+                }))
+                .collect(),
+        }
     };
 
     if let Err(e) = cmd.execute(&mut state.scene_tree) {
@@ -9238,12 +9920,43 @@ fn api_history_goto(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     send_json(stream, &json);
 }
 
-/// `GET /api/viewport` — returns the latest frame as BMP (from separate cache).
-fn api_get_viewport_bmp(cache: &Arc<ViewportCache>, stream: &mut TcpStream) {
+/// Longest `GET /api/viewport?after=<seq>` waits for a newer frame before
+/// answering with the current one.
+const VIEWPORT_LONG_POLL: Duration = Duration::from_millis(250);
+
+/// `GET /api/viewport[?after=<seq>]` — the latest frame as BMP, with its
+/// sequence number in `X-Frame-Seq`. With `after`, waits (briefly) until a frame
+/// newer than `seq` is published, so a client can pull frames as fast as the
+/// server makes them — one request per NEW frame — instead of polling a timer.
+fn api_get_viewport_bmp(cache: &Arc<ViewportCache>, query: &str, stream: &mut TcpStream) {
+    use std::sync::atomic::Ordering::Acquire;
+    if let Some(after) = query_param(query, "after").and_then(|v| v.parse::<u64>().ok()) {
+        let deadline = std::time::Instant::now() + VIEWPORT_LONG_POLL;
+        cache
+            .waiting
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        while cache.seq.load(Acquire) <= after && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(2));
+        }
+        cache
+            .waiting
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    // The frame read below is this one or newer, never older.
+    let seq = cache.seq.load(Acquire);
     let bmp = cache.bmp.lock().unwrap();
     match &*bmp {
         Some(data) => {
-            send_binary(stream, "image/bmp", data);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/bmp\r\nContent-Length: {}\r\n\
+                 X-Frame-Seq: {seq}\r\nAccess-Control-Expose-Headers: X-Frame-Seq\r\n\
+                 Cache-Control: no-store\r\nConnection: close\r\n\r\n",
+                data.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(data);
+            audit_set_status(200);
+            cache.mark_served();
         }
         None => {
             send_error(stream, 404, "no frame available");
@@ -9278,7 +9991,18 @@ fn api_viewport_resize(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
 
 /// `GET /api/viewport/png` — returns the latest frame as PNG (from separate cache).
 fn api_get_viewport_png(cache: &Arc<ViewportCache>, stream: &mut TcpStream) {
-    let png = cache.png.lock().unwrap();
+    use std::sync::atomic::Ordering::{Acquire, Relaxed};
+    // Encode the PNG of the latest frame now if it has not been yet. The check
+    // and the encode happen under the PNG lock, so two requests racing a new
+    // frame cannot leave an older picture stamped with a newer `seq`.
+    let seq = cache.seq.load(Acquire);
+    let mut png = cache.png.lock().unwrap();
+    if cache.png_seq.load(Relaxed) != seq {
+        if let Some(fb) = cache.latest_fb.lock().unwrap().as_ref() {
+            *png = Some(encode_png_fast(fb));
+            cache.png_seq.store(seq, Relaxed);
+        }
+    }
     match &*png {
         Some(data) => {
             send_binary(stream, "image/png", data);
@@ -10075,9 +10799,17 @@ fn api_viewport_drag_end(state: &Arc<Mutex<EditorState>>, body: &str, stream: &m
 fn api_get_zoom_pan(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let json = {
         let state = state.lock().unwrap();
+        // The scene-bounds centre the 2D view is framed on
+        // (`scene_renderer::camera_offset`): the page needs it to put its
+        // origin, grid, rulers and guides where the scene is actually drawn.
+        let bounds = crate::scene_renderer::compute_scene_bounds(&state.scene_tree);
         format!(
-            r#"{{"zoom":{},"pan_x":{},"pan_y":{}}}"#,
-            state.viewport_zoom, state.viewport_pan.0, state.viewport_pan.1
+            r#"{{"zoom":{},"pan_x":{},"pan_y":{},"scene_center_x":{},"scene_center_y":{}}}"#,
+            state.viewport_zoom,
+            state.viewport_pan.0,
+            state.viewport_pan.1,
+            bounds.position.x + bounds.size.x / 2.0,
+            bounds.position.y + bounds.size.y / 2.0
         )
     };
     send_json(stream, &json);
@@ -11970,8 +12702,8 @@ const CAPABILITIES: &[(&str, &str, &str, &str, &str)] = &[
     ("POST", "/api/shader_validate", "[]", "{\"source\":\"string\"}", "{\"type\":\"object\",\"properties\":{\"ok\":\"bool\",\"errors\":\"array\",\"warnings\":\"array\"}}"),
     ("POST", "/api/reimport", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\",\"properties\":{\"reimported\":\"string\",\"output\":\"string\"}}"),
     ("GET", "/api/filesystem/file_info", "[\"path\"]", "null", "{\"type\":\"object\",\"properties\":{\"abs_path\":\"string\",\"uid\":\"string\",\"dependencies\":\"array\",\"owners\":\"array\"}}"),
-    ("GET", "/api/filesystem/tree", "[\"path?\"]", "null", "{\"type\":\"object\",\"properties\":{\"tree\":\"array\"}}"),
-    ("GET", "/api/filesystem/dir", "[\"path?\"]", "null", "{\"type\":\"object\",\"properties\":{\"files\":\"array\"}}"),
+    ("GET", "/api/filesystem/tree", "[\"root?\",\"depth?\"]", "null", "{\"type\":\"object\",\"properties\":{\"root\":\"string\",\"entries\":\"array\"}}"),
+    ("GET", "/api/filesystem/dir", "[\"path\"]", "null", "{\"type\":\"object\",\"properties\":{\"path\":\"string\",\"entries\":\"array\"}}"),
     ("POST", "/api/project/open", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\",\"project_root\":\"string\",\"file_count\":\"number\"}}"),
     // pat-0q2kx.11: Export dialog presets, persisted to export_presets.cfg.
     ("GET", "/api/export/presets", "[]", "null", "{\"type\":\"array\"}"),
@@ -12001,6 +12733,7 @@ const CAPABILITIES: &[(&str, &str, &str, &str, &str)] = &[
     ("POST", "/api/animation/tree/disconnect", "[]", "{\"from\":\"string\",\"to\":\"string\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/animation/tree/node/param", "[]", "{\"name\":\"string\",\"key\":\"string\",\"value\":\"string\"}", "{\"type\":\"object\"}"),
     ("GET", "/api/runtime/status", "[]", "null", "{\"type\":\"object\"}"),
+    ("GET", "/api/runtime/audio", "[]", "null", "{\"type\":\"object\"}"),
     ("GET", "/api/runtime/input/state", "[]", "null", "{\"type\":\"object\"}"),
     ("GET", "/api/settings", "[]", "null", "{\"type\":\"object\"}"),
     ("GET", "/api/editor/layout", "[]", "null", "{\"type\":\"object\",\"properties\":{\"layout\":\"object\",\"saved\":\"boolean\"}}"),
@@ -12072,6 +12805,9 @@ const CAPABILITIES: &[(&str, &str, &str, &str, &str)] = &[
     ("POST", "/api/filesystem/delete", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/filesystem/mkdir", "[]", "{\"path\":\"string\"}", "{\"type\":\"object\"}"),
     ("POST", "/api/script/save", "[]", "{\"path\":\"string\",\"source\":\"string\"}", "{\"type\":\"object\"}"),
+    ("POST", "/api/asset/drop_to_viewport", "[]", "{\"asset_path\":\"string\",\"asset_type\":\"string\",\"parent_id\":\"number\",\"viewport_x\":\"number?\",\"viewport_y\":\"number?\"}", "{\"type\":\"object\",\"properties\":{\"node_id\":\"number\",\"node_class\":\"string\",\"name\":\"string\"}}"),
+    ("POST", "/api/script/validate", "[]", "{\"content\":\"string\"}", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\",\"diagnostics\":\"array\"}}"),
+    ("POST", "/api/script/highlight", "[]", "{\"content\":\"string\"}", "{\"type\":\"object\",\"properties\":{\"spans\":\"array\"}}"),
     ("GET", "/api/script/templates", "[\"base_class?\"]", "null", "{\"type\":\"object\",\"properties\":{\"templates\":\"array\",\"count\":\"number\"}}"),
     ("POST", "/api/script/create", "[]", "{\"path\":\"string\",\"base_class\":\"string?\",\"class_name\":\"string?\",\"template\":\"string?\"}", "{\"type\":\"object\",\"properties\":{\"ok\":\"boolean\",\"content\":\"string\"}}"),
     // pat-0q2kx.14: script-editor completion + goto-definition.
@@ -14136,7 +14872,7 @@ fn api_script_create(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut T
     send_json(stream, &json.to_string());
 }
 
-fn api_get_script(query: &str, stream: &mut TcpStream) {
+fn api_get_script(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
     let raw_path = match query_param(query, "path") {
         Some(p) => url_decode(p),
         None => {
@@ -14145,10 +14881,10 @@ fn api_get_script(query: &str, stream: &mut TcpStream) {
         }
     };
 
-    // Resolve res:// paths relative to cwd.
+    // Resolve res:// against the open project (falling back to the cwd), the
+    // same root `/api/script/save` writes under.
     let file_path = if let Some(stripped) = raw_path.strip_prefix("res://") {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        cwd.join(stripped)
+        script_project_root(&state.lock().unwrap()).join(stripped)
     } else {
         std::path::PathBuf::from(&raw_path)
     };
@@ -14310,7 +15046,7 @@ fn collect_gd_scripts(dir: &std::path::Path, depth: usize, out: &mut Vec<std::pa
     }
 }
 
-fn api_save_script(body: &str, stream: &mut TcpStream) {
+fn api_save_script(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let json = match parse_json_body(body) {
         Some(v) => v,
         None => {
@@ -14332,9 +15068,11 @@ fn api_save_script(body: &str, stream: &mut TcpStream) {
             return;
         }
     };
+    // `res://` is the OPEN project, not the process cwd: after
+    // `/api/project/open` pointed the editor elsewhere, a cwd-relative save
+    // wrote the script outside the project, where Play could not find it.
     let file_path = if let Some(stripped) = raw_path.strip_prefix("res://") {
-        let cwd = std::env::current_dir().unwrap_or_default();
-        cwd.join(stripped)
+        script_project_root(&state.lock().unwrap()).join(stripped)
     } else {
         std::path::PathBuf::from(&raw_path)
     };
@@ -14916,7 +15654,29 @@ pub(crate) fn paste_entry_with_unique_name(
     pid: NodeId,
     e: &ClipboardEntry,
 ) -> Result<NodeId, gdcore::error::EngineError> {
-    let id = paste_clipboard_entry(tree, pid, e)?;
+    paste_entry_reusing_ids(tree, pid, e, &[])
+}
+
+/// [`paste_entry_with_unique_name`], but the created subtree takes its node
+/// ids, in pre-order, from `reuse` (fresh ids once `reuse` runs out).
+///
+/// Used by [`EditorCommand::PasteNodes`]'s redo so the redone paste brings
+/// back the same node objects the original paste created (Godot keeps them
+/// alive in the UndoRedo action and re-adds them).
+pub(crate) fn paste_entry_reusing_ids(
+    tree: &mut SceneTree,
+    pid: NodeId,
+    e: &ClipboardEntry,
+    reuse: &[NodeId],
+) -> Result<NodeId, gdcore::error::EngineError> {
+    let mut reuse = reuse
+        .iter()
+        .copied()
+        // Never collide with a node that is live in the tree.
+        .filter(|id| tree.get_node(*id).is_none())
+        .collect::<Vec<_>>()
+        .into_iter();
+    let id = paste_clipboard_entry(tree, pid, e, &mut reuse)?;
     let siblings: Vec<String> = tree
         .get_node(pid)
         .map(|p| {
@@ -14942,16 +15702,31 @@ fn paste_clipboard_entry(
     tree: &mut SceneTree,
     pid: NodeId,
     e: &ClipboardEntry,
+    reuse: &mut impl Iterator<Item = NodeId>,
 ) -> Result<NodeId, gdcore::error::EngineError> {
-    let mut node = Node::new(&e.name, &e.class_name);
+    let mut node = match reuse.next() {
+        Some(id) => Node::with_id(id, &e.name, &e.class_name),
+        None => Node::new(&e.name, &e.class_name),
+    };
     for (k, v) in &e.properties {
         node.set_property(k, v.clone());
     }
     let new_id = tree.add_child(pid, node)?;
     for c in &e.children {
-        paste_clipboard_entry(tree, new_id, c)?;
+        paste_clipboard_entry(tree, new_id, c, reuse)?;
     }
     Ok(new_id)
+}
+
+/// Every node id of the subtree rooted at `id`, pre-order — the order
+/// [`paste_clipboard_entry`] consumes ids in.
+fn subtree_ids_preorder(tree: &SceneTree, id: NodeId, out: &mut Vec<NodeId>) {
+    out.push(id);
+    if let Some(n) = tree.get_node(id) {
+        for &c in n.children() {
+            subtree_ids_preorder(tree, c, out);
+        }
+    }
 }
 
 /// Pick a name not already used by `siblings`, appending/incrementing a numeric
@@ -15045,10 +15820,19 @@ fn api_paste_nodes(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tcp
     // them back. The nodes are already in the tree, so the command is pushed
     // pre-executed — its `undo` removes `created_ids`, and its `execute`
     // (redo) re-pastes from the captured entries.
+    let subtree_ids = ids
+        .iter()
+        .map(|&id| {
+            let mut v = Vec::new();
+            subtree_ids_preorder(&state.scene_tree, id, &mut v);
+            v
+        })
+        .collect();
     let cmd = EditorCommand::PasteNodes {
         parent_id: pid,
         entries: cb.clone(),
         created_ids: ids.clone(),
+        subtree_ids,
     };
     state.undo_stack.push(cmd);
     state.redo_stack.clear();
@@ -17050,7 +17834,11 @@ fn route_is_edit_locked(method: &str, path: &str) -> bool {
 /// Mirrors Godot's boot: autoload nodes exist and their scripts are attached
 /// before any `_ready` runs, so scene scripts can reference `/root/<Autoload>`.
 /// The caller drives `_ready` (see [`api_runtime_play`]). pat-nzgdu.3.
-fn instantiate_play_autoloads(tree: &mut SceneTree, project_root: &str) -> Vec<NodeId> {
+fn instantiate_play_autoloads(
+    tree: &mut SceneTree,
+    project_root: &str,
+    state: &mut EditorState,
+) -> Vec<NodeId> {
     let root = std::path::Path::new(project_root);
     let autoloads = match gdresource::ProjectLoader::load(root) {
         Ok(loader) => loader.get_autoloads(),
@@ -17060,11 +17848,11 @@ fn instantiate_play_autoloads(tree: &mut SceneTree, project_root: &str) -> Vec<N
         return Vec::new();
     }
     let root_id = tree.root_id();
-    gdscene::autoload::instantiate_autoloads(tree, root_id, &autoloads, root)
-        .nodes
-        .into_iter()
-        .map(|(_, id)| id)
-        .collect()
+    let result = gdscene::autoload::instantiate_autoloads(tree, root_id, &autoloads, root);
+    for message in result.errors {
+        report_play_script_failure(state, message);
+    }
+    result.nodes.into_iter().map(|(_, id)| id).collect()
 }
 
 fn api_runtime_play(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
@@ -17145,13 +17933,61 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         );
     }
 
-    let cloned = build_play_tree(&mut state);
+    // The runtime resolves `res://` and `user://` through gdcore's
+    // process-wide roots, and only the runner ever set them. In the editor's
+    // Play every runtime `res://` path therefore failed quietly:
+    // `change_scene_to_file` answered ERR_CANT_OPEN, and `load()`, FileAccess
+    // and ConfigFile could not reach the project or its save directory. Set
+    // before the tree is built, because `_ready` is where scripts load things.
+    if let Some(root) = state.project_root.clone() {
+        let user = gdplatform::os::user_data_dir();
+        let user_dir = (!user.starts_with("user://")).then(|| std::path::PathBuf::from(user));
+        if let Some(dir) = &user_dir {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        gdcore::set_path_roots(Some(std::path::PathBuf::from(root)), user_dir);
+    }
+    // The global RNG, before any script runs. Godot 4 randomizes it at startup,
+    // so a game that never calls `randomize()` still differs run to run; a
+    // `{"seed": n}` request pins it instead, which is what a reproducible
+    // playtest (the agent interface's frame-exact `play`) asks for.
+    match parse_json_body(body).and_then(|v| v.get("seed").and_then(|s| s.as_i64())) {
+        Some(seed) => gdscript_interop::interpreter::set_random_seed(seed),
+        None => {
+            gdscript_interop::interpreter::randomize_global_rng();
+        }
+    }
+    // The run's game log starts BEFORE the tree is built: building attaches the
+    // scripts, and a script that fails to load is reported into it.
+    state.game_log.start_run();
+    let cloned = build_play_tree(&mut state, project_settings.as_ref());
     // `_ready` has now run on THIS thread, so its `send_message` captures are in
     // this thread's buffer. Drain them here; the per-frame drain runs on the
     // driver thread and would never see them.
     drain_engine_debugger_into(&mut state);
 
     let mut main_loop = MainLoop::new(cloned);
+    // 🔑 Sound. Editor Play never attached an output, so every game played in
+    // the editor was SILENT — Dodge the Creeps' music reported `playing=true`
+    // and nothing reached a speaker. The editor runs on the person's own
+    // machine, so the platform device is the speaker they hear (as Godot's
+    // game process plays through its own device). Opened only when the request
+    // asks (`"audio": true`, the editor's Play buttons): an agent's frame-exact
+    // run and the test suite stay silent. No device (CI, a headless box) means
+    // a silent run, not a failed Play — Godot's dummy-driver fallback.
+    let wants_audio = parse_json_body(body)
+        .and_then(|v| v.get("audio").and_then(|a| a.as_bool()))
+        .unwrap_or(false);
+    #[cfg(not(target_arch = "wasm32"))]
+    if wants_audio {
+        match gdaudio::PlatformAudioOutput::try_open() {
+            Ok(out) => main_loop.audio_bridge_mut().attach_output(Box::new(out)),
+            Err(e) => tracing::warn!("no audio device for Play; the run is silent: {e:?}"),
+        }
+    }
+    main_loop
+        .audio_bridge_mut()
+        .set_output_muted(state.runtime_muted);
     // pat-mgixk.24: the project's own `[input]` actions, not the editor's
     // hard-coded map. `set_input_map` also snapshots this as the baseline
     // `InputMap.load_from_project_settings()` restores, which is what makes
@@ -17185,8 +18021,17 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     state.run_project_settings = project_settings;
     state.run_main_loop = Some(main_loop);
     state.is_running = true;
-    state.is_paused = false;
+    // An agent's playtest asks to start paused (`{"paused":true}`) so the
+    // continuous driver cannot advance a frame between this response and its
+    // first `step` — the run stays frame-exact from frame 0. The editor's own
+    // Play button never sends it.
+    state.is_paused = parse_json_body(body)
+        .and_then(|v| v.get("paused").and_then(|p| p.as_bool()))
+        .unwrap_or(false);
     state.runtime_frame_count = 0;
+    // `_ready` already ran inside `build_play_tree`; surface what it printed as
+    // frame 0 rather than letting it surface late under frame 1.
+    drain_running_game_output(&mut state);
     // pat-nzgdu.171: start (or clear) the Movie Maker recording for this run.
     state.movie_mode = movie;
     state.movie_frames.clear();
@@ -17221,19 +18066,68 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
 /// node in `all_nodes_in_tree_order()` — parent-first, so a parent's `_ready` ran
 /// before its children existed to it — and never dispatched `_enter_tree` at all
 /// (pat-0q2kx.46).
-pub fn build_play_tree(state: &mut EditorState) -> SceneTree {
+pub fn build_play_tree(
+    state: &mut EditorState,
+    settings: Option<&gdcore::ProjectSettings>,
+) -> SceneTree {
     use gdscene::lifecycle::LifecycleManager;
 
     let mut cloned = clone_scene_tree(&state.scene_tree);
+    // The project's stretch, before any `_ready` reads the viewport rect.
+    if let Some(settings) = settings {
+        gdscene::project_runtime::install_root_window(&mut cloned, settings);
+    }
+    let project_root = state.texture_cache.project_root().to_string();
+
+    // The played scene's own source: the current scene's packed source (for
+    // `reload_current_scene`) and the connections expansion needs below.
+    let source = state
+        .scene_file
+        .as_ref()
+        .map(|f| {
+            let p = std::path::Path::new(f);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                std::path::Path::new(&project_root).join(p)
+            }
+        })
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|text| gdscene::packed_scene::PackedScene::from_tscn(&text).ok());
+
+    // 🔑 The edited scene holds every `instance=` sub-scene as a childless
+    // placeholder — the shape the saver writes back — so a game that instances
+    // its Player and HUD ran without them: no sprite, no score, no Start button.
+    // Expand them in this CLONE (never the edited tree), before scripts attach,
+    // so the sub-scenes' own scripts, connections and AnimationPlayers come up
+    // like Godot's run. Placeholders keep their ids and values, so the outer
+    // scene's connections and unsaved edits survive.
+    gdscene::packed_scene::begin_subscene_session();
+    let outer_connections = source
+        .as_ref()
+        .map(|s| s.connections().to_vec())
+        .unwrap_or_default();
+    let cloned_root = cloned.root_id();
+    let scene_roots: Vec<NodeId> = cloned
+        .get_node(cloned_root)
+        .map(|n| n.children().to_vec())
+        .unwrap_or_default();
+    for scene_root in scene_roots {
+        gdscene::packed_scene::expand_instance_placeholders(
+            &mut cloned,
+            scene_root,
+            &outer_connections,
+            &gdscene::packed_scene::load_scene_from_res,
+        );
+    }
 
     // Attach GDScripts to nodes that have a `_script_path` property. Done before
     // any dispatch below, so every script is present for its own `_enter_tree`.
-    let project_root = state.texture_cache.project_root().to_string();
     attach_scripts_to_tree(&mut cloned, &project_root, state);
 
     // Instantiate project [autoload] singletons under /root (pat-nzgdu.3). This
     // also binds their global names, so `Global.score` resolves from any script.
-    let autoload_ids = instantiate_play_autoloads(&mut cloned, &project_root);
+    let autoload_ids = instantiate_play_autoloads(&mut cloned, &project_root, state);
 
     let root_id = cloned.root_id();
     let subtree_roots: Vec<NodeId> = cloned
@@ -17246,6 +18140,18 @@ pub fn build_play_tree(state: &mut EditorState) -> SceneTree {
     // and its scripts observe.
     for id in &subtree_roots {
         LifecycleManager::rewind_for_redispatch(&mut cloned, *id);
+    }
+
+    // The played scene is the tree's CURRENT scene, and autoloads sit ahead of
+    // it under /root, as in Godot. Without a current scene,
+    // `get_tree().current_scene` read null and `change_scene_to_file` freed
+    // nothing: the old scene stayed in the tree, drawn under the new one and
+    // still running its scripts.
+    for (index, id) in autoload_ids.iter().enumerate() {
+        let _ = cloned.move_child(root_id, *id, index);
+    }
+    if let Some(scene_root) = subtree_roots.iter().find(|id| !autoload_ids.contains(id)) {
+        cloned.set_current_scene(*scene_root, source);
     }
 
     // Godot's boot order: each autoload is added to /root before the main scene,
@@ -17305,20 +18211,33 @@ fn attach_scripts_to_tree(tree: &mut SceneTree, project_root: &str, state: &mut 
                     state.add_log("info", format!("Script loaded: {}", path.display()));
                 }
                 Err(e) => {
-                    state.add_log(
-                        "error",
+                    report_play_script_failure(
+                        state,
                         format!("Script parse error in {}: {}", path.display(), e),
                     );
                 }
             },
             Err(e) => {
-                state.add_log(
-                    "error",
+                report_play_script_failure(
+                    state,
                     format!("Failed to read script {}: {}", path.display(), e),
                 );
             }
         }
     }
+}
+
+/// A script that cannot be loaded at Play time leaves its node running with no
+/// script at all, so the failure has to be loud: the Output log, the Errors tab
+/// and the run's game log (frame 0), where an agent's playtest report reads it.
+/// Logging it to the Output panel alone made a typo look like a script that
+/// silently did nothing.
+fn report_play_script_failure(state: &mut EditorState, message: String) {
+    state.add_log("error", message.clone());
+    push_debug_error(state, message.clone());
+    state
+        .game_log
+        .push(0, crate::agent_mcp::GameLogKind::Error, message);
 }
 
 /// Tears down the running instance and restores the editable editor state.
@@ -17550,6 +18469,19 @@ fn drain_engine_debugger_into(state: &mut EditorState) {
     // which is the observable half of the contract.
     if let Some(brk) = gdscript_interop::interpreter::take_engine_debugger_break() {
         state.debug_state = "paused".to_string();
+        // 🔑 Publish the break as the session's LIVE pause. Godot's `debug()`
+        // suspends the game until the editor continues (`ScriptDebugger::debug`
+        // enters the debug loop). Setting only `debug_state` here was undone by
+        // `sync_debug_pause_into` on the very next `/api/debug/*` read — it
+        // sees no live pause and flips a "paused" panel back to "running" — so
+        // `debug()` read as inert and the driver kept stepping the game. A
+        // break the interpreter already published (a breakpoint in the same
+        // frame) is kept: it carries the real stack.
+        if !gdscript_interop::debug_session::is_paused() {
+            gdscript_interop::debug_session::publish_pause(
+                gdscript_interop::debug_session::PauseSnapshot::default(),
+            );
+        }
         let kind = if brk.is_error_breakpoint {
             "error"
         } else {
@@ -17566,7 +18498,85 @@ fn drain_engine_debugger_into(state: &mut EditorState) {
     }
 }
 
-fn advance_running_main_loop(state: &mut EditorState) -> u64 {
+/// Most entries the Errors tab keeps; a script failing every frame would
+/// otherwise grow `debug_errors` by 60 a second for as long as the game runs.
+const MAX_DEBUG_ERRORS: usize = 1000;
+
+/// Adds a runtime error to the Errors tab. At the cap the oldest HALF is
+/// dropped in one go, so a script failing every frame costs amortised O(1)
+/// per error rather than shifting the whole list each time.
+fn push_debug_error(state: &mut EditorState, message: String) {
+    if state.debug_errors.len() >= MAX_DEBUG_ERRORS {
+        state.debug_errors.drain(..MAX_DEBUG_ERRORS / 2);
+    }
+    state.debug_errors.push(("error".to_string(), message));
+}
+
+/// Moves the running game's script output into the panels that show it: prints
+/// to the Output log as `std` (the category `/api/logs` already reserved for
+/// game stdout), errors to the Output log and the Errors tab, and both to the
+/// frame-tagged [`EditorState::game_log`] the agent interface reads.
+///
+/// Before this, nothing drained a played scene's scripts, so `print()` and
+/// runtime errors during Play were invisible everywhere.
+pub(crate) fn drain_running_game_output(state: &mut EditorState) {
+    let frame = state.runtime_frame_count;
+    let out = match state.run_main_loop.as_mut() {
+        Some(main_loop) => main_loop.tree_mut().drain_script_output(),
+        None => return,
+    };
+    for line in out.prints {
+        state.add_log("std", line.clone());
+        state
+            .game_log
+            .push(frame, crate::agent_mcp::GameLogKind::Print, line);
+    }
+    for line in out.errors {
+        state.add_log("error", line.clone());
+        push_debug_error(state, line.clone());
+        state
+            .game_log
+            .push(frame, crate::agent_mcp::GameLogKind::Error, line);
+    }
+}
+
+/// Browser `KeyboardEvent.key` names that carry no character: modifiers, dead
+/// keys, IME composition, and function/media/system keys. None can match a
+/// project action, so none may switch Play onto the fallback input snapshot.
+fn is_non_character_key(name: &str) -> bool {
+    matches!(
+        name,
+        "Meta"
+            | "OS"
+            | "Super"
+            | "Hyper"
+            | "Fn"
+            | "FnLock"
+            | "AltGraph"
+            | "CapsLock"
+            | "NumLock"
+            | "ScrollLock"
+            | "Symbol"
+            | "SymbolLock"
+            | "Dead"
+            | "Process"
+            | "Unidentified"
+            | "Compose"
+            | "ContextMenu"
+            | "Help"
+            | "PrintScreen"
+            | "Pause"
+            | "Insert"
+    ) || name.starts_with("Audio")
+        || name.starts_with("Media")
+        || name.starts_with("Browser")
+        || name.starts_with("Launch")
+        || (name.len() > 1
+            && name.starts_with('F')
+            && name[1..].chars().all(|c| c.is_ascii_digit()))
+}
+
+pub(crate) fn advance_running_main_loop(state: &mut EditorState) -> u64 {
     // pat-mgixk.44: seed the script-visible `ProjectSettings` for THIS thread.
     //
     // ⚠️ It has to happen here, not at Play time: the store is a thread-local
@@ -17609,10 +18619,13 @@ fn advance_running_main_loop(state: &mut EditorState) -> u64 {
     // could not type, which is the case it was written for. Otherwise stay out
     // of the way and let the engine's own `InputState` — the one that ran the
     // `KeyCombo` modifier test — reach the scripts.
-    let untyped_key_pressed = state
-        .pressed_keys
-        .iter()
-        .any(|name| gdplatform::input::Key::from_name(name).is_none());
+    // ⚠️ The fallback REPLACES the engine's input for the frame — the manual
+    // snapshot is built from the editor's own map, so a project's actions,
+    // the mouse and gamepads all vanish while it is in force. Keys a browser
+    // reports with no character of their own (modifiers, dead keys, IME
+    // composition, function/media keys) must never trigger it: one of them
+    // held, or stuck because an OS shortcut swallowed its keyup, froze a game.
+    let untyped_key_pressed = state.input_fallback_key().is_some();
     let input_snapshot = state.make_input_snapshot();
     // pat-s3rrv.27: reconcile the thread-local `EngineDebugger` with the
     // session's intent BEFORE stepping, because scripts run inside `step()` and
@@ -17647,6 +18660,7 @@ fn advance_running_main_loop(state: &mut EditorState) -> u64 {
         }
         let output = main_loop.step(delta);
         state.runtime_frame_count = output.frame_count;
+        FrameStats::mark(&mut state.frame_stats.sim_steps);
         // Record one frame per step while Movie Maker is active (this runs for
         // both the auto-driver and the manual /api/runtime/step path).
         if capture {
@@ -17665,6 +18679,7 @@ fn advance_running_main_loop(state: &mut EditorState) -> u64 {
     // pat-s3rrv.27: drain what this frame's scripts told the debugger, on the
     // same thread that just ran them.
     drain_engine_debugger_into(state);
+    drain_running_game_output(state);
     // Clear per-frame input after scripts have run.
     state.clear_frame_input();
     let frame_count = state.runtime_frame_count;
@@ -17724,6 +18739,96 @@ fn api_runtime_movie(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     );
 }
 
+/// `GET /api/runtime/audio[?secs=N][&wav=1]` — the live audio device, measured.
+///
+/// Without `wav`: JSON with the device queue's counters (underruns, priming,
+/// queue depth, clipping) and [`gdaudio::diagnostics::analyze`] over the last
+/// `secs` (default 5) of EXACTLY what the device was handed. With `wav=1`: that
+/// capture as a 16-bit PCM WAV, to listen to or analyse offline.
+///
+/// 404 when no device is open (Play was started without `audio: true`).
+fn api_runtime_audio(query: &str, stream: &mut TcpStream) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let secs = query_param(query, "secs")
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(5.0)
+            .clamp(0.1, gdaudio::output::HISTORY_SECS);
+        let (Some(stats), Some((samples, rate, ch))) =
+            (gdaudio::live_device_stats(), gdaudio::live_device_capture(secs))
+        else {
+            // 200 with `device: null`, not 404: the ROUTE exists (the
+            // capabilities lint treats a 404 as a phantom route); there is
+            // simply no device to measure yet.
+            send_json(
+                stream,
+                r#"{"device":null,"error":"no audio device is open — Play with audio: true"}"#,
+            );
+            return;
+        };
+        if query_param(query, "wav") == Some("1") {
+            let pcm: Vec<u8> = samples
+                .iter()
+                .flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())
+                .collect();
+            let wav = gdaudio::wav::build_wav_bytes(rate, ch, 16, 1, &pcm);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\n\
+                 Cache-Control: no-store\r\nConnection: close\r\n\r\n",
+                wav.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(&wav);
+            audit_set_status(200);
+            return;
+        }
+        let report = gdaudio::diagnostics::analyze(&samples, rate, ch);
+        let clicks: Vec<serde_json::Value> = report
+            .clicks
+            .iter()
+            .take(50)
+            .map(|c| serde_json::json!({"t": c.time, "severity": c.severity}))
+            .collect();
+        let gaps: Vec<serde_json::Value> = report
+            .gaps
+            .iter()
+            .take(50)
+            .map(|g| serde_json::json!({"t": g.time, "frames": g.frames}))
+            .collect();
+        let body = serde_json::json!({
+            "device": {
+                "sample_rate": stats.sample_rate,
+                "channels": stats.channels,
+                "callbacks": stats.callbacks,
+                "underruns": stats.underruns,
+                "priming_callbacks": stats.priming_callbacks,
+                "queued_frames": stats.queued_frames,
+                "max_queued_frames": stats.max_queued_frames,
+                "frames_accepted": stats.frames_accepted,
+                "frames_consumed": stats.frames_consumed,
+                "dropped_samples": stats.dropped_samples,
+                "clipped_samples": stats.clipped_samples,
+            },
+            "analysis": {
+                "seconds": report.seconds,
+                "peak": report.peak,
+                "rms": report.rms,
+                "clipped_samples": report.clipped_samples,
+                "click_count": report.clicks.len(),
+                "gap_count": report.gaps.len(),
+                "clicks": clicks,
+                "gaps": gaps,
+            }
+        });
+        send_json(stream, &body.to_string());
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = query;
+        send_error(stream, 404, "no audio device on this target");
+    }
+}
+
 fn api_runtime_status(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     let state = state.lock().unwrap();
     let running = state.is_running;
@@ -17737,7 +18842,11 @@ fn api_runtime_status(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
     send_json(
         stream,
         &format!(
-            r#"{{"running":{running},"paused":{paused},"frame_count":{frame_count},"fps":{fps:.1},"suspended":{},"time_scale":{:.2},"muted":{},"camera_override":{},"hide_selection":{},"input_mode":"{}","midi_open":{}}}"#,
+            r#"{{"running":{running},"paused":{paused},"frame_count":{frame_count},"fps":{fps:.1},"sim_fps":{},"render_fps":{},"render_ms":{:.1},"build":"{}","suspended":{},"time_scale":{:.2},"muted":{},"camera_override":{},"hide_selection":{},"input_mode":"{}","midi_open":{},"audio_output":{},"audio_muted":{},"audio_streams":{}}}"#,
+            state.frame_stats.sim_fps(),
+            state.frame_stats.render_fps(),
+            state.frame_stats.render_ms(),
+            build_profile(),
             state.runtime_suspended,
             state.runtime_time_scale,
             state.runtime_muted,
@@ -17751,7 +18860,22 @@ fn api_runtime_status(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
             // for it, and on the web that call is what raises a browser
             // permission prompt — requesting unconditionally would prompt every
             // user who ever pressed Play, for a device almost none of them have.
-            gdscript_interop::midi_ports::is_open()
+            gdscript_interop::midi_ports::is_open(),
+            // Whether Play's audio actually leaves the process, is muted, and
+            // how many voices are sounding — so "is there sound" is answerable
+            // without a listener.
+            state
+                .run_main_loop
+                .as_ref()
+                .is_some_and(|ml| ml.audio_bridge().has_output()),
+            state
+                .run_main_loop
+                .as_ref()
+                .is_some_and(|ml| ml.audio_bridge().output_muted()),
+            state
+                .run_main_loop
+                .as_ref()
+                .map_or(0, |ml| ml.audio_bridge().active_stream_count())
         ),
     );
 }
@@ -17872,6 +18996,12 @@ fn api_runtime_mute(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
         .get("muted")
         .and_then(|v| v.as_bool())
         .unwrap_or(!s.runtime_muted);
+    // Applied to the running game. The flag used to be stored and reported
+    // and read by nothing, so the Game view's mute button silenced nothing.
+    let muted = s.runtime_muted;
+    if let Some(ml) = s.run_main_loop.as_mut() {
+        ml.audio_bridge_mut().set_output_muted(muted);
+    }
     send_json(
         stream,
         &format!(r#"{{"ok":true,"muted":{}}}"#, s.runtime_muted),
@@ -17963,11 +19093,32 @@ fn api_instance_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
         }
     };
 
-    // Read the .tscn file.
-    let source = match std::fs::read_to_string(&path) {
+    // `res://` is the open project. The instanced root then records where it
+    // came from in the form a loaded scene has — `_instance =
+    // ExtResource("id")` plus `_instance_path = res://...` — which is what the
+    // saver writes `instance=ExtResource(..)` from. A bare disk path left the
+    // instance unreadable from `res://` and saved without its reference.
+    let root = script_project_root(&state.lock().unwrap());
+    let (disk_path, res_path) = match path.strip_prefix("res://") {
+        Some(rel) => (root.join(rel), path.clone()),
+        None => {
+            let disk = std::path::PathBuf::from(&path);
+            let res = disk
+                .strip_prefix(&root)
+                .ok()
+                .map(|rel| format!("res://{}", rel.to_string_lossy()))
+                .unwrap_or_else(|| path.clone());
+            (disk, res)
+        }
+    };
+    let source = match std::fs::read_to_string(&disk_path) {
         Ok(s) => s,
         Err(e) => {
-            send_error(stream, 400, &format!("failed to read: {e}"));
+            send_error(
+                stream,
+                400,
+                &format!("failed to read {}: {e}", disk_path.display()),
+            );
             return;
         }
     };
@@ -17986,7 +19137,7 @@ fn api_instance_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
         tscn_source: source,
         created_ids: Vec::new(),
         root_id: None,
-        source_path: Some(path.clone()),
+        source_path: Some(res_path.clone()),
     };
 
     if let Err(e) = cmd.execute(&mut state.scene_tree) {
@@ -17998,6 +19149,24 @@ fn api_instance_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
         EditorCommand::InstanceScene { root_id, .. } => root_id.unwrap(),
         _ => unreachable!(),
     };
+    if res_path.starts_with("res://") {
+        let tree_root = state.scene_tree.root_id();
+        let used = used_resource_ids(&state.scene_tree, tree_root);
+        let stem = res_path
+            .rsplit('/')
+            .next()
+            .and_then(|f| f.strip_suffix(".tscn"))
+            .unwrap_or("scene")
+            .to_string();
+        let id = next_resource_id(&used, &stem);
+        if let Some(node) = state.scene_tree.get_node_mut(root_id) {
+            node.set_property(
+                "_instance",
+                Variant::String(format!("ExtResource(\"{id}\")")),
+            );
+            node.set_property("_instance_path", Variant::String(res_path.clone()));
+        }
+    }
 
     state.undo_stack.push(cmd);
     state.redo_stack.clear();
@@ -18011,6 +19180,89 @@ fn api_instance_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
 // ---------------------------------------------------------------------------
 // Viewport asset drop endpoint
 // ---------------------------------------------------------------------------
+
+/// `POST /api/asset/drop_to_viewport` — the FileSystem-dock drag onto the 2D/3D
+/// viewport. Body: `{"asset_path","asset_type","parent_id","viewport_x",
+/// "viewport_y"}`; returns `{"node_id","node_class","name"}`.
+///
+/// Creates the node Godot's viewport drop creates for that resource
+/// (`CanvasItemEditorViewport::_create_preview` / `_perform_drop_data`):
+/// a texture → `Sprite2D`, an audio stream → `AudioStreamPlayer`, a mesh →
+/// `MeshInstance3D`, a script → a `Node` carrying it, anything else → a
+/// `Node2D`. The node is named after the file (`player_idle.png` →
+/// `player_idle`), placed at the drop point (2D classes), and undoable.
+fn api_asset_drop_to_viewport(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
+    let Some(parsed) = parse_json_body(body) else {
+        send_error(stream, 400, "invalid JSON");
+        return;
+    };
+    let Some(path) = parsed.get("asset_path").and_then(|v| v.as_str()).map(str::to_string) else {
+        send_error(stream, 400, "missing asset_path");
+        return;
+    };
+    let asset_type = parsed.get("asset_type").and_then(|v| v.as_str()).unwrap_or("");
+    let Some(parent_raw) = parsed.get("parent_id").and_then(|v| v.as_u64()) else {
+        send_error(stream, 400, "missing parent_id");
+        return;
+    };
+    let px = parsed.get("viewport_x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let py = parsed.get("viewport_y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+
+    // (class, property that receives the resource path)
+    let (class, path_prop): (&str, Option<&str>) = match asset_type {
+        "texture" => ("Sprite2D", Some("texture")),
+        "audio" => ("AudioStreamPlayer", Some("stream")),
+        "mesh" => ("MeshInstance3D", Some("mesh")),
+        "script" => ("Node", Some("_script_path")),
+        _ => ("Node2D", None),
+    };
+
+    let mut state = state.lock().unwrap();
+    let Some(parent_id) = find_node_by_raw_id(&state.scene_tree, parent_raw) else {
+        send_error(stream, 404, "parent not found");
+        return;
+    };
+    let name = std::path::Path::new(&path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| class.to_string());
+    let mut cmd = EditorCommand::AddNode {
+        parent_id,
+        name: name.clone(),
+        class_name: class.to_string(),
+        created_id: None,
+    };
+    if let Err(e) = cmd.execute(&mut state.scene_tree) {
+        send_error(stream, 500, &e.to_string());
+        return;
+    }
+    let created = match &cmd {
+        EditorCommand::AddNode { created_id: Some(id), .. } => *id,
+        _ => {
+            send_error(stream, 500, "node was not created");
+            return;
+        }
+    };
+    let world = pixel_to_world_pos(&state, px, py);
+    let is_2d = matches!(class, "Sprite2D" | "Node2D");
+    if let Some(node) = state.scene_tree.get_node_mut(created) {
+        if is_2d {
+            node.set_property("position", Variant::Vector2(Vector2::new(world.x, world.y)));
+        }
+        if let Some(prop) = path_prop {
+            node.set_property(prop, Variant::String(path.clone()));
+        }
+    }
+    state.undo_stack.push(cmd);
+    state.redo_stack.clear();
+    state.scene_modified = true;
+    state.add_log("info", format!("Dropped {asset_type} '{path}' as {class} '{name}'"));
+    send_json(
+        stream,
+        &serde_json::json!({"node_id": created.raw(), "node_class": class, "name": name}).to_string(),
+    );
+}
 
 /// `POST /api/viewport/drop` — handles an asset dropped onto the viewport.
 ///
@@ -18869,6 +20121,9 @@ fn api_input_mouse_wheel(state: &Arc<Mutex<EditorState>>, body: &str, stream: &m
         send_json(stream, r#"{"ok":true}"#);
         return;
     }
+    // A notch may carry its own position (the Game tab sends it), applied as a
+    // motion first exactly as a press does.
+    take_press_position(&mut state, &v);
     let (x, y) = state.mouse_position;
     if let Some(ref mut main_loop) = state.run_main_loop {
         for button in buttons {
@@ -18908,6 +20163,7 @@ fn api_input_mouse_down(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
             return;
         }
     };
+    take_press_position(&mut state, &v);
     state.mouse_buttons.insert(button);
     push_mouse_button_event(&mut state, button, true);
     send_json(stream, r#"{"ok":true}"#);
@@ -18929,6 +20185,31 @@ fn api_input_mouse_down(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mu
 /// project binding `back`/`forward` saw nothing and had no error to look at
 /// (pat-s3rrv.76). The browser's names are the reverse of Godot's numbering —
 /// DOM 3 ("back") is `XBUTTON1` (8), DOM 4 ("forward") is `XBUTTON2` (9).
+/// A press or release may carry the pointer position (`x`, `y`, frame pixels)
+/// so it lands where it happened even with no `mouse_move` before it — a tap,
+/// a synthetic click, the first click after the page gains focus. Without
+/// one the last moved-to position stands, as before.
+///
+/// ⚠️ A changed position is reported as a `MouseMotion` FIRST, as a real
+/// pointer would have moved there: the GUI's hover state and a script's
+/// `_input` both see the move before the press, in Godot's order.
+fn take_press_position(state: &mut EditorState, v: &serde_json::Value) {
+    let (Some(x), Some(y)) = (v["x"].as_f64(), v["y"].as_f64()) else {
+        return;
+    };
+    let prev = state.mouse_position;
+    if (x, y) == prev {
+        return;
+    }
+    state.mouse_position = (x, y);
+    if let Some(ref mut main_loop) = state.run_main_loop {
+        main_loop.push_event(gdplatform::InputEvent::MouseMotion {
+            position: gdcore::math::Vector2::new(x as f32, y as f32),
+            relative: gdcore::math::Vector2::new((x - prev.0) as f32, (y - prev.1) as f32),
+        });
+    }
+}
+
 fn push_mouse_button_event(state: &mut EditorState, button: u8, pressed: bool) {
     let btn = match button {
         0 => gdplatform::input::MouseButton::Left,
@@ -18973,6 +20254,7 @@ fn api_input_mouse_up(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
         }
     };
     state.mouse_buttons.remove(&button);
+    take_press_position(&mut state, &v);
     push_mouse_button_event(&mut state, button, false);
     send_json(stream, r#"{"ok":true}"#);
 }
@@ -22418,6 +23700,18 @@ fn resume_paused_game(state: &Arc<Mutex<EditorState>>, command_name: &str, strea
         return;
     }
     s.debug_globals.clear();
+    // A pause with no parked frame (an `EngineDebugger.debug()` break: the
+    // call already returned, so there is nothing to wake) is resumed by
+    // Continue simply by dropping it — `pump_debug_resume` only ever consumes
+    // a pause whose coroutine it holds, so without this the game would stay
+    // frozen forever after `debug()`. Steps keep their existing behaviour.
+    if command == gdscript_interop::debug_session::ResumeCommand::Continue
+        && gdscript_interop::debug_session::pause()
+            .map(|p| !p.is_resumable())
+            .unwrap_or(false)
+    {
+        let _ = gdscript_interop::debug_session::take_resume();
+    }
     if s.is_running && s.run_main_loop.is_some() {
         advance_running_main_loop(&mut s);
     }
@@ -25246,23 +26540,111 @@ fn api_filesystem_mkdir(body: &str, stream: &mut TcpStream) {
 // pat-omfrq: Filesystem tree and dir stubs
 // ---------------------------------------------------------------------------
 
-/// `GET /api/filesystem/tree` — returns the full directory tree.
-fn api_filesystem_tree(query: &str, stream: &mut TcpStream) {
-    // pat-aivim: sandbox-validate any caller-supplied path query.
-    if let Some(raw) = query_param(query, "path") {
-        if let Err(why) = sandbox_path(raw) {
+/// The directory the FileSystem dock lists as `res://`: the opened project,
+/// or the process cwd when none is open (the `/api/filesystem` rule).
+fn filesystem_dock_root(state: &Arc<Mutex<EditorState>>) -> std::path::PathBuf {
+    let s = state.lock().unwrap();
+    let pr = s.asset_browser.filesystem().project_root().to_path_buf();
+    if pr.as_os_str().is_empty() || pr.as_os_str() == "." {
+        std::env::current_dir().unwrap_or_default()
+    } else {
+        pr
+    }
+}
+
+/// A `res://`-relative directory from a query value: decoded, prefix and
+/// slashes trimmed (`""` is the project root).
+fn res_relative_dir(raw: &str) -> String {
+    let decoded = url_decode(raw);
+    decoded
+        .strip_prefix("res://")
+        .unwrap_or(&decoded)
+        .trim_matches('/')
+        .to_string()
+}
+
+/// `GET /api/filesystem/tree[?root=res://sub][&depth=N]` — the dock's
+/// directory tree under `root` (default the project root), `depth` levels
+/// deep (default 3, as `/api/filesystem`).
+///
+/// These two routes were stubs returning `{"tree":[]}` / `{"files":[]}` for
+/// every project, so anything reading them saw an empty project.
+fn api_filesystem_tree(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let raw = query_param(query, "root").or_else(|| query_param(query, "path"));
+    // pat-aivim: sandbox-validate the caller's value AS GIVEN, before any
+    // normalisation — `res_relative_dir` trims leading slashes, which would
+    // quietly turn `/etc/passwd` into a harmless-looking relative path instead
+    // of the 403 an absolute path must get.
+    // (A bare `res://` names the root and has nothing to validate —
+    // `sandbox_path` would call it an empty path.)
+    let rel = raw.map(res_relative_dir).unwrap_or_default();
+    if let (Some(raw), false) = (raw, rel.is_empty()) {
+        if let Err(why) = sandbox_path(&url_decode(raw)) {
             send_sandbox_violation(stream, why);
             return;
         }
     }
-    // Stub: return empty tree. Full implementation pending.
-    send_json(stream, r#"{"tree":[]}"#);
+    let depth = query_param(query, "depth")
+        .and_then(|d| d.parse::<usize>().ok())
+        .unwrap_or(3)
+        .min(16);
+    let dir = filesystem_dock_root(state).join(&rel);
+    if !dir.is_dir() {
+        send_error(stream, 404, &format!("directory not found: res://{rel}"));
+        return;
+    }
+    let entries = scan_directory(&dir, &rel, 0, depth);
+    let entries_json: Vec<String> = entries.iter().map(|e| e.to_json()).collect();
+    send_json(
+        stream,
+        &format!(
+            r#"{{"root":"res://{}","entries":[{}]}}"#,
+            rel.replace('\\', "\\\\").replace('"', "\\\""),
+            entries_json.join(",")
+        ),
+    );
 }
 
-/// `GET /api/filesystem/dir` — returns directory listing.
-fn api_filesystem_dir(query: &str, stream: &mut TcpStream) {
-    // Stub: return empty listing. Full implementation pending.
-    send_json(stream, r#"{"files":[]}"#);
+/// `GET /api/filesystem/dir?path=res://sub` — ONE directory level, for the
+/// dock's lazy expansion: sub-directories come back with empty `children`.
+fn api_filesystem_dir(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
+    let Some(raw) = query_param(query, "path") else {
+        send_error(stream, 400, "missing path");
+        return;
+    };
+    // Sandboxed as given (see `api_filesystem_tree`).
+    let rel = res_relative_dir(raw);
+    if !rel.is_empty() {
+        if let Err(why) = sandbox_path(&url_decode(raw)) {
+            send_sandbox_violation(stream, why);
+            return;
+        }
+    }
+    let dir = filesystem_dock_root(state).join(&rel);
+    if !dir.is_dir() {
+        send_error(stream, 404, &format!("directory not found: res://{rel}"));
+        return;
+    }
+    // One level below so a directory's relevance (does it hold project files?)
+    // is decided the same way as the full tree, then drop the grandchildren.
+    let mut entries = scan_directory(&dir, &rel, 0, 1);
+    for e in &mut entries {
+        e.children.clear();
+    }
+    let entries_json: Vec<String> = entries.iter().map(|e| e.to_json()).collect();
+    let shown = if rel.is_empty() {
+        "res://".to_string()
+    } else {
+        format!("res://{rel}")
+    };
+    send_json(
+        stream,
+        &format!(
+            r#"{{"path":"{}","entries":[{}]}}"#,
+            shown.replace('\\', "\\\\").replace('"', "\\\""),
+            entries_json.join(",")
+        ),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -25321,127 +26703,38 @@ fn api_get_import_settings(state: &Arc<Mutex<EditorState>>, query: &str, stream:
             .and_then(|f| f.params().cloned())
             .unwrap_or_default()
     };
-    let opt = |name: &str, label: &str, ty: &str, value: String, choices: &[&str]| -> String {
-        let choices_json = choices
-            .iter()
-            .map(|c| format!("\"{}\"", c.replace('"', "\\\"")))
-            .collect::<Vec<_>>()
-            .join(",");
-        // The sidecar stores INI literals; re-encode them as the JSON type the
-        // dock's control expects, so a stored `false` arrives as a JSON bool
-        // rather than the string "false" (which a checkbox reads as truthy).
-        let value = match stored.get(name) {
-            Some(raw) => import_option_json_value(ty, raw),
-            None => value,
-        };
-        format!(
-            r#"{{"name":"{name}","label":"{label}","type":"{ty}","value":{value},"choices":[{choices_json}]}}"#
-        )
-    };
-    let s = |v: &str| format!("\"{}\"", v);
-    let (presets, options): (Vec<&str>, Vec<String>) = match rty {
-        ImportResourceType::Texture => (
-            vec!["Default", "2D Pixel", "2D", "3D"],
-            vec![
-                opt(
-                    "compression",
-                    "Compress Mode",
-                    "enum",
-                    s("VRAM Compressed"),
-                    &["Lossless", "Lossy", "VRAM Compressed", "Uncompressed"],
-                ),
-                opt(
-                    "filter",
-                    "Filter",
-                    "enum",
-                    s("Linear"),
-                    &["Nearest", "Linear", "Nearest (Mipmap)", "Linear (Mipmap)"],
-                ),
-                opt("mipmaps", "Mipmaps", "bool", "true".into(), &[]),
-                opt("srgb", "sRGB", "bool", "true".into(), &[]),
-                opt("max_size", "Size Limit", "int", "0".into(), &[]),
-                opt("normal_map", "Normal Map", "bool", "false".into(), &[]),
-                opt("lossy_quality", "Lossy Quality", "float", "0.7".into(), &[]),
-            ],
-        ),
-        ImportResourceType::Audio => (
-            vec!["Default"],
-            vec![
-                opt(
-                    "format",
-                    "Format",
-                    "enum",
-                    s("Original"),
-                    &["Original", "Ogg Vorbis", "WAV (PCM)"],
-                ),
-                opt("loop", "Loop", "bool", "false".into(), &[]),
-                opt("normalize", "Normalize", "bool", "false".into(), &[]),
-            ],
-        ),
-        ImportResourceType::Scene => (
-            vec!["Default"],
-            vec![
-                opt(
-                    "import_animations",
-                    "Import Animations",
-                    "bool",
-                    "true".into(),
-                    &[],
-                ),
-                opt("root_type", "Root Type", "string", s("Node3D"), &[]),
-                opt(
-                    "apply_root_scale",
-                    "Apply Root Scale",
-                    "bool",
-                    "true".into(),
-                    &[],
-                ),
-            ],
-        ),
-        ImportResourceType::Mesh => (
-            vec!["Default"],
-            vec![
-                opt("generate_lods", "Generate LODs", "bool", "true".into(), &[]),
-                opt(
-                    "create_shadow_mesh",
-                    "Create Shadow Mesh",
-                    "bool",
-                    "true".into(),
-                    &[],
-                ),
-            ],
-        ),
-        ImportResourceType::Font => (
-            vec!["Default"],
-            vec![
-                opt(
-                    "antialiasing",
-                    "Antialiasing",
-                    "enum",
-                    s("Grayscale"),
-                    &["None", "Grayscale", "LCD Subpixel"],
-                ),
-                opt(
-                    "hinting",
-                    "Hinting",
-                    "enum",
-                    s("Light"),
-                    &["None", "Light", "Normal"],
-                ),
-                opt("msdf", "Multichannel SDF", "bool", "false".into(), &[]),
-            ],
-        ),
-        ImportResourceType::Shader | ImportResourceType::Script => (
-            vec!["Default"],
-            vec![opt(
-                "keep_compiled",
-                "Keep On Reimport",
-                "bool",
-                "true".into(),
-                &[],
-            )],
-        ),
-    };
+    // 🔑 Godot 4.6's OWN option keys, types, enum choices and defaults
+    // (`ResourceImporter*::get_import_options`), from `godot_import_options`.
+    // The dock used invented names (`compression`, `filter`, `mipmaps`, …)
+    // while the importer reads Godot's (`compress/mode`, `mipmaps/generate`,
+    // importers.rs:830), so every dock edit was written under a key nothing
+    // read, and a real Godot `.import` file's settings never showed.
+    let (presets, defs) = godot_import_options(rty, &ext);
+    let options: Vec<String> = defs
+        .iter()
+        .map(|d| {
+            let choices_json = d
+                .choices
+                .iter()
+                .map(|c| format!("\"{}\"", c.replace('"', "\\\"")))
+                .collect::<Vec<_>>()
+                .join(",");
+            // The sidecar stores INI literals — an enum as its INDEX, as Godot
+            // writes it — re-encoded to what the dock's control expects.
+            let value = match stored.get(d.name) {
+                Some(raw) if d.ty == "enum" => match raw.trim().parse::<usize>() {
+                    Ok(idx) if idx < d.choices.len() => format!("\"{}\"", d.choices[idx]),
+                    _ => import_option_json_value("string", raw),
+                },
+                Some(raw) => import_option_json_value(d.ty, raw),
+                None => d.default.to_string(),
+            };
+            format!(
+                r#"{{"name":"{}","label":"{}","type":"{}","value":{},"choices":[{}]}}"#,
+                d.name, d.label, d.ty, value, choices_json
+            )
+        })
+        .collect();
     let presets_json = presets
         .iter()
         .map(|p| format!("\"{p}\""))
@@ -25484,6 +26777,136 @@ fn api_get_import_settings(state: &Arc<Mutex<EditorState>>, query: &str, stream:
 /// Falls back to the quoted string form when the stored text does not parse as
 /// the declared type, so a hand-edited sidecar renders as text instead of
 /// producing malformed JSON.
+/// One Import-dock option: Godot's key, label, control type, default (as JSON)
+/// and enum choices (an enum is STORED as the choice's index).
+pub struct ImportOptionDef {
+    /// Godot's `[params]` key, e.g. `compress/mode`.
+    pub name: &'static str,
+    /// Dock label.
+    pub label: &'static str,
+    /// `bool` / `int` / `float` / `string` / `enum`.
+    pub ty: &'static str,
+    /// Default value as a JSON literal (an enum's default is its LABEL).
+    pub default: &'static str,
+    /// Enum labels in Godot's order.
+    pub choices: &'static [&'static str],
+}
+
+const fn opt_def(
+    name: &'static str,
+    label: &'static str,
+    ty: &'static str,
+    default: &'static str,
+    choices: &'static [&'static str],
+) -> ImportOptionDef {
+    ImportOptionDef { name, label, ty, default, choices }
+}
+
+/// Godot 4.6's import options for a resource — keys, types and defaults copied
+/// from `editor/import/resource_importer_texture.cpp`, `_wav.cpp`,
+/// `modules/vorbis/resource_importer_ogg_vorbis.cpp`,
+/// `modules/mp3/resource_importer_mp3.cpp`, `_dynamic_font.cpp`,
+/// `3d/resource_importer_scene.cpp` and `3d/resource_importer_obj.cpp`. The
+/// common subset, not every advanced option.
+pub fn godot_import_options(
+    rty: crate::import_settings::ImportResourceType,
+    ext: &str,
+) -> (Vec<&'static str>, Vec<ImportOptionDef>) {
+    use crate::import_settings::ImportResourceType as R;
+    const STREAM: &[ImportOptionDef] = &[
+        opt_def("loop", "Loop", "bool", "false", &[]),
+        opt_def("loop_offset", "Loop Offset", "float", "0", &[]),
+        opt_def("bpm", "BPM", "float", "0", &[]),
+        opt_def("beat_count", "Beat Count", "int", "0", &[]),
+        opt_def("bar_beats", "Bar Beats", "int", "4", &[]),
+    ];
+    match (rty, ext) {
+        (R::Texture, _) => (
+            vec!["2D/3D (Auto-Detect)", "2D", "3D"],
+            vec![
+                opt_def("compress/mode", "Compress Mode", "enum", "\"Lossless\"",
+                    &["Lossless", "Lossy", "VRAM Compressed", "VRAM Uncompressed", "Basis Universal"]),
+                opt_def("compress/high_quality", "High Quality", "bool", "false", &[]),
+                opt_def("compress/lossy_quality", "Lossy Quality", "float", "0.7", &[]),
+                opt_def("compress/normal_map", "Normal Map", "enum", "\"Detect\"", &["Detect", "Enable", "Disabled"]),
+                opt_def("mipmaps/generate", "Generate Mipmaps", "bool", "false", &[]),
+                opt_def("mipmaps/limit", "Mipmap Limit", "int", "-1", &[]),
+                opt_def("process/fix_alpha_border", "Fix Alpha Border", "bool", "true", &[]),
+                opt_def("process/premult_alpha", "Premult Alpha", "bool", "false", &[]),
+                opt_def("process/size_limit", "Size Limit", "int", "0", &[]),
+                opt_def("detect_3d/compress_to", "Detect 3D: Compress To", "enum", "\"VRAM Compressed\"",
+                    &["Disabled", "VRAM Compressed", "Basis Universal"]),
+            ],
+        ),
+        (R::Audio, "wav") => (
+            vec!["Default"],
+            vec![
+                opt_def("force/8_bit", "Force 8 Bit", "bool", "false", &[]),
+                opt_def("force/mono", "Force Mono", "bool", "false", &[]),
+                opt_def("force/max_rate", "Force Max Rate", "bool", "false", &[]),
+                opt_def("force/max_rate_hz", "Max Rate Hz", "float", "44100", &[]),
+                opt_def("edit/trim", "Trim", "bool", "false", &[]),
+                opt_def("edit/normalize", "Normalize", "bool", "false", &[]),
+                opt_def("edit/loop_mode", "Loop Mode", "enum", "\"Detect From WAV\"",
+                    &["Detect From WAV", "Disabled", "Forward", "Ping-Pong", "Backward"]),
+                opt_def("edit/loop_begin", "Loop Begin", "int", "0", &[]),
+                opt_def("edit/loop_end", "Loop End", "int", "-1", &[]),
+                opt_def("compress/mode", "Compress Mode", "enum", "\"Quite OK Audio\"",
+                    &["PCM (Uncompressed)", "IMA ADPCM", "Quite OK Audio"]),
+            ],
+        ),
+        (R::Audio, _) => (vec!["Default"], STREAM.iter().map(|d| opt_def(d.name, d.label, d.ty, d.default, d.choices)).collect()),
+        (R::Scene, "obj") => (
+            vec!["Default"],
+            vec![
+                opt_def("generate_tangents", "Generate Tangents", "bool", "true", &[]),
+                opt_def("generate_lods", "Generate LODs", "bool", "true", &[]),
+                opt_def("generate_shadow_mesh", "Generate Shadow Mesh", "bool", "true", &[]),
+                opt_def("force_disable_mesh_compression", "Force Disable Mesh Compression", "bool", "false", &[]),
+            ],
+        ),
+        (R::Scene, _) => (
+            vec!["Default"],
+            vec![
+                opt_def("nodes/root_type", "Root Type", "string", "\"\"", &[]),
+                opt_def("nodes/root_name", "Root Name", "string", "\"\"", &[]),
+                opt_def("nodes/apply_root_scale", "Apply Root Scale", "bool", "true", &[]),
+                opt_def("nodes/root_scale", "Root Scale", "float", "1.0", &[]),
+                opt_def("animation/import", "Import Animation", "bool", "true", &[]),
+                opt_def("animation/fps", "Animation FPS", "float", "30", &[]),
+            ],
+        ),
+        (R::Mesh, _) => (
+            vec!["Default"],
+            vec![
+                opt_def("generate_lods", "Generate LODs", "bool", "true", &[]),
+                opt_def("generate_shadow_mesh", "Generate Shadow Mesh", "bool", "true", &[]),
+            ],
+        ),
+        (R::Font, _) => (
+            vec!["Default"],
+            vec![
+                opt_def("antialiasing", "Antialiasing", "enum", "\"Grayscale\"", &["None", "Grayscale", "LCD Subpixel"]),
+                opt_def("generate_mipmaps", "Generate Mipmaps", "bool", "false", &[]),
+                opt_def("multichannel_signed_distance_field", "Multichannel SDF", "bool", "false", &[]),
+                opt_def("msdf_pixel_range", "MSDF Pixel Range", "int", "8", &[]),
+                opt_def("msdf_size", "MSDF Size", "int", "48", &[]),
+                opt_def("allow_system_fallback", "Allow System Fallback", "bool", "true", &[]),
+                opt_def("force_autohinter", "Force Autohinter", "bool", "false", &[]),
+                opt_def("hinting", "Hinting", "enum", "\"Light\"", &["None", "Light", "Normal"]),
+                opt_def("subpixel_positioning", "Subpixel Positioning", "enum", "\"Auto (Except Pixel Fonts)\"",
+                    &["Disabled", "Auto", "One Half of a Pixel", "One Quarter of a Pixel", "Auto (Except Pixel Fonts)"]),
+                opt_def("oversampling", "Oversampling", "float", "0.0", &[]),
+                opt_def("compress", "Compress", "bool", "true", &[]),
+            ],
+        ),
+        (R::Shader | R::Script, _) => (
+            vec!["Default"],
+            vec![opt_def("keep_compiled", "Keep On Reimport", "bool", "true", &[])],
+        ),
+    }
+}
+
 fn import_option_json_value(ty: &str, raw: &str) -> String {
     let raw = raw.trim();
     match ty {
@@ -25580,7 +27003,21 @@ fn api_set_import_settings(state: &Arc<Mutex<EditorState>>, body: &str, stream: 
     if sc.source_file().is_none() {
         sc.set_dep("source_file", path);
     }
-    sc.set_param(option, import_option_ini_value(p.get("value")));
+    // An enum is stored as its INDEX, as Godot writes it (`compress/mode=1`);
+    // the dock sends the label. Map it back through Godot's choice list so the
+    // importer, which reads `params.int("compress/mode")`, sees the edit.
+    let rty = ImportResourceType::from_extension(&ext).expect("checked above");
+    let (_, defs) = godot_import_options(rty, &ext);
+    let literal = match (defs.iter().find(|d| d.name == option), p.get("value")) {
+        (Some(d), Some(serde_json::Value::String(label))) if d.ty == "enum" => d
+            .choices
+            .iter()
+            .position(|c| c == label)
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| import_option_ini_value(p.get("value"))),
+        _ => import_option_ini_value(p.get("value")),
+    };
+    sc.set_param(option, literal);
 
     match gdresource::importers::save_import_file(&sidecar, &sc) {
         Ok(()) => send_json(
@@ -30212,7 +31649,7 @@ position = Vector2(10, 20)
         assert_eq!(entry.name, "Player");
         assert_eq!(entry.children.len(), 1);
         let cnt = tree.node_count();
-        let nid = super::paste_clipboard_entry(&mut tree, root, &entry).unwrap();
+        let nid = super::paste_clipboard_entry(&mut tree, root, &entry, &mut std::iter::empty()).unwrap();
         assert_eq!(tree.node_count(), cnt + 2);
         assert_eq!(tree.get_node(nid).unwrap().name(), "Player");
     }
@@ -31533,8 +32970,17 @@ position = Vector2(10, 20)
     fn test_input_action_mapping() {
         let (handle, port) = make_server();
         start_runtime(port);
+        // `ui_left` is bound to the Left arrow only (upstream
+        // `core/input/input_map.cpp` load_default: `Key::LEFT` + joypad),
+        // NOT to `a` — the WASD aliases were removed deliberately
+        // (pat-mgixk.24, see `default_input_map`). So `a` must NOT press it.
         http_post(port, "/api/runtime/input/key_down", r#"{"key":"a"}"#);
+        let resp = http_get(port, "/api/runtime/input/state");
+        let body = extract_body(&resp);
+        let v: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(v["actions"]["ui_left"], false, "`a` is not a ui_left binding in Godot");
 
+        http_post(port, "/api/runtime/input/key_down", r#"{"key":"ArrowLeft"}"#);
         let resp = http_get(port, "/api/runtime/input/state");
         let body = extract_body(&resp);
         let v: serde_json::Value = serde_json::from_str(body).unwrap();
@@ -33685,7 +35131,8 @@ position = Vector2(10, 20)
 
         // Exercise api_runtime_play's autoload step on a fresh scene tree.
         let mut tree = SceneTree::new();
-        let autoload_ids = instantiate_play_autoloads(&mut tree, dir.to_str().unwrap());
+        let mut state = EditorState::new(SceneTree::new());
+        let autoload_ids = instantiate_play_autoloads(&mut tree, dir.to_str().unwrap(), &mut state);
         assert_eq!(autoload_ids.len(), 1, "one autoload instantiated");
 
         // Drive _ready exactly as api_runtime_play does.

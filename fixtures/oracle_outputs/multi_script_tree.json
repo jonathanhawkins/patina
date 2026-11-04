@@ -1,15 +1,6 @@
 {
 	"children": [
 		{
-			"children": [],
-			"class": "Node",
-			"groups": [],
-			"name": "Oracle",
-			"owner": "",
-			"path": "/root/Oracle",
-			"script": "res://oracle_autoload.gd"
-		},
-		{
 			"children": [
 				{
 					"children": [],
@@ -17,8 +8,7 @@
 					"groups": [],
 					"name": "Counter",
 					"owner": "/root/World",
-					"path": "/root/World/Counter",
-					"script": "res://scripts/counter.gd"
+					"path": "/root/World/Counter"
 				},
 				{
 					"children": [],
@@ -26,8 +16,7 @@
 					"groups": [],
 					"name": "Reader",
 					"owner": "/root/World",
-					"path": "/root/World/Reader",
-					"script": "res://scripts/reader.gd"
+					"path": "/root/World/Reader"
 				},
 				{
 					"children": [],
@@ -35,8 +24,7 @@
 					"groups": [],
 					"name": "Mover",
 					"owner": "/root/World",
-					"path": "/root/World/Mover",
-					"script": "res://scripts/mover.gd"
+					"path": "/root/World/Mover"
 				}
 			],
 			"class": "Node2D",

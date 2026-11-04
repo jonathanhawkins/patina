@@ -334,7 +334,7 @@
 					},
 					"content_scale_size": {
 						"type": "Vector2i",
-						"value": "(640, 480)"
+						"value": "(1152, 648)"
 					},
 					"content_scale_stretch": {
 						"type": "int",
@@ -574,7 +574,7 @@
 					},
 					"title": {
 						"type": "String",
-						"value": "Sample Game"
+						"value": "Patina Fixtures"
 					},
 					"transient": {
 						"type": "bool",
@@ -1014,7 +1014,7 @@
 					},
 					"content_scale_size": {
 						"type": "Vector2i",
-						"value": "(640, 480)"
+						"value": "(1152, 648)"
 					},
 					"content_scale_stretch": {
 						"type": "int",
@@ -1254,7 +1254,7 @@
 					},
 					"title": {
 						"type": "String",
-						"value": "Sample Game"
+						"value": "Patina Fixtures"
 					},
 					"transient": {
 						"type": "bool",
@@ -1694,7 +1694,7 @@
 					},
 					"content_scale_size": {
 						"type": "Vector2i",
-						"value": "(640, 480)"
+						"value": "(1152, 648)"
 					},
 					"content_scale_stretch": {
 						"type": "int",
@@ -1934,7 +1934,7 @@
 					},
 					"title": {
 						"type": "String",
-						"value": "Sample Game"
+						"value": "Patina Fixtures"
 					},
 					"transient": {
 						"type": "bool",
@@ -2374,7 +2374,7 @@
 					},
 					"content_scale_size": {
 						"type": "Vector2i",
-						"value": "(640, 480)"
+						"value": "(1152, 648)"
 					},
 					"content_scale_stretch": {
 						"type": "int",
@@ -2614,7 +2614,7 @@
 					},
 					"title": {
 						"type": "String",
-						"value": "Sample Game"
+						"value": "Patina Fixtures"
 					},
 					"transient": {
 						"type": "bool",
@@ -3054,7 +3054,7 @@
 					},
 					"content_scale_size": {
 						"type": "Vector2i",
-						"value": "(640, 480)"
+						"value": "(1152, 648)"
 					},
 					"content_scale_stretch": {
 						"type": "int",
@@ -3294,7 +3294,7 @@
 					},
 					"title": {
 						"type": "String",
-						"value": "Sample Game"
+						"value": "Patina Fixtures"
 					},
 					"transient": {
 						"type": "bool",
@@ -3734,7 +3734,7 @@
 					},
 					"content_scale_size": {
 						"type": "Vector2i",
-						"value": "(640, 480)"
+						"value": "(1152, 648)"
 					},
 					"content_scale_stretch": {
 						"type": "int",
@@ -3974,7 +3974,7 @@
 					},
 					"title": {
 						"type": "String",
-						"value": "Sample Game"
+						"value": "Patina Fixtures"
 					},
 					"transient": {
 						"type": "bool",
@@ -4414,7 +4414,7 @@
 					},
 					"content_scale_size": {
 						"type": "Vector2i",
-						"value": "(640, 480)"
+						"value": "(1152, 648)"
 					},
 					"content_scale_stretch": {
 						"type": "int",
@@ -4654,7 +4654,7 @@
 					},
 					"title": {
 						"type": "String",
-						"value": "Sample Game"
+						"value": "Patina Fixtures"
 					},
 					"transient": {
 						"type": "bool",
@@ -5094,7 +5094,7 @@
 					},
 					"content_scale_size": {
 						"type": "Vector2i",
-						"value": "(640, 480)"
+						"value": "(1152, 648)"
 					},
 					"content_scale_stretch": {
 						"type": "int",
@@ -5334,7 +5334,7 @@
 					},
 					"title": {
 						"type": "String",
-						"value": "Sample Game"
+						"value": "Patina Fixtures"
 					},
 					"transient": {
 						"type": "bool",
@@ -5774,7 +5774,7 @@
 					},
 					"content_scale_size": {
 						"type": "Vector2i",
-						"value": "(640, 480)"
+						"value": "(1152, 648)"
 					},
 					"content_scale_stretch": {
 						"type": "int",
@@ -6014,7 +6014,7 @@
 					},
 					"title": {
 						"type": "String",
-						"value": "Sample Game"
+						"value": "Patina Fixtures"
 					},
 					"transient": {
 						"type": "bool",
@@ -6454,7 +6454,7 @@
 					},
 					"content_scale_size": {
 						"type": "Vector2i",
-						"value": "(640, 480)"
+						"value": "(1152, 648)"
 					},
 					"content_scale_stretch": {
 						"type": "int",
@@ -6694,7 +6694,7 @@
 					},
 					"title": {
 						"type": "String",
-						"value": "Sample Game"
+						"value": "Patina Fixtures"
 					},
 					"transient": {
 						"type": "bool",
@@ -6804,7 +6804,7 @@
 		}
 	],
 	"frames_captured": 10,
-	"generated_at": "2026-03-20T13:40:02",
+	"generated_at": "2026-11-03T18:34:31",
 	"notification_trace": [],
 	"properties": {
 		"children": [
@@ -7136,7 +7136,7 @@
 			},
 			"content_scale_size": {
 				"type": "Vector2i",
-				"value": "(640, 480)"
+				"value": "(1152, 648)"
 			},
 			"content_scale_stretch": {
 				"type": "int",
@@ -7376,7 +7376,7 @@
 			},
 			"title": {
 				"type": "String",
-				"value": "Sample Game"
+				"value": "Patina Fixtures"
 			},
 			"transient": {
 				"type": "bool",

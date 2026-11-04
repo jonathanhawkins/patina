@@ -246,7 +246,9 @@ fn reparent_fires_the_full_exit_and_reenter_lifecycle() {
             "PARENTED",
             "MOVED_IN_PARENT",
             "ENTER_TREE",
-            "READY"
+            // No READY: an already-ready node is not readied again —
+            // `_propagate_ready` sends READY only while `ready_first` is set
+            // (scene/main/node.cpp:328-332); a reparent sends POST_ENTER_TREE.
         ],
         "reparent must take the child out of the tree and back in, not just \
          re-link it structurally"
@@ -863,10 +865,12 @@ fn full_reparent_sequence() {
             "PARENTED",
             "MOVED_IN_PARENT",
             "ENTER_TREE",
-            "READY"
+            // No READY: an already-ready node is not readied again —
+            // `_propagate_ready` sends READY only while `ready_first` is set
+            // (scene/main/node.cpp:328-332); a reparent sends POST_ENTER_TREE.
         ],
         "reparent sequence should be EXIT_TREE -> UNPARENTED -> PARENTED -> \
-         MOVED_IN_PARENT -> ENTER_TREE -> READY"
+         MOVED_IN_PARENT -> ENTER_TREE (READY fires once per node, not per entry)"
     );
 
     let b_details = exact_node_notifications(&tree, "/root/B");
@@ -925,8 +929,8 @@ fn child_order_changed_constant_matches_godot() {
     use gdobject::notification::NOTIFICATION_CHILD_ORDER_CHANGED;
     assert_eq!(
         NOTIFICATION_CHILD_ORDER_CHANGED.code(),
-        16,
-        "NOTIFICATION_CHILD_ORDER_CHANGED should be code 16 (Godot standard)"
+        24,
+        "NOTIFICATION_CHILD_ORDER_CHANGED is 24 in scene/main/node.h (this claimed 16)"
     );
 }
 

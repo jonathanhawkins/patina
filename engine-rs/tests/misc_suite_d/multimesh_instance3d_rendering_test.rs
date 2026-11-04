@@ -29,7 +29,8 @@ fn triangle_mesh() -> Mesh3D {
             Vector3::new(0.0, 0.0, 1.0),
         ],
         uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]],
-        indices: vec![0, 1, 2],
+        // Clockwise = front-facing in Godot (ArrayMesh.xml:49).
+        indices: vec![0, 2, 1],
         primitive_type: PrimitiveType::Triangles,
         surfaces: vec![],
         ..Default::default()
@@ -52,7 +53,8 @@ fn small_quad() -> Mesh3D {
             Vector3::new(0.0, 0.0, 1.0),
         ],
         uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
-        indices: vec![0, 1, 2, 0, 2, 3],
+        // Clockwise = front-facing in Godot (ArrayMesh.xml:49).
+        indices: vec![0, 2, 1, 0, 3, 2],
         primitive_type: PrimitiveType::Triangles,
         surfaces: vec![],
         ..Default::default()

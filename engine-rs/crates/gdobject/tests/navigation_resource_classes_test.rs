@@ -89,7 +89,8 @@ fn navigation_mesh_carries_the_full_bake_param_surface() {
             .find(|p| p.name == "vertices_per_polygon")
             .expect("vertices_per_polygon exists")
             .default_value,
-        Variant::Float(0.0),
+        // doc/classes/NavigationMesh.xml:164 — `type="float" default="6.0"`.
+        Variant::Float(6.0),
         "vertices_per_polygon is a float in Godot, not an int"
     );
 }

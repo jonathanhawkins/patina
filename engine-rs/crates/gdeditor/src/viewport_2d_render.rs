@@ -119,8 +119,15 @@ pub fn navigation_overlay_items(
 mod tests {
     use super::*;
     use crate::viewport_2d::Viewport2D;
+    // This module became a re-export of `gdscene::canvas_render`, so `super::*`
+    // no longer brings these in; without them the whole gdeditor lib test
+    // target failed to compile.
+    use gdcore::math::Vector2;
+    use gdscene::control::TextAlign;
     use gdscene::node::Node;
     use gdscene::node3d;
+    use gdscene::{control, node2d};
+    use gdvariant::Variant;
 
     fn find(items: &[Render2DItem], node_id: u64) -> Option<&Render2DItem> {
         items.iter().find(|i| i.node_id == node_id)

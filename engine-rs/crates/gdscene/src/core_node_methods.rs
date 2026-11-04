@@ -453,7 +453,14 @@ fn call_surface_override_material_method(
     // comment records as a REGRESSION it had to fix: an ungated indexed family
     // answers for classes that never bound the name. Only `MeshInstance3D`
     // binds this one (`class_db.rs:1871-1896`).
-    if !gdobject::class_db::is_parent_class(class_name, "MeshInstance3D") {
+    //
+    // The exact class is accepted WITHOUT a ClassDB lookup: with no classes
+    // registered (an embedder, a tool, a test) `is_parent_class` is false even
+    // for "MeshInstance3D" itself, so the arm declined for the very class it
+    // was written for and the getter raised as undispatched.
+    if class_name != "MeshInstance3D"
+        && !gdobject::class_db::is_parent_class(class_name, "MeshInstance3D")
+    {
         return None;
     }
     let index = arg_int(args, 0)?;

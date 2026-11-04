@@ -404,11 +404,23 @@ impl Sprite3D {
         let normal = self.plane_normal();
         let uvs = self.uv_coords();
 
+        // Wound CLOCKWISE about the plane normal — Godot's front face
+        // (`doc/classes/ArrayMesh.xml:49`) — so a single-sided sprite
+        // (`double_sided = false`) stays visible from the side it faces. The
+        // axis mapping in `quad_vertices` flips handedness between axes, so the
+        // order is chosen from the actual corners rather than fixed.
+        let ccw = (verts[1] - verts[0]).cross(verts[2] - verts[0]).dot(normal) > 0.0;
+        let indices = if ccw {
+            vec![0, 2, 1, 0, 3, 2]
+        } else {
+            vec![0, 1, 2, 0, 2, 3]
+        };
+
         Mesh3D {
             vertices: verts.to_vec(),
             normals: vec![normal; 4],
             uvs: uvs.to_vec(),
-            indices: vec![0, 1, 2, 0, 2, 3],
+            indices,
             primitive_type: PrimitiveType::Triangles,
             surfaces: Vec::new(),
             ..Default::default()
@@ -733,7 +745,8 @@ mod tests {
         assert_eq!(m.vertices.len(), 4);
         assert_eq!(m.normals.len(), 4);
         assert_eq!(m.uvs.len(), 4);
-        assert_eq!(m.indices, vec![0, 1, 2, 0, 2, 3]);
+        // Clockwise seen from +Z (the Z-axis sprite's normal), Godot's front face.
+        assert_eq!(m.indices, vec![0, 2, 1, 0, 3, 2]);
         assert_eq!(m.primitive_type, PrimitiveType::Triangles);
     }
 

@@ -310,12 +310,14 @@ pub struct Material3D {
     /// Normal-map strength multiplier (1.0 = full strength).
     pub normal_scale: f32,
     /// Optional roughness texture; its **green** channel multiplies
-    /// [`roughness`] per-fragment (Godot's default roughness channel).
+    /// [`roughness`] per-fragment. Patina's internal packing: a map is
+    /// normalised to it at load via [`TextureChannel::broadcast`], so Godot's
+    /// `roughness_texture_channel` (default RED) is honoured.
     ///
     /// [`roughness`]: Material3D::roughness
     pub roughness_texture: Option<Arc<TextureImage>>,
     /// Optional metallic texture; its **blue** channel multiplies [`metallic`]
-    /// per-fragment (Godot's default metallic channel).
+    /// per-fragment (internal packing; see [`TextureChannel::broadcast`]).
     ///
     /// [`metallic`]: Material3D::metallic
     pub metallic_texture: Option<Arc<TextureImage>>,
@@ -369,6 +371,64 @@ impl TextureSlot {
     }
 }
 
+/// `BaseMaterial3D.TextureChannel` — which channel of a roughness/metallic map
+/// carries the value. Godot's default for both is **RED** (material.cpp:3977);
+/// `ORMMaterial3D` and the glTF importer pick GREEN/BLUE explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextureChannel {
+    /// `TEXTURE_CHANNEL_RED` (0), the default.
+    #[default]
+    Red,
+    /// `TEXTURE_CHANNEL_GREEN` (1).
+    Green,
+    /// `TEXTURE_CHANNEL_BLUE` (2).
+    Blue,
+    /// `TEXTURE_CHANNEL_ALPHA` (3).
+    Alpha,
+    /// `TEXTURE_CHANNEL_GRAYSCALE` (4): the average of r, g, b.
+    Grayscale,
+}
+
+impl TextureChannel {
+    /// From Godot's enum ordinal; unknown values fall back to RED.
+    pub fn from_godot_int(v: i64) -> Self {
+        match v {
+            1 => Self::Green,
+            2 => Self::Blue,
+            3 => Self::Alpha,
+            4 => Self::Grayscale,
+            _ => Self::Red,
+        }
+    }
+
+    /// The selected value of one texel.
+    pub fn pick(self, c: Color) -> f32 {
+        match self {
+            Self::Red => c.r,
+            Self::Green => c.g,
+            Self::Blue => c.b,
+            Self::Alpha => c.a,
+            Self::Grayscale => (c.r + c.g + c.b) / 3.0,
+        }
+    }
+
+    /// `tex` with the selected channel broadcast into r, g and b. The
+    /// renderers read roughness from G and metallic from B (an internal
+    /// packing both backends share), so a map is normalised to that ONCE at
+    /// load instead of threading the channel through every shader.
+    pub fn broadcast(self, tex: &TextureImage) -> TextureImage {
+        let pixels = tex
+            .pixels
+            .iter()
+            .map(|&c| {
+                let v = self.pick(c);
+                Color::new(v, v, v, 1.0)
+            })
+            .collect();
+        TextureImage::new(tex.width, tex.height, pixels)
+    }
+}
+
 /// A Godot-compatible `StandardMaterial3D` with PBR texture slots.
 ///
 /// Maps to Godot's `StandardMaterial3D` resource type with support for
@@ -382,12 +442,20 @@ pub struct StandardMaterial3D {
     pub albedo_texture: Option<TextureSlot>,
     /// Metallic factor (0.0 = dielectric, 1.0 = metallic).
     pub metallic: f32,
-    /// Optional metallic texture (sampled from the blue channel in Godot).
+    /// Optional metallic texture; `metallic_texture_channel` selects the channel
+    /// (Godot: RED by default).
     pub metallic_texture: Option<TextureSlot>,
     /// Roughness factor (0.0 = mirror, 1.0 = fully rough).
     pub roughness: f32,
-    /// Optional roughness texture (sampled from the green channel in Godot).
+    /// Optional roughness texture; [`roughness_texture_channel`] selects the
+    /// channel that multiplies `roughness` (Godot: RED by default).
+    ///
+    /// [`roughness_texture_channel`]: Self::roughness_texture_channel
     pub roughness_texture: Option<TextureSlot>,
+    /// `roughness_texture_channel` (Godot default RED).
+    pub roughness_texture_channel: TextureChannel,
+    /// `metallic_texture_channel` (Godot default RED).
+    pub metallic_texture_channel: TextureChannel,
     /// Whether the normal map is enabled.
     pub normal_enabled: bool,
     /// Optional normal-map texture.
@@ -434,6 +502,8 @@ impl Default for StandardMaterial3D {
             metallic_texture: None,
             roughness: 1.0,
             roughness_texture: None,
+            roughness_texture_channel: TextureChannel::Red,
+            metallic_texture_channel: TextureChannel::Red,
             normal_enabled: false,
             normal_texture: None,
             normal_scale: 1.0,
@@ -520,6 +590,16 @@ impl StandardMaterial3D {
                 "roughness_texture" => {
                     if let Variant::String(s) = value {
                         mat.roughness_texture = Some(TextureSlot::new(s.as_str()));
+                    }
+                }
+                "roughness_texture_channel" => {
+                    if let Variant::Int(v) = value {
+                        mat.roughness_texture_channel = TextureChannel::from_godot_int(*v);
+                    }
+                }
+                "metallic_texture_channel" => {
+                    if let Variant::Int(v) = value {
+                        mat.metallic_texture_channel = TextureChannel::from_godot_int(*v);
                     }
                 }
                 "normal_enabled" => {
@@ -1027,5 +1107,30 @@ mod tests {
         };
         let cloned = mat.clone();
         assert_eq!(mat, cloned);
+    }
+}
+
+#[cfg(test)]
+mod texture_channel_tests {
+    use super::*;
+
+    #[test]
+    fn godot_ordinals_and_default_red() {
+        assert_eq!(TextureChannel::default(), TextureChannel::Red);
+        assert_eq!(TextureChannel::from_godot_int(1), TextureChannel::Green);
+        assert_eq!(TextureChannel::from_godot_int(4), TextureChannel::Grayscale);
+        // Edge: an out-of-range ordinal falls back to Godot's default.
+        assert_eq!(TextureChannel::from_godot_int(99), TextureChannel::Red);
+        assert_eq!(StandardMaterial3D::default().roughness_texture_channel, TextureChannel::Red);
+    }
+
+    #[test]
+    fn grayscale_averages_and_broadcast_fills_rgb() {
+        let c = Color::new(0.3, 0.6, 0.9, 0.5);
+        assert!((TextureChannel::Grayscale.pick(c) - 0.6).abs() < 1e-6);
+        assert_eq!(TextureChannel::Alpha.pick(c), 0.5);
+        let t = TextureImage::new(1, 1, vec![c]);
+        let b = TextureChannel::Blue.broadcast(&t);
+        assert_eq!((b.pixels[0].r, b.pixels[0].g, b.pixels[0].b), (0.9, 0.9, 0.9));
     }
 }

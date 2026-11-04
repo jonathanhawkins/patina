@@ -48,7 +48,8 @@ fi
 # Step 3: Split into per-type files
 echo "[3/4] Splitting output by capture_type..."
 
-for CAPTURE_TYPE in scene_tree properties signals classdb resource_metadata; do
+# Every capture_type a probe in src/ emits (grep `capture_type: "` there).
+for CAPTURE_TYPE in scene_tree properties signals classdb resource_metadata api_surface enum_constants inheritance_chain method_defaults node_defaults resource_roundtrip resource_subtype resource_validation singleton_api virtual_methods; do
     OUT_FILE="$OUTPUT_DIR/${CAPTURE_TYPE}.jsonl"
     grep "\"capture_type\":\"$CAPTURE_TYPE\"" "$RAW_OUTPUT" > "$OUT_FILE" 2>/dev/null || true
     COUNT=$(wc -l < "$OUT_FILE" | tr -d ' ')

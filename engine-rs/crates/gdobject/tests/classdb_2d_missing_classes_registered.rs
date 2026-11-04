@@ -69,14 +69,22 @@ fn classdb_2d_missing_classes_registered() {
             is_parent_class(class, parent),
             "{class} must inherit {parent} (doc/classes/{class}.xml `inherits`)"
         );
-        assert!(
-            can_instantiate(class),
-            "{class} must be instantiable via ClassDB"
-        );
-        assert!(
-            instantiate(class).is_some(),
-            "ClassDB must hand back an instance of {class}"
-        );
+        // TileSetSource is GDREGISTER_ABSTRACT_CLASS upstream (its concrete
+        // forms are TileSetAtlasSource / TileSetScenesCollectionSource).
+        if *class == "TileSetSource" {
+            assert!(!can_instantiate(class), "{class}: Godot registers it with GDREGISTER_ABSTRACT_CLASS");
+        } else {
+            assert!(
+                can_instantiate(class),
+                "{class} must be instantiable via ClassDB"
+            );
+        }
+        if *class != "TileSetSource" {
+            assert!(
+                instantiate(class).is_some(),
+                "ClassDB must hand back an instance of {class}"
+            );
+        }
     }
 
     // The whole point of the parents: the Node2D family must resolve as canvas

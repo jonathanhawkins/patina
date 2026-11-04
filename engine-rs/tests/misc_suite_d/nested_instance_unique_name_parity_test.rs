@@ -208,12 +208,18 @@ fn ahop_lookup_from_subscene_root_searches_parent_scope() {
         "%Banner should be found from sub-scene root (searches parent scope)"
     );
 
-    // But %HealthBar is NOT in the parent scope — it's in the inner scope.
-    // From the inner root (whose owner is the outer root), the search is in
-    // the outer scope, so %HealthBar should NOT be found.
+    // ⚠️ This asserted %HealthBar is NOT found from the inner root. Godot's `Node::get_node_or_null` checks the CURRENT node's
+    // `owned_unique_nodes` FIRST and only then its owner's
+    // (`scene/main/node.cpp:1930-1934`). An instance root OWNS its inner
+    // scene's unique nodes, so from it the INNER name resolves.
+    // The outer root must still not see it — that is the leak that matters.
     assert!(
-        tree.get_node_relative(inner_hud, "%HealthBar").is_none(),
-        "%HealthBar should not be found from sub-scene root (wrong scope)"
+        tree.get_node_relative(ui_root, "%HealthBar").is_none(),
+        "%HealthBar must not leak into the outer scene's scope"
+    );
+    assert!(
+        tree.get_node_relative(inner_hud, "%HealthBar").is_some(),
+        "the sub-scene root owns %HealthBar, which Godot checks first"
     );
 }
 

@@ -345,9 +345,24 @@ func _process(delta):
     tree.process_script_process(node, 0.016);
     tree.flush_pending_redraws();
 
+    // ⚠️ The render list is NOT empty: with the ClassDB populated, the bare
+    // `Node2D` itself is collected as a `Render2DKind::Marker` — the editor's
+    // stand-in for a node with no visual of its own, which the runtime
+    // rasterizer draws nothing for (`Render2DKind::Marker { .. } => {}` in
+    // canvas_render.rs). That item is the node's baseline, not a draw call.
+    // What must be absent is any item the dropped `draw_rect` would have
+    // produced, and the node's custom-draw command list.
     assert!(
-        rendered_commands(&tree).is_empty(),
-        "a draw_* call outside _draw must be dropped, not queued for the next pass"
+        tree.custom_draw_commands(node).is_empty(),
+        "a draw_* call outside _draw must not be captured as the node's drawing"
+    );
+    let drawn: Vec<Render2DItem> = rendered_commands(&tree)
+        .into_iter()
+        .filter(|i| !matches!(i.kind, Render2DKind::Marker { .. }))
+        .collect();
+    assert!(
+        drawn.is_empty(),
+        "a draw_* call outside _draw must be dropped, not queued for the next pass: {drawn:?}"
     );
 }
 

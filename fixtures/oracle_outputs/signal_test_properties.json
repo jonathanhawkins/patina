@@ -1,15 +1,6 @@
 {
 	"children": [
 		{
-			"children": [],
-			"class": "Node",
-			"name": "Oracle",
-			"path": "/root/Oracle",
-			"properties": {
-
-			}
-		},
-		{
 			"children": [
 				{
 					"children": [],
@@ -17,12 +8,7 @@
 					"name": "Emitter",
 					"path": "/root/Root/Emitter",
 					"properties": {
-						"emit_count": {
-							"class_type": "",
-							"hint": 0,
-							"type": "int",
-							"value": 0
-						}
+
 					}
 				},
 				{
@@ -31,18 +17,7 @@
 					"name": "Listener",
 					"path": "/root/Root/Listener",
 					"properties": {
-						"last_value": {
-							"class_type": "",
-							"hint": 0,
-							"type": "int",
-							"value": 0
-						},
-						"received_count": {
-							"class_type": "",
-							"hint": 0,
-							"type": "int",
-							"value": 0
-						}
+
 					}
 				}
 			],
@@ -143,7 +118,7 @@
 			"class_type": "",
 			"hint": 0,
 			"type": "String",
-			"value": "test00"
+			"value": "Patina Fixtures"
 		},
 		"world_3d": {
 			"class_type": "World3D",

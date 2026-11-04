@@ -204,14 +204,6 @@ pub fn render_runtime_frame(
         // CanvasLayer items, so HUD pixels stay put while the world scrolls.
         let mut items = crate::viewport_2d_render::build_runtime_render_list(tree);
         let viewport_size = Vector2::new(width.max(1) as f32, height.max(1) as f32);
-        if let Some(view) = crate::viewport_2d_render::camera2d_view_transform(
-            tree,
-            viewport_size,
-            None,
-            1.0 / 60.0,
-        ) {
-            crate::viewport_2d_render::apply_camera2d_view(&mut items, view);
-        }
         // The root window's content scale is the OUTERMOST transform, applied
         // after the camera and to CanvasLayer items too (pat-nzgdu.87). The
         // window here is the Game view's rect, not the project's configured
@@ -220,6 +212,16 @@ pub fn render_runtime_frame(
         // framing the exported game would.
         let mut window = *tree.root_window();
         window.size = viewport_size;
+        // The camera centres on the CANVAS (the base resolution under
+        // stretch), not the window — see `canvas_size_of`.
+        if let Some(view) = crate::viewport_2d_render::camera2d_view_transform(
+            tree,
+            gdscene::canvas_render::canvas_size_of(&window),
+            None,
+            1.0 / 60.0,
+        ) {
+            crate::viewport_2d_render::apply_camera2d_view(&mut items, view);
+        }
         crate::viewport_2d_render::apply_stretch_transform(&mut items, window.stretch_transform());
         // ⚠️ The clear colour is what makes this composable. Over a 3D frame the
         // canvas must clear TRANSPARENT so the world shows through wherever no
@@ -252,7 +254,7 @@ pub fn render_runtime_frame(
             None,
             &crate::viewport_2d_render::CanvasQuality::default(),
         );
-        match base_3d {
+        let mut frame = match base_3d {
             // A 3D scene with no CanvasItems composites a fully transparent
             // canvas, which `composite_canvas_over` skips pixel by pixel — so
             // that frame stays bit-identical to the plain 3D render too.
@@ -261,7 +263,11 @@ pub fn render_runtime_frame(
                 base
             }
             None => canvas,
-        }
+        };
+        // The keep-aspect letterbox, over the WHOLE frame (3D included): it is
+        // the window outside the viewport. A no-op without stretch.
+        gdscene::canvas_render::paint_black_bars(&mut frame, &window);
+        frame
     }
 }
 
@@ -446,7 +452,7 @@ pub fn render_scene_with_zoom_pan_mut(
     let viewport_size = Vector2::new(width.max(1) as f32, height.max(1) as f32);
     let root = tree.root_id();
     let control_items =
-        crate::viewport_2d_render::build_control_render_items(tree, root, viewport_size);
+        crate::viewport_2d_render::build_control_render_items_sourced(tree, root, viewport_size);
     render_scene_inner(
         tree,
         selected,
@@ -460,7 +466,168 @@ pub fn render_scene_with_zoom_pan_mut(
     )
 }
 
+/// [`render_scene_with_zoom_pan_mut`] that also draws every `instance=`
+/// sub-scene, textured — what the editor's 2D view shows while editing.
+///
+/// 🔑 The edited tree holds each instanced sub-scene as a childless
+/// placeholder (the shape the saver writes back as `instance=`), so the 2D view
+/// drew a main scene with no player, no enemies and no HUD — Godot's editor
+/// shows them all. Each placeholder's sub-scene is instanced into a SCRATCH
+/// tree, its items built and mapped onto the placeholder's place in the scene,
+/// and the scratch tree dropped. The edited tree is never touched, so the
+/// saver, undo, the scene dock and selection cannot see the preview.
+#[allow(clippy::too_many_arguments)]
+pub fn render_scene_with_instance_previews(
+    tree: &mut SceneTree,
+    project_root: &str,
+    texture_cache: &mut TextureCache,
+    selected: Option<NodeId>,
+    width: u32,
+    height: u32,
+    zoom: f64,
+    pan: (f64, f64),
+) -> FrameBuffer {
+    let viewport_size = Vector2::new(width.max(1) as f32, height.max(1) as f32);
+    // Root Controls anchor to the GAME's base resolution, as Godot's 2D editor
+    // lays them out inside the game rect — the edited scene's own and every
+    // previewed sub-scene's alike. Anchoring to the editor panel stretched a
+    // full-rect background over the whole view.
+    let layout_size = project_layout_size(project_root).unwrap_or(viewport_size);
+    let root = tree.root_id();
+    let control_items =
+        crate::viewport_2d_render::build_control_render_items_sourced(tree, root, layout_size);
+    let previews = instance_preview_items(tree, project_root, layout_size);
+    render_scene_inner_with_previews(
+        tree,
+        selected,
+        width,
+        height,
+        zoom,
+        pan,
+        Some(texture_cache),
+        None,
+        control_items,
+        previews,
+    )
+}
+
+/// The project's base resolution (`display/window/size/viewport_*`), or `None`
+/// when the folder has no readable `project.godot`.
+fn project_layout_size(project_root: &str) -> Option<Vector2> {
+    gdcore::ProjectSettings::load_godot_project(
+        &std::path::Path::new(project_root).join("project.godot"),
+    )
+    .ok()
+    .map(|ps| Vector2::new(ps.viewport_width() as f32, ps.viewport_height() as f32))
+}
+
+/// The render items of every instanced sub-scene's preview, in the edited
+/// scene's global canvas space. See [`render_scene_with_instance_previews`].
+fn instance_preview_items(
+    tree: &SceneTree,
+    project_root: &str,
+    viewport_size: Vector2,
+) -> Vec<crate::viewport_2d_render::Render2DItem> {
+    use gdscene::packed_scene::PackedScene;
+    let resolve = |path: &str| -> Option<PackedScene> {
+        let rel = path.strip_prefix("res://").unwrap_or(path);
+        let text = std::fs::read_to_string(std::path::Path::new(project_root).join(rel)).ok()?;
+        PackedScene::from_tscn(&text).ok()
+    };
+    // A sub-scene's UI is laid out in the game's base resolution (the caller's
+    // `layout_size`), as Godot's editor shows it inside the game rect.
+    let layout_size = viewport_size;
+    let mut out = Vec::new();
+    for id in tree.all_nodes_in_tree_order() {
+        let Some(node) = tree.get_node(id) else { continue };
+        let Variant::String(path) = node.get_property("_instance_path") else {
+            continue;
+        };
+        let Some(sub) = resolve(&path) else { continue };
+        let mut scratch = SceneTree::new();
+        let scratch_root = scratch.root_id();
+        let Ok(sub_root) = gdscene::packed_scene::add_packed_scene_to_tree_with_subscenes(
+            &mut scratch,
+            scratch_root,
+            &sub,
+            &resolve,
+        ) else {
+            continue;
+        };
+        // The outer scene's overrides on the instance (its position, say).
+        if let Some(preview_root) = scratch.get_node_mut(sub_root) {
+            for (key, value) in node.properties() {
+                if !key.starts_with('_') {
+                    preview_root.set_property(key, value.clone());
+                }
+            }
+        }
+        // An AnimatedSprite2D's frame texture is published by the animation
+        // step; a zero-delta step publishes the current frame without moving
+        // anything, so the sprite draws as it will at run time.
+        scratch.process_animated_sprites(0.0);
+        let controls = crate::viewport_2d_render::build_control_render_items_sourced(
+            &mut scratch,
+            scratch_root,
+            layout_size,
+        );
+        let runtime = crate::viewport_2d_render::build_runtime_render_list(&scratch);
+        let items = crate::viewport_2d_render::merge_control_items(&scratch, runtime, controls);
+        // Where the instance sits in the edited scene: its parent's global
+        // transform. A CanvasLayer item is screen-fixed and keeps its own.
+        let place = tree
+            .get_node(id)
+            .and_then(|n| n.parent())
+            .map(|parent| node2d::get_global_transform(tree, parent))
+            .unwrap_or(Transform2D::IDENTITY);
+        for mut item in items {
+            if matches!(
+                item.canvas_follow,
+                crate::viewport_2d_render::CanvasFollow::DefaultCanvas
+            ) {
+                item.global_transform = place * item.global_transform;
+            } else {
+                // A CanvasLayer's UI is shown registered with the scene, at
+                // the game rect's origin, panning and zooming with the view —
+                // as Godot's 2D editor draws it — not pinned to the panel.
+                item.canvas_follow = crate::viewport_2d_render::CanvasFollow::DefaultCanvas;
+            }
+            // Not a node of the edited tree: never pickable, never outlined.
+            item.node_id = 0;
+            out.push(item);
+        }
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_scene_inner(
+    tree: &SceneTree,
+    selected: Option<NodeId>,
+    width: u32,
+    height: u32,
+    zoom: f64,
+    pan: (f64, f64),
+    texture_cache: Option<&mut TextureCache>,
+    overlays: Option<&crate::viewport_2d::OverlaySettings>,
+    control_items: Vec<(crate::viewport_2d_render::Render2DItem, Option<NodeId>)>,
+) -> FrameBuffer {
+    render_scene_inner_with_previews(
+        tree,
+        selected,
+        width,
+        height,
+        zoom,
+        pan,
+        texture_cache,
+        overlays,
+        control_items,
+        Vec::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_scene_inner_with_previews(
     tree: &SceneTree,
     selected: Option<NodeId>,
     width: u32,
@@ -469,7 +636,8 @@ fn render_scene_inner(
     pan: (f64, f64),
     mut texture_cache: Option<&mut TextureCache>,
     overlays: Option<&crate::viewport_2d::OverlaySettings>,
-    control_items: Vec<crate::viewport_2d_render::Render2DItem>,
+    control_items: Vec<(crate::viewport_2d_render::Render2DItem, Option<NodeId>)>,
+    previews: Vec<crate::viewport_2d_render::Render2DItem>,
 ) -> FrameBuffer {
     // `None` means "no overlay set supplied" — draw every gizmo, which is what
     // every pre-existing caller expects. It is NOT the same as an empty set.
@@ -523,7 +691,7 @@ fn render_scene_inner(
     // Control's size comes from `offset_*` resolved by the layout pass, so on
     // the immutable path a ColorRect is zero-sized and paints nothing.
     // `canvas_composite.rs:34` warns about exactly this.
-    let mut items = crate::viewport_2d_render::build_runtime_render_list(tree);
+    let items = crate::viewport_2d_render::build_runtime_render_list(tree);
     // The themed Control pass, when the caller could supply it (see
     // `render_scene_with_zoom_pan_mut`). Empty for the immutable wrappers.
     //
@@ -542,7 +710,12 @@ fn render_scene_inner(
     // `draw_control_rect` is a `fill_rect`, so the opaque purple block would
     // cover the text this pass just rasterized.
     let controls_drawn = !control_items.is_empty();
-    items.extend(control_items);
+    // Interleaved at each Control's tree position — layer, then z, then tree
+    // order, as Play does — rather than appended above everything.
+    let mut items = crate::viewport_2d_render::merge_control_items(tree, items, control_items);
+    // Instanced sub-scene previews (see `render_scene_with_instance_previews`).
+    // Appended: the raster's stable (layer, z) sort places them.
+    items.extend(previews);
     // The editor's view stands in for Play's Camera2D + window stretch.
     //
     // ⚠️ It MUST reuse the same `z` and `offset_*` the grid was drawn with

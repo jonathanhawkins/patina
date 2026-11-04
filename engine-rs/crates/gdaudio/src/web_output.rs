@@ -236,6 +236,11 @@ impl AudioOutputStream for WebAudioOutput {
     fn channels(&self) -> u16 {
         self.channels
     }
+
+    /// Fed at the mix rate; resamples to the context rate itself.
+    fn input_sample_rate(&self) -> u32 {
+        self.mix_rate
+    }
 }
 
 /// A clonable handle to ONE [`WebAudioOutput`], so the mixer side and the
@@ -351,6 +356,10 @@ impl AudioOutputStream for SharedWebAudioOutput {
 
     fn channels(&self) -> u16 {
         self.channels
+    }
+
+    fn input_sample_rate(&self) -> u32 {
+        self.with(|o| o.mix_rate)
     }
 }
 

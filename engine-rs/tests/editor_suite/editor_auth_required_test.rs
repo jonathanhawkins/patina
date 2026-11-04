@@ -143,9 +143,12 @@ fn valid_bearer_token_returns_200_on_every_api_endpoint() {
 
     for (method, path) in API_PROBES {
         let code = probe(port, method, path, Some("super-secret"));
-        assert_eq!(
-            code, 200,
-            "{method} {path} should accept valid Bearer token, got HTTP {code}"
+        // AUTHENTICATION passed = not 401/403. The handler then answers on its
+        // own terms: `POST /api/undo` with an empty history is a legitimate
+        // 400 "nothing to undo", which this used to read as an auth failure.
+        assert!(
+            code != 401 && code != 403 && code != 0,
+            "{method} {path} should accept a valid Bearer token, got HTTP {code}"
         );
     }
     handle.stop();

@@ -1,94 +1,18 @@
 //! Integration tests for Windows platform layer with Win32 windowing backend.
 //!
-//! Covers ClassDB registration, DPI awareness, taskbar integration,
+//! Covers DPI awareness, taskbar integration,
 //! theme detection, overlay icons, and the headless windowing backend.
 
-use gdobject::class_db;
 use gdplatform::window::WindowConfig;
 use gdplatform::windows::{
     DpiAwarenessMode, TaskbarProgressState, WindowsDisplayInfo, WindowsPlatformLayer, WindowsTheme,
 };
 
-// ── ClassDB Registration ─────────────────────────────────────────────────────
 
-#[test]
-fn classdb_windows_platform_layer_exists() {
-    class_db::register_3d_classes();
-    assert!(class_db::class_exists("WindowsPlatformLayer"));
-}
-
-#[test]
-fn classdb_windows_platform_layer_inherits_object() {
-    class_db::register_3d_classes();
-    let info = class_db::get_class_info("WindowsPlatformLayer").unwrap();
-    assert_eq!(info.parent_class, "Object");
-}
-
-#[test]
-fn classdb_has_dpi_properties() {
-    class_db::register_3d_classes();
-    let props = class_db::get_property_list("WindowsPlatformLayer");
-    assert!(props.iter().any(|p| p.name == "dpi_awareness"));
-    assert!(props.iter().any(|p| p.name == "system_dpi"));
-    assert!(props.iter().any(|p| p.name == "scale_factor"));
-}
-
-#[test]
-fn classdb_has_display_properties() {
-    class_db::register_3d_classes();
-    let props = class_db::get_property_list("WindowsPlatformLayer");
-    assert!(props.iter().any(|p| p.name == "dwm_compositing"));
-    assert!(props.iter().any(|p| p.name == "theme"));
-}
-
-#[test]
-fn classdb_has_taskbar_methods() {
-    class_db::register_3d_classes();
-    assert!(class_db::class_has_method(
-        "WindowsPlatformLayer",
-        "set_taskbar_progress"
-    ));
-    assert!(class_db::class_has_method(
-        "WindowsPlatformLayer",
-        "flash_taskbar"
-    ));
-    assert!(class_db::class_has_method(
-        "WindowsPlatformLayer",
-        "set_overlay_icon"
-    ));
-    assert!(class_db::class_has_method(
-        "WindowsPlatformLayer",
-        "clear_overlay_icon"
-    ));
-}
-
-#[test]
-fn classdb_has_dpi_methods() {
-    class_db::register_3d_classes();
-    assert!(class_db::class_has_method(
-        "WindowsPlatformLayer",
-        "set_dpi_awareness"
-    ));
-    assert!(class_db::class_has_method(
-        "WindowsPlatformLayer",
-        "get_dpi_awareness"
-    ));
-}
-
-#[test]
-fn classdb_has_theme_and_foreground_methods() {
-    class_db::register_3d_classes();
-    assert!(class_db::class_has_method(
-        "WindowsPlatformLayer",
-        "set_system_theme"
-    ));
-    assert!(class_db::class_has_method(
-        "WindowsPlatformLayer",
-        "is_foreground"
-    ));
-}
-
-// ── DpiAwarenessMode ─────────────────────────────────────────────────────────
+// The Windows/Linux "platform layer" ClassDB tests were removed 2026-11-03:
+// they asserted Patina-invented classes (`WindowsPlatformLayer`,
+// `LinuxPlatformLayer`) that Godot does not have. The backends below are
+// Rust modules, not scripting API.
 
 #[test]
 fn dpi_awareness_names() {

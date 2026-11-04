@@ -103,11 +103,21 @@ pub fn resolve_import_artifact(source_path: &Path) -> EngineResult<Option<PathBu
     })?;
     let artifact = resolve_res_path(&project_root, remap_path)?;
     if !artifact.exists() {
-        return Err(EngineError::NotFound(format!(
-            "imported artifact not found: {} (referenced by {})",
+        // 🔑 Not imported YET — load the source. `.godot/` is never committed,
+        // so every fresh clone of a Godot project has sidecars naming
+        // artifacts that do not exist; Godot's EditorFileSystem treats that as
+        // "needs (re)import" and imports from the source. This used to be a
+        // hard error, so every `.webp`/`.ogg`/... asset of a cloned project
+        // failed to load (PNG only survived through the texture cache's own
+        // direct decode): the official 2D Platformer demo drew every prop as a
+        // white box. An exported game has no source either, so it still fails
+        // — at the source read, with the source's path.
+        tracing::debug!(
+            "import artifact {} (from {}) not present; loading the source",
             artifact.display(),
             sidecar.display()
-        )));
+        );
+        return Ok(None);
     }
     Ok(Some(artifact))
 }
@@ -2781,20 +2791,26 @@ antialiased=true
     }
 
     #[test]
-    fn import_remap_missing_artifact_errors() {
+    fn import_remap_missing_artifact_loads_the_source() {
+        // A fresh clone: the sidecar names a `.godot/imported` artifact that was
+        // never generated. Godot reimports from the source, so the source loads.
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path();
-        std::fs::create_dir_all(root.join(".godot")).unwrap();
+        std::fs::write(root.join("project.godot"), "config_version=5\n").unwrap();
         let png = root.join("icon.png");
-        std::fs::write(&png, b"src").unwrap();
+        std::fs::write(&png, tiny_red_png()).unwrap();
         std::fs::write(
             root.join("icon.png.import"),
             "[remap]\npath=\"res://.godot/imported/missing.ctex\"\n",
         )
         .unwrap();
+        let res = import_image(&png).expect("the source loads when the artifact is absent");
+        assert_eq!(res.get_property("has_pixel_data"), Some(&Variant::Bool(true)));
 
-        let err = import_image(&png).unwrap_err().to_string();
-        assert!(err.contains("not found"), "got: {err}");
+        // With an undecodable source as well, it is still an error — about the
+        // source, since that is what was read.
+        std::fs::write(&png, b"not a png").unwrap();
+        assert!(import_image(&png).is_err());
     }
 
     #[test]

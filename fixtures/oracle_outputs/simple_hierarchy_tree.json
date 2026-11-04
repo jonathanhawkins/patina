@@ -1,15 +1,6 @@
 {
 	"children": [
 		{
-			"children": [],
-			"class": "Node",
-			"groups": [],
-			"name": "Oracle",
-			"owner": "",
-			"path": "/root/Oracle",
-			"script": "res://oracle_autoload.gd"
-		},
-		{
 			"children": [
 				{
 					"children": [
@@ -43,8 +34,7 @@
 			],
 			"name": "Root",
 			"owner": "/root",
-			"path": "/root/Root",
-			"script": "res://scripts/hierarchy_test.gd"
+			"path": "/root/Root"
 		}
 	],
 	"class": "Window",

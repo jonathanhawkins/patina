@@ -222,9 +222,14 @@ pub fn picker_layout(rect: Rect2, edit_alpha: bool) -> PickerLayout {
         Vector2::new(rect.position.x + sv_w + BAR_GAP, rect.position.y),
         Vector2::new(HUE_BAR_W.min(rect.size.x), body_h),
     );
+    // Anchored to the rect's BOTTOM edge. At any size with room this is the
+    // same y as `body_h + BAR_GAP`; it differs only when the rect is shorter
+    // than bar + gap, where the old `top + body_h + BAR_GAP` (body_h clamped
+    // to 0) pushed the bar BAR_GAP px below the control — so a too-short
+    // picker caught presses aimed at whatever sits under it.
     let alpha = if edit_alpha && alpha_h > 0.0 {
         Some(Rect2::new(
-            Vector2::new(rect.position.x, rect.position.y + body_h + BAR_GAP),
+            Vector2::new(rect.position.x, rect.position.y + rect.size.y - alpha_h),
             Vector2::new(rect.size.x, alpha_h),
         ))
     } else {

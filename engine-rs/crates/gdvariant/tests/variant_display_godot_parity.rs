@@ -30,7 +30,7 @@ fn containers_print_their_elements() {
     d.insert("a".to_string(), Variant::Vector2(Vector2::new(1.0, 2.0)));
     assert_eq!(
         Variant::Dictionary(d.into()).to_string(),
-        "{ \"a\": (1, 2) }",
+        "{ \"a\": (1.0, 2.0) }",
         "a Dictionary pads its braces and quotes string keys"
     );
 
@@ -38,7 +38,7 @@ fn containers_print_their_elements() {
     let mut inner = Dictionary::new();
     inner.insert("a".to_string(), Variant::Vector2(Vector2::new(1.0, 2.0)));
     let nested = Variant::Array(vec![Variant::Int(1), Variant::Dictionary(inner.into())].into());
-    assert_eq!(nested.to_string(), "[1, { \"a\": (1, 2) }]");
+    assert_eq!(nested.to_string(), "[1, { \"a\": (1.0, 2.0) }]");
 
     // Packed arrays print elements too, not a length placeholder.
     assert_eq!(
@@ -47,42 +47,47 @@ fn containers_print_their_elements() {
     );
     assert_eq!(
         Variant::PackedVector2Array(vec![Vector2::new(1.0, 2.0)]).to_string(),
-        "[(1, 2)]"
+        "[(1.0, 2.0)]"
     );
 }
 
+// ⚠️ Float components print WITH `.0`: Godot's `Vector2/3::operator String`
+// use `String::num_real(x, true)` (core/math/vector2.cpp:210), whose `true`
+// keeps a trailing `.0` on whole numbers. This file asserted `(1, 2)` — the
+// Godot 3 form. Exceptions, also upstream's: Plane's `D` uses
+// `num_real(d, false)` and Color uses `String::num(r, 4)` (no `.0`).
 #[test]
 fn matrix_types_label_their_columns() {
     assert_eq!(
         Variant::Transform2D(Transform2D::IDENTITY).to_string(),
-        "[X: (1, 0), Y: (0, 1), O: (0, 0)]"
+        "[X: (1.0, 0.0), Y: (0.0, 1.0), O: (0.0, 0.0)]"
     );
     assert_eq!(
         Variant::Basis(Basis::IDENTITY).to_string(),
-        "[X: (1, 0, 0), Y: (0, 1, 0), Z: (0, 0, 1)]"
+        "[X: (1.0, 0.0, 0.0), Y: (0.0, 1.0, 0.0), Z: (0.0, 0.0, 1.0)]"
     );
     assert_eq!(
         Variant::Transform3D(Transform3D::IDENTITY).to_string(),
-        "[X: (1, 0, 0), Y: (0, 1, 0), Z: (0, 0, 1), O: (0, 0, 0)]"
+        "[X: (1.0, 0.0, 0.0), Y: (0.0, 1.0, 0.0), Z: (0.0, 0.0, 1.0), O: (0.0, 0.0, 0.0)]"
     );
 }
 
 #[test]
 fn rect_and_shape_types_use_p_s_labels() {
     let r = Rect2::new(Vector2::new(1.0, 2.0), Vector2::new(3.0, 4.0));
-    assert_eq!(Variant::Rect2(r).to_string(), "[P: (1, 2), S: (3, 4)]");
+    assert_eq!(Variant::Rect2(r).to_string(), "[P: (1.0, 2.0), S: (3.0, 4.0)]");
 
     let aabb = Aabb::new(Vector3::new(1.0, 2.0, 3.0), Vector3::new(4.0, 5.0, 6.0));
     assert_eq!(
         Variant::Aabb(aabb).to_string(),
-        "[P: (1, 2, 3), S: (4, 5, 6)]"
+        "[P: (1.0, 2.0, 3.0), S: (4.0, 5.0, 6.0)]"
     );
 
     let plane = Plane {
         normal: Vector3::new(0.0, 1.0, 0.0),
         d: 5.0,
     };
-    assert_eq!(Variant::Plane(plane).to_string(), "[N: (0, 1, 0), D: 5]");
+    assert_eq!(Variant::Plane(plane).to_string(), "[N: (0.0, 1.0, 0.0), D: 5]");
 }
 
 #[test]
@@ -91,11 +96,11 @@ fn scalar_and_vector_shapes_are_bare_tuples() {
     // `Vector2(1, 2)`; the constructor text belongs to `var_to_str`, not print.
     assert_eq!(
         Variant::Vector2(Vector2::new(1.0, 2.0)).to_string(),
-        "(1, 2)"
+        "(1.0, 2.0)"
     );
     assert_eq!(
         Variant::Vector3(Vector3::new(1.0, 2.0, 3.0)).to_string(),
-        "(1, 2, 3)"
+        "(1.0, 2.0, 3.0)"
     );
     assert_eq!(
         Variant::Color(Color::new(1.0, 0.5, 0.0, 1.0)).to_string(),

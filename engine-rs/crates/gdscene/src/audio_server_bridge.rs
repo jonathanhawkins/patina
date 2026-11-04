@@ -19,7 +19,7 @@ use gdaudio::spatial::{
     doppler_pitch_scale, AttenuationModel, AudioListener3D, AudioStreamPlayer2D as Spatial2D,
     AudioStreamPlayer3D as Spatial3D, DopplerTracking,
 };
-use gdaudio::{mix_and_write, AudioBuffer, AudioServer, AudioStreamPlayer, PlaybackId};
+use gdaudio::{mix_and_write_gain, AudioBuffer, AudioServer, AudioStreamPlayer, PlaybackId};
 use gdcore::math::{Vector2, Vector3};
 use gdvariant::Variant;
 
@@ -93,6 +93,10 @@ impl PlayerKind {
 }
 
 /// Runtime audio driver owned by the main loop.
+/// How much audio a real device's queue is kept topped up to (seconds): above
+/// the output's prebuffer, so a frame that stalls this long is still covered.
+pub const DEVICE_QUEUE_TARGET_SECS: f64 = 0.08;
+
 pub struct AudioServerBridge {
     server: AudioServer,
     importer: AudioStreamLoader,
@@ -114,6 +118,9 @@ pub struct AudioServerBridge {
     /// Nodes already visited once (autoplay fires on first sight).
     seen: HashSet<NodeId>,
     output: Option<Box<dyn AudioOutputStream>>,
+    /// The host's mute (the editor's Game-view mute button): the attached
+    /// output receives silence while the mix runs on unchanged.
+    output_muted: bool,
     /// Base directory for resolving `res://` stream paths.
     base_dir: Option<PathBuf>,
     /// Fractional output frames carried between process calls.
@@ -193,6 +200,7 @@ impl AudioServerBridge {
             extra_voices: HashMap::new(),
             seen: HashSet::new(),
             output: None,
+            output_muted: false,
             base_dir: None,
             frame_accumulator: 0.0,
             last_mix: Vec::new(),
@@ -276,8 +284,43 @@ impl AudioServerBridge {
 
     /// Attaches a device/output stream; mixed frames are written to it
     /// instead of being retained in [`last_mix`](Self::last_mix).
+    ///
+    /// 🔑 The server ADOPTS the output's sample rate and channel count. Godot's
+    /// mix rate is the rate the driver actually opened (`AudioDriver::
+    /// get_mix_rate`); the project's `audio/driver/mix_rate` is only a request.
+    /// Mixing at the project's 44100 into a 48000 Hz device made the device
+    /// consume ~9% more frames than the game produced: the queue ran dry
+    /// every few frames (silence gaps — crackle on continuous music) and every
+    /// stream played ~9% sharp.
     pub fn attach_output(&mut self, output: Box<dyn AudioOutputStream>) {
+        let rate = output.input_sample_rate();
+        if rate > 0 {
+            self.server.set_output_sample_rate(rate);
+        }
+        let channels = output.channels();
+        if channels > 0 {
+            self.server.set_output_channels(channels);
+        }
+        self.frame_accumulator = 0.0;
         self.output = Some(output);
+    }
+
+    /// Whether an output device is attached (audio actually leaves the
+    /// process, rather than only being mixed into [`last_mix`](Self::last_mix)).
+    pub fn has_output(&self) -> bool {
+        self.output.is_some()
+    }
+
+    /// Silences (or restores) what reaches the attached output without
+    /// touching the mix or the game's own bus state. See
+    /// [`gdaudio::mix_and_write_gain`].
+    pub fn set_output_muted(&mut self, muted: bool) {
+        self.output_muted = muted;
+    }
+
+    /// Whether [`set_output_muted`](Self::set_output_muted) is in effect.
+    pub fn output_muted(&self) -> bool {
+        self.output_muted
     }
 
     /// Sets the project base directory used to resolve `res://` paths.
@@ -490,9 +533,30 @@ impl AudioServerBridge {
         }
 
         // Mix this frame's worth of output.
-        self.frame_accumulator += delta * f64::from(self.server.output_sample_rate());
-        let frames = self.frame_accumulator as usize;
-        self.frame_accumulator -= frames as f64;
+        //
+        // 🔑 For a real device, how much to mix is decided by the DEVICE: top
+        // its queue back up to `DEVICE_QUEUE_TARGET_SECS`. Mixing a fixed
+        // `delta * rate` per game frame paced production by the GAME's clock
+        // while the device consumed on its own; any drift or a jittery frame
+        // let the queue run dry — measured on Dodge the Creeps' music: 25
+        // underruns in 12 s, each a ~50 ms hole. Godot has no such gap because
+        // its driver PULLS the mix; topping up to a target is the push-model
+        // equivalent, and a stall now only matters if it outlasts the queue.
+        let rate = self.server.output_sample_rate();
+        let frames = match self.output.as_ref().and_then(|o| o.queued_frames()) {
+            Some(queued) => {
+                let target = (DEVICE_QUEUE_TARGET_SECS * f64::from(rate)) as usize;
+                // At most a quarter second per frame, so a long stall does not
+                // produce one enormous block.
+                target.saturating_sub(queued).min(rate as usize / 4)
+            }
+            None => {
+                self.frame_accumulator += delta * f64::from(rate);
+                let frames = self.frame_accumulator as usize;
+                self.frame_accumulator -= frames as f64;
+                frames
+            }
+        };
         // Generated audio has to reach the server BEFORE the mix below, or it
         // lands one frame late — audible as latency that grows with block size.
         for id in &player_ids {
@@ -501,7 +565,8 @@ impl AudioServerBridge {
 
         if frames > 0 {
             if let Some(output) = self.output.as_mut() {
-                mix_and_write(&mut self.server, output.as_mut(), frames);
+                let gain = if self.output_muted { 0.0 } else { 1.0 };
+                mix_and_write_gain(&mut self.server, output.as_mut(), frames, gain);
             } else {
                 self.last_mix = self.server.mix(frames);
             }
@@ -1020,14 +1085,36 @@ impl AudioServerBridge {
             }
         }
 
-        // Both computed BEFORE the `&mut self.players` borrow below:
-        // `resolve_stream_path` takes `&self`, which cannot coexist with it.
         let stream_key = stream_spec.identity();
+        let prev_stream_key = self.stream_keys.get(&id).cloned();
+        // Load the stream whenever the node names a DIFFERENT one than the
+        // buffer the player holds — not merely on first sight.
+        //
+        // 🔑 `player.stream = preload(...)` and an animation audio key
+        // switching clips both arrive on a node the bridge has already seen, so
+        // a first-sight-only load left the original buffer playing for the rest
+        // of the run (pat-mgixk.5).
+        let has_stream = self.players.get(&id).is_some_and(|p| p.has_stream());
+        let needs_load = !stream_key.is_empty()
+            && match &prev_stream_key {
+                // Never loaded for this node. A buffer injected straight onto
+                // the player (`set_stream_buffer`) still wins over the path the
+                // scene names, exactly as before.
+                None => !has_stream,
+                // Loaded before: only a genuinely different stream reloads.
+                Some(prev) => prev != &stream_key,
+            };
+        // Resolved only when a load will actually happen, and BEFORE the
+        // `&mut self.players` borrow below (`resolve_stream_path` takes `&self`).
+        //
+        // ⚠️ This used to run on EVERY frame for EVERY player — an ancestor
+        // walk of filesystem probes plus a `.import` parse — and when the
+        // sidecar's artifact was missing (any project cloned without its
+        // `.godot/` cache) it logged a warning per player per frame.
         let resolved_path = match &stream_spec {
-            StreamSpec::Path(raw) => Some(self.resolve_stream_path(raw)),
+            StreamSpec::Path(raw) if needs_load => Some(self.resolve_stream_path(raw)),
             _ => None,
         };
-        let prev_stream_key = self.stream_keys.get(&id).cloned();
 
         let player = self
             .players
@@ -1036,22 +1123,6 @@ impl AudioServerBridge {
         player.set_bus(bus);
         player.set_volume_db(volume_db);
 
-        // Load the stream whenever the node names a DIFFERENT one than the
-        // buffer the player holds — not merely on first sight.
-        //
-        // 🔑 `player.stream = preload(...)` and an animation audio key
-        // switching clips both arrive on a node the bridge has already seen, so
-        // a first-sight-only load left the original buffer playing for the rest
-        // of the run (pat-mgixk.5).
-        let needs_load = !stream_key.is_empty()
-            && match &prev_stream_key {
-                // Never loaded for this node. A buffer injected straight onto
-                // the player (`set_stream_buffer`) still wins over the path the
-                // scene names, exactly as before.
-                None => !player.has_stream(),
-                // Loaded before: only a genuinely different stream reloads.
-                Some(prev) => prev != &stream_key,
-            };
         // Remembered even when the load is skipped or fails: otherwise an
         // injected buffer (or a bad path) would leave the node with no
         // identity, and the NEXT assignment would look like the first one.

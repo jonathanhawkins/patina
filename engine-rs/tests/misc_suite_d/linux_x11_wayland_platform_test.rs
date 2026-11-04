@@ -1,85 +1,18 @@
 //! Integration tests for Linux X11 and Wayland platform backends.
 //!
-//! Covers ClassDB registration, display protocol detection, desktop environment
+//! Covers display protocol detection, desktop environment
 //! detection, compositing, IME, cursor theming, and headless backend.
 
-use gdobject::class_db;
 use gdplatform::linux::{
     LinuxDesktopEnvironment, LinuxDisplayInfo, LinuxDisplayProtocol, LinuxPlatformLayer,
 };
 use gdplatform::window::WindowConfig;
 
-// ── ClassDB Registration ─────────────────────────────────────────────────────
 
-#[test]
-fn classdb_linux_platform_layer_exists() {
-    class_db::register_3d_classes();
-    assert!(class_db::class_exists("LinuxPlatformLayer"));
-}
-
-#[test]
-fn classdb_linux_platform_layer_inherits_object() {
-    class_db::register_3d_classes();
-    let info = class_db::get_class_info("LinuxPlatformLayer").unwrap();
-    assert_eq!(info.parent_class, "Object");
-}
-
-#[test]
-fn classdb_has_display_properties() {
-    class_db::register_3d_classes();
-    let props = class_db::get_property_list("LinuxPlatformLayer");
-    assert!(props.iter().any(|p| p.name == "display_protocol"));
-    assert!(props.iter().any(|p| p.name == "scale_factor"));
-    assert!(props.iter().any(|p| p.name == "compositing_enabled"));
-    assert!(props.iter().any(|p| p.name == "ime_enabled"));
-    assert!(props.iter().any(|p| p.name == "cursor_size"));
-}
-
-#[test]
-fn classdb_has_protocol_methods() {
-    class_db::register_3d_classes();
-    assert!(class_db::class_has_method("LinuxPlatformLayer", "is_x11"));
-    assert!(class_db::class_has_method(
-        "LinuxPlatformLayer",
-        "is_wayland"
-    ));
-    assert!(class_db::class_has_method(
-        "LinuxPlatformLayer",
-        "is_headless"
-    ));
-}
-
-#[test]
-fn classdb_has_capability_methods() {
-    class_db::register_3d_classes();
-    assert!(class_db::class_has_method(
-        "LinuxPlatformLayer",
-        "supports_window_positioning"
-    ));
-    assert!(class_db::class_has_method(
-        "LinuxPlatformLayer",
-        "supports_global_shortcuts"
-    ));
-    assert!(class_db::class_has_method(
-        "LinuxPlatformLayer",
-        "has_system_tray"
-    ));
-}
-
-#[test]
-fn classdb_has_cursor_methods() {
-    class_db::register_3d_classes();
-    assert!(class_db::class_has_method(
-        "LinuxPlatformLayer",
-        "set_cursor_theme"
-    ));
-    assert!(class_db::class_has_method(
-        "LinuxPlatformLayer",
-        "get_cursor_theme"
-    ));
-}
-
-// ── LinuxDisplayProtocol ─────────────────────────────────────────────────────
+// The Windows/Linux "platform layer" ClassDB tests were removed 2026-11-03:
+// they asserted Patina-invented classes (`WindowsPlatformLayer`,
+// `LinuxPlatformLayer`) that Godot does not have. The backends below are
+// Rust modules, not scripting API.
 
 #[test]
 fn display_protocol_names() {

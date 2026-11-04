@@ -43,7 +43,6 @@ const WIDTH: u32 = 640;
 const HEIGHT: u32 = 480;
 const FRAME_COUNT: u64 = 120;
 const DT: f32 = 1.0 / 60.0;
-const GRAVITY: f32 = 980.0;
 const PLAYER_SPEED: f32 = 200.0;
 const JUMP_IMPULSE: f32 = -400.0;
 const COLLECT_RADIUS: f32 = 30.0;
@@ -289,7 +288,11 @@ fn run_platformer() -> PlatformerResult {
                 jump_sfx.play();
             }
 
-            player.apply_force(Vector2::new(0.0, GRAVITY));
+            // No manual gravity force: `PhysicsWorld2D` applies the space's
+            // default gravity itself (Godot's 980 px/s² down,
+            // physics/2d/default_gravity). Adding GRAVITY here on top made the
+            // player fall at double gravity, so it never reached the
+            // collectible or landed back near its start.
         }
 
         physics.step(DT);

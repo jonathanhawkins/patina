@@ -55,27 +55,42 @@ fn await_parses_as_stmt() {
     assert!(matches!(stmts[0], gdscript_interop::Stmt::Await { .. }));
 }
 
+// Godot's OPCODE_AWAIT (modules/gdscript/gdscript_vm.cpp): a value that is not
+// a Signal (and not a GDScriptFunctionState) does NOT suspend — the VM writes
+// the value itself into the await's target and continues, printing nothing.
+// These tests used to assert a "coroutines not fully supported" warning from
+// the pre-coroutine stub; that warning was removed when await became real
+// (pat-nzgdu.6) and Godot never printed one.
+
 #[test]
-fn await_emits_warning() {
+fn await_on_a_non_signal_prints_nothing() {
     let output = run_output("await null\n");
-    assert_eq!(output.len(), 1);
-    assert!(output[0].contains("coroutines not fully supported"));
+    assert!(output.is_empty(), "{output:?}");
 }
 
 #[test]
 fn await_evaluates_expression() {
-    // await evaluates its expression, just emits a warning
     let output = run_output("await print(\"hello\")\n");
-    assert_eq!(output.len(), 2);
-    assert_eq!(output[0], "hello"); // print was called
-    assert!(output[1].contains("await")); // warning
+    assert_eq!(output, vec!["hello".to_string()]);
 }
 
 #[test]
 fn await_with_member_access() {
-    // Should parse and execute without panic
     let output = run_output("var x = null\nawait x\n");
-    assert!(output[0].contains("coroutines not fully supported"));
+    assert!(output.is_empty(), "{output:?}");
+}
+
+#[test]
+fn await_on_a_non_signal_yields_the_value_itself() {
+    // `*target = result` in OPCODE_AWAIT: the awaited value, not Nil.
+    assert_eq!(run_val("var v = await 5\nreturn v\n"), Variant::Int(5));
+    let src = "\
+func helper():
+    return 7
+var v = await helper()
+return v
+";
+    assert_eq!(run_val(src), Variant::Int(7));
 }
 
 #[test]
@@ -87,7 +102,7 @@ func do_stuff():
 return do_stuff()
 ";
     let (output, val) = run(src);
-    assert!(output[0].contains("await"));
+    assert!(output.is_empty(), "{output:?}");
     assert_eq!(val.unwrap(), Variant::Int(42));
 }
 

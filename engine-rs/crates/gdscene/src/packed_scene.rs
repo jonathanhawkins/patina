@@ -83,6 +83,14 @@ struct NodeTemplate {
     /// `res://` path from `instance_placeholder="..."` — the sub-scene is
     /// deferred (a placeholder stands in) rather than instanced on load.
     instance_placeholder: Option<String>,
+    /// Whether the header carried `type=`. Godot omits it exactly when the
+    /// node's class is defined in ANOTHER file: an `instance=` node, or an
+    /// override entry for a node inside an instanced/inherited scene. Such a
+    /// node must not be seeded with `Node`'s ClassDB defaults, because when the
+    /// sub-scene is expanded onto it those seeded values would be
+    /// indistinguishable from authored overrides and would beat the
+    /// sub-scene's own values.
+    has_type: bool,
 }
 
 /// An external resource reference parsed from `[ext_resource]` sections.
@@ -275,17 +283,25 @@ impl PackedScene {
         // multiple lines; we accumulate until the brackets balance, then parse.
         let mut pending_prop: Option<(String, String)> = None;
 
-        for (line_num, line) in source.lines().enumerate() {
+        for (line_num, raw_line) in source.lines().enumerate() {
             let _line_num = line_num + 1; // 1-based, for error reporting
-            let line = line.trim();
+            let line = raw_line.trim();
 
             // Continue accumulating a multi-line property value from a prior line.
             if let Some((key, mut acc)) = pending_prop.take() {
-                if !acc.is_empty() {
-                    acc.push(' ');
+                if gdresource::loader::ends_inside_string(&acc) {
+                    // A newline INSIDE a string literal (`text = "Dodge the`
+                    // / `Creeps"`): the line is the string's own text, so it is
+                    // joined by the newline it contains and kept verbatim.
+                    acc.push('\n');
+                    acc.push_str(raw_line);
+                } else {
+                    if !acc.is_empty() {
+                        acc.push(' ');
+                    }
+                    acc.push_str(line);
                 }
-                acc.push_str(line);
-                if bracket_depth(&acc) > 0 {
+                if gdresource::loader::value_continues(&acc) {
                     // Still unbalanced — keep reading subsequent lines.
                     pending_prop = Some((key, acc));
                 } else if let Some(ref mut tmpl) = current {
@@ -405,6 +421,7 @@ impl PackedScene {
                         (false, raw_name)
                     };
 
+                    let has_type = attrs.contains_key("type");
                     let class_name = attrs.get("type").cloned().unwrap_or_else(|| "Node".into());
                     let parent_path = attrs.get("parent").cloned();
 
@@ -430,6 +447,7 @@ impl PackedScene {
                         instance,
                         script_path: None,
                         instance_placeholder,
+                        has_type,
                     });
                 } else if inner.starts_with("ext_resource") {
                     let attrs = extract_header_attrs(inner);
@@ -476,6 +494,30 @@ impl PackedScene {
                             if let Some(entry) = ext_resources.get(&ext_id) {
                                 tmpl.script_path = Some(entry.path.clone());
                             }
+                            // Godot applies a node's stored properties IN FILE
+                            // ORDER (packed_scene.cpp `SceneState::instantiate`):
+                            // a script variable authored ABOVE `script = …` is set
+                            // on the script-less node, is not a property of its
+                            // class, and is dropped — the variable keeps its
+                            // initializer. Record those keys so the script
+                            // replay (`SceneTree::attach_script`) skips them.
+                            // Godot's own saver always writes `script` first, so
+                            // this only fires for hand-ordered files.
+                            let before: Vec<Variant> = tmpl
+                                .properties
+                                .keys()
+                                .filter(|k| !k.starts_with('_'))
+                                .filter(|k| {
+                                    !gdobject::class_db::class_has_property(&tmpl.class_name, k)
+                                })
+                                .map(|k| Variant::String(k.clone()))
+                                .collect();
+                            if !before.is_empty() {
+                                tmpl.properties.insert(
+                                    PROPS_BEFORE_SCRIPT_KEY.to_string(),
+                                    Variant::Array(before.into()),
+                                );
+                            }
                         }
                         // Store the raw reference as a string property too.
                         tmpl.properties
@@ -486,7 +528,7 @@ impl PackedScene {
                     // A value that opens more brackets/braces than it closes on
                     // this line continues onto following lines (e.g. a GridMap
                     // `data = {` dictionary). Buffer it until the brackets balance.
-                    if bracket_depth(value_str) > 0 {
+                    if gdresource::loader::value_continues(value_str) {
                         pending_prop = Some((key.to_string(), value_str.to_string()));
                         continue;
                     }
@@ -512,7 +554,7 @@ impl PackedScene {
                     // Container values continue onto following lines, exactly as
                     // for node properties above (Animation `tracks/N/keys`,
                     // AnimationLibrary `_data`).
-                    if bracket_depth(value_str) > 0 {
+                    if gdresource::loader::value_continues(value_str) {
                         pending_prop = Some((key.to_string(), value_str.to_string()));
                         continue;
                     }
@@ -640,6 +682,13 @@ impl PackedScene {
                             tmpl.properties.insert(
                                 "__shortcut__events".to_string(),
                                 Variant::PackedInt32Array(pairs),
+                            );
+                        }
+                        let actions = shortcut_actions(&sub_resource_props, sub_id);
+                        if !actions.is_empty() {
+                            tmpl.properties.insert(
+                                crate::shortcut::SHORTCUT_ACTIONS_KEY.to_string(),
+                                Variant::PackedStringArray(actions),
                             );
                         }
                     }
@@ -2102,175 +2151,43 @@ impl PackedScene {
         // The declared `tile_set` property keeps its `SubResource:<id>` value.
         for tmpl in &mut templates {
             // Owned: the inserts below take `tmpl.properties` mutably, so the
-            // id cannot stay borrowed out of it.
-            let set_id = match tmpl.properties.get("tile_set") {
-                Some(Variant::String(raw)) => match raw.strip_prefix("SubResource:") {
-                    Some(id) => id.to_string(),
-                    None => continue,
-                },
+            // reference cannot stay borrowed out of it.
+            let raw = match tmpl.properties.get("tile_set") {
+                Some(Variant::String(raw)) => raw.clone(),
                 _ => continue,
             };
-            let Some(set_props) = sub_resource_props.get(&set_id) else {
-                continue;
-            };
-
-            // `TileSet.tile_size` is the map's cell size. Godot omits it when it
-            // is the 16x16 default, so an absent property is not "no tile set".
-            let tile_size = match set_props.get("tile_size") {
-                Some(Variant::Vector2i(v)) => *v,
-                Some(Variant::Vector2(v)) => gdcore::math::Vector2i::new(v.x as i32, v.y as i32),
-                _ => gdcore::math::Vector2i::new(16, 16),
-            };
-            tmpl.properties.insert(
-                format!("{TILE_SET_PREFIX}tile_size"),
-                Variant::Vector2i(tile_size),
-            );
-
-            // Godot names custom data layers on the TILESET
-            // (`custom_data_layer_<i>/name`, tile_set.cpp:4211) and refers to
-            // them per tile by INDEX (`custom_data_<i>`, :6848). Patina's
-            // companions are keyed by NAME, so the index -> name map has to be
-            // built here, before any source is walked.
-            //
-            // ⚠️ Densely numbered from 0 like every Godot array property, so
-            // stop at the first gap rather than scanning an arbitrary range.
-            let mut custom_data_layers: Vec<String> = Vec::new();
-            // Godot also declares each layer's Variant TYPE
-            // (`custom_data_layer_<i>/type`). Carried through verbatim so a
-            // round trip does not silently strip it: values are still copied
-            // as authored, and nothing is ever inferred — a layer the file
-            // typed keeps its type, a layer it did not stays untyped (-1).
-            let mut custom_data_types: Vec<i32> = Vec::new();
-            for index in 0.. {
-                match set_props.get(&format!("custom_data_layer_{index}/name")) {
-                    Some(Variant::String(name)) if !name.is_empty() => {
-                        custom_data_layers.push(name.clone());
-                        custom_data_types.push(
-                            match set_props.get(&format!("custom_data_layer_{index}/type")) {
-                                Some(Variant::Int(t)) => *t as i32,
-                                _ => -1,
-                            },
-                        );
-                    }
-                    _ => break,
-                }
-            }
-            if !custom_data_layers.is_empty() {
-                tmpl.properties.insert(
-                    crate::tilemap::TILE_CUSTOM_DATA_LAYERS.to_string(),
-                    Variant::PackedStringArray(custom_data_layers.clone()),
+            if let Some(set_id) = raw.strip_prefix("SubResource:") {
+                let Some(set_props) = sub_resource_props.get(set_id) else {
+                    continue;
+                };
+                let set_props = set_props.clone();
+                flatten_tile_set_into(
+                    &mut tmpl.properties,
+                    &set_props,
+                    &sub_resource_props,
+                    &ext_resources,
                 );
-                // Only when the file actually typed something. An all `-1`
-                // array would be indistinguishable from an editor-authored
-                // TileSet and would make the saver emit nothing anyway, so
-                // omitting it keeps the companion set minimal.
-                if custom_data_types.iter().any(|t| *t >= 0) {
-                    tmpl.properties.insert(
-                        crate::tilemap::TILE_CUSTOM_DATA_TYPES.to_string(),
-                        Variant::PackedInt32Array(custom_data_types),
+            } else if let Some(path) = parse_ext_resource_ref(&raw)
+                .and_then(|id| ext_resources.get(&id))
+                .map(|e| e.path.clone())
+            {
+                // `tile_set = ExtResource("1")` — a TileSet saved as its own
+                // `.tres`, which is how real projects keep one (the official 2D
+                // Platformer demo does). Only the SubResource form used to be
+                // flattened, so such a TileMapLayer drew nothing and collided
+                // with nothing: the player fell through the level forever.
+                // The `.tres` is read with this same parser, so its
+                // `sources/<id>` sub-resources and textures resolve against
+                // ITS OWN tables, exactly as an inline tile set's do.
+                if let Some(tres) = read_tile_set_tres(&path) {
+                    flatten_tile_set_into(
+                        &mut tmpl.properties,
+                        &tres.set_props,
+                        &tres.sub_resource_props,
+                        &tres.ext_resources,
                     );
                 }
             }
-
-            let mut source_ids: Vec<i32> = Vec::new();
-            let mut physics_source_ids: Vec<i32> = Vec::new();
-            let mut nav_source_ids: Vec<i32> = Vec::new();
-            let mut occl_source_ids: Vec<i32> = Vec::new();
-            for (key, value) in set_props {
-                // `sources/3 = SubResource("TileSetAtlasSource_x")`
-                let Some(id_str) = key.strip_prefix("sources/") else {
-                    continue;
-                };
-                let Ok(source_id) = id_str.trim().parse::<i32>() else {
-                    continue;
-                };
-                let Variant::String(source_ref) = value else {
-                    continue;
-                };
-                let Some(source_sub) = source_ref.strip_prefix("SubResource:") else {
-                    continue;
-                };
-                let Some(source_props) = sub_resource_props.get(source_sub) else {
-                    continue;
-                };
-                source_ids.push(source_id);
-
-                let prefix = format!("{TILE_SET_PREFIX}source_{source_id}_");
-                // `texture = ExtResource("id")` — resolve to the real path, the
-                // same value a Sprite2D's `texture` ends up holding.
-                if let Some(Variant::String(tex)) = source_props.get("texture") {
-                    let path = tex
-                        .strip_prefix("ExtResource:")
-                        .and_then(|id| ext_resources.get(id).map(|e| e.path.clone()))
-                        .unwrap_or_else(|| tex.clone());
-                    tmpl.properties
-                        .insert(format!("{prefix}texture"), Variant::String(path));
-                }
-                for key in ["texture_region_size", "margins", "separation"] {
-                    if let Some(value) = source_props.get(key) {
-                        tmpl.properties
-                            .insert(format!("{prefix}{key}"), value.clone());
-                    }
-                }
-
-                // Per-tile collision (pat-0q2kx.117). A real TileSetAtlasSource
-                // writes one key per tile per physics layer:
-                //   `<ax>:<ay>/<alt>/physics_layer_0/polygon_0/points`
-                //   `<ax>:<ay>/<alt>/physics_layer_0/polygon_0/one_way`
-                // Flattened onto the node the physics server can build the
-                // tile's static bodies from the tree alone, exactly as
-                // `__shape__*` lets it build a CollisionShape2D's body.
-                collect_tile_custom_data(
-                    source_id,
-                    source_props,
-                    &custom_data_layers,
-                    &mut tmpl.properties,
-                );
-                if collect_tile_physics(source_id, source_props, &mut tmpl.properties) {
-                    physics_source_ids.push(source_id);
-                }
-                if collect_tile_navigation(
-                    source_id,
-                    source_props,
-                    &sub_resource_props,
-                    tile_size,
-                    &mut tmpl.properties,
-                ) {
-                    nav_source_ids.push(source_id);
-                }
-                if collect_tile_occlusion(
-                    source_id,
-                    source_props,
-                    &sub_resource_props,
-                    tile_size,
-                    &mut tmpl.properties,
-                ) {
-                    occl_source_ids.push(source_id);
-                }
-            }
-            source_ids.sort_unstable();
-            tmpl.properties.insert(
-                format!("{TILE_SET_PREFIX}source_ids"),
-                Variant::PackedInt32Array(source_ids),
-            );
-            physics_source_ids.sort_unstable();
-            physics_source_ids.dedup();
-            tmpl.properties.insert(
-                crate::tilemap::TILE_PHYSICS_SOURCES.to_string(),
-                Variant::PackedInt32Array(physics_source_ids),
-            );
-            nav_source_ids.sort_unstable();
-            nav_source_ids.dedup();
-            tmpl.properties.insert(
-                crate::tilemap::TILE_NAV_SOURCES.to_string(),
-                Variant::PackedInt32Array(nav_source_ids),
-            );
-            occl_source_ids.sort_unstable();
-            occl_source_ids.dedup();
-            tmpl.properties.insert(
-                crate::tilemap::TILE_OCCLUDER_SOURCES.to_string(),
-                Variant::PackedInt32Array(occl_source_ids),
-            );
         }
 
         if templates.is_empty() {
@@ -2331,10 +2248,8 @@ impl PackedScene {
         let mut path_to_index: HashMap<String, usize> = HashMap::new();
 
         // Create root node.
-        let mut root_node = node_with_class_defaults(&root_tmpl.name, &root_tmpl.class_name);
-        for (key, value) in &root_tmpl.properties {
-            root_node.set_property(key, instance_value(value));
-        }
+        let mut root_node = template_node(root_tmpl);
+        apply_template_properties(&mut root_node, root_tmpl);
         for group in &root_tmpl.groups {
             root_node.add_to_group(group.clone());
         }
@@ -2367,10 +2282,8 @@ impl PackedScene {
                 ))
             })?;
 
-            let mut node = node_with_class_defaults(&tmpl.name, &tmpl.class_name);
-            for (key, value) in &tmpl.properties {
-                node.set_property(key, instance_value(value));
-            }
+            let mut node = template_node(tmpl);
+            apply_template_properties(&mut node, tmpl);
             for group in &tmpl.groups {
                 node.add_to_group(group.clone());
             }
@@ -2468,6 +2381,34 @@ impl PackedScene {
     where
         F: Fn(&str) -> Option<PackedScene>,
     {
+        let mut levels = Vec::new();
+        let (mut nodes, own) = self.instance_levels(resolve_scene, &mut levels)?;
+        apply_level_owners(&mut nodes, &levels, &own);
+        Ok(nodes)
+    }
+
+    /// [`instance_with_subscenes`](Self::instance_with_subscenes), also
+    /// reporting every sub-scene LEVEL it flattened into the node list.
+    ///
+    /// Returns the nodes plus the indices THIS scene's own templates created;
+    /// each instanced (or inherited) sub-scene is pushed onto `levels`, inner
+    /// levels before outer ones, with its indices into the returned list.
+    ///
+    /// 🔑 The flat list alone loses which scene each node came from, and with
+    /// it everything a scene carries besides nodes: its `[connection]`s (paths
+    /// are relative to THAT scene's root) and its scene-local `SubResource`
+    /// ids. Without the levels, a sub-scene's own signal wiring — a Player's
+    /// `body_entered`, a HUD button's `pressed` — was silently dropped whenever
+    /// a scene reached it through `instance=`.
+    fn instance_levels<F>(
+        &self,
+        resolve_scene: &F,
+        levels: &mut Vec<SceneLevel>,
+    ) -> EngineResult<(Vec<Node>, Vec<usize>)>
+    where
+        F: Fn(&str) -> Option<PackedScene>,
+    {
+        let mut own: Vec<usize> = Vec::new();
         if self.templates.is_empty() {
             return Err(EngineError::InvalidOperation(
                 "packed scene has no nodes".into(),
@@ -2505,7 +2446,15 @@ impl PackedScene {
             .and_then(|path| resolve_scene(path));
 
         if let Some(base) = inherited_base {
-            let base_nodes = base.instance_with_subscenes(resolve_scene)?;
+            let mut base_levels = Vec::new();
+            let (base_nodes, base_own) = base.instance_levels(resolve_scene, &mut base_levels)?;
+            levels.extend(base_levels);
+            // The base's nodes come first, so its indices need no offset.
+            levels.push(SceneLevel {
+                scene: base,
+                root: 0,
+                own: base_own,
+            });
             if base_nodes.is_empty() {
                 return Err(EngineError::InvalidOperation(
                     "inherited base scene produced no nodes".into(),
@@ -2514,9 +2463,7 @@ impl PackedScene {
             nodes = base_nodes;
             // The derived scene names the root and diffs its properties on top.
             nodes[0].set_name(&root_tmpl.name);
-            for (key, value) in &root_tmpl.properties {
-                nodes[0].set_property(key, instance_value(value));
-            }
+            apply_template_properties(&mut nodes[0], root_tmpl);
             for group in &root_tmpl.groups {
                 nodes[0].add_to_group(group.clone());
             }
@@ -2531,10 +2478,8 @@ impl PackedScene {
             // finds them instead of creating a duplicate.
             Self::map_root_child_paths(&nodes, &mut path_to_index);
         } else {
-            let mut root_node = node_with_class_defaults(&root_tmpl.name, &root_tmpl.class_name);
-            for (key, value) in &root_tmpl.properties {
-                root_node.set_property(key, instance_value(value));
-            }
+            let mut root_node = template_node(root_tmpl);
+            apply_template_properties(&mut root_node, root_tmpl);
             for group in &root_tmpl.groups {
                 root_node.add_to_group(group.clone());
             }
@@ -2545,6 +2490,7 @@ impl PackedScene {
             path_to_index.insert(".".into(), 0);
             path_to_index.insert(root_tmpl.name.clone(), 0);
             nodes.push(root_node);
+            own.push(0);
         }
         let root_id = nodes[0].id();
 
@@ -2562,7 +2508,9 @@ impl PackedScene {
                 if let Some(scene_path) = self.resolve_ext_resource_path(inst_ref) {
                     if let Some(sub_scene) = resolve_scene(scene_path) {
                         // Recursively instance the sub-scene.
-                        let sub_nodes = sub_scene.instance_with_subscenes(resolve_scene)?;
+                        let mut sub_levels = Vec::new();
+                        let (sub_nodes, sub_own) =
+                            sub_scene.instance_levels(resolve_scene, &mut sub_levels)?;
                         if sub_nodes.is_empty() {
                             continue;
                         }
@@ -2571,6 +2519,19 @@ impl PackedScene {
                         // Apply overrides: rename to template name, apply
                         // template properties on top.
                         let sub_root_idx = nodes.len();
+                        levels.extend(
+                            sub_levels
+                                .into_iter()
+                                .map(|level| level.offset_by(sub_root_idx)),
+                        );
+                        levels.push(
+                            SceneLevel {
+                                scene: sub_scene,
+                                root: 0,
+                                own: sub_own,
+                            }
+                            .offset_by(sub_root_idx),
+                        );
                         let node_path = if parent_path == "." {
                             tmpl.name.clone()
                         } else {
@@ -2582,9 +2543,7 @@ impl PackedScene {
                                 // Override name from parent scene's template.
                                 sub_node.set_name(&tmpl.name);
                                 // Apply property overrides from parent scene.
-                                for (key, value) in &tmpl.properties {
-                                    sub_node.set_property(key, instance_value(value));
-                                }
+                                apply_template_properties(&mut sub_node, tmpl);
                                 for group in &tmpl.groups {
                                     sub_node.add_to_group(group.clone());
                                 }
@@ -2628,9 +2587,7 @@ impl PackedScene {
             // the real instanced child kept its base values (pat-0q2kx.139).
             if let Some(&existing_idx) = path_to_index.get(&node_path) {
                 let existing = &mut nodes[existing_idx];
-                for (key, value) in &tmpl.properties {
-                    existing.set_property(key, instance_value(value));
-                }
+                apply_template_properties(existing, tmpl);
                 for group in &tmpl.groups {
                     existing.add_to_group(group.clone());
                 }
@@ -2678,15 +2635,14 @@ impl PackedScene {
                 path_to_index.insert(node_path, nodes.len());
                 node.set_parent(Some(nodes[parent_idx].id()));
                 nodes[parent_idx].add_child_id(child_id);
+                own.push(nodes.len());
                 nodes.push(node);
                 continue;
             }
 
             // Regular (non-instanced) node.
-            let mut node = node_with_class_defaults(&tmpl.name, &tmpl.class_name);
-            for (key, value) in &tmpl.properties {
-                node.set_property(key, instance_value(value));
-            }
+            let mut node = template_node(tmpl);
+            apply_template_properties(&mut node, tmpl);
             for group in &tmpl.groups {
                 node.add_to_group(group.clone());
             }
@@ -2710,10 +2666,11 @@ impl PackedScene {
             node.set_parent(Some(nodes[parent_idx].id()));
             nodes[parent_idx].add_child_id(child_id);
 
+            own.push(child_idx);
             nodes.push(node);
         }
 
-        Ok(nodes)
+        Ok((nodes, own))
     }
 
     /// Maps every descendant of node 0 by the *bare* path a template uses.
@@ -2758,6 +2715,43 @@ impl PackedScene {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// The node a template starts from before its authored properties apply:
+/// ClassDB-seeded for a typed `[node]`, BARE for a typeless one (an `instance=`
+/// node or an override entry), whose real class lives in another file — see
+/// [`NodeTemplate::has_type`].
+fn template_node(tmpl: &NodeTemplate) -> Node {
+    if tmpl.has_type {
+        node_with_class_defaults(&tmpl.name, &tmpl.class_name)
+    } else {
+        Node::new(&tmpl.name, &tmpl.class_name)
+    }
+}
+
+/// Applies a template's authored properties over its (seeded) node.
+///
+/// 🔑 A `.tscn` 3D node stores only `transform = Transform3D(..)`; Godot's
+/// `position`/`rotation`/`scale` are views of that one `local_transform`
+/// (`scene/3d/node_3d.cpp`). Patina keeps them as separate keys, and ClassDB
+/// seeding writes `position = ZERO` etc. BEFORE the authored values — so a node
+/// authored at (5,6,7) answered `get_position()` with ZERO while
+/// `get_local_transform()` said (5,6,7). When the template authors the
+/// transform and none of its component views, every view is refreshed from it.
+fn apply_template_properties(node: &mut Node, tmpl: &NodeTemplate) {
+    for (key, value) in &tmpl.properties {
+        node.set_property(key, instance_value(value));
+    }
+    const VIEWS: &[&str] = &["position", "rotation", "rotation_degrees", "scale", "basis", "quaternion"];
+    let authored_view = tmpl.properties.iter().any(|(k, _)| VIEWS.contains(&k.as_str()));
+    if authored_view {
+        return;
+    }
+    if let Variant::Transform3D(t) = node.get_property("transform") {
+        if tmpl.properties.iter().any(|(k, _)| k == "transform") {
+            crate::node3d::store_local_transform(node, t);
+        }
+    }
+}
 
 /// Builds a scene node the way Godot instantiates one: through ClassDB, so the
 /// class's registered defaults are already in the property bag before the
@@ -3151,6 +3145,55 @@ fn collect_tile_navigation(
     true
 }
 
+/// Flattens each ALTERNATIVE tile's orientation — `<ax>:<ay>/<alt>/flip_h`,
+/// `flip_v`, `transpose` — into one bit mask per alternative
+/// ([`crate::tilemap::tile_alternative_flags_key`]). Godot draws a cell
+/// painted with alternative N using that tile's flags
+/// (`TileMapLayer::draw_tile`); without them a flipped edge piece drew facing
+/// the wrong way. Alternative 0 is the unflipped default and is skipped.
+fn collect_tile_alternative_flags(
+    source_id: i32,
+    source_props: &HashMap<String, Variant>,
+    out: &mut HashMap<String, Variant>,
+) {
+    for (key, value) in source_props {
+        let Some((coords, rest)) = key.split_once('/') else {
+            continue;
+        };
+        let Some((alt, field)) = rest.split_once('/') else {
+            continue;
+        };
+        let bit = match field {
+            "flip_h" => crate::tilemap::TILE_FLIP_H,
+            "flip_v" => crate::tilemap::TILE_FLIP_V,
+            "transpose" => crate::tilemap::TILE_TRANSPOSE,
+            _ => continue,
+        };
+        if !matches!(value, Variant::Bool(true)) {
+            continue;
+        }
+        let (Some((ax, ay)), Ok(alt)) = (coords.split_once(':'), alt.trim().parse::<i32>()) else {
+            continue;
+        };
+        let (Ok(ax), Ok(ay)) = (ax.trim().parse::<i32>(), ay.trim().parse::<i32>()) else {
+            continue;
+        };
+        if alt == 0 {
+            continue;
+        }
+        let k = crate::tilemap::tile_alternative_flags_key(
+            source_id,
+            gdcore::math::Vector2i::new(ax, ay),
+            alt,
+        );
+        let mask = match out.get(&k) {
+            Some(Variant::Int(m)) => *m,
+            _ => 0,
+        } | bit;
+        out.insert(k, Variant::Int(mask));
+    }
+}
+
 fn collect_tile_physics(
     source_id: i32,
     source_props: &HashMap<String, Variant>,
@@ -3168,12 +3211,18 @@ fn collect_tile_physics(
         let (Ok(ax), Ok(ay)) = (ax.trim().parse::<i32>(), ay.trim().parse::<i32>()) else {
             continue;
         };
-        // `rest` is `<alt>/physics_layer_<n>/polygon_<m>/<field>`; the
-        // alternative id is dropped because only the default tile (alt 0) can
-        // be painted through `tile_map_data` today.
-        let Some((_alt, layer_rest)) = rest.split_once('/') else {
+        // `rest` is `<alt>/physics_layer_<n>/polygon_<m>/<field>`.
+        //
+        // ⚠️ The alternative id used to be DROPPED here, so every alternative
+        // of a tile wrote the SAME key and whichever `HashMap` iteration
+        // visited last won. In the official 2D Platformer demo's TileSet the
+        // `flip_v` alternative's box sits 10 px off the default's, so a floor
+        // could collide 10 px off — differently from run to run. Alternative
+        // 0 keeps the base key; every other alternative gets its own.
+        let Some((alt, layer_rest)) = rest.split_once('/') else {
             continue;
         };
+        let alt: i32 = alt.trim().parse().unwrap_or(0);
         if !layer_rest.starts_with("physics_layer_") {
             continue;
         }
@@ -3196,13 +3245,17 @@ fn collect_tile_physics(
                 _ => continue,
             };
             if points.len() >= 3 {
-                out.insert(
-                    crate::tilemap::tile_physics_points_key(source_id, atlas),
-                    Variant::PackedVector2Array(points),
-                );
+                let key = if alt == 0 {
+                    crate::tilemap::tile_physics_points_key(source_id, atlas)
+                } else {
+                    crate::tilemap::tile_physics_points_alt_key(source_id, atlas, alt)
+                };
+                out.insert(key, Variant::PackedVector2Array(points));
                 any = true;
             }
-        } else if layer_rest.ends_with("/polygon_0/one_way") {
+        } else if alt == 0 && layer_rest.ends_with("/polygon_0/one_way") {
+            // The default tile's flag only, for the same reason as above: a
+            // shared key fed by every alternative is decided by hash order.
             let one_way =
                 matches!(value, Variant::Bool(true)) || matches!(value, Variant::Int(i) if *i != 0);
             out.insert(
@@ -3241,38 +3294,6 @@ fn encode_shape_marker(ty: &str, props: Option<&HashMap<String, Variant>>) -> St
         }
         _ => format!("shape:{ty}"),
     }
-}
-
-/// Net bracket depth of `s`: `([{` count as `+1`, `)]}` as `-1`, ignoring any
-/// characters inside double-quoted strings. A positive result means the value
-/// opens more containers than it closes, i.e. it continues on a later line
-/// (used to stitch multi-line `.tscn` property values such as a GridMap `data`
-/// dictionary back into a single parseable string).
-fn bracket_depth(s: &str) -> i32 {
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escape = false;
-    for c in s.chars() {
-        if escape {
-            escape = false;
-            continue;
-        }
-        if in_string {
-            match c {
-                '\\' => escape = true,
-                '"' => in_string = false,
-                _ => {}
-            }
-            continue;
-        }
-        match c {
-            '"' => in_string = true,
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth -= 1,
-            _ => {}
-        }
-    }
-    depth
 }
 
 fn parse_groups_attr(raw: &str) -> Vec<String> {
@@ -3485,6 +3506,38 @@ fn shortcut_event_pairs(
         out.push(mods);
     }
     out
+}
+
+/// The actions a Shortcut's `InputEventAction` events name.
+///
+/// Godot's `Shortcut.events` may hold an `InputEventAction` rather than a key —
+/// the official Dodge the Creeps HUD binds its Start button to
+/// `InputEventAction(action = &"start_game")`, so Enter or Space start the
+/// game. [`shortcut_event_pairs`] reads only `keycode`, which an action event
+/// does not have, so such a shortcut flattened to nothing and never fired.
+fn shortcut_actions(
+    sub_props: &HashMap<String, HashMap<String, Variant>>,
+    shortcut_id: &str,
+) -> Vec<String> {
+    let Some(Variant::Array(events)) = sub_props.get(shortcut_id).and_then(|p| p.get("events"))
+    else {
+        return Vec::new();
+    };
+    events
+        .to_vec()
+        .iter()
+        .filter_map(|ev| {
+            let Variant::String(reference) = ev else {
+                return None;
+            };
+            let event = sub_props.get(reference.strip_prefix("SubResource:")?)?;
+            match event.get("action")? {
+                Variant::StringName(s) if !s.as_str().is_empty() => Some(s.as_str().to_string()),
+                Variant::String(s) if !s.is_empty() => Some(s.clone()),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 pub fn add_packed_scene_to_tree(
@@ -3750,6 +3803,646 @@ where
     Ok(root)
 }
 
+thread_local! {
+    /// Scenes [`load_scene_from_res`] has read during the current instancing
+    /// session (`None` = unreadable or cyclic), so a level that instances one
+    /// bullet scene a thousand times parses it once.
+    static SUBSCENE_CACHE: std::cell::RefCell<HashMap<String, Option<PackedScene>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+/// Starts a fresh [`load_scene_from_res`] session: scenes are re-read, so an
+/// edit on disk between two scene changes is seen.
+pub fn begin_subscene_session() {
+    SUBSCENE_CACHE.with(|cache| cache.borrow_mut().clear());
+}
+
+/// The `res://` paths of every scene `scene` instances directly.
+fn instanced_scene_paths(scene: &PackedScene) -> Vec<String> {
+    scene
+        .templates
+        .iter()
+        .filter_map(|t| t.instance.as_deref())
+        .filter_map(|r| scene.resolve_ext_resource_path(r))
+        .map(str::to_string)
+        .collect()
+}
+
+/// An external TileSet `.tres`, parsed into the tables
+/// [`flatten_tile_set_into`] walks.
+struct TileSetTres {
+    /// The `[resource]` section's own properties (the TileSet).
+    set_props: HashMap<String, Variant>,
+    sub_resource_props: HashMap<String, HashMap<String, Variant>>,
+    ext_resources: HashMap<String, ExtResourceEntry>,
+}
+
+/// Reads a TileSet `.tres` through the scene parser: its `[resource]` section
+/// is relabelled as one more sub-resource so every value — `SubResource(..)` /
+/// `ExtResource(..)` references, packed arrays, the `0:0/0/...` tile keys —
+/// parses exactly as it would inline in a `.tscn`.
+fn read_tile_set_tres(path: &str) -> Option<TileSetTres> {
+    const ROOT: &str = "__tres_resource__";
+    let text = match gdcore::file_access::read_from_packs(path) {
+        Some(bytes) => String::from_utf8(bytes).ok()?,
+        None => std::fs::read_to_string(gdcore::resolve_path(path).ok()?).ok()?,
+    };
+    let relabelled: String = text
+        .lines()
+        .map(|line| {
+            if line.trim() == "[resource]" {
+                format!("[sub_resource type=\"TileSet\" id=\"{ROOT}\"]")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    // `from_tscn` requires a node; a placeholder root satisfies it and is
+    // discarded — only the resource tables are kept.
+    let with_root = format!("{relabelled}\n\n[node name=\"{ROOT}\" type=\"Node\"]\n");
+    let mut scene = PackedScene::from_tscn(&with_root).ok()?;
+    let set_props = scene.sub_resource_props.remove(ROOT)?;
+    Some(TileSetTres {
+        set_props,
+        sub_resource_props: scene.sub_resource_props,
+        ext_resources: scene.ext_resources,
+    })
+}
+
+/// Flattens a TileSet (its tile size, custom data layers and every atlas
+/// source's texture, region, per-tile physics, navigation and occlusion) onto
+/// a TileMapLayer node's properties under `__tile_set__*` (pat-0q2kx.108), so
+/// the renderer and physics server can resolve cells from the tree alone.
+/// `sub_resource_props` / `ext_resources` are the tables of the file that
+/// DECLARES the tile set — the scene for an inline one, the `.tres` for an
+/// external one.
+fn flatten_tile_set_into(
+    props: &mut HashMap<String, Variant>,
+    set_props: &HashMap<String, Variant>,
+    sub_resource_props: &HashMap<String, HashMap<String, Variant>>,
+    ext_resources: &HashMap<String, ExtResourceEntry>,
+) {
+    // `TileSet.tile_size` is the map's cell size. Godot omits it when it
+    // is the 16x16 default, so an absent property is not "no tile set".
+    let tile_size = match set_props.get("tile_size") {
+        Some(Variant::Vector2i(v)) => *v,
+        Some(Variant::Vector2(v)) => gdcore::math::Vector2i::new(v.x as i32, v.y as i32),
+        _ => gdcore::math::Vector2i::new(16, 16),
+    };
+    props.insert(
+        format!("{TILE_SET_PREFIX}tile_size"),
+        Variant::Vector2i(tile_size),
+    );
+
+    // Godot names custom data layers on the TILESET
+    // (`custom_data_layer_<i>/name`, tile_set.cpp:4211) and refers to
+    // them per tile by INDEX (`custom_data_<i>`, :6848). Patina's
+    // companions are keyed by NAME, so the index -> name map has to be
+    // built here, before any source is walked.
+    //
+    // ⚠️ Densely numbered from 0 like every Godot array property, so
+    // stop at the first gap rather than scanning an arbitrary range.
+    let mut custom_data_layers: Vec<String> = Vec::new();
+    // Godot also declares each layer's Variant TYPE
+    // (`custom_data_layer_<i>/type`). Carried through verbatim so a
+    // round trip does not silently strip it: values are still copied
+    // as authored, and nothing is ever inferred — a layer the file
+    // typed keeps its type, a layer it did not stays untyped (-1).
+    let mut custom_data_types: Vec<i32> = Vec::new();
+    for index in 0.. {
+        match set_props.get(&format!("custom_data_layer_{index}/name")) {
+            Some(Variant::String(name)) if !name.is_empty() => {
+                custom_data_layers.push(name.clone());
+                custom_data_types.push(
+                    match set_props.get(&format!("custom_data_layer_{index}/type")) {
+                        Some(Variant::Int(t)) => *t as i32,
+                        _ => -1,
+                    },
+                );
+            }
+            _ => break,
+        }
+    }
+    if !custom_data_layers.is_empty() {
+        props.insert(
+            crate::tilemap::TILE_CUSTOM_DATA_LAYERS.to_string(),
+            Variant::PackedStringArray(custom_data_layers.clone()),
+        );
+        // Only when the file actually typed something. An all `-1`
+        // array would be indistinguishable from an editor-authored
+        // TileSet and would make the saver emit nothing anyway, so
+        // omitting it keeps the companion set minimal.
+        if custom_data_types.iter().any(|t| *t >= 0) {
+            props.insert(
+                crate::tilemap::TILE_CUSTOM_DATA_TYPES.to_string(),
+                Variant::PackedInt32Array(custom_data_types),
+            );
+        }
+    }
+
+    // The physics layer's collision bits. Godot defaults both to 1; a TileSet
+    // that moves its tiles to another layer (the official 2D Platformer
+    // demo's tiles are on layer 16, its player masks 30) collided with
+    // NOTHING while every tile body was created on layer 1.
+    for (key, companion) in [
+        ("physics_layer_0/collision_layer", crate::tilemap::TILE_PHYSICS_COLLISION_LAYER),
+        ("physics_layer_0/collision_mask", crate::tilemap::TILE_PHYSICS_COLLISION_MASK),
+    ] {
+        if let Some(Variant::Int(bits)) = set_props.get(key) {
+            props.insert(companion.to_string(), Variant::Int(*bits));
+        }
+    }
+
+    let mut source_ids: Vec<i32> = Vec::new();
+    let mut physics_source_ids: Vec<i32> = Vec::new();
+    let mut nav_source_ids: Vec<i32> = Vec::new();
+    let mut occl_source_ids: Vec<i32> = Vec::new();
+    for (key, value) in set_props {
+        // `sources/3 = SubResource("TileSetAtlasSource_x")`
+        let Some(id_str) = key.strip_prefix("sources/") else {
+            continue;
+        };
+        let Ok(source_id) = id_str.trim().parse::<i32>() else {
+            continue;
+        };
+        let Variant::String(source_ref) = value else {
+            continue;
+        };
+        let Some(source_sub) = source_ref.strip_prefix("SubResource:") else {
+            continue;
+        };
+        let Some(source_props) = sub_resource_props.get(source_sub) else {
+            continue;
+        };
+        source_ids.push(source_id);
+
+        let prefix = format!("{TILE_SET_PREFIX}source_{source_id}_");
+        // `texture = ExtResource("id")` — resolve to the real path, the
+        // same value a Sprite2D's `texture` ends up holding.
+        if let Some(Variant::String(tex)) = source_props.get("texture") {
+            let path = tex
+                .strip_prefix("ExtResource:")
+                .and_then(|id| ext_resources.get(id).map(|e| e.path.clone()))
+                .unwrap_or_else(|| tex.clone());
+            props
+                .insert(format!("{prefix}texture"), Variant::String(path));
+        }
+        for key in ["texture_region_size", "margins", "separation"] {
+            if let Some(value) = source_props.get(key) {
+                props
+                    .insert(format!("{prefix}{key}"), value.clone());
+            }
+        }
+
+        // Per-tile collision (pat-0q2kx.117). A real TileSetAtlasSource
+        // writes one key per tile per physics layer:
+        //   `<ax>:<ay>/<alt>/physics_layer_0/polygon_0/points`
+        //   `<ax>:<ay>/<alt>/physics_layer_0/polygon_0/one_way`
+        // Flattened onto the node the physics server can build the
+        // tile's static bodies from the tree alone, exactly as
+        // `__shape__*` lets it build a CollisionShape2D's body.
+        collect_tile_custom_data(
+            source_id,
+            source_props,
+            &custom_data_layers,
+            props,
+        );
+        collect_tile_alternative_flags(source_id, source_props, props);
+        if collect_tile_physics(source_id, source_props, props) {
+            physics_source_ids.push(source_id);
+        }
+        if collect_tile_navigation(
+            source_id,
+            source_props,
+            sub_resource_props,
+            tile_size,
+            props,
+        ) {
+            nav_source_ids.push(source_id);
+        }
+        if collect_tile_occlusion(
+            source_id,
+            source_props,
+            sub_resource_props,
+            tile_size,
+            props,
+        ) {
+            occl_source_ids.push(source_id);
+        }
+    }
+    source_ids.sort_unstable();
+    props.insert(
+        format!("{TILE_SET_PREFIX}source_ids"),
+        Variant::PackedInt32Array(source_ids),
+    );
+    physics_source_ids.sort_unstable();
+    physics_source_ids.dedup();
+    props.insert(
+        crate::tilemap::TILE_PHYSICS_SOURCES.to_string(),
+        Variant::PackedInt32Array(physics_source_ids),
+    );
+    nav_source_ids.sort_unstable();
+    nav_source_ids.dedup();
+    props.insert(
+        crate::tilemap::TILE_NAV_SOURCES.to_string(),
+        Variant::PackedInt32Array(nav_source_ids),
+    );
+    occl_source_ids.sort_unstable();
+    occl_source_ids.dedup();
+    props.insert(
+        crate::tilemap::TILE_OCCLUDER_SOURCES.to_string(),
+        Variant::PackedInt32Array(occl_source_ids),
+    );
+}
+
+fn read_scene_file(path: &str) -> Option<PackedScene> {
+    let text = match gdcore::file_access::read_from_packs(path) {
+        Some(bytes) => String::from_utf8(bytes).ok()?,
+        None => std::fs::read_to_string(gdcore::resolve_path(path).ok()?).ok()?,
+    };
+    PackedScene::from_tscn(&text).ok()
+}
+
+/// Whether `scene` (loaded from `path`) reaches `path` again through its chain
+/// of instances. Godot refuses such a scene as a cyclic instance; instancing it
+/// would recurse until the stack overflowed.
+fn instances_itself(path: &str, scene: &PackedScene) -> bool {
+    let mut pending = instanced_scene_paths(scene);
+    let mut seen = std::collections::HashSet::new();
+    while let Some(next) = pending.pop() {
+        if next == path {
+            return true;
+        }
+        if !seen.insert(next.clone()) {
+            continue;
+        }
+        if let Some(sub) = read_scene_file(&next) {
+            pending.extend(instanced_scene_paths(&sub));
+        }
+    }
+    false
+}
+
+/// Loads a `.tscn` by Godot path, for expanding `instance=ExtResource(..)`
+/// nodes at runtime: mounted packs first (an exported game), then the file
+/// under the configured `res://` root. `None` when it cannot be read or parsed,
+/// or when it instances itself (directly or through other scenes) — a
+/// non-cyclic instance graph is at most as deep as it has distinct files, so
+/// the recursion this feeds always terminates.
+pub fn load_scene_from_res(path: &str) -> Option<PackedScene> {
+    if let Some(cached) = SUBSCENE_CACHE.with(|cache| cache.borrow().get(path).cloned()) {
+        return cached;
+    }
+    let loaded = read_scene_file(path).filter(|scene| {
+        let cyclic = instances_itself(path, scene);
+        if cyclic {
+            tracing::warn!("{path} instances itself; refusing the cyclic instance");
+        }
+        !cyclic
+    });
+    SUBSCENE_CACHE.with(|cache| cache.borrow_mut().insert(path.to_string(), loaded.clone()));
+    loaded
+}
+
+/// One scene reached while flattening `instance=`/inherited sub-scenes: the
+/// `PackedScene` itself, where its root landed in the flat node list, and the
+/// nodes its own templates created. See [`PackedScene::instance_levels`].
+struct SceneLevel {
+    scene: PackedScene,
+    root: usize,
+    own: Vec<usize>,
+}
+
+impl SceneLevel {
+    fn offset_by(mut self, by: usize) -> Self {
+        self.root += by;
+        for idx in &mut self.own {
+            *idx += by;
+        }
+        self
+    }
+}
+
+/// Where [`mount_packed_scene`] puts a scene's root.
+#[derive(Clone, Copy)]
+enum MountPoint {
+    /// A new node, added as the last child of this parent.
+    Under(crate::node::NodeId),
+    /// Into this EXISTING node — an `instance=` placeholder that a plain
+    /// [`add_packed_scene_to_tree`] left childless. It keeps its id, so every
+    /// signal already wired to it survives, and its own (authored) property
+    /// values win over the sub-scene's.
+    Into(crate::node::NodeId),
+    /// A new node with NO parent: the whole scene is built in the arena but
+    /// outside the tree, so nothing enters or readies until the caller
+    /// `add_child`s the finished root — Godot's `instantiate()` followed by
+    /// one `add_child`.
+    Detached,
+}
+
+/// Instances `scene` with every `instance=`/inherited sub-scene expanded, and
+/// gives EACH scene level what a scene brings besides nodes: its connections
+/// (resolved relative to that level's own root), its AnimationPlayers and
+/// AnimationTrees, and its local-to-scene resources — each pass over just the
+/// nodes that level created, because `SubResource` ids are scene-local.
+fn mount_packed_scene<F>(
+    tree: &mut crate::scene_tree::SceneTree,
+    at: MountPoint,
+    scene: &PackedScene,
+    resolve_scene: &F,
+) -> EngineResult<crate::node::NodeId>
+where
+    F: Fn(&str) -> Option<PackedScene>,
+{
+    use crate::node::NodeId;
+
+    let mut levels = Vec::new();
+    let (nodes, own) = scene.instance_levels(resolve_scene, &mut levels)?;
+    if nodes.is_empty() {
+        return Err(EngineError::InvalidOperation(
+            "instanced scene produced no nodes".into(),
+        ));
+    }
+
+    // Copies a detached template node into a fresh tree node. Fresh rather
+    // than moved: the flat node's child-id list points into the flat list.
+    fn fresh_copy(node: &Node) -> Node {
+        let mut copy = Node::new(node.name(), node.class_name());
+        for (key, value) in node.properties() {
+            copy.set_property(key, value.clone());
+        }
+        for group in node.groups() {
+            copy.add_to_group(group.clone());
+        }
+        copy.set_unique_name(node.is_unique_name());
+        copy
+    }
+
+    // Folds a sub-scene node into the node that already stands at its path —
+    // the placeholder, or the outer scene's override entry for it. The class
+    // comes from the sub-scene (the existing node is typeless); every value the
+    // existing node already holds was authored by the outer scene (or edited
+    // in the editor), so it wins.
+    fn merge_into(tree: &mut crate::scene_tree::SceneTree, target: NodeId, src: &Node) {
+        let Some(existing) = tree.get_node_mut(target) else {
+            return;
+        };
+        existing.set_class_name(src.class_name());
+        for (key, value) in src.properties() {
+            if !existing.has_property(key) {
+                existing.set_property(key, value.clone());
+            }
+        }
+        for group in src.groups() {
+            existing.add_to_group(group.clone());
+        }
+        if src.is_unique_name() {
+            existing.set_unique_name(true);
+        }
+    }
+
+    let mut final_ids: Vec<NodeId> = Vec::with_capacity(nodes.len());
+    let mut old_to_new: HashMap<NodeId, NodeId> = HashMap::new();
+    let root_id = match at {
+        MountPoint::Under(parent) => tree.add_child(parent, fresh_copy(&nodes[0]))?,
+        MountPoint::Detached => tree.insert_detached(fresh_copy(&nodes[0])),
+        MountPoint::Into(target) => {
+            merge_into(tree, target, &nodes[0]);
+            target
+        }
+    };
+    old_to_new.insert(nodes[0].id(), root_id);
+    final_ids.push(root_id);
+
+    // Children each merged parent already had before the sub-scene arrived:
+    // the outer scene's override entries and its own additions.
+    let mut prior_children: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    let is_into = matches!(at, MountPoint::Into(_));
+
+    for node in &nodes[1..] {
+        let old_parent = node.parent().ok_or_else(|| {
+            EngineError::InvalidOperation(format!("instanced node '{}' has no parent", node.name()))
+        })?;
+        let &parent = old_to_new.get(&old_parent).ok_or_else(|| {
+            EngineError::InvalidOperation(format!(
+                "parent for '{}' not yet added to tree",
+                node.name()
+            ))
+        })?;
+
+        let prior = if is_into {
+            prior_children
+                .entry(parent)
+                .or_insert_with(|| {
+                    tree.get_node(parent)
+                        .map(|p| p.children().to_vec())
+                        .unwrap_or_default()
+                })
+                .clone()
+        } else {
+            Vec::new()
+        };
+        let existing = prior.into_iter().find(|&child| {
+            tree.get_node(child).is_some_and(|c| c.name() == node.name())
+        });
+
+        let id = match existing {
+            Some(existing) => {
+                merge_into(tree, existing, node);
+                existing
+            }
+            None => {
+                let mut copy = fresh_copy(node);
+                copy.set_owner(Some(root_id));
+                tree.add_child(parent, copy)?
+            }
+        };
+        old_to_new.insert(node.id(), id);
+        final_ids.push(id);
+    }
+
+    // Godot orders an instance's own children ahead of anything the outer
+    // scene added to it. `add_child` appended the sub-scene's after the outer
+    // ones, so move each merged parent's outer-only children to the end.
+    for (parent, prior) in &prior_children {
+        let sub_children: std::collections::HashSet<NodeId> = final_ids.iter().copied().collect();
+        let outer_only: Vec<NodeId> = prior
+            .iter()
+            .copied()
+            .filter(|child| {
+                // A prior child the sub-scene merged into belongs to the
+                // sub-scene's order; only genuine outer additions move.
+                !sub_children.contains(child)
+            })
+            .collect();
+        for child in outer_only {
+            let last = tree
+                .get_node(*parent)
+                .map(|p| p.children().len().saturating_sub(1))
+                .unwrap_or(0);
+            let _ = tree.move_child(*parent, child, last);
+        }
+    }
+
+    // Godot's ownership: a node is owned by the root of the scene that
+    // declared it, so an instance's inner nodes belong to the INSTANCE root,
+    // not the outermost scene (`%Unique` lookups are scoped by owner). Levels
+    // are inner-first, so an outer level never overwrites an inner choice —
+    // each level only touches the nodes it created itself.
+    // The mounted scene itself last: under `Into`, a node merged into an
+    // outer override entry still carries the OUTER owner until this runs.
+    let top = (0usize, &own);
+    for (root_idx, level_own) in levels.iter().map(|l| (l.root, &l.own)).chain([top]) {
+        let level_root = final_ids[root_idx];
+        for &idx in level_own {
+            let id = final_ids[idx];
+            if id != level_root {
+                if let Some(node) = tree.get_node_mut(id) {
+                    node.set_owner(Some(level_root));
+                }
+            }
+        }
+    }
+
+    // An INSTANCE root is owned by the scene that instanced it — the nearest
+    // enclosing level root (or the mounted scene's root). The loop above skips
+    // each level's own root (`id != level_root`), so a nested instance root kept
+    // the outermost root it was created with: `Sword` (weapon.tscn, instanced by
+    // player.tscn, instanced by world.tscn) was owned by World instead of Hero,
+    // and `%Unique` lookups scoped by owner leaked across scene boundaries.
+    let level_roots: std::collections::HashSet<NodeId> = levels
+        .iter()
+        .map(|l| final_ids[l.root])
+        .chain([root_id])
+        .collect();
+    for level in &levels {
+        let inner = final_ids[level.root];
+        let mut cursor = tree.get_node(inner).and_then(|n| n.parent());
+        while let Some(id) = cursor {
+            if level_roots.contains(&id) {
+                if let Some(node) = tree.get_node_mut(inner) {
+                    node.set_owner(Some(id));
+                }
+                break;
+            }
+            cursor = tree.get_node(id).and_then(|n| n.parent());
+        }
+    }
+
+    // Inner levels first, as Godot wires a sub-scene while instancing it,
+    // before the scene that instanced it.
+    let ids_of = |indices: &[usize]| -> Vec<NodeId> {
+        indices.iter().filter_map(|&i| final_ids.get(i).copied()).collect()
+    };
+    for level in &levels {
+        finish_scene_level(tree, &level.scene, final_ids[level.root], &ids_of(&level.own));
+    }
+    finish_scene_level(tree, scene, root_id, &ids_of(&own));
+
+    // A camera becomes current, and a video player binds, as it ENTERS the
+    // tree; a detached build has not entered yet, so its caller runs these
+    // after attaching (see `finish_attached_scene`).
+    if !matches!(at, MountPoint::Detached) {
+        finish_attached_scene(tree, root_id);
+    }
+    Ok(root_id)
+}
+
+/// The post-entry half of a scene mount: current-camera assignment and video
+/// player binding. Run once the scene root is inside the tree.
+pub fn finish_attached_scene(tree: &mut crate::scene_tree::SceneTree, root_id: crate::node::NodeId) {
+    auto_assign_current_camera(tree, root_id);
+    crate::video_stream::bind_video_players(tree);
+}
+
+/// Builds `scene` (sub-scenes expanded, as
+/// [`add_packed_scene_to_tree_with_subscenes`]) as a DETACHED subtree: in the
+/// arena, parentless, never entered. Godot's `PackedScene::instantiate()`.
+///
+/// 🔑 Assembling a scene under a live parent node-by-node made each `add_child`
+/// enter and ready its node before that node had children, so READY ran
+/// parent-first and every node was entered once per assembly pass. Build here,
+/// prepare (attach scripts), then hand the root to ONE `add_child`: ENTER
+/// top-down then READY bottom-up, exactly once, as `Node::_propagate_*` does.
+/// Finish with [`finish_attached_scene`] after attaching.
+pub fn instance_packed_scene_detached<F>(
+    tree: &mut crate::scene_tree::SceneTree,
+    scene: &PackedScene,
+    resolve_scene: &F,
+) -> EngineResult<crate::node::NodeId>
+where
+    F: Fn(&str) -> Option<PackedScene>,
+{
+    mount_packed_scene(tree, MountPoint::Detached, scene, resolve_scene)
+}
+
+/// Godot's ownership over a FLAT instanced list: each node is owned by the root
+/// of the scene that declared it, and an instance root by the nearest
+/// enclosing scene root. The flat list came back with every node owned by the
+/// outermost root, so a sub-scene's `Sprite` claimed `World` as its owner and
+/// `%Unique` names leaked across scene boundaries. Mirrors the tree-side pass in
+/// `mount_packed_scene`.
+fn apply_level_owners(nodes: &mut [Node], levels: &[SceneLevel], own: &[usize]) {
+    use crate::node::NodeId;
+    if nodes.is_empty() {
+        return;
+    }
+    let ids: Vec<NodeId> = nodes.iter().map(|n| n.id()).collect();
+    let index_of: HashMap<NodeId, usize> = ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+    let top_root = 0usize;
+    for (root_idx, level_own) in levels.iter().map(|l| (l.root, &l.own)).chain([(top_root, &own.to_vec())]) {
+        let owner = ids[root_idx];
+        for &idx in level_own {
+            if idx != root_idx && idx < nodes.len() {
+                nodes[idx].set_owner(Some(owner));
+            }
+        }
+    }
+    let roots: std::collections::HashSet<usize> =
+        levels.iter().map(|l| l.root).chain([top_root]).collect();
+    for level in levels {
+        let mut cursor = nodes[level.root].parent().and_then(|p| index_of.get(&p).copied());
+        while let Some(i) = cursor {
+            if roots.contains(&i) {
+                let owner = ids[i];
+                nodes[level.root].set_owner(Some(owner));
+                break;
+            }
+            cursor = nodes[i].parent().and_then(|p| index_of.get(&p).copied());
+        }
+    }
+}
+
+/// What one scene level brings besides its nodes, applied once its nodes (and
+/// every sub-scene's) are in the tree.
+fn finish_scene_level(
+    tree: &mut crate::scene_tree::SceneTree,
+    scene: &PackedScene,
+    level_root: crate::node::NodeId,
+    own: &[crate::node::NodeId],
+) {
+    wire_connections(tree, level_root, &scene.connections);
+    crate::animation_tscn::attach_scene_animation_players_for(tree, own, scene);
+    crate::animation_tree_tscn::attach_scene_animation_trees_for(tree, own, scene);
+    crate::local_to_scene::setup_local_to_scene_for(tree, scene, own);
+}
+
+/// Adds `scene` under `parent_id` with every `instance=ExtResource(..)` and
+/// inherited base expanded through `resolve_scene`.
+///
+/// This is how Godot's `SceneState::instantiate` builds a scene, and it is what
+/// every RUNTIME load must use. [`add_packed_scene_to_tree`] leaves each
+/// instanced sub-scene as a childless placeholder `Node` — right for the
+/// editor's edited scene, which the saver must write back as `instance=`, and
+/// wrong for a running game: a main scene that instances its Player and HUD
+/// booted without either.
+///
+/// Each sub-scene level is wired with its OWN connections (relative to its own
+/// root) and gets its own AnimationPlayer/AnimationTree/local-to-scene passes.
+/// The previous implementation wired only the top scene's connections, so a
+/// sub-scene's internal signals — a HUD button's `pressed`, a Player's
+/// `body_entered` — never fired.
 pub fn add_packed_scene_to_tree_with_subscenes<F>(
     tree: &mut crate::scene_tree::SceneTree,
     parent_id: crate::node::NodeId,
@@ -3759,75 +4452,98 @@ pub fn add_packed_scene_to_tree_with_subscenes<F>(
 where
     F: Fn(&str) -> Option<PackedScene>,
 {
-    let nodes = scene.instance_with_subscenes(resolve_scene)?;
-    if nodes.is_empty() {
-        return Err(EngineError::InvalidOperation(
-            "instanced scene produced no nodes".into(),
-        ));
-    }
-
-    let mut old_to_new: HashMap<crate::node::NodeId, crate::node::NodeId> = HashMap::new();
-
-    let scene_root = &nodes[0];
-    let mut new_root = Node::new(scene_root.name(), scene_root.class_name());
-    for (key, value) in scene_root.properties() {
-        new_root.set_property(key, value.clone());
-    }
-    for group in scene_root.groups() {
-        new_root.add_to_group(group.clone());
-    }
-    new_root.set_unique_name(scene_root.is_unique_name());
-    let new_root_id = new_root.id();
-    old_to_new.insert(scene_root.id(), new_root_id);
-    tree.add_child(parent_id, new_root)?;
-
-    for node in &nodes[1..] {
-        let old_parent_id = node.parent().ok_or_else(|| {
-            EngineError::InvalidOperation(format!("instanced node '{}' has no parent", node.name()))
-        })?;
-        let &new_parent_id = old_to_new.get(&old_parent_id).ok_or_else(|| {
-            EngineError::InvalidOperation(format!(
-                "parent for '{}' not yet added to tree",
-                node.name()
-            ))
-        })?;
-
-        let mut new_node = Node::new(node.name(), node.class_name());
-        for (key, value) in node.properties() {
-            new_node.set_property(key, value.clone());
-        }
-        for group in node.groups() {
-            new_node.add_to_group(group.clone());
-        }
-        new_node.set_unique_name(node.is_unique_name());
-        new_node.set_owner(Some(new_root_id));
-        let new_node_id = new_node.id();
-        old_to_new.insert(node.id(), new_node_id);
-        tree.add_child(new_parent_id, new_node)?;
-    }
-
-    wire_connections(tree, new_root_id, &scene.connections);
-
-    crate::animation_tscn::attach_scene_animation_players(tree, new_root_id, scene);
-
-    crate::animation_tree_tscn::attach_scene_animation_trees(tree, new_root_id, scene);
-
-    auto_assign_current_camera(tree, new_root_id);
-
-    // The local-to-scene pass, as in `add_packed_scene_to_tree` (pat-mgixk.71).
-    //
-    // ⚠️ Covers THIS scene's own nodes. `instance_with_subscenes` flattens the
-    // sub-scenes into one node list, which discards which `PackedScene` each
-    // node's `__resref__` ids belong to — and those ids are scene-local. So a
-    // sub-resource declared inside a flattened sub-scene is not resolvable from
-    // here and is left alone, rather than resolved against the parent scene's
-    // table where the same id may name something unrelated. Instancing that
-    // sub-scene through `add_packed_scene_to_tree` with its own `PackedScene`
-    // does get the pass.
-    crate::local_to_scene::setup_local_to_scene_in(tree, scene, new_root_id);
-
-    Ok(new_root_id)
+    mount_packed_scene(tree, MountPoint::Under(parent_id), scene, resolve_scene)
 }
+
+/// [`add_packed_scene_to_tree_with_subscenes`] resolving sub-scenes from
+/// `res://` (packs first, then the project root) in a fresh subscene session.
+/// The one call a runtime boot path needs.
+pub fn add_packed_scene_to_tree_from_res(
+    tree: &mut crate::scene_tree::SceneTree,
+    parent_id: crate::node::NodeId,
+    scene: &PackedScene,
+) -> EngineResult<crate::node::NodeId> {
+    begin_subscene_session();
+    add_packed_scene_to_tree_with_subscenes(tree, parent_id, scene, &load_scene_from_res)
+}
+
+/// Property marking an `instance=` placeholder that
+/// [`expand_instance_placeholders`] has already expanded, so a second pass is
+/// a no-op. Runtime-only; the saver never writes it.
+pub const INSTANCE_EXPANDED_KEY: &str = "_instance_expanded";
+
+/// Node property listing the `.tscn` keys authored ABOVE the node's
+/// `script = …` line that its class does not have — values Godot drops because
+/// it sets them before the script exists. Consumed by `SceneTree::attach_script`.
+pub const PROPS_BEFORE_SCRIPT_KEY: &str = "_props_before_script";
+
+/// Expands, in place, every `instance=` placeholder in the subtree at `root`
+/// that a plain [`add_packed_scene_to_tree`] left childless — the shape of the
+/// editor's edited scene. Used to turn a CLONE of that scene into the tree a
+/// game runs (editor Play), which must hold the instanced Player, HUD, enemies.
+///
+/// Each placeholder keeps its `NodeId` (connections already wired to it
+/// survive) and its values (authored overrides and unsaved editor edits win
+/// over the sub-scene's); its existing children — the outer scene's override
+/// entries — merge into the sub-scene's nodes of the same name.
+///
+/// `outer_connections` are the outer scene's connections: any whose endpoint
+/// sits INSIDE an instance could not resolve before expansion and is wired
+/// now. Returns how many placeholders were expanded.
+pub fn expand_instance_placeholders<F>(
+    tree: &mut crate::scene_tree::SceneTree,
+    root: crate::node::NodeId,
+    outer_connections: &[SceneConnection],
+    resolve_scene: &F,
+) -> usize
+where
+    F: Fn(&str) -> Option<PackedScene>,
+{
+    let resolves = |tree: &crate::scene_tree::SceneTree, path: &str| {
+        path == "." || tree.get_node_relative(root, path).is_some()
+    };
+    let unresolved: Vec<SceneConnection> = outer_connections
+        .iter()
+        .filter(|c| !resolves(tree, &c.from_path) || !resolves(tree, &c.to_path))
+        .cloned()
+        .collect();
+
+    let mut ids = Vec::new();
+    tree.collect_subtree_top_down(root, &mut ids);
+    let mut expanded = 0;
+    for id in ids {
+        let path = match tree.get_node(id) {
+            Some(node) if !node.has_property(INSTANCE_EXPANDED_KEY) => {
+                match node.get_property("_instance_path") {
+                    Variant::String(path) => path,
+                    _ => continue,
+                }
+            }
+            _ => continue,
+        };
+        let Some(sub) = resolve_scene(&path) else {
+            tracing::warn!("instanced scene '{path}' could not be loaded; left as a placeholder");
+            continue;
+        };
+        match mount_packed_scene(tree, MountPoint::Into(id), &sub, resolve_scene) {
+            Ok(_) => {
+                if let Some(node) = tree.get_node_mut(id) {
+                    node.set_property(INSTANCE_EXPANDED_KEY, Variant::Bool(true));
+                }
+                expanded += 1;
+            }
+            Err(e) => tracing::warn!("instanced scene '{path}' failed to expand: {e}"),
+        }
+    }
+
+    let now_resolvable: Vec<SceneConnection> = unresolved
+        .into_iter()
+        .filter(|c| resolves(tree, &c.from_path) && resolves(tree, &c.to_path))
+        .collect();
+    wire_connections(tree, root, &now_resolvable);
+    expanded
+}
+
 
 /// Automatically assigns `current = true` to the first Camera3D in the
 /// subtree rooted at `root_id`, if no Camera3D already has `current` set.
@@ -5711,14 +6427,26 @@ position = Vector2(200, 0)
     }
 
     #[test]
-    fn subscene_owner_is_main_scene_root() {
+    fn subscene_owner_is_the_instance_root_not_the_main_scene() {
+        // Godot: a node is owned by the root of the scene that DECLARED it. The
+        // instance root (Player) belongs to World; Player's own Sprite/Hitbox
+        // belong to Player — which is what hides them in the editor's tree and
+        // scopes their `%Unique` names. This test used to assert every node was
+        // owned by World, the flat list's old (wrong) answer.
         let scene = PackedScene::from_tscn(MAIN_WITH_INSTANCE).unwrap();
         let nodes = scene.instance_with_subscenes(&test_scene_resolver).unwrap();
 
-        let root_id = nodes[0].id();
-        assert!(nodes[0].owner().is_none()); // root has no owner
-        for node in &nodes[1..] {
-            assert_eq!(node.owner(), Some(root_id));
+        let world = nodes[0].id();
+        let player = nodes[1].id();
+        assert!(nodes[0].owner().is_none(), "the scene root has no owner");
+        assert_eq!(nodes[1].owner(), Some(world), "the instance root belongs to World");
+        for node in &nodes[2..] {
+            assert_eq!(
+                node.owner(),
+                Some(player),
+                "{} was declared by player.tscn, so Player owns it",
+                node.name()
+            );
         }
     }
 

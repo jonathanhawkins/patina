@@ -302,14 +302,17 @@ fn multi_body_independent_integration() {
         b_initial.y
     );
 
-    // Ball A has no initial Y velocity and gravity is not yet applied to
-    // RigidBody2D by the physics server, so Y should remain unchanged.
+    // Both balls start at y = 0 under the SAME gravity (Godot applies the
+    // space's default 980 px/s² to every RigidBody2D — this used to claim
+    // gravity "is not yet applied"). Integration is independent per body, so
+    // the only difference in y is B's own 60 px/s over the 10 frames: 10 px.
     assert!(
-        approx_eq_f32(a_final.y, a_initial.y),
-        "BallA Y should not change without gravity: {} vs {}",
+        ((b_final.y - a_final.y) - 10.0).abs() < 0.01,
+        "A and B share gravity; B is 10 px further from its own velocity: A={} B={}",
         a_final.y,
-        a_initial.y
+        b_final.y
     );
+    assert!(a_final.y > a_initial.y, "BallA falls under gravity");
 
     // Ball B's X should not change significantly (no X velocity, gravity is vertical).
     assert!(

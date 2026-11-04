@@ -50,6 +50,24 @@ use crate::MainLoop;
 ///
 /// ⚠️ This does NOT seed the script-visible `ProjectSettings` singleton — see
 /// [`seed_script_settings_for_this_thread`] and this module's threading note.
+/// Installs the project's content-scale ("stretch") settings —
+/// `display/window/stretch/*` and the base viewport size — on the root window,
+/// as Godot seeds its root `Window` at boot.
+///
+/// 🔑 Must run BEFORE the main scene enters the tree: `_ready` is where a game
+/// reads `get_viewport_rect().size` (Dodge the Creeps' player clamps its
+/// movement to it), and Godot configures the window before `Main::start`
+/// instantiates anything. The size is left alone — the host owns it (the OS
+/// window, the editor's Game panel) and keeps it current.
+///
+/// Without this, editor Play ran every project with stretching OFF: a
+/// 480×720 `canvas_items` game drew 1:1 in a corner of the Game view, and
+/// only the runner's own bootstrap installed the config.
+pub fn install_root_window(tree: &mut crate::SceneTree, settings: &ProjectSettings) {
+    tree.root_window_mut().config = settings.content_scale_config();
+    tree.publish_root_window_state();
+}
+
 pub fn apply_project_settings(main_loop: &mut MainLoop, settings: &ProjectSettings) {
     gdplatform::os::set_project_name(settings.project_name());
     main_loop.configure_from_project_settings(settings);
@@ -97,15 +115,25 @@ pub fn seed_script_visible_settings(settings: &ProjectSettings, project_root: &P
 /// would look harmless and would quietly undo a script's own
 /// `ProjectSettings.set_setting`, handing back the project's value on the next
 /// frame.
+///
+/// ⚠️ "Once" is per PROJECT, not per thread. Keyed on the thread alone, the
+/// second project booted on a thread — the editor opening another project, a
+/// reload, any host that boots twice — kept the FIRST project's settings, so a
+/// project declaring `physics/2d/default_gravity=123` read back 980. A new
+/// project root resets the store before seeding, so nothing leaks across.
 pub fn seed_script_settings_for_this_thread(settings: &ProjectSettings, project_root: &Path) {
-    use std::cell::Cell;
+    use std::cell::RefCell;
     thread_local! {
-        static SEEDED: Cell<bool> = const { Cell::new(false) };
+        static SEEDED_FOR: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
     }
-    if SEEDED.with(Cell::get) {
+    let already = SEEDED_FOR.with(|s| s.borrow().as_deref() == Some(project_root));
+    if already {
         return;
     }
-    SEEDED.with(|s| s.set(true));
+    let had_other = SEEDED_FOR.with(|s| s.replace(Some(project_root.to_path_buf())).is_some());
+    if had_other {
+        gdscript_interop::interpreter::reset_project_settings();
+    }
 
     // Engine DEFAULTS first, then the project's own values.
     //

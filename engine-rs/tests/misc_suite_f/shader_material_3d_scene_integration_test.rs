@@ -37,18 +37,15 @@ fn classdb_shader_material_has_expected_properties() {
     gdobject::class_db::register_3d_classes();
     let props = gdobject::class_db::get_property_list("ShaderMaterial");
     let names: Vec<&str> = props.iter().map(|p| p.name.as_str()).collect();
-    assert!(
-        names.contains(&"shader_code"),
-        "missing shader_code property"
-    );
-    assert!(
-        names.contains(&"shader_type"),
-        "missing shader_type property"
-    );
-    assert!(
-        names.contains(&"render_mode"),
-        "missing render_mode property"
-    );
+    // Godot's ShaderMaterial declares exactly one member, `shader`
+    // (doc/classes/ShaderMaterial.xml); uniforms surface as `shader_parameter/*`
+    // per shader. This test used to require `shader_code` / `shader_type` /
+    // `render_mode`, which are not ShaderMaterial properties in Godot.
+    assert!(names.contains(&"shader"), "missing shader property: {names:?}");
+    for not_godot in ["shader_code", "shader_type", "render_mode"] {
+        assert!(!names.contains(&not_godot), "{not_godot} is not a Godot property");
+    }
+    assert!(gdobject::class_db::is_parent_class("ShaderMaterial", "Material"));
 }
 
 // ===========================================================================

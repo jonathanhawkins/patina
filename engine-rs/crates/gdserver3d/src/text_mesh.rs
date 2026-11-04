@@ -162,7 +162,11 @@ fn push_tri(
     uvs.push(ua);
     uvs.push(ub);
     uvs.push(uc);
-    indices.extend_from_slice(&[base, base + 1, base + 2]);
+    // Callers pass `a, b, c` counter-clockwise about `normal` (the CCW
+    // triangulation above); stored CLOCKWISE, Godot's front face
+    // (`doc/classes/ArrayMesh.xml:49`), so the cap is not culled from the side
+    // it faces.
+    indices.extend_from_slice(&[base, base + 2, base + 1]);
 }
 
 /// Extrudes a single closed 2D `contour` into a solid [`Mesh3D`].

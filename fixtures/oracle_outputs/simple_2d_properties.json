@@ -27,15 +27,7 @@
 							"name": "CollisionShape",
 							"path": "/root/Level/Player/CollisionShape",
 							"properties": {
-								"shape": {
-									"class_type": "Shape2D",
-									"hint": 17,
-									"type": "Object",
-									"value": {
-										"_resource_class": "CircleShape2D",
-										"_resource_path": "res://real_godot/simple_2d.tscn::CircleShape2D_ghij5"
-									}
-								}
+
 							}
 						},
 						{
@@ -60,27 +52,7 @@
 					"name": "Player",
 					"path": "/root/Level/Player",
 					"properties": {
-						"metadata/jump_force": {
-							"class_type": "",
-							"hint": 0,
-							"type": "float",
-							"value": -450.0
-						},
-						"metadata/move_speed": {
-							"class_type": "",
-							"hint": 0,
-							"type": "float",
-							"value": 300.0
-						},
-						"position": {
-							"class_type": "",
-							"hint": 1,
-							"type": "Vector2",
-							"value": {
-								"x": 100.0,
-								"y": 200.0
-							}
-						}
+
 					}
 				}
 			],

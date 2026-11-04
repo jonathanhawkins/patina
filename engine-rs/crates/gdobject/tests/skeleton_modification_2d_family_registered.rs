@@ -222,7 +222,13 @@ fn the_bound_method_surfaces_match_upstream() {
 #[test]
 fn the_modification_virtuals_are_marked_virtual() {
     register_all_classes();
-    let virtuals: Vec<String> = get_method_list("SkeletonModification2D")
+    // OWN virtuals: `get_method_list` walks the chain, so it also returns
+    // Resource's `_setup_local_to_scene`/`_get_rid`/`_reset_state`/
+    // `_set_path_cache` and Object's virtuals — inherited override points, not
+    // this class's. doc/classes/SkeletonModification2D.xml declares exactly 3.
+    let virtuals: Vec<String> = gdobject::class_db::get_class_info("SkeletonModification2D")
+        .expect("registered")
+        .methods
         .into_iter()
         .filter(|m| m.is_virtual)
         .map(|m| m.name)

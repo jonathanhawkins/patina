@@ -33,7 +33,11 @@ fn rigged_quad() -> Mesh3D {
     ];
     mesh.normals = vec![Vector3::new(0.0, 0.0, 1.0); 4];
     mesh.uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-    mesh.indices = vec![0, 1, 2, 0, 2, 3];
+    // Clockwise as the camera (on +Z, looking down -Z) sees it: Godot's front
+    // face (`doc/classes/ArrayMesh.xml:49`), so CULL_BACK keeps it. The
+    // counter-clockwise `0,1,2 / 0,2,3` only rendered while the cull had the
+    // convention inverted.
+    mesh.indices = vec![0, 2, 1, 0, 3, 2];
     mesh.bone_weights = vec![[1.0, 0.0, 0.0, 0.0]; 4];
     mesh.bone_indices = vec![[0, 0, 0, 0], [0, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0]];
     mesh
@@ -153,7 +157,11 @@ fn four_influence_skinning_renders() {
     ];
     mesh.normals = vec![Vector3::new(0.0, 0.0, 1.0); 4];
     mesh.uvs = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-    mesh.indices = vec![0, 1, 2, 0, 2, 3];
+    // Clockwise as the camera (on +Z, looking down -Z) sees it: Godot's front
+    // face (`doc/classes/ArrayMesh.xml:49`), so CULL_BACK keeps it. The
+    // counter-clockwise `0,1,2 / 0,2,3` only rendered while the cull had the
+    // convention inverted.
+    mesh.indices = vec![0, 2, 1, 0, 3, 2];
     // Every vertex: quarter weight on each of binds 0,1,2,3.
     mesh.bone_weights = vec![[0.25, 0.25, 0.25, 0.25]; 4];
     mesh.bone_indices = vec![[0, 1, 2, 3]; 4];

@@ -16,6 +16,9 @@ gpu-render = ["gdrender3d/gpu"]
 software-render = []
 
 [dependencies]
+# Editor Play opens the platform audio device (`PlatformAudioOutput`) so a game
+# played in the editor is heard. Acyclic: gdaudio depends on gdcore alone.
+gdaudio = { path = "../gdaudio" }
 gdcore = { path = "../gdcore" }
 gdvariant = { path = "../gdvariant" }
 gdobject = { path = "../gdobject" }
@@ -42,5 +45,5 @@ tempfile = "3"
 # pat-s3rrv.52: the audio-bus acceptance test proves the layout the editor
 # SAVES is the one the runtime LOADS, which means re-reading it through the
 # real `AudioMixer::load_bus_layout_tres`. DEV-only and acyclic: gdaudio
-# depends on gdcore alone and never on gdeditor.
-gdaudio = { path = "../gdaudio" }
+# depends on gdcore alone and never on gdeditor. (Also a normal dependency
+# above, since editor Play opens the audio device.)

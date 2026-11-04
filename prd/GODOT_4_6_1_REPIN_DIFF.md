@@ -114,3 +114,38 @@ Closing all 11 gaps would bring overall parity to 98.6% (70/71), with only the M
 - Oracle parity tests: 32/32 passing
 - Oracle regression tests: 43/43 passing
 - Full workspace: `cargo test --workspace` passes
+
+## Final Resolution
+
+Re-measured 2026-11-03 against a local **Godot 4.6.1-stable** build: the oracle
+outputs in `fixtures/oracle_outputs/` were regenerated (`tools/oracle/run_all.sh`)
+and the property-parity report
+(`oracle_regression_test::golden_all_scenes_property_parity_report`) was run on
+the result. Final parity: **100.0% (71/71)** property comparisons match.
+
+### Per-Fixture Final State
+
+| Fixture | Properties matched | Parity |
+|---------|--------------------|--------|
+| `minimal.tscn` | 1/1 | 100% (1/1) |
+| `hierarchy.tscn` | 3/3 | 100% (3/3) |
+| `with_properties.tscn` | 5/5 | 100% (5/5) |
+| `space_shooter.tscn` | 13/13 | 100% (13/13) |
+| `platformer.tscn` | 12/12 | 100% (12/12) |
+| `physics_playground.tscn` | 12/12 | 100% (12/12) |
+| `signals_complex.tscn` | 9/9 | 100% (9/9) |
+| `test_scripts.tscn` | 11/11 | 100% (11/11) |
+| `ui_menu.tscn` | 5/5 | 100% (5/5) |
+| **Overall** | **71/71** | **100.0% (71/71)** |
+
+These numbers are the report's own output, not estimates; re-run it to refresh
+this table.
+
+### Test Verification
+
+- `oracle_regression_test` (in `engine-rs/tests/oracle_suite/`) — the parity
+  report above and the per-scene regressions.
+- `repin_diff_report_test` (in `engine-rs/tests/misc_suite_e/`) — keeps this
+  document consistent with the measured state.
+- `default_property_stripping_parity_test` — key-set and value-level parity
+  against the regenerated oracle outputs.

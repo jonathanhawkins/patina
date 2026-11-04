@@ -1,0 +1,51 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scripts/player.gd" id="1_script"]
+
+[sub_resource type="CircleShape2D" id="1_circleshape2d"]
+radius = 9.0
+
+[node name="Player" type="CharacterBody2D"]
+clip_children = 0
+collision_layer = 1
+collision_mask = 0
+collision_priority = 1.0
+disable_mode = 0
+floor_block_on_wall = true
+floor_constant_speed = false
+floor_max_angle = 0.785398
+floor_snap_length = 1.0
+floor_stop_on_slope = true
+input_pickable = false
+light_mask = 1
+material = null
+max_slides = 4
+modulate = Color(1, 1, 1, 1)
+motion_mode = 1
+platform_floor_layers = 4294967295
+platform_on_leave = 0
+platform_wall_layers = 0
+position = Vector2(0, 0)
+rotation = 0.0
+safe_margin = 0.08
+scale = Vector2(1, 1)
+script = ExtResource("1_script")
+self_modulate = Color(1, 1, 1, 1)
+show_behind_parent = false
+skew = 0.0
+slide_on_ceiling = true
+texture_filter = 0
+texture_repeat = 0
+top_level = false
+up_direction = Vector2(0, -1)
+use_parent_material = false
+velocity = Vector2(0, 0)
+visibility_layer = 1
+visible = true
+wall_min_slide_angle = 0.2617994
+y_sort_enabled = false
+z_as_relative = true
+z_index = 0
+
+[node name="Shape" type="CollisionShape2D" parent="."]
+shape = SubResource("1_circleshape2d")

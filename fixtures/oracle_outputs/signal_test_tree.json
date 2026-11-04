@@ -1,15 +1,6 @@
 {
 	"children": [
 		{
-			"children": [],
-			"class": "Node",
-			"groups": [],
-			"name": "Oracle",
-			"owner": "",
-			"path": "/root/Oracle",
-			"script": "res://oracle_autoload.gd"
-		},
-		{
 			"children": [
 				{
 					"children": [],
@@ -17,8 +8,7 @@
 					"groups": [],
 					"name": "Emitter",
 					"owner": "/root/Root",
-					"path": "/root/Root/Emitter",
-					"script": "res://scripts/emitter.gd"
+					"path": "/root/Root/Emitter"
 				},
 				{
 					"children": [],
@@ -26,8 +16,7 @@
 					"groups": [],
 					"name": "Listener",
 					"owner": "/root/Root",
-					"path": "/root/Root/Listener",
-					"script": "res://scripts/listener.gd"
+					"path": "/root/Root/Listener"
 				}
 			],
 			"class": "Node2D",

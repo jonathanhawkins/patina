@@ -59,7 +59,10 @@ fn physics_body_3d_carries_its_six_axis_locks() {
 /// BaseMaterial3D members out.
 #[test]
 fn progress_bar_carries_its_stated_members() {
-    assert_eq!(own_count("ProgressBar"), 3);
+    // All 4 of doc/classes/ProgressBar.xml's members, including
+    // `editor_preview_indeterminate` (no XML default; `false` from the C++
+    // initialiser, registered by a later bead).
+    assert_eq!(own_count("ProgressBar"), 4);
     // A false here would hide the percentage label on every bar in the project.
     assert_eq!(own("ProgressBar", "show_percentage"), Variant::Bool(true));
     assert_eq!(own("ProgressBar", "fill_mode"), Variant::Int(0));

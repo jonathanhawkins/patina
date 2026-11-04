@@ -50,6 +50,12 @@ use gdscene::scene_tree::SceneTree;
 use gdserver3d::reflection_probe::ReflectionProbeAmbientMode;
 
 fn load(tscn: &str) -> SceneTree {
+    // ⚠️ The render list filters on `is_class("Node3D")`, which reads the
+    // ClassDB. Without this only the literal `Node3D` root is collected — as an
+    // orange editor marker — and the `MeshInstance3D` floor every assertion in
+    // this file is about never reaches the renderer: each test was measuring
+    // the root's marker cube instead of the floor.
+    gdobject::class_db::register_3d_classes();
     let scene = PackedScene::from_tscn(tscn).expect("parse tscn");
     let mut tree = SceneTree::new();
     let root = tree.root_id();
@@ -106,6 +112,53 @@ interior = true
 ambient_mode = 2
 ambient_color = Color(1, 0, 0, 1)
 ambient_color_energy = 1.0
+"#;
+
+/// [`RED_PROBE`] with its ambient switched off and nothing else changed — the
+/// control for the red-ambient acceptance.
+///
+/// ⚠️ The control must hold a probe, not omit one. A probe contributes two
+/// things: the flat `ambient_color` this file is about, and the REFLECTION of
+/// its captured cubemap (pat-s3rrv.206), which Godot applies to any surface
+/// that is not fully rough — the mesh here has no material, and Godot's default
+/// material is `ROUGHNESS = 0.8` (`scene_shader_forward_clustered.cpp:920`). A
+/// ReflectionProbe is also drawn as an editor marker. Comparing against a
+/// probe-less scene therefore measured the reflection and the marker as well,
+/// which change green and blue. Holding the probe fixed isolates the ambient.
+const RED_PROBE_AMBIENT_OFF: &str = r#"[gd_scene format=3]
+
+[node name="Root" type="Node3D"]
+
+[node name="Camera" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 6)
+current = true
+
+[node name="Floor" type="MeshInstance3D" parent="."]
+mesh = "primitive:PlaneMesh"
+
+[node name="Probe" type="ReflectionProbe" parent="."]
+size = Vector3(20, 20, 20)
+interior = true
+ambient_mode = 0
+ambient_color = Color(1, 0, 0, 1)
+ambient_color_energy = 1.0
+"#;
+
+/// A probe at Godot's defaults: `ambient_mode` 1 (`ENVIRONMENT`,
+/// `ReflectionProbe.xml:23`) and a black `ambient_color`.
+const DEFAULT_PROBE: &str = r#"[gd_scene format=3]
+
+[node name="Root" type="Node3D"]
+
+[node name="Camera" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 6)
+current = true
+
+[node name="Floor" type="MeshInstance3D" parent="."]
+mesh = "primitive:PlaneMesh"
+
+[node name="Probe" type="ReflectionProbe" parent="."]
+size = Vector3(20, 20, 20)
 "#;
 
 /// Same probe, but explicitly disabled. `ambient_mode = 0` is `DISABLED`.
@@ -200,7 +253,10 @@ fn reflection_probe_decal_scene_render() {
 
     // -- (2) …and it reaches the shaded frame --------------------------------
     let with_probe = render_editor_3d_frame(&vp, &tree);
-    let without = render_editor_3d_frame(&vp, &load(NO_PROBE));
+    // The same probe with its ambient off (see `RED_PROBE_AMBIENT_OFF`): the
+    // reflection and the editor marker are common-mode, so what differs is the
+    // ambient term alone.
+    let without = render_editor_3d_frame(&vp, &load(RED_PROBE_AMBIENT_OFF));
     assert_eq!(
         with_probe.pixels.len(),
         without.pixels.len(),
@@ -256,48 +312,71 @@ fn reflection_probe_decal_scene_render() {
     );
 }
 
-/// `ambient_mode = 0` (Disabled) must actually disable the probe — the clause
-/// that makes the test above attributable to the ambient rather than to the
-/// probe's mere presence.
+/// `ambient_mode = 0` (Disabled) must actually disable the probe's AMBIENT — the
+/// clause that makes the test above attributable to the ambient rather than to
+/// the probe's mere presence.
+///
+/// ⚠️ The control is a default probe, not "no probe". Disabling the ambient
+/// does not disable the probe: Godot still applies its captured REFLECTION
+/// (`ReflectionProbe.xml`: `ambient_mode` only "sets how the probe's ambient
+/// light is computed"), and the editor still draws the node's marker. Both are
+/// identical between these two scenes, so a red `ambient_color` leaking past
+/// `ambient_mode = 0` is the only thing that could differ.
 #[test]
 fn a_disabled_probe_contributes_nothing() {
     let vp = viewport();
     let disabled = render_editor_3d_frame(&vp, &load(DISABLED_PROBE));
-    let without = render_editor_3d_frame(&vp, &load(NO_PROBE));
+    let default_probe = render_editor_3d_frame(&vp, &load(DEFAULT_PROBE));
+
+    // Guard: the floor must actually draw, or two empty frames are "identical".
+    let empty = render_editor_3d_frame(&vp, &load(&DEFAULT_PROBE.replace(
+        "mesh = \"primitive:PlaneMesh\"",
+        "",
+    )));
+    assert!(
+        differing_pixels(&default_probe.pixels, &empty.pixels) > 0,
+        "fixture check: the floor must render, or this comparison is vacuous"
+    );
 
     assert_eq!(
-        differing_pixels(&disabled.pixels, &without.pixels),
+        differing_pixels(&disabled.pixels, &default_probe.pixels),
         0,
-        "a probe with `ambient_mode = 0` must render identically to no probe at \
-         all, even with a red `ambient_color` authored"
+        "a probe with `ambient_mode = 0` must render identically to a default \
+         (black-ambient) probe, even with a red `ambient_color` authored"
     );
 }
 
-/// A probe left at Godot's defaults has a black `ambient_color`, so it must not
-/// perturb the frame either — every scene that predates this change stays
-/// byte-identical.
+/// A probe left at Godot's defaults has a black `ambient_color`, so its ambient
+/// term must add exactly nothing: the frame equals the same probe with its
+/// ambient switched off. (Its reflection is common to both; see
+/// [`a_disabled_probe_contributes_nothing`].)
 #[test]
 fn a_default_probe_leaves_the_frame_unchanged() {
     let vp = viewport();
-    let default_probe = load(&NO_PROBE.replace(
-        r#"mesh = "primitive:PlaneMesh""#,
-        "mesh = \"primitive:PlaneMesh\"\n\n[node name=\"Probe\" type=\"ReflectionProbe\" parent=\".\"]\nsize = Vector3(20, 20, 20)",
-    ));
+    let default_probe = load(DEFAULT_PROBE);
     let framed = render_editor_3d_frame(&vp, &default_probe);
-    let without = render_editor_3d_frame(&vp, &load(NO_PROBE));
+    let ambient_off = render_editor_3d_frame(
+        &vp,
+        &load(&format!("{DEFAULT_PROBE}ambient_mode = 0\n")),
+    );
 
-    // Guard the substitution actually produced a probe, or this passes vacuously.
+    // Guard the fixture actually produced a probe, or this passes vacuously.
     let inputs = editor_3d_render_inputs(&vp, &default_probe);
     assert_eq!(
         inputs.env_effects.reflection_probes.len(),
         1,
         "the default-valued probe must be in the scene for this to mean anything"
     );
+    assert_eq!(
+        inputs.env_effects.reflection_probes[0].ambient_mode,
+        ReflectionProbeAmbientMode::Environment,
+        "Godot's default `ambient_mode` is ENVIRONMENT (ReflectionProbe.xml:23)"
+    );
 
     assert_eq!(
-        differing_pixels(&framed.pixels, &without.pixels),
+        differing_pixels(&framed.pixels, &ambient_off.pixels),
         0,
-        "a probe with Godot's default black ambient must add exactly zero"
+        "a probe with Godot's default black ambient must add exactly zero ambient"
     );
 }
 

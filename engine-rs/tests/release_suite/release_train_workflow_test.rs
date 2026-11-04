@@ -430,9 +430,7 @@ fn integration_test_directory_has_tests() {
     let tests_dir = workspace_root().join("tests");
     assert!(tests_dir.exists(), "engine-rs/tests/ must exist");
 
-    let test_count = fs::read_dir(&tests_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
+    let test_count = walk_test_entries(&tests_dir).into_iter()
         .filter(|e| e.path().extension().map_or(false, |ext| ext == "rs"))
         .count();
 
@@ -456,9 +454,7 @@ fn parity_tests_cover_key_subsystems() {
     ];
 
     for pattern in &subsystem_patterns {
-        let has_test = fs::read_dir(&tests_dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
+        let has_test = walk_test_entries(&tests_dir).into_iter()
             .any(|e| {
                 let name = e.file_name().to_string_lossy().to_lowercase();
                 name.contains(pattern) && name.ends_with("_test.rs")
@@ -702,9 +698,7 @@ fn fixture_resources_and_scenes_present() {
 #[test]
 fn integration_test_count_floor() {
     let tests_dir = workspace_root().join("tests");
-    let test_count = fs::read_dir(&tests_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
+    let test_count = walk_test_entries(&tests_dir).into_iter()
         .filter(|e| {
             let name = e.file_name().to_string_lossy().to_string();
             name.ends_with("_test.rs")
@@ -747,4 +741,27 @@ fn ci_has_workspace_test_gate() {
         ci_content.contains("--workspace") || ci_content.contains("cargo test"),
         "CI must include workspace-level test execution"
     );
+}
+
+/// Every entry under `dir`, recursing into the suite folders (`tests/<suite>/`)
+/// the integration tests were consolidated into. A flat `read_dir(tests/)`
+/// now sees only the ~10 suite entry points, which made every count- and
+/// coverage-based gate here report a collapse that never happened.
+fn walk_test_entries(dir: &std::path::Path) -> Vec<std::fs::DirEntry> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if p.file_name().map_or(false, |n| n != "support" && n != "fixtures") {
+                    stack.push(p);
+                }
+            } else {
+                out.push(e);
+            }
+        }
+    }
+    out
 }

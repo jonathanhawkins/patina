@@ -16,7 +16,7 @@
 								"properties": {
 									"animation": {
 										"type": "StringName",
-										"value": ""
+										"value": "default"
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -24,7 +24,7 @@
 									},
 									"autoplay": {
 										"type": "String",
-										"value": "idle"
+										"value": ""
 									},
 									"centered": {
 										"type": "bool",
@@ -229,13 +229,6 @@
 										"type": "String",
 										"value": ""
 									},
-									"libraries/": {
-										"type": "Object",
-										"value": {
-											"_resource_class": "AnimationLibrary",
-											"_resource_path": "res://real_godot/animated_character.tscn::AnimationLibrary_anim1"
-										}
-									},
 									"movie_quit_on_finish": {
 										"type": "bool",
 										"value": false
@@ -319,19 +312,6 @@
 									"editor_description": {
 										"type": "String",
 										"value": ""
-									},
-									"metadata/current_state": {
-										"type": "String",
-										"value": "idle"
-									},
-									"metadata/states": {
-										"type": "Array",
-										"value": [
-											"idle",
-											"run",
-											"jump",
-											"fall"
-										]
 									},
 									"physics_interpolation_mode": {
 										"type": "int",
@@ -929,7 +909,7 @@
 								"properties": {
 									"animation": {
 										"type": "StringName",
-										"value": ""
+										"value": "default"
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -937,7 +917,7 @@
 									},
 									"autoplay": {
 										"type": "String",
-										"value": "idle"
+										"value": ""
 									},
 									"centered": {
 										"type": "bool",
@@ -1142,13 +1122,6 @@
 										"type": "String",
 										"value": ""
 									},
-									"libraries/": {
-										"type": "Object",
-										"value": {
-											"_resource_class": "AnimationLibrary",
-											"_resource_path": "res://real_godot/animated_character.tscn::AnimationLibrary_anim1"
-										}
-									},
 									"movie_quit_on_finish": {
 										"type": "bool",
 										"value": false
@@ -1232,19 +1205,6 @@
 									"editor_description": {
 										"type": "String",
 										"value": ""
-									},
-									"metadata/current_state": {
-										"type": "String",
-										"value": "idle"
-									},
-									"metadata/states": {
-										"type": "Array",
-										"value": [
-											"idle",
-											"run",
-											"jump",
-											"fall"
-										]
 									},
 									"physics_interpolation_mode": {
 										"type": "int",
@@ -1842,7 +1802,7 @@
 								"properties": {
 									"animation": {
 										"type": "StringName",
-										"value": ""
+										"value": "default"
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -1850,7 +1810,7 @@
 									},
 									"autoplay": {
 										"type": "String",
-										"value": "idle"
+										"value": ""
 									},
 									"centered": {
 										"type": "bool",
@@ -2055,13 +2015,6 @@
 										"type": "String",
 										"value": ""
 									},
-									"libraries/": {
-										"type": "Object",
-										"value": {
-											"_resource_class": "AnimationLibrary",
-											"_resource_path": "res://real_godot/animated_character.tscn::AnimationLibrary_anim1"
-										}
-									},
 									"movie_quit_on_finish": {
 										"type": "bool",
 										"value": false
@@ -2145,19 +2098,6 @@
 									"editor_description": {
 										"type": "String",
 										"value": ""
-									},
-									"metadata/current_state": {
-										"type": "String",
-										"value": "idle"
-									},
-									"metadata/states": {
-										"type": "Array",
-										"value": [
-											"idle",
-											"run",
-											"jump",
-											"fall"
-										]
 									},
 									"physics_interpolation_mode": {
 										"type": "int",
@@ -2755,7 +2695,7 @@
 								"properties": {
 									"animation": {
 										"type": "StringName",
-										"value": ""
+										"value": "default"
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -2763,7 +2703,7 @@
 									},
 									"autoplay": {
 										"type": "String",
-										"value": "idle"
+										"value": ""
 									},
 									"centered": {
 										"type": "bool",
@@ -2968,13 +2908,6 @@
 										"type": "String",
 										"value": ""
 									},
-									"libraries/": {
-										"type": "Object",
-										"value": {
-											"_resource_class": "AnimationLibrary",
-											"_resource_path": "res://real_godot/animated_character.tscn::AnimationLibrary_anim1"
-										}
-									},
 									"movie_quit_on_finish": {
 										"type": "bool",
 										"value": false
@@ -3058,19 +2991,6 @@
 									"editor_description": {
 										"type": "String",
 										"value": ""
-									},
-									"metadata/current_state": {
-										"type": "String",
-										"value": "idle"
-									},
-									"metadata/states": {
-										"type": "Array",
-										"value": [
-											"idle",
-											"run",
-											"jump",
-											"fall"
-										]
 									},
 									"physics_interpolation_mode": {
 										"type": "int",
@@ -3668,7 +3588,7 @@
 								"properties": {
 									"animation": {
 										"type": "StringName",
-										"value": ""
+										"value": "default"
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -3676,7 +3596,7 @@
 									},
 									"autoplay": {
 										"type": "String",
-										"value": "idle"
+										"value": ""
 									},
 									"centered": {
 										"type": "bool",
@@ -3881,13 +3801,6 @@
 										"type": "String",
 										"value": ""
 									},
-									"libraries/": {
-										"type": "Object",
-										"value": {
-											"_resource_class": "AnimationLibrary",
-											"_resource_path": "res://real_godot/animated_character.tscn::AnimationLibrary_anim1"
-										}
-									},
 									"movie_quit_on_finish": {
 										"type": "bool",
 										"value": false
@@ -3971,19 +3884,6 @@
 									"editor_description": {
 										"type": "String",
 										"value": ""
-									},
-									"metadata/current_state": {
-										"type": "String",
-										"value": "idle"
-									},
-									"metadata/states": {
-										"type": "Array",
-										"value": [
-											"idle",
-											"run",
-											"jump",
-											"fall"
-										]
 									},
 									"physics_interpolation_mode": {
 										"type": "int",
@@ -4581,7 +4481,7 @@
 								"properties": {
 									"animation": {
 										"type": "StringName",
-										"value": ""
+										"value": "default"
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -4589,7 +4489,7 @@
 									},
 									"autoplay": {
 										"type": "String",
-										"value": "idle"
+										"value": ""
 									},
 									"centered": {
 										"type": "bool",
@@ -4794,13 +4694,6 @@
 										"type": "String",
 										"value": ""
 									},
-									"libraries/": {
-										"type": "Object",
-										"value": {
-											"_resource_class": "AnimationLibrary",
-											"_resource_path": "res://real_godot/animated_character.tscn::AnimationLibrary_anim1"
-										}
-									},
 									"movie_quit_on_finish": {
 										"type": "bool",
 										"value": false
@@ -4884,19 +4777,6 @@
 									"editor_description": {
 										"type": "String",
 										"value": ""
-									},
-									"metadata/current_state": {
-										"type": "String",
-										"value": "idle"
-									},
-									"metadata/states": {
-										"type": "Array",
-										"value": [
-											"idle",
-											"run",
-											"jump",
-											"fall"
-										]
 									},
 									"physics_interpolation_mode": {
 										"type": "int",
@@ -5494,7 +5374,7 @@
 								"properties": {
 									"animation": {
 										"type": "StringName",
-										"value": ""
+										"value": "default"
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -5502,7 +5382,7 @@
 									},
 									"autoplay": {
 										"type": "String",
-										"value": "idle"
+										"value": ""
 									},
 									"centered": {
 										"type": "bool",
@@ -5707,13 +5587,6 @@
 										"type": "String",
 										"value": ""
 									},
-									"libraries/": {
-										"type": "Object",
-										"value": {
-											"_resource_class": "AnimationLibrary",
-											"_resource_path": "res://real_godot/animated_character.tscn::AnimationLibrary_anim1"
-										}
-									},
 									"movie_quit_on_finish": {
 										"type": "bool",
 										"value": false
@@ -5797,19 +5670,6 @@
 									"editor_description": {
 										"type": "String",
 										"value": ""
-									},
-									"metadata/current_state": {
-										"type": "String",
-										"value": "idle"
-									},
-									"metadata/states": {
-										"type": "Array",
-										"value": [
-											"idle",
-											"run",
-											"jump",
-											"fall"
-										]
 									},
 									"physics_interpolation_mode": {
 										"type": "int",
@@ -6407,7 +6267,7 @@
 								"properties": {
 									"animation": {
 										"type": "StringName",
-										"value": ""
+										"value": "default"
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -6415,7 +6275,7 @@
 									},
 									"autoplay": {
 										"type": "String",
-										"value": "idle"
+										"value": ""
 									},
 									"centered": {
 										"type": "bool",
@@ -6620,13 +6480,6 @@
 										"type": "String",
 										"value": ""
 									},
-									"libraries/": {
-										"type": "Object",
-										"value": {
-											"_resource_class": "AnimationLibrary",
-											"_resource_path": "res://real_godot/animated_character.tscn::AnimationLibrary_anim1"
-										}
-									},
 									"movie_quit_on_finish": {
 										"type": "bool",
 										"value": false
@@ -6710,19 +6563,6 @@
 									"editor_description": {
 										"type": "String",
 										"value": ""
-									},
-									"metadata/current_state": {
-										"type": "String",
-										"value": "idle"
-									},
-									"metadata/states": {
-										"type": "Array",
-										"value": [
-											"idle",
-											"run",
-											"jump",
-											"fall"
-										]
 									},
 									"physics_interpolation_mode": {
 										"type": "int",
@@ -7320,7 +7160,7 @@
 								"properties": {
 									"animation": {
 										"type": "StringName",
-										"value": ""
+										"value": "default"
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -7328,7 +7168,7 @@
 									},
 									"autoplay": {
 										"type": "String",
-										"value": "idle"
+										"value": ""
 									},
 									"centered": {
 										"type": "bool",
@@ -7533,13 +7373,6 @@
 										"type": "String",
 										"value": ""
 									},
-									"libraries/": {
-										"type": "Object",
-										"value": {
-											"_resource_class": "AnimationLibrary",
-											"_resource_path": "res://real_godot/animated_character.tscn::AnimationLibrary_anim1"
-										}
-									},
 									"movie_quit_on_finish": {
 										"type": "bool",
 										"value": false
@@ -7623,19 +7456,6 @@
 									"editor_description": {
 										"type": "String",
 										"value": ""
-									},
-									"metadata/current_state": {
-										"type": "String",
-										"value": "idle"
-									},
-									"metadata/states": {
-										"type": "Array",
-										"value": [
-											"idle",
-											"run",
-											"jump",
-											"fall"
-										]
 									},
 									"physics_interpolation_mode": {
 										"type": "int",
@@ -8233,7 +8053,7 @@
 								"properties": {
 									"animation": {
 										"type": "StringName",
-										"value": ""
+										"value": "default"
 									},
 									"auto_translate_mode": {
 										"type": "int",
@@ -8241,7 +8061,7 @@
 									},
 									"autoplay": {
 										"type": "String",
-										"value": "idle"
+										"value": ""
 									},
 									"centered": {
 										"type": "bool",
@@ -8446,13 +8266,6 @@
 										"type": "String",
 										"value": ""
 									},
-									"libraries/": {
-										"type": "Object",
-										"value": {
-											"_resource_class": "AnimationLibrary",
-											"_resource_path": "res://real_godot/animated_character.tscn::AnimationLibrary_anim1"
-										}
-									},
 									"movie_quit_on_finish": {
 										"type": "bool",
 										"value": false
@@ -8536,19 +8349,6 @@
 									"editor_description": {
 										"type": "String",
 										"value": ""
-									},
-									"metadata/current_state": {
-										"type": "String",
-										"value": "idle"
-									},
-									"metadata/states": {
-										"type": "Array",
-										"value": [
-											"idle",
-											"run",
-											"jump",
-											"fall"
-										]
 									},
 									"physics_interpolation_mode": {
 										"type": "int",
@@ -9134,7 +8934,7 @@
 		}
 	],
 	"frames_captured": 10,
-	"generated_at": "2026-03-20T13:39:36",
+	"generated_at": "2026-11-03T18:34:14",
 	"notification_trace": [],
 	"properties": {
 		"children": [
@@ -9148,7 +8948,7 @@
 						"properties": {
 							"animation": {
 								"type": "StringName",
-								"value": ""
+								"value": "default"
 							},
 							"auto_translate_mode": {
 								"type": "int",
@@ -9156,7 +8956,7 @@
 							},
 							"autoplay": {
 								"type": "String",
-								"value": "idle"
+								"value": ""
 							},
 							"centered": {
 								"type": "bool",
@@ -9361,13 +9161,6 @@
 								"type": "String",
 								"value": ""
 							},
-							"libraries/": {
-								"type": "Object",
-								"value": {
-									"_resource_class": "AnimationLibrary",
-									"_resource_path": "res://real_godot/animated_character.tscn::AnimationLibrary_anim1"
-								}
-							},
 							"movie_quit_on_finish": {
 								"type": "bool",
 								"value": false
@@ -9451,19 +9244,6 @@
 							"editor_description": {
 								"type": "String",
 								"value": ""
-							},
-							"metadata/current_state": {
-								"type": "String",
-								"value": "idle"
-							},
-							"metadata/states": {
-								"type": "Array",
-								"value": [
-									"idle",
-									"run",
-									"jump",
-									"fall"
-								]
 							},
 							"physics_interpolation_mode": {
 								"type": "int",

@@ -454,10 +454,20 @@ fn test_invalid_track_type_rejected() {
     );
     assert!(response_ok(&resp));
 
+    // `bezier` is NOT invalid: Godot has `Animation.TYPE_BEZIER` (= 6,
+    // doc/classes/Animation.xml), and the API accepts it. This test used to
+    // use it as its "invalid" example.
     let resp = http_post(
         port,
         "/api/animation/track/add",
         r#"{"animation":"inv","node_path":"Player","property":"x","track_type":"bezier"}"#,
+    );
+    assert!(response_ok(&resp), "a bezier track is a Godot track type: {resp}");
+
+    let resp = http_post(
+        port,
+        "/api/animation/track/add",
+        r#"{"animation":"inv","node_path":"Player","property":"y","track_type":"not_a_track_type"}"#,
     );
     assert!(
         resp.contains("400"),

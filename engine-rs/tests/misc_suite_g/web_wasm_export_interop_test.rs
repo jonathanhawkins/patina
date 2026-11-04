@@ -400,13 +400,13 @@ fn web_target_triple_contains_wasm() {
 
 #[test]
 fn classdb_javascript_bridge_exists() {
-    gdobject::class_db::register_3d_classes();
+    gdobject::class_db::register_all_classes(); // JavaScriptBridge is registered by `register_io_classes`
     assert!(gdobject::class_db::class_exists("JavaScriptBridge"));
 }
 
 #[test]
 fn classdb_javascript_bridge_has_methods() {
-    gdobject::class_db::register_3d_classes();
+    gdobject::class_db::register_all_classes(); // JavaScriptBridge is registered by `register_io_classes`
     assert!(gdobject::class_db::class_has_method(
         "JavaScriptBridge",
         "eval"

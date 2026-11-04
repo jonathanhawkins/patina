@@ -69,6 +69,110 @@ fn support_point(shape: &Shape3D, pos: Vector3, rot: Quaternion, dir: Vector3) -
     }
 }
 
+/// Below this |component| of the (unit) contact normal in a shape's local
+/// frame, the support is a whole edge/face rather than one corner. The normal
+/// a narrowphase hands back carries float noise (~1e-5 off an axis), and with
+/// a 1e-6 cut that noise picked a corner of a 20 m floor as the "support" —
+/// a capsule dropped dead-centre took torque from a contact 14 m away and
+/// toppled.
+const SUPPORT_FEATURE_EPS: f32 = 1e-3;
+
+/// The set of points of a shape that are extreme along a direction — a vertex,
+/// an edge (one free axis) or a face (two) — as its centre plus the free axes
+/// with their half-lengths.
+struct SupportFeature {
+    centre: Vector3,
+    axes: [(Vector3, f32); 2],
+    n_axes: usize,
+}
+
+impl SupportFeature {
+    fn vertex(centre: Vector3) -> Self {
+        Self { centre, axes: [(Vector3::ZERO, 0.0); 2], n_axes: 0 }
+    }
+    /// (dimension, extent): a vertex < an edge < a face, then by size.
+    fn rank(&self) -> (usize, f32) {
+        let size = self.axes[..self.n_axes].iter().map(|a| a.1).product::<f32>();
+        (self.n_axes, if self.n_axes == 0 { 0.0 } else { size })
+    }
+    /// `p` projected onto the feature (clamped to its extent).
+    fn clamp(&self, p: Vector3) -> Vector3 {
+        let mut q = self.centre;
+        for &(axis, half) in &self.axes[..self.n_axes] {
+            q = q + axis * (p - self.centre).dot(axis).clamp(-half, half);
+        }
+        q
+    }
+}
+
+fn support_feature(shape: &Shape3D, pos: Vector3, rot: Quaternion, dir: Vector3) -> SupportFeature {
+    let d = dir.normalized();
+    match shape {
+        Shape3D::BoxShape { half_extents } => {
+            let ld = rot.inverse().xform(d);
+            let comps = [ld.x, ld.y, ld.z];
+            let halves = [half_extents.x, half_extents.y, half_extents.z];
+            let units = [
+                Vector3::new(1.0, 0.0, 0.0),
+                Vector3::new(0.0, 1.0, 0.0),
+                Vector3::new(0.0, 0.0, 1.0),
+            ];
+            let mut local_centre = Vector3::ZERO;
+            let mut f = SupportFeature::vertex(Vector3::ZERO);
+            for i in 0..3 {
+                if comps[i].abs() < SUPPORT_FEATURE_EPS {
+                    if f.n_axes < 2 {
+                        f.axes[f.n_axes] = (rot.xform(units[i]), halves[i]);
+                        f.n_axes += 1;
+                    }
+                } else {
+                    local_centre = local_centre + units[i] * (halves[i] * comps[i].signum());
+                }
+            }
+            f.centre = pos + rot.xform(local_centre);
+            f
+        }
+        Shape3D::CapsuleShape { radius, height } => {
+            // Godot's capsule `height` is the TOTAL height, caps included.
+            let hh = (height * 0.5 - radius).max(0.0);
+            let axis = rot.xform(Vector3::new(0.0, 1.0, 0.0));
+            let along = axis.dot(d);
+            if along.abs() < SUPPORT_FEATURE_EPS && hh > 0.0 {
+                SupportFeature {
+                    centre: pos + d * *radius,
+                    axes: [(axis, hh), (Vector3::ZERO, 0.0)],
+                    n_axes: 1,
+                }
+            } else {
+                SupportFeature::vertex(pos + axis * (hh * along.signum()) + d * *radius)
+            }
+        }
+        _ => SupportFeature::vertex(support_point(shape, pos, rot, d)),
+    }
+}
+
+/// Where a contact's impulse acts: the centre of the SMALLER touching feature,
+/// clamped onto the larger one, half-way between the two surfaces along the
+/// normal. A capsule end on a floor contacts under the capsule; a box flat on
+/// a floor contacts under its own centre (no spurious torque); a box hanging
+/// past a ledge contacts at the ledge's edge, so it still tips.
+fn contact_position(
+    shape_a: &Shape3D,
+    pos_a: Vector3,
+    rot_a: Quaternion,
+    shape_b: &Shape3D,
+    pos_b: Vector3,
+    rot_b: Quaternion,
+    normal: Vector3,
+) -> Vector3 {
+    let fa = support_feature(shape_a, pos_a, rot_a, normal);
+    let fb = support_feature(shape_b, pos_b, rot_b, normal * -1.0);
+    let (small, large) = if fa.rank() <= fb.rank() { (&fa, &fb) } else { (&fb, &fa) };
+    let on_large = large.clamp(small.centre);
+    let n = normal.normalized();
+    on_large + n * ((small.centre - on_large).dot(n) * 0.5)
+}
+
 /// Result of a 3D raycast query.
 #[derive(Debug, Clone, Copy)]
 pub struct RaycastHit3D {
@@ -893,10 +997,15 @@ impl PhysicsWorld3D {
                 // ⚠️ The SHAPE's world centre, not the body's. These coincided
                 // before offsets existed; with them, using `pos_a` would place
                 // the contact on a phantom shape at the body origin.
-                let support_a = support_point(&shape_a, shape_pos_a, shape_rot_a, result.normal);
-                let support_b =
-                    support_point(&shape_b, shape_pos_b, shape_rot_b, result.normal * -1.0);
-                let contact_pos = (support_a + support_b) * 0.5;
+                let contact_pos = contact_position(
+                    &shape_a,
+                    shape_pos_a,
+                    shape_rot_a,
+                    &shape_b,
+                    shape_pos_b,
+                    shape_rot_b,
+                    result.normal,
+                );
                 if let Some(a) = self.bodies.get_mut(&id_a) {
                     a.add_contact(ContactPoint3D {
                         position: contact_pos,

@@ -112,12 +112,19 @@ impl BoxMesh {
             uvs.push([1.0, 1.0]);
             uvs.push([0.0, 1.0]);
 
-            indices.push(base);
-            indices.push(base + 1);
-            indices.push(base + 2);
-            indices.push(base);
-            indices.push(base + 2);
-            indices.push(base + 3);
+            // 🔑 Wound CLOCKWISE as seen from outside, on EVERY face — Godot's
+            // front-face convention (`doc/classes/ArrayMesh.xml:49`). The quad
+            // `0,1,2 / 0,2,3` is counter-clockwise exactly when `u × v` points
+            // along the outward normal, which held for the X and Z faces but not
+            // the Y faces, so this mesh used to be half inside-out: under
+            // back-face culling the top of a box was dropped and its BOTTOM face
+            // (lit by a downward normal) drew in its place. Only the index order
+            // changes; vertices and UVs are untouched.
+            if u_dir.cross(*v_dir).dot(*normal) > 0.0 {
+                indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+            } else {
+                indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            }
         }
 
         Mesh3D {

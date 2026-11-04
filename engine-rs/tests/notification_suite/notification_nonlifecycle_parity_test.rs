@@ -463,10 +463,11 @@ fn five_frames_fires_five_process_per_node() {
 
 #[test]
 fn instanced_notification_constant_matches_godot() {
+    // `NOTIFICATION_SCENE_INSTANTIATED = 20` in Godot `scene/main/node.h` (this said 25).
     assert_eq!(
         NOTIFICATION_INSTANCED.code(),
-        25,
-        "NOTIFICATION_INSTANCED should be code 25"
+        20,
+        "NOTIFICATION_INSTANCED (SCENE_INSTANTIATED) should be code 20"
     );
 }
 
@@ -515,8 +516,9 @@ fn draw_notification_not_in_process_frame() {
 /// but have no dispatch path yet. They require UI input handling.
 #[test]
 fn drag_notifications_defined_but_not_dispatched() {
-    let drag_begin = Notification::new(26);
-    let drag_end = Notification::new(27);
+    // DRAG_BEGIN = 21, DRAG_END = 22 in Godot `scene/main/node.h` (this used 26/27).
+    let drag_begin = Notification::new(21);
+    let drag_end = Notification::new(22);
     assert_eq!(format!("{drag_begin}"), "NOTIFICATION_DRAG_BEGIN");
     assert_eq!(format!("{drag_end}"), "NOTIFICATION_DRAG_END");
 

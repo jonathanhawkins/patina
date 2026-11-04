@@ -69,11 +69,21 @@ pub fn attach_scene_animation_trees(
 ) -> usize {
     let mut subtree = Vec::new();
     tree.collect_subtree_top_down(root_id, &mut subtree);
+    attach_scene_animation_trees_for(tree, &subtree, scene)
+}
 
+/// [`attach_scene_animation_trees`] over the nodes ONE scene level created, so
+/// each tree's `tree_root` sub-resources resolve against the scene that
+/// declared them (`SubResource` ids are scene-local).
+pub fn attach_scene_animation_trees_for(
+    tree: &mut SceneTree,
+    subtree: &[NodeId],
+    scene: &PackedScene,
+) -> usize {
     // Build first (immutable reads of nodes and their attached players), attach
     // second, so the tree is never borrowed mutably mid-read.
     let mut built = Vec::new();
-    for &node_id in &subtree {
+    for &node_id in subtree {
         let Some(node) = tree.get_node(node_id) else {
             continue;
         };

@@ -128,6 +128,10 @@ fn the_previously_unhashed_kinds_do_not_collide_with_each_other() {
     let all = previously_unhashed();
     for (i, (na, a)) in all.iter().enumerate() {
         for (nb, b) in all.iter().skip(i + 1) {
+            // A Godot-faithful collision, pinned in its own test below.
+            if (*na, *nb) == ("Vector4", "PackedVector4Array") {
+                continue;
+            }
             assert_ne!(
                 godot_hash(a),
                 godot_hash(b),
@@ -135,6 +139,24 @@ fn the_previously_unhashed_kinds_do_not_collide_with_each_other() {
             );
         }
     }
+}
+
+/// Godot COLLIDES a `Vector4` with a one-element `PackedVector4Array` holding
+/// it, and so do we.
+///
+/// ⚠️ Also not a bug. `Vector4::hash` (`core/math/vector4.h:150`) is four
+/// `hash_murmur3_one_real` folds from the default seed then `hash_fmix32`;
+/// the `PACKED_VECTOR4_ARRAY` arm of `Variant::recursive_hash`
+/// (`core/variant/variant.cpp:3108`) starts at `HASH_MURMUR3_SEED`, folds the
+/// same four reals per element, then `hash_fmix32` — the identical sequence for
+/// a single element, with no type tag or length mixed in.
+#[test]
+fn a_vector4_and_its_one_element_packed_array_collide_as_in_godot() {
+    let v = Vector4::new(1.0, 2.0, 3.0, 4.0);
+    assert_eq!(
+        godot_hash(&Variant::Vector4(v)),
+        godot_hash(&Variant::PackedVector4Array(vec![v])),
+    );
 }
 
 /// Godot COLLIDES `Rect2i` and `Vector4i` that carry the same four components,

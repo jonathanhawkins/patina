@@ -40,15 +40,15 @@ const DT: f64 = 1.0 / 60.0;
 
 #[test]
 fn bootstrap_headless_full_lifecycle_no_scene() {
-    // Bootstrap all 8 phases in headless mode (no scene file needed).
+    // Bootstrap all 9 phases in headless mode (no scene file needed).
     let mut boot = EngineBootstrap::new(BootConfig::headless());
     boot.run_all().unwrap();
 
     assert!(boot.is_running());
     assert_eq!(boot.current_phase(), BootPhase::Running);
     assert!(boot.main_loop().is_some());
-    // All 8 transitions should be logged.
-    assert_eq!(boot.log().len(), 8);
+    // All 9 transitions (Autoloads included) should be logged.
+    assert_eq!(boot.log().len(), 9);
 
     // Run 10 frames.
     let ml = boot.main_loop_mut().unwrap();
@@ -66,6 +66,9 @@ fn bootstrap_phases_execute_in_godot_order() {
         BootPhase::Servers,
         BootPhase::Resources,
         BootPhase::SceneTree,
+        // Godot instantiates `[autoload]` entries under /root BEFORE the main
+        // scene (main/main.cpp), so scripts can reach `/root/<Name>` in _ready.
+        BootPhase::Autoloads,
         BootPhase::MainScene,
         BootPhase::Scripts,
         BootPhase::Lifecycle,
@@ -533,7 +536,21 @@ fn integrated_bootstrap_run_package_all_platforms() {
     let tmp = std::env::temp_dir().join("patina-integrated-flow-test");
     let _ = std::fs::remove_dir_all(&tmp);
 
-    let platforms = ["linux", "macos", "windows", "web"];
+    // ⚠️ `web` is packaged separately below: a web export now REFUSES to
+    // emit a placeholder `.wasm` when no compiled runtime is supplied, which
+    // is the correct outcome for a test that has none.
+    let platforms = ["linux", "macos", "windows"];
+    {
+        let config = ExportConfig::new("web", "IntegratedTest")
+            .with_build_profile(BuildProfile::Release)
+            .with_resource("res://scenes/hierarchy.tscn");
+        let mut executor = PackageExecutor::new(config, &project_dir, &tmp.join("web"));
+        let result = executor.run();
+        assert!(
+            !result.success,
+            "web without a compiled .wasm must refuse rather than emit a placeholder"
+        );
+    }
     for platform in &platforms {
         let config = ExportConfig::new(*platform, "IntegratedTest")
             .with_build_profile(BuildProfile::Release)
@@ -620,8 +637,8 @@ fn audited_artifact_path_bootstrap_run_package_verify() {
     boot.run_all().unwrap();
     assert!(boot.is_running(), "engine must reach Running phase");
 
-    // Verify all 8 phase transitions were logged.
-    assert_eq!(boot.log().len(), 8, "all boot phases must complete");
+    // Verify all 9 phase transitions (Autoloads included) were logged.
+    assert_eq!(boot.log().len(), 9, "all boot phases must complete");
 
     // --- Phase 2: Run frames through the platform backend ---
     let ml = boot.main_loop_mut().unwrap();

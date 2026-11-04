@@ -4,11 +4,15 @@
 //! packed-scene APIs. Acceptance: focused transition tests with explicit
 //! ordering assertions.
 //!
-//! Since SceneTree does not yet expose high-level `change_scene_to_packed` /
-//! `reload_current_scene` methods, these tests exercise the underlying
-//! primitives (`add_packed_scene_to_tree`, `LifecycleManager::enter_tree`,
-//! `LifecycleManager::exit_tree`, `remove_node`) to verify the lifecycle
-//! contract that a future high-level API must uphold:
+//! Transitions go through the real `SceneTree::change_scene_to_packed`, the
+//! path a game's `change_scene_to_*` takes. These tests used to hand-assemble
+//! a transition as `add_packed_scene_to_tree` + a manual
+//! `LifecycleManager::enter_tree`, written before that API existed. Since
+//! `add_child` itself enters the tree (Godot: `add_child` → `_set_tree` →
+//! `_propagate_enter_tree`, scene/main/node.cpp), that manual pass entered
+//! every node a SECOND time and the counts below read 8 for a 4-node scene.
+//! Manual `enter_tree` calls after `add_child` are gone for the same reason.
+//! The contract checked:
 //!
 //! 1. EXIT_TREE fires bottom-up for the departing scene
 //! 2. ENTER_TREE fires top-down for the arriving scene
@@ -109,18 +113,14 @@ fn transition_to_packed(
     old_scene_root: Option<NodeId>,
     new_packed: &PackedScene,
 ) -> NodeId {
-    let root = tree.root_id();
-
-    // Exit and remove old scene if present.
     if let Some(old_id) = old_scene_root {
-        LifecycleManager::exit_tree(tree, old_id);
-        tree.remove_node(old_id).unwrap();
+        assert_eq!(
+            tree.current_scene(),
+            Some(old_id),
+            "the departing scene must be the tree's current scene"
+        );
     }
-
-    // Instance and add new scene.
-    let new_id = add_packed_scene_to_tree(tree, root, new_packed).unwrap();
-    LifecycleManager::enter_tree(tree, new_id);
-    new_id
+    tree.change_scene_to_packed(new_packed).unwrap()
 }
 
 /// Builds a tree with packed scene A already loaded and lifecycle-entered.
@@ -129,9 +129,9 @@ fn tree_with_packed_scene_a() -> (SceneTree, NodeId) {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
 
+    let _ = root;
     let packed = packed_scene_a();
-    let scene_id = add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
-    LifecycleManager::enter_tree(&mut tree, scene_id);
+    let scene_id = tree.change_scene_to_packed(&packed).unwrap();
 
     // Enable trace and clear so we only capture subsequent transition events.
     tree.event_trace_mut().enable();
@@ -375,7 +375,6 @@ fn deep_to_single_node_transition() {
     let l2 = tree.add_child(l1, Node::new("Deep2", "Node")).unwrap();
     tree.add_child(l2, Node::new("Deep3", "Node")).unwrap();
 
-    LifecycleManager::enter_tree(&mut tree, l0);
     tree.event_trace_mut().enable();
     tree.event_trace_mut().clear();
 
@@ -403,7 +402,6 @@ fn deep_to_single_node_transition() {
 
     // Add single flat node.
     let flat = tree.add_child(root, Node::new("Flat", "Node2D")).unwrap();
-    LifecycleManager::enter_tree(&mut tree, flat);
 
     // Only root + Flat remain.
     assert_eq!(tree.node_count(), 2);
@@ -508,7 +506,6 @@ fn reinstancing_same_scene_produces_fresh_nodes() {
     let root = tree.root_id();
     let packed = packed_scene_a();
     let new_scene_id = add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
-    LifecycleManager::enter_tree(&mut tree, new_scene_id);
 
     // New scene root must have a different NodeId.
     assert_ne!(
@@ -534,19 +531,16 @@ fn reinstancing_same_scene_twice_produces_unique_ids() {
 
     // Instance 1.
     let id1 = add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
-    LifecycleManager::enter_tree(&mut tree, id1);
     LifecycleManager::exit_tree(&mut tree, id1);
     tree.remove_node(id1).unwrap();
 
     // Instance 2.
     let id2 = add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
-    LifecycleManager::enter_tree(&mut tree, id2);
     LifecycleManager::exit_tree(&mut tree, id2);
     tree.remove_node(id2).unwrap();
 
     // Instance 3.
     let id3 = add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
-    LifecycleManager::enter_tree(&mut tree, id3);
 
     assert_ne!(id1, id2);
     assert_ne!(id2, id3);
@@ -568,9 +562,6 @@ fn transition_replaces_all_root_children() {
     let top_b = tree.add_child(root, Node::new("TopB", "Node")).unwrap();
     let top_c = tree.add_child(root, Node::new("TopC", "Node")).unwrap();
 
-    LifecycleManager::enter_tree(&mut tree, top_a);
-    LifecycleManager::enter_tree(&mut tree, top_b);
-    LifecycleManager::enter_tree(&mut tree, top_c);
 
     tree.event_trace_mut().enable();
     tree.event_trace_mut().clear();
@@ -602,7 +593,6 @@ fn transition_replaces_all_root_children() {
     tree.event_trace_mut().clear();
     let packed_c = packed_scene_c();
     let new_id = add_packed_scene_to_tree(&mut tree, root, &packed_c).unwrap();
-    LifecycleManager::enter_tree(&mut tree, new_id);
 
     // Only root + SceneC + CC1 remain.
     assert_eq!(tree.node_count(), 3);
