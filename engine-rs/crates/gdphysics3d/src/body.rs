@@ -45,6 +45,9 @@ pub struct ContactPoint3D {
     pub other_body: BodyId3D,
 }
 
+/// Godot's default `physics/3d/time_before_sleep`, in seconds.
+pub const DEFAULT_TIME_BEFORE_SLEEP: f32 = 0.5;
+
 /// A 3D physics body with position, velocity, shape, and material properties.
 #[derive(Debug, Clone)]
 pub struct PhysicsBody3D {
@@ -145,6 +148,8 @@ pub struct PhysicsBody3D {
     pub can_sleep: bool,
     /// Whether the body is currently sleeping.
     pub sleeping: bool,
+    /// How long the body has been below the sleep thresholds (pat-l8jg8).
+    sleep_timer: f32,
     /// Freeze mode (None = active, Static/Kinematic = frozen).
     pub freeze_mode: FreezeMode,
     /// Whether contact monitoring is enabled.
@@ -215,6 +220,7 @@ impl PhysicsBody3D {
             continuous_cd: false,
             can_sleep: true,
             sleeping: false,
+            sleep_timer: 0.0,
             freeze_mode: FreezeMode::None,
             contact_monitor: false,
             max_contacts_reported: 0,
@@ -381,15 +387,29 @@ impl PhysicsBody3D {
         self.accumulated_force = Vector3::ZERO;
         self.accumulated_torque = Vector3::ZERO;
 
-        // Auto-sleep check
+        // Auto-sleep check.
+        //
+        // ⚠️ Only SUSTAINED stillness may sleep a body: Godot (and Jolt) wait
+        // `physics/3d/time_before_sleep` (0.5 s) below the thresholds, as the
+        // 2D body already does. Sleeping on the first slow tick froze every
+        // body released at rest in a 120 ticks/s project (truck_town): one
+        // tick of gravity is 9.8/120 = 0.082 m/s, under the 0.1 m/s threshold,
+        // so a dropped box hung in the air forever (pat-l8jg8).
         if self.can_sleep {
             let linear_threshold = 0.01;
             let angular_threshold = 0.01;
             if self.linear_velocity.length_squared() < linear_threshold
                 && self.angular_velocity.length_squared() < angular_threshold
             {
-                self.sleeping = true;
+                self.sleep_timer += dt;
+                if self.sleep_timer >= DEFAULT_TIME_BEFORE_SLEEP {
+                    self.sleeping = true;
+                }
+            } else {
+                self.sleep_timer = 0.0;
             }
+        } else {
+            self.sleep_timer = 0.0;
         }
     }
 
@@ -412,6 +432,7 @@ impl PhysicsBody3D {
     /// Wakes the body from sleep.
     pub fn wake_up(&mut self) {
         self.sleeping = false;
+        self.sleep_timer = 0.0;
     }
 
     /// Puts the body to sleep.
@@ -986,6 +1007,37 @@ mod tests {
         body.put_to_sleep();
         body.integrate(1.0, Vector3::new(0.0, -9.8, 0.0));
         assert!((body.position.y - 10.0).abs() < 1e-5);
+    }
+
+    /// pat-l8jg8: at 120 ticks/s one tick of gravity is 9.8/120 = 0.082 m/s,
+    /// under the 0.1 m/s threshold, and the body used to sleep on that first
+    /// tick — hanging in the air forever. Only sustained stillness
+    /// (`time_before_sleep`, 0.5 s) may sleep a body.
+    #[test]
+    fn a_body_released_at_rest_falls_at_120_ticks() {
+        let mut body = make_rigid(Vector3::new(0.0, 10.0, 0.0));
+        for _ in 0..60 {
+            body.integrate(1.0 / 120.0, Vector3::new(0.0, -9.8, 0.0));
+        }
+        assert!(!body.sleeping, "a falling body must not sleep");
+        // Half a second of free fall: y = 10 - 0.5 * 9.8 * 0.5^2 (to within
+        // the explicit integrator's one-step lead).
+        assert!(body.position.y < 9.0, "body hung at y {}", body.position.y);
+    }
+
+    #[test]
+    fn a_still_body_sleeps_only_after_time_before_sleep() {
+        let mut body = make_rigid(Vector3::ZERO);
+        let dt = 1.0 / 120.0;
+        // 0.5 s is 60 ticks; one short of it the body is still awake.
+        for _ in 0..59 {
+            body.integrate(dt, Vector3::ZERO);
+        }
+        assert!(!body.sleeping, "asleep before time_before_sleep elapsed");
+        for _ in 0..2 {
+            body.integrate(dt, Vector3::ZERO);
+        }
+        assert!(body.sleeping, "a body still for 0.5 s should sleep");
     }
 
     #[test]

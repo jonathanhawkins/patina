@@ -2409,6 +2409,19 @@ impl PackedScene {
         }
     }
 
+    /// Registers an inline sub-resource on a synthetic (glTF-built) scene, so
+    /// its nodes' `SubResource:<id>` references resolve like a `.tscn`'s
+    /// (pat-l8jg8: the physics shapes of `OMI_physics_shape`).
+    pub(crate) fn add_synthetic_sub_resource(
+        &mut self,
+        id: String,
+        class: String,
+        props: HashMap<String, Variant>,
+    ) {
+        self.sub_resources.insert(id.clone(), class);
+        self.sub_resource_props.insert(id, props);
+    }
+
     /// The clips of a scene built from a glTF document, for the importer to
     /// apply its `.import` settings to (pat-3mbf5). `None` for any other scene.
     pub fn gltf_animations_mut(&mut self) -> Option<&mut Vec<crate::animation::Animation>> {
@@ -3725,7 +3738,7 @@ fn collect_tile_physics(
     any
 }
 
-fn encode_shape_marker(ty: &str, props: Option<&HashMap<String, Variant>>) -> String {
+pub(crate) fn encode_shape_marker(ty: &str, props: Option<&HashMap<String, Variant>>) -> String {
     let num = |k: &str| -> Option<f32> {
         match props?.get(k)? {
             Variant::Float(f) => Some(*f as f32),
