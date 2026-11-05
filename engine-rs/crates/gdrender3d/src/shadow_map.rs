@@ -238,6 +238,160 @@ pub fn generate_shadow_maps(lights: &[Light3D], instances: &[Instance3D]) -> Vec
         .collect()
 }
 
+/// The shadow casters already rasterized into a base depth buffer per shadow
+/// map, reused across frames by [`generate_shadow_maps_incremental`]
+/// (pat-414k3).
+#[derive(Debug, Default)]
+pub struct ShadowCasterCache {
+    /// Signature of the lights the bases were rasterized for.
+    light_sig: u64,
+    /// How many instances of each caster key the bases hold.
+    base_counts: std::collections::HashMap<u64, u32>,
+    /// One base depth buffer per shadow map, in `generate_shadow_maps` order.
+    base: Vec<DepthBuffer>,
+    /// How many calls in a row each caster key has been present. A caster
+    /// unchanged for [`STATIC_CASTER_CALLS`] calls is treated as static and
+    /// goes into the next rebuilt base; a body that merely paused for a frame
+    /// or two would otherwise join the base and force a rebuild when it moves.
+    ages: std::collections::HashMap<u64, u32>,
+    /// How many times a base was rebuilt. Instrumentation for the tests.
+    pub base_rebuilds: u64,
+    /// How many casters the last call rasterized on top of the base.
+    pub last_redrawn: usize,
+}
+
+/// See [`ShadowCasterCache::ages`].
+const STATIC_CASTER_CALLS: u32 = 30;
+
+/// [`generate_shadow_maps`] for a scene where most casters do not move between
+/// calls (pat-414k3).
+///
+/// A CPU shadow map is the per-texel MINIMUM depth over every caster
+/// triangle, and a minimum does not depend on the order it is taken in. So
+/// the casters that have not changed since the previous call are rasterized
+/// once into a cached base, and each call copies the base and rasterizes only
+/// the casters the base does not hold — the player, the enemies and the
+/// spinning coins, rather than thousands of GridMap tiles. The maps are
+/// bit-identical to [`generate_shadow_maps`] over the same instances.
+///
+/// `keys[i]` must change whenever anything `instances[i]` contributes to a
+/// shadow map changes (its mesh, transform, visibility, `cast_shadow` or
+/// layers); `light_sig` likewise for the lights' shadow parameters.
+pub fn generate_shadow_maps_incremental(
+    lights: &[Light3D],
+    instances: &[&Instance3D],
+    keys: &[u64],
+    light_sig: u64,
+    cache: &mut ShadowCasterCache,
+) -> Vec<ShadowMap> {
+    use std::collections::HashMap;
+    debug_assert_eq!(instances.len(), keys.len());
+    let casting: Vec<&Light3D> = lights
+        .iter()
+        .filter(|l| {
+            l.shadow_enabled && matches!(l.light_type, LightType::Directional | LightType::Spot)
+        })
+        .collect();
+    let matrices = |l: &Light3D| match l.light_type {
+        LightType::Spot => (spot_light_view_matrix(l), spot_light_proj_matrix(l)),
+        _ => (directional_light_view_matrix(l), directional_light_proj_matrix()),
+    };
+    let size = SHADOW_MAP_SIZE;
+
+    let mut available: HashMap<u64, u32> = HashMap::new();
+    for k in keys {
+        *available.entry(*k).or_default() += 1;
+    }
+    let ages: HashMap<u64, u32> = available
+        .keys()
+        .map(|k| (*k, cache.ages.get(k).copied().unwrap_or(0) + 1))
+        .collect();
+    cache.ages = ages;
+    // Everything the base does not already hold, counted per key so two
+    // identical casters at one spot are both drawn.
+    let outside_base = |counts: &HashMap<u64, u32>| -> Vec<usize> {
+        let mut held = counts.clone();
+        (0..instances.len())
+            .filter(|i| match held.get_mut(&keys[*i]) {
+                Some(n) if *n > 0 => {
+                    *n -= 1;
+                    false
+                }
+                _ => true,
+            })
+            .collect()
+    };
+    let base_valid = cache.light_sig == light_sig
+        && cache.base.len() == casting.len()
+        && cache
+            .base_counts
+            .iter()
+            .all(|(k, n)| available.get(k).copied().unwrap_or(0) >= *n);
+    let mut rest = outside_base(&cache.base_counts);
+    // Fold casters that have settled into the base once they are at least half
+    // of what is redrawn every call — on the first frames that is the whole
+    // level, later only what has come to rest.
+    let settled = rest
+        .iter()
+        .filter(|i| cache.ages[&keys[**i]] >= STATIC_CASTER_CALLS)
+        .count();
+    if !base_valid || (settled > 0 && settled * 2 >= rest.len()) {
+        // Rebuild from the casters that have sat still for a while.
+        let stable: Vec<usize> = (0..instances.len())
+            .filter(|i| cache.ages[&keys[*i]] >= STATIC_CASTER_CALLS)
+            .collect();
+        cache.base = casting
+            .iter()
+            .map(|l| {
+                let (view, proj) = matrices(l);
+                let mut depth = DepthBuffer::new(size, size);
+                rasterize_instance_refs_into_shadow(
+                    stable.iter().map(|i| instances[*i]),
+                    l.shadow_caster_mask,
+                    &view,
+                    &proj,
+                    &mut depth,
+                    size,
+                );
+                depth
+            })
+            .collect();
+        cache.base_counts.clear();
+        for i in &stable {
+            *cache.base_counts.entry(keys[*i]).or_default() += 1;
+        }
+        cache.light_sig = light_sig;
+        cache.base_rebuilds += 1;
+        rest = outside_base(&cache.base_counts);
+    }
+    let rest: Vec<&Instance3D> = rest.into_iter().map(|i| instances[i]).collect();
+    cache.last_redrawn = rest.len();
+
+    casting
+        .iter()
+        .zip(&cache.base)
+        .map(|(l, base)| {
+            let (view_matrix, proj_matrix) = matrices(l);
+            let mut depth = base.clone();
+            rasterize_instance_refs_into_shadow(
+                rest.iter().copied(),
+                l.shadow_caster_mask,
+                &view_matrix,
+                &proj_matrix,
+                &mut depth,
+                size,
+            );
+            ShadowMap {
+                light_id: l.id,
+                depth,
+                view_matrix,
+                proj_matrix,
+                size,
+            }
+        })
+        .collect()
+}
+
 /// Builds a view matrix looking from the spot light position along its direction.
 pub fn spot_light_view_matrix(light: &Light3D) -> [[f32; 4]; 4] {
     let dir = light.direction.normalized();
@@ -332,6 +486,25 @@ pub fn casts_into_shadow(inst: &Instance3D, caster_mask: u32) -> bool {
 
 fn rasterize_instances_into_shadow(
     instances: &[Instance3D],
+    caster_mask: u32,
+    view_matrix: &[[f32; 4]; 4],
+    proj_matrix: &[[f32; 4]; 4],
+    depth_buf: &mut DepthBuffer,
+    size: u32,
+) {
+    rasterize_instance_refs_into_shadow(
+        instances.iter(),
+        caster_mask,
+        view_matrix,
+        proj_matrix,
+        depth_buf,
+        size,
+    );
+}
+
+/// [`rasterize_instances_into_shadow`] over borrowed instances.
+fn rasterize_instance_refs_into_shadow<'a>(
+    instances: impl IntoIterator<Item = &'a Instance3D>,
     caster_mask: u32,
     view_matrix: &[[f32; 4]; 4],
     proj_matrix: &[[f32; 4]; 4],

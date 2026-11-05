@@ -225,7 +225,13 @@ impl Decal3D {
     /// Returns `None` if the point is outside the decal box.
     pub fn project_point(&self, world_point: Vector3) -> Option<(f64, f64, f64)> {
         let inv = self.global_transform.inverse();
-        let local = inv.xform(world_point);
+        self.project_local(inv.xform(world_point))
+    }
+
+    /// [`Self::project_point`] for a point already in the decal's local space
+    /// (`global_transform.inverse().xform(world)`), so a caller projecting many
+    /// points inverts the transform once (pat-414k3).
+    pub fn project_local(&self, local: Vector3) -> Option<(f64, f64, f64)> {
         let he = self.half_extents();
 
         if local.x.abs() > he.x || local.y.abs() > he.y || local.z.abs() > he.z {
@@ -326,7 +332,26 @@ impl Decal3D {
         if !self.visible {
             return None;
         }
-        let (u, v, w) = self.project_point(world_point)?;
+        let uvw = self.project_point(world_point)?;
+        self.sample_projected(uvw, camera_distance)
+    }
+
+    /// [`Self::sample`] for a point already in the decal's local space (see
+    /// [`Self::project_local`]): the same result, without inverting the
+    /// transform per call (pat-414k3).
+    pub fn sample_local(&self, local: Vector3, camera_distance: f64) -> Option<DecalSample> {
+        if !self.visible {
+            return None;
+        }
+        let uvw = self.project_local(local)?;
+        self.sample_projected(uvw, camera_distance)
+    }
+
+    fn sample_projected(
+        &self,
+        (u, v, w): (f64, f64, f64),
+        camera_distance: f64,
+    ) -> Option<DecalSample> {
         let fade = self.vertical_fade(w) * self.distance_fade(camera_distance);
         if fade <= 0.0 {
             return None;

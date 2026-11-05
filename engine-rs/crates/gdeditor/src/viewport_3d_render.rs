@@ -432,11 +432,24 @@ fn gridmap_items(tree: &SceneTree, nid: gdscene::NodeId, base: &Render3DItem) ->
     if let Some(path) = grid.mesh_library_resource.clone() {
         // Either format (pat-33wmr); the items' meshes are `.res` ArrayMeshes
         // that `mesh_for_primitive` now decodes.
-        if let Some(library) = gdscene::grid_map::MeshLibrary::load(&path) {
+        if let Some(library) = cached_mesh_library(&path) {
             grid.mesh_library = library;
         }
     }
-    grid.mesh_instances_oriented()
+    // 🔑 Sorted by cell position (pat-414k3). `mesh_instances_oriented` walks a
+    // HashMap that `GridMap::from_node` builds afresh, with a fresh random hash
+    // seed, on every call — so every frame listed the cells in a different
+    // order. Draw order decides which of two coplanar surfaces wins the depth
+    // test, so the Play view flickered between frames of a PAUSED game, and no
+    // whole-frame comparison of the renderer could be made at all.
+    let mut cells = grid.mesh_instances_oriented();
+    // Unstable is enough: no two cells share a position.
+    cells.sort_unstable_by(|a, b| {
+        (a.0.x, a.0.y, a.0.z)
+            .partial_cmp(&(b.0.x, b.0.y, b.0.z))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    cells
         .into_iter()
         .map(|(origin, basis, path)| Render3DItem {
             // The cell's placement is relative to the GridMap node, so it
@@ -447,6 +460,35 @@ fn gridmap_items(tree: &SceneTree, nid: gdscene::NodeId, base: &Render3DItem) ->
             ..base.clone()
         })
         .collect()
+}
+
+/// [`gdscene::grid_map::MeshLibrary::load`], read once per file rather than on
+/// every frame (pat-414k3): the Play view parsed the GridMap's whole
+/// MeshLibrary resource every frame, under the editor-state lock. Re-read when
+/// a loose file's modification time changes.
+fn cached_mesh_library(path: &str) -> Option<gdscene::grid_map::MeshLibrary> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    type Entry = (Option<std::time::SystemTime>, gdscene::grid_map::MeshLibrary);
+    thread_local! {
+        static LIBRARIES: RefCell<HashMap<String, Entry>> = RefCell::new(HashMap::new());
+    }
+    let stamp = gdcore::file_access::resolve_path(path)
+        .ok()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok());
+    LIBRARIES.with(|cache| {
+        if let Some((cached, library)) = cache.borrow().get(path) {
+            if *cached == stamp {
+                return Some(library.clone());
+            }
+        }
+        let library = gdscene::grid_map::MeshLibrary::load(path)?;
+        cache
+            .borrow_mut()
+            .insert(path.to_string(), (stamp, library.clone()));
+        Some(library)
+    })
 }
 
 /// Maps a collected spatial node to its draw item.
@@ -792,7 +834,9 @@ fn mesh_from_file(path: &str) -> Option<Mesh3D> {
     // and nothing else, and every glTF model fell through to the placeholder
     // marker cube.
     if lowered.ends_with(".glb") || lowered.ends_with(".gltf") {
-        let resource = gdresource::gltf_import::import_gltf(std::path::Path::new(on_disk)).ok()?;
+        // Parsed once per file (pat-ujiku): this runs for every mesh node on
+        // every frame, under the editor-state lock.
+        let resource = gdscene::render_server_3d::import_gltf_cached(path)?;
         return gdscene::render_server_3d::mesh3d_from_gltf_resource(&resource);
     }
 

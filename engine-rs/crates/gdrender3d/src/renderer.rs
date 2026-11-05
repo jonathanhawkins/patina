@@ -1479,38 +1479,233 @@ impl SoftwareRenderer3D {
             .iter()
             .map(|d| (d.global_transform.origin - camera_pos).length() as f64)
             .collect();
+        // pat-414k3: this pass ran `sample` — which inverts the decal's
+        // transform — for every pixel of the frame, and reconstructed every
+        // pixel's world position even where no decal could reach. Three
+        // conservative rejections now come first, each of which only drops
+        // points `sample` itself would drop, so the picture cannot change:
+        //
+        // 1. a screen rectangle per decal (its padded world box projected),
+        //    outside which no pixel's surface can lie inside the box;
+        // 2. the padded world-space AABB of the decal box;
+        // 3. then `sample_local`, with the inverse `sample` computes per call
+        //    computed ONCE per decal — the same `inverse()`, so the same bits.
+        let boxes: Vec<(Vector3, Vector3)> = decals
+            .iter()
+            .map(|d| {
+                let he = d.half_extents();
+                let b = &d.global_transform.basis;
+                let ext = Vector3::new(
+                    b.x.x.abs() * he.x + b.y.x.abs() * he.y + b.z.x.abs() * he.z,
+                    b.x.y.abs() * he.x + b.y.y.abs() * he.y + b.z.y.abs() * he.z,
+                    b.x.z.abs() * he.x + b.y.z.abs() * he.y + b.z.z.abs() * he.z,
+                );
+                let pad = ext * 1e-3 + Vector3::new(1e-3, 1e-3, 1e-3);
+                let o = d.global_transform.origin;
+                (o - ext - pad, o + ext + pad)
+            })
+            .collect();
+        let inverses: Vec<Transform3D> =
+            decals.iter().map(|d| d.global_transform.inverse()).collect();
+        let proj = invert_projection(inv_proj);
+        let view_of_world = camera_transform.inverse();
+        // Inclusive pixel rectangle, or `None` when no part of the box can be
+        // on screen. A box crossing the camera plane is clipped to its part in
+        // front (the corners in front, plus where its edges cross a plane just
+        // ahead of the eye): every visible surface point lies beyond the near
+        // plane, so it projects inside the hull of those points.
+        let full = Some((0u32, 0u32, w.saturating_sub(1), h.saturating_sub(1)));
+        const EYE_W: f32 = 1e-3;
+        let rects: Vec<Option<(u32, u32, u32, u32)>> = boxes
+            .iter()
+            .map(|(lo, hi)| {
+                let clip_of = |c: Vector3| {
+                    let v = view_of_world.xform(c);
+                    let r = |r: usize| {
+                        proj[0][r] * v.x + proj[1][r] * v.y + proj[2][r] * v.z + proj[3][r]
+                    };
+                    [r(0), r(1), r(3)]
+                };
+                let corners: Vec<[f32; 3]> = (0..8)
+                    .map(|k| {
+                        clip_of(Vector3::new(
+                            if k & 1 == 0 { lo.x } else { hi.x },
+                            if k & 2 == 0 { lo.y } else { hi.y },
+                            if k & 4 == 0 { lo.z } else { hi.z },
+                        ))
+                    })
+                    .collect();
+                let mut pts: Vec<[f32; 3]> =
+                    corners.iter().copied().filter(|c| c[2] >= EYE_W).collect();
+                // The 12 box edges join corners that differ in one bit.
+                for a in 0..8usize {
+                    for bit in [1usize, 2, 4] {
+                        let b = a | bit;
+                        if b == a {
+                            continue;
+                        }
+                        let (ca, cb) = (corners[a], corners[b]);
+                        if (ca[2] >= EYE_W) != (cb[2] >= EYE_W) {
+                            // Clip coordinates are affine along the edge.
+                            let t = (EYE_W - ca[2]) / (cb[2] - ca[2]);
+                            pts.push([
+                                ca[0] + (cb[0] - ca[0]) * t,
+                                ca[1] + (cb[1] - ca[1]) * t,
+                                EYE_W,
+                            ]);
+                        }
+                    }
+                }
+                if pts.is_empty() {
+                    // Wholly behind the eye.
+                    return None;
+                }
+                let (mut x0, mut y0, mut x1, mut y1) =
+                    (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+                for c in pts {
+                    let sx = (c[0] / c[2] + 1.0) * 0.5 * w as f32 - 0.5;
+                    let sy = (1.0 - c[1] / c[2]) * 0.5 * h as f32 - 0.5;
+                    if !(sx.is_finite() && sy.is_finite()) {
+                        return full;
+                    }
+                    x0 = x0.min(sx);
+                    y0 = y0.min(sy);
+                    x1 = x1.max(sx);
+                    y1 = y1.max(sy);
+                }
+                // Two pixels of slack for the depth reconstruction's rounding.
+                let (x0, y0, x1, y1) = (x0 - 2.0, y0 - 2.0, x1 + 2.0, y1 + 2.0);
+                if x1 < 0.0 || y1 < 0.0 || x0 > (w - 1) as f32 || y0 > (h - 1) as f32 {
+                    return None;
+                }
+                Some((
+                    x0.max(0.0).floor() as u32,
+                    y0.max(0.0).floor() as u32,
+                    (x1.ceil() as u32).min(w - 1),
+                    (y1.ceil() as u32).min(h - 1),
+                ))
+            })
+            .collect();
+        let Some((ux0, uy0, ux1, uy1)) = rects.iter().flatten().copied().reduce(|a, b| {
+            (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
+        }) else {
+            return;
+        };
+        // 4. a depth window per decal, tested BEFORE a pixel's position is
+        //    reconstructed. With a projection whose z and w ignore x and y (any
+        //    perspective or orthographic one), NDC depth is a monotonic function
+        //    of view-space z alone, so a padded box spans one depth interval and
+        //    a pixel outside it cannot lie in the box. `None` (an unusual
+        //    projection, or a box reaching behind the eye) keeps every pixel.
+        let depth_only = proj[0][2] == 0.0
+            && proj[1][2] == 0.0
+            && proj[0][3] == 0.0
+            && proj[1][3] == 0.0;
+        let windows: Vec<Option<(f32, f32)>> = boxes
+            .iter()
+            .map(|(lo, hi)| {
+                if !depth_only {
+                    return None;
+                }
+                let (mut z0, mut z1) = (f32::INFINITY, f32::NEG_INFINITY);
+                for k in 0..8 {
+                    let c = Vector3::new(
+                        if k & 1 == 0 { lo.x } else { hi.x },
+                        if k & 2 == 0 { lo.y } else { hi.y },
+                        if k & 4 == 0 { lo.z } else { hi.z },
+                    );
+                    let z = view_of_world.xform(c).z;
+                    z0 = z0.min(z);
+                    z1 = z1.max(z);
+                }
+                let ndc = |z: f32| {
+                    let cw = proj[2][3] * z + proj[3][3];
+                    (cw > EYE_W).then(|| (proj[2][2] * z + proj[3][2]) / cw)
+                };
+                // `z0` is the box's far side. When the near side reaches the
+                // eye (the follow camera sits inside the player's blob-shadow
+                // column), only the far bound is known: the window is open on
+                // the near side, in whichever direction depth grows toward the
+                // eye.
+                let far = ndc(z0)?;
+                let (d0, d1) = match ndc(z1) {
+                    Some(near) => (far.min(near), far.max(near)),
+                    None => {
+                        let closer = ndc(z0 * 0.999)?;
+                        if closer < far {
+                            (f32::NEG_INFINITY, far)
+                        } else {
+                            (far, f32::INFINITY)
+                        }
+                    }
+                };
+                // Slack for the depth buffer's and the reconstruction's
+                // rounding, on top of the box padding.
+                let slack = 1e-4 * (1.0 + far.abs());
+                (!d0.is_nan() && !d1.is_nan()).then(|| (d0 - slack, d1 + slack))
+            })
+            .collect();
 
-        for y in 0..h {
+        let shade_row = |y: u32, row: &mut [Color]| {
             let ndc_y = 1.0 - 2.0 * (y as f32 + 0.5) / h as f32;
-            for x in 0..w {
+            for x in ux0..=ux1 {
                 let ndc_x = 2.0 * (x as f32 + 0.5) / w as f32 - 1.0;
                 let i = (y * w + x) as usize;
+                let px = &mut row[x as usize];
                 let d = depth[i];
                 if d >= 1.0 {
+                    continue;
+                }
+                let reachable = rects.iter().zip(&windows).any(|(r, win)| match r {
+                    Some((x0, y0, x1, y1)) if x >= *x0 && x <= *x1 && y >= *y0 && y <= *y1 => {
+                        win.map_or(true, |(d0, d1)| d >= d0 && d <= d1)
+                    }
+                    _ => false,
+                });
+                if !reachable {
                     continue;
                 }
 
                 let view_pos = pixel_view_position(ndc_x, ndc_y, d, inv_proj);
                 let world_pos = camera_transform.xform(view_pos);
 
-                for (decal, camera_distance) in decals.iter().zip(camera_distances.iter()) {
+                for (k, (decal, camera_distance)) in
+                    decals.iter().zip(camera_distances.iter()).enumerate()
+                {
+                    match rects[k] {
+                        Some((x0, y0, x1, y1)) if x >= x0 && x <= x1 && y >= y0 && y <= y1 => {}
+                        _ => continue,
+                    }
+                    let (lo, hi) = boxes[k];
+                    if world_pos.x < lo.x
+                        || world_pos.y < lo.y
+                        || world_pos.z < lo.z
+                        || world_pos.x > hi.x
+                        || world_pos.y > hi.y
+                        || world_pos.z > hi.z
+                    {
+                        continue;
+                    }
+                    // The same `inverse()` `sample` would compute, once per
+                    // decal instead of once per pixel: the same bits.
+                    let local = inverses[k].xform(world_pos);
                     // ⚠️ `sample`, not `sample_alpha` (pat-s3rrv.204). The old
                     // call returned a scalar and this blended the decal's flat
                     // `modulate` by it, so the four texture channels were read
                     // off the node, carried all the way here, and never
                     // sampled — every decal projected one uniform colour.
-                    let sample = match decal.sample(world_pos, *camera_distance) {
+                    let sample = match decal.sample_local(local, *camera_distance) {
                         Some(s) if s.fade > 0.0 => s,
                         _ => continue,
                     };
 
                     let alpha = sample.albedo_alpha as f32;
                     if alpha > 0.0 {
-                        pixels[i] = Color::new(
-                            lerp(pixels[i].r, sample.albedo.r, alpha),
-                            lerp(pixels[i].g, sample.albedo.g, alpha),
-                            lerp(pixels[i].b, sample.albedo.b, alpha),
-                            pixels[i].a,
+                        *px = Color::new(
+                            lerp(px.r, sample.albedo.r, alpha),
+                            lerp(px.g, sample.albedo.g, alpha),
+                            lerp(px.b, sample.albedo.b, alpha),
+                            px.a,
                         );
                     }
 
@@ -1525,16 +1720,43 @@ impl SoftwareRenderer3D {
                     if let Some(e) = sample.emission {
                         let k = (sample.fade * decal.emission_energy) as f32;
                         if k > 0.0 {
-                            pixels[i] = Color::new(
-                                (pixels[i].r + e.r * k).min(1.0),
-                                (pixels[i].g + e.g * k).min(1.0),
-                                (pixels[i].b + e.b * k).min(1.0),
-                                pixels[i].a,
+                            *px = Color::new(
+                                (px.r + e.r * k).min(1.0),
+                                (px.g + e.g * k).min(1.0),
+                                (px.b + e.b * k).min(1.0),
+                                px.a,
                             );
                         }
                     }
                 }
             }
+        };
+        // Rows are independent, so they shade on worker threads in bands —
+        // the same split `apply_camera_post` uses. Each pixel's result is
+        // unchanged; only who computes it differs (pat-414k3).
+        let width = w as usize;
+        let band_pixels = &mut pixels[uy0 as usize * width..(uy1 as usize + 1) * width];
+        let rows = (uy1 - uy0 + 1) as usize;
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .clamp(1, 8)
+            .min(rows);
+        let band_rows = rows.div_ceil(threads);
+        if threads <= 1 {
+            for (r, row) in band_pixels.chunks_mut(width).enumerate() {
+                shade_row(uy0 + r as u32, row);
+            }
+        } else {
+            let shade_row = &shade_row;
+            std::thread::scope(|scope| {
+                for (b, band) in band_pixels.chunks_mut(band_rows * width).enumerate() {
+                    scope.spawn(move || {
+                        for (r, row) in band.chunks_mut(width).enumerate() {
+                            shade_row(uy0 + (b * band_rows + r) as u32, row);
+                        }
+                    });
+                }
+            });
         }
     }
 
@@ -4733,3 +4955,9 @@ mod tests {
         assert!(SoftwareRenderer3D::wireframe().decals().is_empty());
     }
 }
+
+/// pat-414k3: the decal pass rejects pixels early; it must still draw exactly
+/// what the per-pixel `sample` walk drew.
+#[cfg(test)]
+#[path = "decal_pass_tests.rs"]
+mod decal_pass_tests;
