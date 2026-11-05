@@ -5,7 +5,7 @@
       "scenario_key": "7e09d6176af7888a",
       "godot_version": "4.6.1.stable.official.14d19694e",
       "recorded": "2026-11-05",
-      "commit": "8a032f3",
+      "commit": "521f110",
       "traces": {
         "/root/Main/Player:position": {
           "compared": 319,
@@ -16,24 +16,24 @@
       },
       "images": {
         "f18": {
-          "mismatch_pct": 2.045,
-          "mean_delta": 6.747,
-          "coarse_mismatch_pct": 2.759
+          "mismatch_pct": 0.259,
+          "mean_delta": 1.742,
+          "coarse_mismatch_pct": 0
         },
         "f168": {
-          "mismatch_pct": 1.409,
-          "mean_delta": 2.973,
-          "coarse_mismatch_pct": 1.37
+          "mismatch_pct": 0.114,
+          "mean_delta": 1.565,
+          "coarse_mismatch_pct": 0
         },
         "f258": {
-          "mismatch_pct": 10.731,
-          "mean_delta": 10.435,
-          "coarse_mismatch_pct": 9.926
+          "mismatch_pct": 0.127,
+          "mean_delta": 1.521,
+          "coarse_mismatch_pct": 0
         },
         "f318": {
-          "mismatch_pct": 15.543,
-          "mean_delta": 18.342,
-          "coarse_mismatch_pct": 15.389
+          "mismatch_pct": 1.019,
+          "mean_delta": 2.455,
+          "coarse_mismatch_pct": 0.87
         }
       }
     },
@@ -128,7 +128,7 @@
       "scenario_key": "8048329905e3a83f",
       "godot_version": "4.6.1.stable.official.14d19694e",
       "recorded": "2026-11-05",
-      "commit": "8a032f3",
+      "commit": "521f110",
       "traces": {
         "/root/Pong/Left:position": {
           "compared": 229,
@@ -176,7 +176,7 @@
       "scenario_key": "f86827054863d476",
       "godot_version": "4.6.1.stable.official.14d19694e",
       "recorded": "2026-11-05",
-      "commit": "8a032f3",
+      "commit": "521f110",
       "traces": {
         "/root/Main/Player:position": {
           "compared": 235,
@@ -187,29 +187,29 @@
       },
       "images": {
         "f48": {
-          "mismatch_pct": 6.412,
-          "mean_delta": 14.387,
-          "coarse_mismatch_pct": 9.583
+          "mismatch_pct": 1.758,
+          "mean_delta": 4.203,
+          "coarse_mismatch_pct": 0.111
         },
         "f66": {
-          "mismatch_pct": 1.563,
-          "mean_delta": 7.112,
-          "coarse_mismatch_pct": 1.833
+          "mismatch_pct": 0.633,
+          "mean_delta": 5.08,
+          "coarse_mismatch_pct": 0.611
         },
         "f114": {
-          "mismatch_pct": 1.571,
-          "mean_delta": 8.445,
-          "coarse_mismatch_pct": 1.861
+          "mismatch_pct": 0.64,
+          "mean_delta": 6.437,
+          "coarse_mismatch_pct": 0.611
         },
         "f174": {
-          "mismatch_pct": 1.76,
-          "mean_delta": 8.613,
-          "coarse_mismatch_pct": 2.056
+          "mismatch_pct": 0.645,
+          "mean_delta": 6.364,
+          "coarse_mismatch_pct": 0.611
         },
         "f234": {
-          "mismatch_pct": 1.93,
-          "mean_delta": 5.787,
-          "coarse_mismatch_pct": 2.194
+          "mismatch_pct": 0.649,
+          "mean_delta": 3.233,
+          "coarse_mismatch_pct": 0.611
         }
       }
     },
@@ -217,50 +217,50 @@
       "scenario_key": "1dee248d8f842e0b",
       "godot_version": "4.6.1.stable.official.14d19694e",
       "recorded": "2026-11-05",
-      "commit": "8a032f3",
+      "commit": "521f110",
       "traces": {
         "/root/TownScene/InstancePos/car/Body:position": {
           "compared": 583,
-          "first_divergence": 109,
-          "max_error": null,
-          "max_error_frame": 109
+          "first_divergence": 400,
+          "max_error": 0.3448,
+          "max_error_frame": 575
         }
       },
       "images": {
         "f90": {
-          "mismatch_pct": 2.459,
-          "mean_delta": 15.664,
-          "coarse_mismatch_pct": 2.023
+          "mismatch_pct": 1.452,
+          "mean_delta": 4.042,
+          "coarse_mismatch_pct": 0.249
         },
         "f108": {
-          "mismatch_pct": 10.825,
-          "mean_delta": 17.839,
-          "coarse_mismatch_pct": 8.985
+          "mismatch_pct": 1.453,
+          "mean_delta": 5.964,
+          "coarse_mismatch_pct": 0.274
         },
         "f258": {
-          "mismatch_pct": 18.529,
-          "mean_delta": 26.984,
-          "coarse_mismatch_pct": 18.493
+          "mismatch_pct": 16.072,
+          "mean_delta": 24.256,
+          "coarse_mismatch_pct": 15.595
         },
         "f408": {
-          "mismatch_pct": 37.652,
-          "mean_delta": 43.368,
-          "coarse_mismatch_pct": 33.479
+          "mismatch_pct": 32.862,
+          "mean_delta": 38.541,
+          "coarse_mismatch_pct": 29.235
         },
         "f480": {
-          "mismatch_pct": 27.748,
-          "mean_delta": 37.098,
-          "coarse_mismatch_pct": 24.666
+          "mismatch_pct": 20.047,
+          "mean_delta": 27.998,
+          "coarse_mismatch_pct": 15.098
         },
         "f552": {
-          "mismatch_pct": 34.042,
-          "mean_delta": 40.738,
-          "coarse_mismatch_pct": 30.118
+          "mismatch_pct": 31.748,
+          "mean_delta": 37.107,
+          "coarse_mismatch_pct": 27.066
         },
         "f582": {
-          "mismatch_pct": 33.237,
-          "mean_delta": 41.185,
-          "coarse_mismatch_pct": 29.638
+          "mismatch_pct": 27.505,
+          "mean_delta": 33.626,
+          "coarse_mismatch_pct": 21.922
         }
       }
     }
