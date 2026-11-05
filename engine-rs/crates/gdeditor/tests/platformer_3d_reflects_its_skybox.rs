@@ -69,12 +69,14 @@ fn platformer_3d_reflects_its_skybox_and_orders_its_probes() {
     std::thread::sleep(Duration::from_millis(500));
     let (env, probes) = {
         let state = handle.state();
-        let st = state.lock().unwrap();
-        let tree = st
-            .run_main_loop
-            .as_ref()
-            .map(|ml| ml.tree())
-            .unwrap_or(&st.scene_tree);
+        let mut guard = state.lock().unwrap();
+        let st = &mut *guard;
+        // `prepare_play_3d_frame` lays out Controls in place (pat-9ww3e), so
+        // it takes the tree mutably.
+        let tree = match st.run_main_loop.as_mut() {
+            Some(ml) => ml.tree_mut(),
+            None => &mut st.scene_tree,
+        };
         let clear = st
             .run_project_settings
             .as_ref()
