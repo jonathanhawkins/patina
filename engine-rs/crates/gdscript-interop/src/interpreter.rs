@@ -3289,6 +3289,37 @@ impl Interpreter {
             member: prop.to_string(),
         })?;
 
+        // 🔑 `node.<resource prop>.<field> = v` on an INLINE sub-resource
+        // (pat-7puwj). The node stores the reference as TEXT
+        // (`"SubResource:Environment_x"`) with the sub-resource's body beside it
+        // as `__subres__<prop>__<key>` companions (packed_scene.rs), which is
+        // what the renderers and the saver read. A Godot resource is a shared
+        // reference, so the write mutates it in place: land it on that
+        // companion. Without this, truck_town's `town.setup()` died on its last
+        // line, `%WorldEnvironment.environment.sdfgi_enabled = sdfgi`, with
+        // "cannot assign member on String" — and the town never loaded.
+        if let Variant::String(text) = &intermediate {
+            if text.starts_with("SubResource") && self.scene_access.is_some() {
+                if let Variant::ObjectId(oid) = self.eval_expr(inner_obj)? {
+                    let key = format!("__subres__{prop}__{field}");
+                    let final_val = if matches!(op, AssignOp::Assign) {
+                        rhs
+                    } else {
+                        let cur = self
+                            .scene_access
+                            .as_ref()
+                            .map(|a| a.get_node_property(oid.raw(), &key))
+                            .unwrap_or(Variant::Nil);
+                        self.apply_assign_op(op, &cur, &rhs)?
+                    };
+                    if let Some(access) = self.scene_access.as_mut() {
+                        access.set_node_property(oid.raw(), &key, final_val);
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
         // Step 2: Get the current field value for compound ops
         let current_field = match &intermediate {
             Variant::Vector2(v) => match field {
