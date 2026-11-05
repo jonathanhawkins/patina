@@ -211,6 +211,9 @@ fn frame_ordering_sync_to_step_sync_from() {
     );
 
     // Rigid body should have moved from physics integration.
+    // pat-29zst: a rigid body's step reaches its node at the NEXT tick's flush,
+    // as in Godot 4.6.1, so the node shows the first step after the second tick.
+    ml.step(1.0 / 60.0);
     let rigid_pos = get_node_position(&ml, rigid_id);
     assert!(
         rigid_pos.x > 100.0,
@@ -227,6 +230,9 @@ fn sync_from_physics_writes_all_rigid_properties() {
     let (mut ml, rigid_id, _static_id, _kinematic_id) = setup_mixed_body_scene();
 
     // Step to trigger integration + sync_from_physics.
+    ml.step(1.0 / 60.0);
+    // pat-29zst: a rigid body's step reaches its node at the NEXT tick's flush,
+    // as in Godot 4.6.1, so the node shows the first step after the second tick.
     ml.step(1.0 / 60.0);
 
     let node = ml.tree().get_node(rigid_id).unwrap();
@@ -406,6 +412,9 @@ fn rigid_external_velocity_write_is_applied() {
     );
 
     // Step again — the written velocity is the body's velocity now.
+    ml.step(1.0 / 60.0);
+    // pat-29zst: that step's result (written velocity plus one tick of
+    // gravity) reaches the node at the next tick's flush, as in Godot 4.6.1.
     ml.step(1.0 / 60.0);
     let vel_after_second = match ml
         .tree()

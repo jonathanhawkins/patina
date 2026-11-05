@@ -305,10 +305,12 @@ fn multi_body_independent_integration() {
     // Both balls start at y = 0 under the SAME gravity (Godot applies the
     // space's default 980 px/s² to every RigidBody2D — this used to claim
     // gravity "is not yet applied"). Integration is independent per body, so
-    // the only difference in y is B's own 60 px/s over the 10 frames: 10 px.
+    // the only difference in y is B's own 60 px/s over the steps the nodes
+    // show. A rigid body's node reads one step old, as in Godot 4.6.1, so ten
+    // ticks publish nine steps (pat-29zst): 9 px.
     assert!(
-        ((b_final.y - a_final.y) - 10.0).abs() < 0.01,
-        "A and B share gravity; B is 10 px further from its own velocity: A={} B={}",
+        ((b_final.y - a_final.y) - 9.0).abs() < 0.01,
+        "A and B share gravity; B is 9 px further from its own velocity: A={} B={}",
         a_final.y,
         b_final.y
     );

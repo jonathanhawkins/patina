@@ -727,6 +727,19 @@ pub struct MainLoop {
     viewport_size: (u32, u32),
     /// The active movie-capture session, if any (pat-s3rrv.262).
     movie_capture: Option<MovieCapture>,
+    /// Called once per frame right after the deferred-call flush (pat-la27y).
+    /// See [`Self::set_deferred_flush_observer`].
+    deferred_flush_observer: Option<DeferredFlushObserver>,
+}
+
+/// A frame observer run at the deferred-call flush, Godot's
+/// `MessageQueue::flush()` after `_process` (pat-la27y).
+pub struct DeferredFlushObserver(Box<dyn FnMut(&SceneTree) + Send>);
+
+impl std::fmt::Debug for DeferredFlushObserver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DeferredFlushObserver")
+    }
 }
 
 /// An in-flight `MovieWriter` capture session (pat-s3rrv.262).
@@ -845,7 +858,30 @@ impl MainLoop {
             hovered_pickables_3d: std::collections::HashSet::new(),
             viewport_size: (1152, 648),
             movie_capture: None,
+            deferred_flush_observer: None,
         }
+    }
+
+    /// Installs (or clears) an observer that reads the tree once per frame at
+    /// the point a `call_deferred` from the last `_process` runs: after the
+    /// deferred-call flush, BEFORE queued frees and a queued scene change are
+    /// applied (pat-la27y).
+    ///
+    /// 🔑 This is where Godot code observes "the end of a frame". Godot's
+    /// `SceneTree::process` flushes the MessageQueue, THEN applies
+    /// `_flush_scene_change`, timers, tweens and `_flush_delete_queue`
+    /// (`scene_tree.cpp`). A frame-exact comparison against a Godot capture
+    /// that records from a deferred call (scripts/lib/godot-reference-capture.gd)
+    /// must read Patina at the same phase: read after the whole step, a scene
+    /// changed with `change_scene_to_file` was already present one frame before
+    /// Godot's capture could see it (spark_keeper: `/root/Main/Player` at f49
+    /// vs Godot's f50), although `_ready` and the first tick run on the same
+    /// frames in both engines.
+    pub fn set_deferred_flush_observer(
+        &mut self,
+        observer: Option<Box<dyn FnMut(&SceneTree) + Send>>,
+    ) {
+        self.deferred_flush_observer = observer.map(DeferredFlushObserver);
     }
 
     /// Advances CPU particle simulators for every emitting particle node.
@@ -2782,6 +2818,32 @@ impl MainLoop {
         self.physics_server_3d
             .set_gravity(Vector3::new(dir3.x * g3, dir3.y * g3, dir3.z * g3));
 
+        // Jolt's contact penetration model (pat-29zst), only when the project
+        // selects Jolt. The key spelling is project.godot's own
+        // (`3d/physics_engine="Jolt Physics"`); GodotPhysics3D keeps the full
+        // push-out.
+        let jolt = settings
+            .get("physics/3d/physics_engine")
+            .and_then(|v| v.as_string())
+            == Some("Jolt Physics");
+        self.physics_server_3d.set_jolt_contacts(jolt.then(|| {
+            let mut p = gdphysics3d::world::JoltContactParams::default();
+            let key = |k: &str| format!("physics/jolt_physics_3d/simulation/{k}");
+            if let Some(v) = float_setting(settings, &key("penetration_slop")) {
+                p.penetration_slop = v;
+            }
+            if let Some(v) = float_setting(settings, &key("speculative_contact_distance")) {
+                p.speculative_contact_distance = v;
+            }
+            if let Some(v) = float_setting(settings, &key("baumgarte_stabilization_factor")) {
+                p.baumgarte = v;
+            }
+            if let Some(v) = settings.get(&key("position_steps")).and_then(|v| v.as_int()) {
+                p.position_steps = v.max(0) as u32;
+            }
+            p
+        }));
+
         // 2D space + solver parameters (pat-0q2kx.116). These were stored on the
         // body and the world and read from nowhere — a project that authored
         // `default_linear_damp = 1.0` simulated as if it had not.
@@ -4143,6 +4205,10 @@ impl MainLoop {
             // `body_entered` handler one tick EARLY: Pong's ball, which moves in
             // `_process`, was reset on frame 186 where Godot resets it on 187.
             if simulate {
+                // The rigid-body states the previous tick's step solved
+                // (pat-29zst). Godot's `GodotSpace2D::call_queries` runs the
+                // body state callbacks before the area monitor callbacks.
+                self.physics_server.flush_rigid_states(&mut self.tree);
                 // body_entered / body_exited on Area2D nodes.
                 self.physics_server.process_overlap_signals(&mut self.tree);
                 // area_entered / area_exited between Area2D nodes (pat-u3l8c.51).
@@ -4199,8 +4265,15 @@ impl MainLoop {
                 // Snapshotted rather than borrowed from the server: the bound
                 // script servers hand callbacks a raw `&mut` to it, so a live
                 // `&` here would alias that.
-                let in_space: std::collections::HashSet<crate::node::NodeId> =
-                    self.physics_server_3d.registered_nodes().collect();
+                // A body whose step was held back (pat-29zst: fresh, so Godot
+                // has not stepped it yet) gets no callback either: Godot's
+                // first `_integrate_forces` comes from the flush after its
+                // first step.
+                let in_space: std::collections::HashSet<crate::node::NodeId> = self
+                    .physics_server_3d
+                    .registered_nodes()
+                    .filter(|&id| !self.physics_server_3d.step_was_held(id))
+                    .collect();
                 crate::integrate_forces::run_integrate_forces_3d_where(
                     &mut self.tree,
                     self.physics_server_3d.gravity(),
@@ -4333,6 +4406,11 @@ impl MainLoop {
             self.tree.clear_script_audio_server();
             self.tree.clear_script_physics_server();
             self.tree.clear_script_physics_server_3d();
+            // A 3D body this script phase spawned is in Godot's space for the
+            // step that ends this tick — Patina's next-tick step (pat-29zst).
+            if simulate {
+                self.physics_server_3d.sync_registrations(&self.tree);
+            }
             // -- 2D solver phase (pat-0q2kx.201) --
             // Godot's `Main::iteration` runs the scene tree's physics process —
             // every `_physics_process`, and so every `move_and_slide`, impulse
@@ -4377,7 +4455,11 @@ impl MainLoop {
                 );
                 self.physics_server.sync_to_physics(&mut self.tree);
                 self.physics_server.step_physics(physics_dt as f32);
-                self.physics_server.sync_from_physics(&mut self.tree);
+                // A rigid body's solved state reaches its node at the next
+                // tick's flush (`flush_rigid_states` above), as in Godot
+                // (pat-29zst).
+                self.physics_server
+                    .sync_from_physics_deferring_rigid(&mut self.tree);
 
                 // ⚠️ The overlap / contact SIGNALS of this step are emitted at
                 // the START of the next tick (see `flush_queries` above), not
@@ -4730,6 +4812,10 @@ impl MainLoop {
         // -- deferred call phase (Godot MessageQueue flush) --
         // After process notifications; before queue_free deletions.
         self.tree.process_deferred_calls();
+        // What a `call_deferred` from the last `_process` sees (pat-la27y).
+        if let Some(obs) = self.deferred_flush_observer.as_mut() {
+            (obs.0)(&self.tree);
+        }
 
         // -- deferred deletion phase --
         // Remove nodes that called queue_free() during this frame.

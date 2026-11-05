@@ -127,6 +127,16 @@ fn physics2d_tick_order_script_before_step() {
         1,
         "`_physics_process` must have run exactly once for a single 1/60 step"
     );
+    // pat-29zst: the step that ended tick 1 reaches the NODE at tick 2's
+    // `flush_queries`, as in Godot 4.6.1 (a 60 px/s RigidBody2D still reads
+    // x = 0 after one tick). So the ordering is read after the second tick,
+    // whose flush publishes the step the tick-1 write drove.
+    assert_eq!(
+        position(&ml, id),
+        Vector2::ZERO,
+        "after one tick the node still holds its pre-step state, as in Godot"
+    );
+    ml.step(PHYSICS_DT);
 
     let expected = SPEED * PHYSICS_DT as f32;
     let x = position(&ml, id).x;
@@ -139,8 +149,8 @@ fn physics2d_tick_order_script_before_step() {
     // regression into a tolerance argument.
     assert!(
         x > 0.0,
-        "after ONE physics tick the body must have moved along +X at the velocity \
-         the script wrote in that same tick, got x = {x}. Exactly 0.0 is the bug \
+        "the step ending the tick whose script wrote the velocity must have moved \
+         the body along +X, got x = {x}. Exactly 0.0 is the bug \
          this bead is about: the solver stepped before the script phase, so the \
          write landed a tick late"
     );
@@ -151,7 +161,7 @@ fn physics2d_tick_order_script_before_step() {
     // double-applied velocity would produce.
     assert!(
         (x - expected).abs() <= expected * 0.02,
-        "after one tick the body must have advanced exactly one step: expected \
+        "the first step must advance the body exactly one step: expected \
          x = {expected}, got {x}"
     );
 }

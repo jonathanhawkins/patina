@@ -746,6 +746,10 @@ pub struct PhysicsServer {
     last_overlap_events: Vec<OverlapEvent>,
     /// Area-area overlap events from the last physics step.
     last_area_overlap_events: Vec<AreaOverlapEvent>,
+    /// Rigid bodies whose last step has not reached their node yet
+    /// (pat-29zst), with what their node held when the step ran. See
+    /// [`sync_from_physics_deferring_rigid`](Self::sync_from_physics_deferring_rigid).
+    pending_rigid_publish: Vec<PendingRigidPublish>,
     /// Physics trace log (frame-by-frame body positions).
     trace: Vec<PhysicsTraceEntry>,
     /// Whether tracing is enabled.
@@ -757,6 +761,19 @@ pub struct PhysicsServer {
 /// Everything about a tilemap node that changes the static bodies it generates
 /// (pat-0q2kx.117). Equality decides whether the tile bodies are rebuilt, so it
 /// must cover the painted cells themselves — a same-size edit (one cell erased,
+/// A rigid body's node as it stood when the step that has not been published
+/// yet ran (pat-29zst). A field that differs at the flush was written by a
+/// script in between, and wins over the solver's value.
+#[derive(Debug, Clone)]
+struct PendingRigidPublish {
+    node: NodeId,
+    body: BodyId,
+    position: Vector2,
+    rotation: f32,
+    linear_velocity: Variant,
+    angular_velocity: Variant,
+}
+
 /// another painted) would slip past a body-count comparison.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TileMapFingerprint {
@@ -803,6 +820,7 @@ impl PhysicsServer {
             last_collision_events: Vec::new(),
             last_overlap_events: Vec::new(),
             last_area_overlap_events: Vec::new(),
+            pending_rigid_publish: Vec::new(),
             trace: Vec::new(),
             tracing_enabled: false,
             trace_frame: 0,
@@ -2897,7 +2915,98 @@ impl PhysicsServer {
     }
 
     /// Pulls physics body transforms back into the scene tree.
+    /// [`sync_from_physics`](Self::sync_from_physics) for a host that runs
+    /// Godot's tick order (pat-29zst): every body is published now EXCEPT a
+    /// `RigidBody2D`, whose solved state waits for
+    /// [`flush_rigid_states`](Self::flush_rigid_states) at the start of the
+    /// next tick.
+    ///
+    /// 🔑 Godot copies a rigid body's state onto its node from
+    /// `flush_queries()`, which `Main::iteration` runs at the START of a tick,
+    /// before `_physics_process`; the step itself runs at the END. So between
+    /// ticks — in `_process`, at the end of a frame, in the rendered picture —
+    /// a rigid body reads one step old. Measured on Godot 4.6.1: a
+    /// `RigidBody2D` moving at 60 px/s still reads x = 0 after the first tick
+    /// and 0.998333 after the second. Patina published at the end of the
+    /// step and read one step ahead everywhere outside the script phase.
+    ///
+    /// A `CharacterBody2D` is not deferred: `move_and_slide` moves its node
+    /// directly, inside the script phase, as in Godot.
+    pub fn sync_from_physics_deferring_rigid(&mut self, tree: &mut SceneTree) {
+        self.pending_rigid_publish.clear();
+        for (&node, &body) in &self.node_to_body {
+            if self.world.get_body(body).map(|b| b.body_type) != Some(BodyType::Rigid) {
+                continue;
+            }
+            let Some(n) = tree.get_node(node) else {
+                continue;
+            };
+            let linear_velocity = n.get_property("linear_velocity");
+            let angular_velocity = n.get_property("angular_velocity");
+            self.pending_rigid_publish.push(PendingRigidPublish {
+                node,
+                body,
+                position: crate::node2d::get_global_position(tree, node),
+                rotation: crate::node2d::get_global_rotation(tree, node),
+                linear_velocity,
+                angular_velocity,
+            });
+        }
+        self.publish_states(tree, true);
+    }
+
+    /// Publishes the rigid-body states the last
+    /// [`sync_from_physics_deferring_rigid`](Self::sync_from_physics_deferring_rigid)
+    /// held back: Godot's `flush_queries()` at the start of a tick (pat-29zst).
+    ///
+    /// ⚠️ A field a script wrote since the step (a teleport or a
+    /// `linear_velocity` set from `_process`) is left as written. In Godot that
+    /// write went straight to the server, so the flush publishes it back; here
+    /// it is still only on the node, and the end-of-tick `sync_to_physics`
+    /// carries it into the body. Overwriting it with the solver's value would
+    /// silently undo the script.
+    pub fn flush_rigid_states(&mut self, tree: &mut SceneTree) {
+        let pending = std::mem::take(&mut self.pending_rigid_publish);
+        for p in pending {
+            if self.node_to_body.get(&p.node) != Some(&p.body) {
+                continue;
+            }
+            let Some(body) = self.world.get_body(p.body) else {
+                continue;
+            };
+            let (pos, rot, lin, ang) = (
+                body.position,
+                body.rotation,
+                body.linear_velocity,
+                body.angular_velocity,
+            );
+            if tree.get_node(p.node).is_none() {
+                continue;
+            }
+            let node_pos = crate::node2d::get_global_position(tree, p.node);
+            let node_rot = crate::node2d::get_global_rotation(tree, p.node);
+            if node_pos == p.position {
+                crate::node2d::set_global_position(tree, p.node, pos);
+            }
+            if node_rot == p.rotation {
+                crate::node2d::set_global_rotation(tree, p.node, rot);
+            }
+            if let Some(node) = tree.get_node_mut(p.node) {
+                if node.get_property("linear_velocity") == p.linear_velocity {
+                    node.set_property("linear_velocity", Variant::Vector2(lin));
+                }
+                if node.get_property("angular_velocity") == p.angular_velocity {
+                    node.set_property("angular_velocity", Variant::Float(ang as f64));
+                }
+            }
+        }
+    }
+
     pub fn sync_from_physics(&self, tree: &mut SceneTree) {
+        self.publish_states(tree, false);
+    }
+
+    fn publish_states(&self, tree: &mut SceneTree, skip_rigid: bool) {
         // The overlap set the last step produced reaches scripts here, on the
         // same tick the enter/exit signals fire.
         self.publish_overlapping_bodies(tree);
@@ -2906,6 +3015,9 @@ impl PhysicsServer {
             if let Some(body) = self.world.get_body(body_id) {
                 // Don't write back static body properties (they don't move).
                 if body.body_type == BodyType::Static {
+                    continue;
+                }
+                if skip_rigid && body.body_type == BodyType::Rigid {
                     continue;
                 }
                 // ⚠️ An `AnimatableBody2D`'s transform is AUTHORED: animation

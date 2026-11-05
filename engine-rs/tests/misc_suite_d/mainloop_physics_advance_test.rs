@@ -322,6 +322,9 @@ fn step_traced_captures_node_snapshots() {
     let (mut ml, rigid_id) = make_gravity_test();
 
     let initial_pos = get_pos(&ml, rigid_id);
+    // pat-29zst: a rigid body's step reaches its node at the NEXT tick's flush,
+    // as in Godot 4.6.1, so the node shows the first step after the second tick.
+    ml.step(1.0 / 60.0);
     let record = ml.step_traced(1.0 / 60.0);
 
     // Should have node snapshots

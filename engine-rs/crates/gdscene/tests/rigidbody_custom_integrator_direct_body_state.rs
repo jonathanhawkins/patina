@@ -194,6 +194,11 @@ fn position_3d(ml: &MainLoop, id: NodeId) -> gdcore::math::Vector3 {
 fn rigidbody_3d_custom_integrator_direct_body_state() {
     let (mut ml, id) = scene_3d_with(true);
 
+    // pat-29zst: no callback on the body's first tick. Godot calls
+    // `_integrate_forces` from the flush AFTER a step, and a body that entered
+    // with the scene has not been stepped before its first tick.
+    ml.step(PHYSICS_DT);
+    assert_eq!(ticks(&ml, id), 0, "no callback before the body's first step");
     ml.step(PHYSICS_DT);
     assert_eq!(
         ticks(&ml, id),
@@ -205,7 +210,7 @@ fn rigidbody_3d_custom_integrator_direct_body_state() {
     for _ in 0..4 {
         ml.step(PHYSICS_DT);
     }
-    assert_eq!(ticks(&ml, id), 5, "five ticks, five callbacks");
+    assert_eq!(ticks(&ml, id), 5, "six ticks, five callbacks");
 
     // Gravity is along -Y, so +X travel can only come from the script's write.
     let p = position_3d(&ml, id);
@@ -249,12 +254,17 @@ fn without_custom_integrator_the_3d_callback_never_runs() {
 #[test]
 fn two_d_and_three_d_states_do_not_cross_dispatch() {
     let (mut ml2, id2) = scene_with(true);
+    // TWO ticks in 2D: the first step reaches the node at the second tick's
+    // flush, as in Godot 4.6.1 (pat-29zst).
+    ml2.step(PHYSICS_DT);
     ml2.step(PHYSICS_DT);
     let p2 = position(&ml2, id2);
 
     let (mut ml3, id3) = scene_3d_with(true);
-    // TWO ticks in 3D: the velocity a 3D `_integrate_forces` writes moves the
-    // body from the NEXT step, as on Godot 4.6.1 + Jolt (pat-d4ghb).
+    // THREE ticks in 3D, as on Godot 4.6.1 + Jolt: the first callback runs
+    // after the body's first step (pat-29zst), and the velocity it writes
+    // moves the body from the NEXT step (pat-d4ghb).
+    ml3.step(PHYSICS_DT);
     ml3.step(PHYSICS_DT);
     ml3.step(PHYSICS_DT);
     let p3 = position_3d(&ml3, id3);

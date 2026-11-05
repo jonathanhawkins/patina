@@ -1790,6 +1790,7 @@ struct TimedInput {
     end: u64,
 }
 
+#[derive(Clone)]
 struct Probe {
     node: String,
     props: Vec<String>,
@@ -2561,17 +2562,31 @@ fn run_frames(
                 ));
                 break;
             }
+            // 🔑 Probes read the tree at the deferred-call flush, where the
+            // Godot reference capture reads it (a `call_deferred` from its
+            // last-priority `_process`), not after the whole step: a queued
+            // scene change and queued frees land AFTER that point in Godot
+            // (pat-la27y). See `MainLoop::set_deferred_flush_observer`.
+            let flushed = install_flush_probes(&mut s, frame, base_frame, &probes);
             crate::editor_server::advance_running_main_loop(&mut s);
+            let flushed = take_flush_probes(&mut s, flushed);
             stepped += 1;
             if !s.is_running {
                 ended_early = Some(format!("the game quit during frame {}", base_frame + frame));
                 break;
             }
+            let read_after: &[Probe] = match flushed {
+                Some(lines) => {
+                    probe_lines.extend(lines);
+                    &[]
+                }
+                None => &probes,
+            };
             capture(
                 &mut s,
                 frame,
                 base_frame,
-                &probes,
+                read_after,
                 &shots,
                 width,
                 height,
@@ -2666,6 +2681,48 @@ fn run_frames(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// What [`install_flush_probes`] hands [`take_flush_probes`]: the lines the
+/// observer wrote, or `None` when no probe is due this frame.
+type FlushProbes = Option<std::sync::Arc<std::sync::Mutex<Option<Vec<String>>>>>;
+
+/// Installs a deferred-flush observer on the running loop that reads every
+/// probe due at `frame` (pat-la27y). Returns the slot it writes into.
+fn install_flush_probes(
+    s: &mut EditorState,
+    frame: u64,
+    base_frame: u64,
+    probes: &[Probe],
+) -> FlushProbes {
+    let due: Vec<Probe> = probes.iter().filter(|p| p.due(frame)).cloned().collect();
+    if due.is_empty() {
+        return None;
+    }
+    let ml = s.run_main_loop.as_mut()?;
+    let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let out = slot.clone();
+    ml.set_deferred_flush_observer(Some(Box::new(move |tree: &SceneTree| {
+        // The LAST flush of the step wins, should one advance run several.
+        let lines = due
+            .iter()
+            .map(|p| format!("f{} {}", base_frame + frame, read_probe(tree, p)))
+            .collect();
+        *out.lock().unwrap() = Some(lines);
+    })));
+    Some(slot)
+}
+
+/// Removes the observer [`install_flush_probes`] set and returns what it read,
+/// or `None` (read after the step instead) when the step never reached a
+/// flush.
+fn take_flush_probes(s: &mut EditorState, slot: FlushProbes) -> Option<Vec<String>> {
+    let slot = slot?;
+    if let Some(ml) = s.run_main_loop.as_mut() {
+        ml.set_deferred_flush_observer(None);
+    }
+    let lines = slot.lock().unwrap().take();
+    lines
+}
+
 fn capture(
     s: &mut EditorState,
     frame: u64,

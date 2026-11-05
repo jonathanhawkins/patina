@@ -793,6 +793,17 @@ pub struct PhysicsServer3D {
     /// script phase, so without this the first tick already fell, and every
     /// later sample of the player was one tick of gravity ahead.
     fresh_bodies: HashSet<BodyId3D>,
+    /// Rigid bodies whose step was held back this tick (pat-29zst): every
+    /// fresh rigid body. See [`step`](Self::step).
+    held_this_step: HashSet<BodyId3D>,
+    /// True once a host drives this server tick by tick through
+    /// [`begin_physics_tick`](Self::begin_physics_tick), as `MainLoop` does.
+    /// Only then is a fresh body's step held (pat-29zst); a caller that just
+    /// syncs and steps the server directly keeps plain step-per-call motion.
+    tick_driven: bool,
+    /// Set while [`sync_registrations`](Self::sync_registrations) runs
+    /// `sync_to_physics` as a registration-only pass.
+    registration_only: bool,
     /// True while `MainLoop` runs the `_integrate_forces` pass, which (unlike
     /// `_physics_process`) already sees the real gravity on a body's first
     /// tick — Godot calls it from inside the step that computes it.
@@ -846,6 +857,9 @@ impl PhysicsServer3D {
             gridmap_shape_cache: HashMap::new(),
             gravity: Vector3::new(0.0, -9.8, 0.0),
             fresh_bodies: HashSet::new(),
+            held_this_step: HashSet::new(),
+            tick_driven: false,
+            registration_only: false,
             force_integration_phase: false,
         }
     }
@@ -872,6 +886,9 @@ impl PhysicsServer3D {
             gridmap_shape_cache: HashMap::new(),
             gravity,
             fresh_bodies: HashSet::new(),
+            held_this_step: HashSet::new(),
+            tick_driven: false,
+            registration_only: false,
             force_integration_phase: false,
         }
     }
@@ -911,12 +928,19 @@ impl PhysicsServer3D {
         }
     }
 
+    /// Selects Jolt's contact penetration model, or the full push-out with
+    /// `None` (pat-29zst). See [`gdphysics3d::world::JoltContactParams`].
+    pub fn set_jolt_contacts(&mut self, params: Option<gdphysics3d::world::JoltContactParams>) {
+        self.world.jolt_contacts = params;
+    }
+
     /// Marks the start of a physics tick: bodies registered by the previous
     /// tick's sync are no longer fresh (pat-d4ghb).
     ///
     /// `MainLoop` calls it at the start of every tick, before the sync that
     /// registers this tick's new bodies.
     pub fn begin_physics_tick(&mut self) {
+        self.tick_driven = true;
         self.fresh_bodies.clear();
     }
 
@@ -1111,6 +1135,32 @@ impl PhysicsServer3D {
     ///
     /// Registers new bodies for untracked nodes and updates positions for
     /// existing tracked bodies.
+    /// Registers the bodies of nodes that entered the tree since the last sync,
+    /// and nothing else: no velocity, force or flag is read and no stale body
+    /// is dropped (pat-29zst).
+    ///
+    /// `MainLoop` runs it right after each tick's script phase. Godot adds a
+    /// body to its space when the node enters the tree, so a body a
+    /// `_physics_process` spawns (a bullet) is part of THAT tick's step, which
+    /// Patina runs at the start of the next tick. Registered here, the body is
+    /// not fresh at that step and moves on the same tick it does in Godot.
+    /// A body that entered the tree outside the script phase (the scene at
+    /// boot, a `_process` spawn, a changed scene) is registered by the next
+    /// tick's [`sync_to_physics`](Self::sync_to_physics) instead, as fresh.
+    pub fn sync_registrations(&mut self, tree: &SceneTree) {
+        self.registration_only = true;
+        self.sync_to_physics(tree);
+        self.registration_only = false;
+    }
+
+    /// Whether a body's step was held back by the last [`step`](Self::step)
+    /// because it was fresh: it has not been stepped by Godot's reckoning
+    /// yet, so its `_integrate_forces` does not run either (pat-29zst).
+    pub fn step_was_held(&self, node_id: NodeId) -> bool {
+        self.body_for_node(node_id)
+            .is_some_and(|id| self.held_this_step.contains(&id))
+    }
+
     pub fn sync_to_physics(&mut self, tree: &SceneTree) {
         let all_nodes = tree.all_nodes_in_tree_order();
         let mut current_body_nodes: HashMap<NodeId, ()> = HashMap::new();
@@ -1232,7 +1282,15 @@ impl PhysicsServer3D {
 
                         let actual_id = self.world.add_body(body);
                         self.node_to_body.insert(nid, actual_id);
-                        self.fresh_bodies.insert(actual_id);
+                        // A body registered right after the script phase that
+                        // created it is in Godot's space for that tick's step,
+                        // so it is not fresh (pat-29zst).
+                        if !self.registration_only {
+                            self.fresh_bodies.insert(actual_id);
+                        }
+                    }
+                    if self.registration_only {
+                        continue;
                     }
 
                     // Rigid bodies used to get nothing after registration, so every
@@ -1320,6 +1378,9 @@ impl PhysicsServer3D {
         }
 
         // Remove bodies for nodes that no longer exist.
+        if self.registration_only {
+            return;
+        }
         let stale: Vec<NodeId> = self
             .node_to_body
             .keys()
@@ -2398,7 +2459,59 @@ impl PhysicsServer3D {
             }
             self.vehicles.extend(taken);
         }
+        // 🔑 Godot steps the space at the END of a tick, after the scripts,
+        // and copies the result onto the nodes at the NEXT tick's
+        // `flush_queries` (`main.cpp`: sync, flush_queries, physics_process,
+        // step). Patina runs sync, step and publish together at the START of
+        // a tick, so its step at tick k stands for Godot's step at the end of
+        // tick k-1, and what it publishes is exactly what Godot's flush
+        // publishes at tick k (pat-29zst).
+        //
+        // That correspondence fails for a body that was NOT in Godot's space
+        // at the end of the previous tick: the scene's bodies at boot (Godot
+        // has no step before the first tick), a body spawned from `_process`
+        // or a changed scene. Godot first steps such a body at the end of
+        // this tick, so Patina must not move it until the next one. Those are
+        // exactly the fresh bodies; a body spawned by `_physics_process` is
+        // registered right after the script phase (`sync_registrations`) and
+        // is not fresh.
+        //
+        // Measured on Godot 4.6.1 + Jolt (3D platformer, Enemy1, a custom
+        // integrator): after two ticks the node still reads its authored
+        // y = 5.40827 with one `_integrate_forces` run (velocity -0.1833);
+        // after four ticks it has moved by two steps (5.40369) with three.
+        // Without the hold Patina moved it at the first tick (5.4067 at f1).
+        //
+        // Held, not left out: the body stays in the world, so other bodies and
+        // queries still meet it. Its state is put back after the step, which
+        // keeps a velocity a script or `_ready` impulse gave it for the step
+        // that really moves it.
+        self.held_this_step.clear();
+        let held: Vec<(BodyId3D, Vector3, gdcore::math3d::Quaternion, Vector3, Vector3)> = self
+            .fresh_bodies
+            .iter()
+            .filter(|_| self.tick_driven)
+            .filter_map(|&id| {
+                let b = self.world.get_body(id)?;
+                (b.body_type == BodyType3D::Rigid).then_some((
+                    id,
+                    b.position,
+                    b.rotation,
+                    b.linear_velocity,
+                    b.angular_velocity,
+                ))
+            })
+            .collect();
         self.world.step(dt);
+        for (id, position, rotation, lin, ang) in held {
+            if let Some(b) = self.world.get_body_mut(id) {
+                b.position = position;
+                b.rotation = rotation;
+                b.linear_velocity = lin;
+                b.angular_velocity = ang;
+            }
+            self.held_this_step.insert(id);
+        }
         self.detect_body_contacts();
         if self.world.area_count() > 0 {
             let (body_events, area_events) = self.world.detect_overlaps();

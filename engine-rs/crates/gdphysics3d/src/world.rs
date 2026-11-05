@@ -105,6 +105,32 @@ impl SupportFeature {
     }
 }
 
+/// Whether a box's or a convex hull's support toward `dir` is a whole FACE
+/// rather than an edge or a vertex (pat-29zst, Jolt's internal edge removal).
+fn support_is_face(shape: &Shape3D, pos: Vector3, rot: Quaternion, dir: Vector3) -> bool {
+    match shape {
+        Shape3D::BoxShape { .. } => support_feature(shape, pos, rot, dir).n_axes == 2,
+        Shape3D::ConvexPolygonShape { points } => {
+            let d = rot.inverse().xform(dir.normalized());
+            let best = points.iter().map(|p| p.dot(d)).fold(f32::NEG_INFINITY, f32::max);
+            let on: Vec<Vector3> = points
+                .iter()
+                .copied()
+                .filter(|p| (p.dot(d) - best).abs() < 1e-4)
+                .collect();
+            // A face needs three support points that are not on one line.
+            on.iter().enumerate().any(|(i, a)| {
+                on.iter().skip(i + 1).enumerate().any(|(j, b)| {
+                    on.iter()
+                        .skip(i + j + 2)
+                        .any(|c| (*b - *a).cross(*c - *a).length_squared() > 1e-8)
+                })
+            })
+        }
+        _ => false,
+    }
+}
+
 fn support_feature(shape: &Shape3D, pos: Vector3, rot: Quaternion, dir: Vector3) -> SupportFeature {
     let d = dir.normalized();
     match shape {
@@ -604,6 +630,64 @@ fn project_point_constraint(
     distribute_position_correction(a, b, world_b - world_a);
 }
 
+/// How Jolt Physics resolves a rigid body's contact penetration, for a
+/// project whose `physics/3d/physics_engine` is `"Jolt Physics"` (pat-29zst).
+///
+/// Jolt does not push a penetrating body all the way out. Its position solve
+/// (`ContactConstraintManager::SolvePositionConstraints`) corrects only the
+/// depth BEYOND `penetration_slop`, a `baumgarte` fraction per position
+/// iteration, and its velocity solve runs before integration, so a body
+/// already in contact stops sinking. A body that was more than the
+/// `speculative_contact_distance` away before the step is not in contact yet
+/// and lands as deep as its motion takes it. Measured on Godot 4.6.1: the 3D
+/// platformer's enemy falls into the floor and rests 0.0101 m deep (y =
+/// 1.92799), where a full correction rests it on the surface (1.9381); with
+/// the project's slop set to 0, Godot rests it at 1.9381 too.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JoltContactParams {
+    /// `physics/jolt_physics_3d/simulation/penetration_slop` (0.02).
+    pub penetration_slop: f32,
+    /// `physics/jolt_physics_3d/simulation/speculative_contact_distance` (0.02).
+    pub speculative_contact_distance: f32,
+    /// `physics/jolt_physics_3d/simulation/baumgarte_stabilization_factor` (0.2).
+    pub baumgarte: f32,
+    /// `physics/jolt_physics_3d/simulation/position_steps` (2).
+    pub position_steps: u32,
+}
+
+impl Default for JoltContactParams {
+    fn default() -> Self {
+        Self {
+            penetration_slop: 0.02,
+            speculative_contact_distance: 0.02,
+            baumgarte: 0.2,
+            position_steps: 2,
+        }
+    }
+}
+
+impl JoltContactParams {
+    /// The penetration Jolt leaves after one step, given the depth before the
+    /// step's motion (`pre`, negative = separated) and after it (`depth`).
+    /// `None` means the pair was not in contact yet: no correction and no
+    /// velocity response this step.
+    pub fn resolved_depth(&self, pre: f32, depth: f32) -> Option<f32> {
+        if pre >= 0.0 {
+            // Already touching: the velocity solve stopped this step's sinking,
+            // and the position solve takes a fraction of what exceeds the slop.
+            let keep = (1.0 - self.baumgarte).max(0.0).powi(self.position_steps as i32);
+            let excess = (pre - self.penetration_slop).max(0.0);
+            Some((pre - excess * (1.0 - keep)).min(depth))
+        } else if -pre < self.speculative_contact_distance {
+            // A speculative contact: the approach is limited so the body
+            // arrives exactly at the surface.
+            Some(0.0)
+        } else {
+            None
+        }
+    }
+}
+
 /// A 3D physics world that owns bodies and steps the simulation.
 pub struct PhysicsWorld3D {
     bodies: BTreeMap<BodyId3D, PhysicsBody3D>,
@@ -632,6 +716,9 @@ pub struct PhysicsWorld3D {
     /// that surfaces frames later, somewhere else, as two bodies that suddenly
     /// notice each other.
     script_collision_exceptions: HashSet<(BodyId3D, BodyId3D)>,
+    /// Resolve contact penetration the way Jolt Physics does (pat-29zst).
+    /// `None` (the default) pushes a penetrating body fully out every step.
+    pub jolt_contacts: Option<JoltContactParams>,
 }
 
 impl PhysicsWorld3D {
@@ -646,6 +733,7 @@ impl PhysicsWorld3D {
             joints: Vec::new(),
             collision_exceptions: HashSet::new(),
             script_collision_exceptions: HashSet::new(),
+            jolt_contacts: None,
         }
     }
 
@@ -931,7 +1019,14 @@ impl PhysicsWorld3D {
         //    Each candidate is then filtered by collision layer/mask before the
         //    narrow-phase test and impulse resolution.
         let pairs = self.broadphase_pairs();
+        let ghosts = match self.jolt_contacts {
+            Some(jolt) => self.internal_edge_ghosts(&pairs, jolt),
+            None => HashSet::new(),
+        };
         for (id_a, id_b) in pairs {
+            if ghosts.contains(&(id_a, id_b)) {
+                continue;
+            }
             let (should_collide, pos_a, shapes_a, pos_b, shapes_b) = {
                 let a = &self.bodies[&id_a];
                 let b = &self.bodies[&id_b];
@@ -1060,9 +1155,31 @@ impl PhysicsWorld3D {
                 let b_inv = self.bodies[&id_b].inverse_mass();
                 let total_inv = a_inv + b_inv;
 
+                // Under Jolt only part of the depth is corrected (pat-29zst).
+                // The depth before this step's motion is the depth now minus
+                // how far the step carried the bodies into each other.
+                let correct_depth = match self.jolt_contacts {
+                    None => Some(result.depth),
+                    Some(jolt) => {
+                        let n = result.normal;
+                        let ra = contact_pos - pos_a;
+                        let rb = contact_pos - pos_b;
+                        let (a, b) = (&self.bodies[&id_a], &self.bodies[&id_b]);
+                        let approach = ((a.linear_velocity + a.angular_velocity.cross(ra))
+                            - (b.linear_velocity + b.angular_velocity.cross(rb)))
+                        .dot(n);
+                        let pre = result.depth - approach.max(0.0) * dt;
+                        jolt.resolved_depth(pre, result.depth)
+                            .map(|left| result.depth - left)
+                    }
+                };
+                let Some(correct_depth) = correct_depth else {
+                    continue;
+                };
+
                 if total_inv > 0.0 {
                     // Position correction.
-                    let correction = result.normal * result.depth;
+                    let correction = result.normal * correct_depth;
                     if let Some(a) = self.bodies.get_mut(&id_a) {
                         a.position = a.position - correction * (a_inv / total_inv);
                     }
@@ -1801,6 +1918,96 @@ impl PhysicsWorld3D {
     /// bodies costs O(n log n + k) (k = overlapping pairs) rather than the
     /// O(n^2) all-pairs scan. A real collision always implies AABB overlap, so
     /// pruning never drops a colliding pair.
+    /// The rigid-vs-box pairs Jolt's internal edge removal would drop this
+    /// step (pat-29zst): a contact with a box's EDGE or VERTEX that lies in the
+    /// plane of a FACE contact the same rigid body has with another box.
+    ///
+    /// A GridMap floor is a row of boxes. A body resting a little INSIDE one
+    /// (Jolt keeps up to `penetration_slop`) also meets the top edge of the
+    /// next box as it walks over the seam, with a slanted normal. Resolving
+    /// that "ghost" contact lifts the body and drags it back: the 3D
+    /// platformer's enemy climbed 0.0095 m in eight frames on a flat floor
+    /// while Godot's stayed level. Godot's Jolt backend enables
+    /// `use_enhanced_internal_edge_detection` by default, which voids an edge
+    /// that a face contact already covers. A real step up keeps its edge: the
+    /// edge is then above the face plane, not in it.
+    fn internal_edge_ghosts(
+        &self,
+        pairs: &[(BodyId3D, BodyId3D)],
+        jolt: JoltContactParams,
+    ) -> HashSet<(BodyId3D, BodyId3D)> {
+        struct Touch {
+            pair: (BodyId3D, BodyId3D),
+            rigid: BodyId3D,
+            other: BodyId3D,
+            normal: Vector3,
+            point: Vector3,
+            face: bool,
+        }
+        let mut touches: Vec<Touch> = Vec::new();
+        for &(id_a, id_b) in pairs {
+            let (a, b) = (&self.bodies[&id_a], &self.bodies[&id_b]);
+            let (rigid, other) = match (a.body_type, b.body_type) {
+                (BodyType3D::Rigid, BodyType3D::Static) => (a, b),
+                (BodyType3D::Static, BodyType3D::Rigid) => (b, a),
+                _ => continue,
+            };
+            if !a.should_collide_with(b) || self.has_collision_exception(id_a, id_b) {
+                continue;
+            }
+            let other_shapes = other.shapes_world();
+            let [(box_pos, box_rot, box_shape)] = other_shapes.as_slice() else {
+                continue;
+            };
+            if !matches!(
+                box_shape,
+                Shape3D::BoxShape { .. } | Shape3D::ConvexPolygonShape { .. }
+            ) {
+                continue;
+            }
+            let mut best: Option<(collision::CollisionResult3D, Vector3, Quaternion, Shape3D)> =
+                None;
+            for (pos, rot, shape) in rigid.shapes_world() {
+                let r =
+                    collision::test_collision_rot(pos, rot, &shape, *box_pos, *box_rot, box_shape);
+                if r.colliding && best.as_ref().map_or(true, |(b, ..)| r.depth > b.depth) {
+                    best = Some((r, pos, rot, shape));
+                }
+            }
+            let Some((r, pos, rot, shape)) = best else {
+                continue;
+            };
+            let point =
+                contact_position(&shape, pos, rot, box_shape, *box_pos, *box_rot, r.normal);
+            // `r.normal` points from the rigid body into the box, so the box's
+            // touching feature is its support toward `-normal`.
+            let face = support_is_face(box_shape, *box_pos, *box_rot, r.normal * -1.0);
+            touches.push(Touch {
+                pair: (id_a, id_b),
+                rigid: rigid.id,
+                other: other.id,
+                normal: r.normal.normalized(),
+                point,
+                face,
+            });
+        }
+        let tolerance = jolt.speculative_contact_distance.max(0.005);
+        let mut ghosts = HashSet::new();
+        for edge in touches.iter().filter(|t| !t.face) {
+            let covered = touches.iter().any(|f| {
+                f.face
+                    && f.rigid == edge.rigid
+                    && f.other != edge.other
+                    && f.normal.dot(edge.normal).abs() > 0.5
+                    && (edge.point - f.point).dot(f.normal).abs() < tolerance
+            });
+            if covered {
+                ghosts.insert(edge.pair);
+            }
+        }
+        ghosts
+    }
+
     fn broadphase_pairs(&self) -> Vec<(BodyId3D, BodyId3D)> {
         // 🔑 Static bodies never pair with each other (pat-2ifdx): neither can
         // move, so the pair has no response to compute, and Godot's broadphase
@@ -2811,5 +3018,30 @@ mod softbody_world_tests {
         assert_eq!(world.soft_body_count(), 1);
         let y1 = world.soft_bodies_mut()[0].vertices[0].position.y;
         assert!(y1 < y0, "unpinned soft body falls under gravity");
+    }
+}
+
+#[cfg(test)]
+mod jolt_contact_tests {
+    use super::JoltContactParams;
+
+    /// pat-29zst: the three cases of Jolt's penetration handling.
+    #[test]
+    fn jolt_resolved_depth_keeps_slop_and_lands_undetected_contacts() {
+        let j = JoltContactParams::default();
+        // Separated by more than the speculative distance before the step: not
+        // a contact yet, the body lands as deep as it moved (the 3D
+        // platformer's enemy: 0.0922 above, 0.0102 deep after).
+        assert_eq!(j.resolved_depth(-0.0922, 0.0102), None);
+        // Inside the speculative distance: it arrives exactly at the surface.
+        assert_eq!(j.resolved_depth(-0.01, 0.005), Some(0.0));
+        // Resting 0.0101 deep, sinking 0.0015 this step: the velocity solve
+        // undoes the sinking and the slop keeps the rest.
+        let rest = j.resolved_depth(0.0101, 0.0116).unwrap();
+        assert!((rest - 0.0101).abs() < 1e-7, "{rest}");
+        // Deeper than the slop: two Baumgarte iterations take 36% of the
+        // excess (1 - 0.8^2).
+        let deep = j.resolved_depth(0.07, 0.08).unwrap();
+        assert!((deep - (0.07 - 0.05 * 0.36)).abs() < 1e-6, "{deep}");
     }
 }
