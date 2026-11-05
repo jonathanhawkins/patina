@@ -95,7 +95,9 @@ struct ModelUniforms {
     // probe is chosen per INSTANCE at its world origin, exactly as the software
     // renderer does (`renderer.rs`: `sample_probes_at` / `probe_reflection_at`
     // at `entry.transform.origin`).
-    // Summed probe ambient (`sample_probes_at`), added to the camera ambient.
+    // `probe_ambient_mode` 0 (no captured probe): the summed uncaptured-probe
+    // ambient (`sample_probes_at`), ADDED to the camera ambient. Modes 1..3
+    // (captured): the ConstantColor ambient (linear * energy) (pat-t42ca).
     probe_ambient: vec4<f32>,
     // xyz = influence box min, w = intensity.
     probe_box_min: vec4<f32>,
@@ -107,7 +109,9 @@ struct ModelUniforms {
     // draw has no captured probe (so a zeroed uniform means "none").
     probe_layer: u32,
     probe_resolution: u32,
-    _probe_pad0: u32,
+    // pat-t42ca: 0 = no captured probe; 1 = Disabled, 2 = Environment,
+    // 3 = ConstantColor (`ReflectionProbeAmbientMode` + 1).
+    probe_ambient_mode: u32,
     _probe_pad1: u32,
 };
 @group(1) @binding(0)
@@ -265,53 +269,93 @@ fn probe_axis_exit(p: f32, r: f32, lo: f32, hi: f32) -> f32 {
     return max((hi - p) / r, (lo - p) / r);
 }
 
-// Port of `ProbeReflection::sample` (box projection, nearest-texel cubemap
-// lookup, intensity * blend weight).
-fn probe_sample(world_pos: vec3<f32>, reflection: vec3<f32>) -> vec3<f32> {
-    let box_min = model.probe_box_min.xyz;
-    let box_max = model.probe_box_max.xyz;
-    var dir = reflection;
-    if (model.probe_origin.w > 0.5 && length(reflection) >= 1e-9) {
-        let ex = probe_axis_exit(world_pos.x, reflection.x, box_min.x, box_max.x);
-        let ey = probe_axis_exit(world_pos.y, reflection.y, box_min.y, box_max.y);
-        let ez = probe_axis_exit(world_pos.z, reflection.z, box_min.z, box_max.z);
-        let dist = min(ex, min(ey, ez));
-        if (dist >= 1.0e38 || dist <= 0.0) {
-            dir = normalize(reflection);
-        } else {
-            dir = normalize(world_pos + reflection * dist - model.probe_origin.xyz);
-        }
+// pat-9gjpr: each probe face layer is an ATLAS of the GGX roughness chain
+// (`RoughnessChain`): level 0 (the raw capture, `res` square) at (0, 0), and
+// level k >= 1 (`roughness_level_resolution`) at (res, sum of the sizes of
+// levels 1..k-1). Mirrors `probe_atlas_layout` on the Rust side.
+fn probe_level_size(k: i32) -> i32 {
+    let res = i32(model.probe_resolution);
+    if (k == 0) {
+        return res;
     }
+    return min(max(res >> u32(k), 4), res);
+}
+
+fn probe_level_origin(k: i32) -> vec2<i32> {
+    if (k == 0) {
+        return vec2<i32>(0, 0);
+    }
+    var y = 0;
+    for (var j = 1; j < k; j = j + 1) {
+        y = y + probe_level_size(j);
+    }
+    return vec2<i32>(i32(model.probe_resolution), y);
+}
+
+// Face index + [0,1] uv, the conventions of `ReflectionCubemap::sample_direction`.
+fn probe_face_uv(dir: vec3<f32>) -> vec3<f32> {
     let a = abs(dir);
-    if (a.x + a.y + a.z <= 0.0) {
-        return vec3<f32>(0.0);
-    }
-    var face = 0;
+    var face = 0.0;
     var sc = 0.0;
     var tc = 0.0;
     var ma = 1.0;
     if (a.x >= a.y && a.x >= a.z) {
         ma = a.x;
-        if (dir.x > 0.0) { face = 0; sc = -dir.z; tc = -dir.y; }
-        else { face = 1; sc = dir.z; tc = -dir.y; }
+        if (dir.x > 0.0) { face = 0.0; sc = -dir.z; tc = -dir.y; }
+        else { face = 1.0; sc = dir.z; tc = -dir.y; }
     } else if (a.y >= a.z) {
         ma = a.y;
-        if (dir.y > 0.0) { face = 2; sc = dir.x; tc = dir.z; }
-        else { face = 3; sc = dir.x; tc = -dir.z; }
+        if (dir.y > 0.0) { face = 2.0; sc = dir.x; tc = dir.z; }
+        else { face = 3.0; sc = dir.x; tc = -dir.z; }
     } else {
         ma = a.z;
-        if (dir.z > 0.0) { face = 4; sc = dir.x; tc = -dir.y; }
-        else { face = 5; sc = -dir.x; tc = -dir.y; }
+        if (dir.z > 0.0) { face = 4.0; sc = dir.x; tc = -dir.y; }
+        else { face = 5.0; sc = -dir.x; tc = -dir.y; }
     }
-    let res = i32(model.probe_resolution);
-    let u = 0.5 * (sc / ma + 1.0);
-    let v = 0.5 * (tc / ma + 1.0);
-    let x = min(i32(clamp(u, 0.0, 1.0) * f32(res)), res - 1);
-    let y = min(i32(clamp(v, 0.0, 1.0) * f32(res)), res - 1);
-    let layer = i32(model.probe_layer) - 1 + face;
-    let c = textureLoad(probe_cubes, vec2<i32>(x, y), layer, 0).rgb;
+    return vec3<f32>(face, 0.5 * (sc / ma + 1.0), 0.5 * (tc / ma + 1.0));
+}
 
-    // `ReflectionProbe::blend_weight`.
+// `bilinear_face`: texel centres, clamped at the face edge.
+fn probe_bilinear(layer: i32, k: i32, uv: vec2<f32>) -> vec3<f32> {
+    let size = probe_level_size(k);
+    let o = probe_level_origin(k);
+    let p = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * f32(size) - vec2<f32>(0.5);
+    let p0 = floor(p);
+    let f = p - p0;
+    let x0 = clamp(i32(p0.x), 0, size - 1);
+    let x1 = clamp(i32(p0.x) + 1, 0, size - 1);
+    let y0 = clamp(i32(p0.y), 0, size - 1);
+    let y1 = clamp(i32(p0.y) + 1, 0, size - 1);
+    let a = textureLoad(probe_cubes, o + vec2<i32>(x0, y0), layer, 0).rgb;
+    let b = textureLoad(probe_cubes, o + vec2<i32>(x1, y0), layer, 0).rgb;
+    let c = textureLoad(probe_cubes, o + vec2<i32>(x0, y1), layer, 0).rgb;
+    let d = textureLoad(probe_cubes, o + vec2<i32>(x1, y1), layer, 0).rgb;
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+// `RoughnessChain::sample_lod`: trilinear between two roughness levels.
+fn probe_sample_lod(dir: vec3<f32>, lod_in: f32) -> vec3<f32> {
+    let a = abs(dir);
+    if (a.x + a.y + a.z <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let fuv = probe_face_uv(dir);
+    let layer = i32(model.probe_layer) - 1 + i32(fuv.x);
+    let lod = clamp(lod_in, 0.0, 7.0);
+    let i = i32(floor(lod));
+    let t = lod - f32(i);
+    let ca = probe_bilinear(layer, i, fuv.yz);
+    if (t <= 0.0 || i >= 7) {
+        return ca;
+    }
+    let cb = probe_bilinear(layer, i + 1, fuv.yz);
+    return mix(ca, cb, t);
+}
+
+// `ReflectionProbe::blend_weight`.
+fn probe_blend(world_pos: vec3<f32>) -> f32 {
+    let box_min = model.probe_box_min.xyz;
+    let box_max = model.probe_box_max.xyz;
     var blend = 1.0;
     let bd = model.probe_box_max.w;
     if (bd > 0.0) {
@@ -328,7 +372,54 @@ fn probe_sample(world_pos: vec3<f32>, reflection: vec3<f32>) -> vec3<f32> {
         }
         blend = blend * blend;
     }
-    return c * (model.probe_box_min.w * blend);
+    return blend;
+}
+
+// Port of `ProbeReflection::sample_rough` (box projection, roughness-filtered
+// lookup at `sqrt(roughness) * MAX_ROUGHNESS_LOD`, intensity * blend weight).
+fn probe_sample(world_pos: vec3<f32>, reflection: vec3<f32>, roughness: f32) -> vec3<f32> {
+    let box_min = model.probe_box_min.xyz;
+    let box_max = model.probe_box_max.xyz;
+    var dir = reflection;
+    if (model.probe_origin.w > 0.5 && length(reflection) >= 1e-9) {
+        let ex = probe_axis_exit(world_pos.x, reflection.x, box_min.x, box_max.x);
+        let ey = probe_axis_exit(world_pos.y, reflection.y, box_min.y, box_max.y);
+        let ez = probe_axis_exit(world_pos.z, reflection.z, box_min.z, box_max.z);
+        let dist = min(ex, min(ey, ez));
+        if (dist >= 1.0e38 || dist <= 0.0) {
+            dir = normalize(reflection);
+        } else {
+            dir = normalize(world_pos + reflection * dist - model.probe_origin.xyz);
+        }
+    }
+    let c = probe_sample_lod(dir, sqrt(clamp(roughness, 0.0, 1.0)) * 7.0);
+    return c * (model.probe_box_min.w * probe_blend(world_pos));
+}
+
+// Port of `ProbeReflection::ambient` (pat-t42ca): inside a captured probe the
+// ambient is REPLACED by the fade weight.
+fn probe_ambient_at(world_pos: vec3<f32>, normal: vec3<f32>, base: vec3<f32>) -> vec3<f32> {
+    let mode = model.probe_ambient_mode;
+    if (mode <= 1u) {
+        return base;
+    }
+    var amb = model.probe_ambient.rgb;
+    if (mode == 2u) {
+        amb = probe_sample_lod(normal, 7.0);
+    }
+    let b = probe_blend(world_pos);
+    return amb * b + base * (1.0 - b);
+}
+
+// `shader::env_brdf` (Karis' fit of Godot's `prefiltered_dfg`): (f90 term, total).
+fn env_brdf(roughness: f32, n_dot_v: f32) -> vec2<f32> {
+    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
+    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
+    let r = roughness * c0 + c1;
+    let a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
+    let scale = -1.04 * a004 + r.z;
+    let bias = max(1.04 * a004 + r.w, 0.0);
+    return vec2<f32>(bias, max(scale + bias, 1e-4));
 }
 
 // ── Vertex stage ────────────────────────────────────────────────────
@@ -783,9 +874,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let normal_texel = textureSample(base_normal_map, base_material_sampler, in.uv);
     let mapped_normal = apply_normal_map(geo_normal, normal_texel, model.normal_scale);
     let normal = select(geo_normal, mapped_normal, model.has_normal_map != 0u);
-    // Probe ambient is per INSTANCE and adds to the environment ambient, as
-    // in the software `entry_ambient` (pat-p3p1m). Zero without a probe.
-    let ambient = camera.ambient.rgb + model.probe_ambient.rgb;
+    // An UNCAPTURED probe's ambient is per INSTANCE and adds to the
+    // environment ambient, as in the software `entry_ambient` (pat-p3p1m). A
+    // CAPTURED probe replaces it per fragment (`probe_ambient_at`, pat-t42ca).
+    let base_ambient = camera.ambient.rgb
+        + select(vec3<f32>(0.0), model.probe_ambient.rgb, model.probe_ambient_mode == 0u);
+    let has_capture = model.probe_layer != 0u;
+    var ambient = base_ambient;
+    if (has_capture) {
+        ambient = probe_ambient_at(in.world_position, normal, base_ambient);
+    }
     let probe_roughness = clamp(model.roughness * roughness_map, 0.0, 1.0);
     let probe_metallic = clamp(model.metallic * metallic_map, 0.0, 1.0);
     // Ambient is DIFFUSE light, so in PBR (mode 2) a metal takes none of it:
@@ -808,16 +906,34 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // `keep` (metals have no diffuse); PBR (mode 2) adds it to the ambient.
     let probe_sharpness = 1.0 - probe_roughness;
     var probe_env = vec3<f32>(0.0);
-    let has_probe = model.probe_layer != 0u && probe_sharpness > 0.0;
-    if (has_probe) {
+    // Lambert (mode 1) keeps its sharpness-weighted mirror term, now
+    // roughness-filtered (pat-9gjpr).
+    let has_probe = has_capture && probe_sharpness > 0.0;
+    if (has_probe && model.shading_mode == 1u) {
         let v = normalize(camera.camera_position - in.world_position);
         let n_dot_v = max(dot(normal, v), 1e-4);
         let reflection = normal * (2.0 * n_dot_v) - v;
         let f0 = mix(vec3<f32>(0.04), albedo_tex.rgb, probe_metallic);
-        probe_env = probe_sample(in.world_position, reflection) * f0 * probe_sharpness;
-        if (model.shading_mode == 2u) {
-            color += probe_env;
-        }
+        probe_env = probe_sample(in.world_position, reflection, probe_roughness) * f0 * probe_sharpness;
+    }
+    // PBR (mode 2): `shader::probe_indirect`, Godot's IBL specular — any
+    // roughness, specular occlusion from the ambient, split-sum env BRDF.
+    if (has_capture && model.shading_mode == 2u) {
+        let v = normalize(camera.camera_position - in.world_position);
+        let mirror = normalize(normal * (2.0 * dot(normal, v)) - v);
+        let r2 = probe_roughness * probe_roughness;
+        let ref_vec = mix(mirror, normal, r2 * r2);
+        let env = probe_sample(in.world_position, ref_vec, probe_roughness);
+        let lum = dot(ambient, vec3<f32>(0.3, 0.59, 0.11)) * 2.0;
+        var so = min(lum * 4.0, 1.0);
+        let reflective_f = (1.0 - probe_roughness) * probe_metallic;
+        so = max(min(reflective_f * so * 10.0, 1.0), so);
+        let n_dot_v = clamp(dot(normal, v), 1e-4, 1.0);
+        let dfg = env_brdf(probe_roughness, n_dot_v);
+        let f0 = mix(vec3<f32>(0.04), albedo_tex.rgb, probe_metallic);
+        let f90 = clamp(50.0 * f0.g, probe_metallic, 1.0);
+        let ec = vec3<f32>(1.0) + f0 * (1.0 / dfg.y - 1.0);
+        color += env * so * ec * ((vec3<f32>(f90) - f0) * dfg.x + f0 * dfg.y);
     }
 
     let num_lights = min(model.num_lights, 16u);
@@ -875,7 +991,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let fl = pow(1.0 - n_dot_l, 5.0);
             let fv = pow(1.0 - n_dot_v, 5.0);
             let burley = (1.0 / 3.14159265) * (1.0 + (fd90 - 1.0) * fl) * (1.0 + (fd90 - 1.0) * fv);
-            color += albedo_lin * light.color * (n_dot_l * intensity * shadow * burley);
+            // Godot's `energy *= PI` (light_storage.cpp) cancels the 1/PI in
+            // Burley and D_GGX: `shader::GODOT_LIGHT_ENERGY_SCALE` (pat-9gjpr).
+            let pi_energy = 3.14159265;
+            color += albedo_lin * light.color * (n_dot_l * intensity * shadow * burley * pi_energy);
 
             // GGX D * V * F.
             let a = n_dot_h * alpha;
@@ -898,7 +1017,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
             let specular_type_scale = select(2.0, 1.0, light.kind == 0u);
             color += light.color
                 * f
-                * (d * vis * n_dot_l * intensity * shadow * light.specular * specular_type_scale);
+                * (d * vis * n_dot_l * intensity * shadow * light.specular * specular_type_scale * pi_energy);
         }
     }
 
@@ -1221,8 +1340,9 @@ pub struct ModelUniformData {
     pub probe_layer: u32,
     /// Edge length of each probe cubemap face, in texels.
     pub probe_resolution: u32,
-    /// Padding to a multiple of 16 bytes.
-    pub _probe_pad0: u32,
+    /// The covering captured probe's ambient mode PLUS ONE (1 Disabled,
+    /// 2 Environment, 3 ConstantColor); `0` = no captured probe (pat-t42ca).
+    pub probe_ambient_mode: u32,
     /// Padding to a multiple of 16 bytes.
     pub _probe_pad1: u32,
 }
@@ -1251,6 +1371,21 @@ fn probe_cube_key(probes: &[ReflectionProbe]) -> Vec<usize> {
         .collect()
 }
 
+/// The per-face roughness atlas for a capture of `res` texels (pat-9gjpr):
+/// `(width, height, origin of each level)`. Level 0 sits at `(0, 0)`, level
+/// `k >= 1` at `(res, sum of the edges of levels 1..k)`.
+pub fn probe_atlas_layout(res: u32) -> (u32, u32, Vec<(u32, u32)>) {
+    use gdserver3d::reflection_probe::{roughness_level_resolution, ROUGHNESS_LAYERS};
+    let res = res.max(1);
+    let mut origins = vec![(0, 0)];
+    let mut y = 0;
+    for k in 1..ROUGHNESS_LAYERS {
+        origins.push((res, y));
+        y += roughness_level_resolution(res, k);
+    }
+    (res + roughness_level_resolution(res, 1), res.max(y), origins)
+}
+
 /// Uploads every captured probe cubemap. Probes without a capture (or whose
 /// resolution differs from the first capture's) are left out and draw without
 /// a reflection, exactly like an uncaptured probe on the software path.
@@ -1267,13 +1402,29 @@ fn upload_probe_cube_array(
     let mut layer_plus_one = Vec::with_capacity(probes.len());
     let mut bytes: Vec<u8> = Vec::new();
     let mut layers = 0u32;
+    // pat-9gjpr: one layer per face holds that face's whole GGX roughness
+    // chain as an atlas (`probe_atlas_layout`, mirrored by the WGSL
+    // `probe_level_origin`).
+    let (atlas_w, atlas_h, origins) = probe_atlas_layout(resolution);
     for p in probes {
         match p.captured.as_ref() {
             Some(c) if c.resolution == resolution => {
                 layer_plus_one.push(layers + 1);
-                for face in c.faces.iter() {
-                    for texel in face.iter() {
-                        for v in [texel.r, texel.g, texel.b, texel.a] {
+                let chain = c.roughness_chain();
+                for face in 0..6 {
+                    let mut texels = vec![[0.0f32; 4]; (atlas_w * atlas_h) as usize];
+                    for (level, &(ox, oy)) in chain.levels.iter().zip(origins.iter()) {
+                        let lr = level.resolution;
+                        for y in 0..lr {
+                            for x in 0..lr {
+                                let c = level.faces[face][(y * lr + x) as usize];
+                                texels[((oy + y) * atlas_w + ox + x) as usize] =
+                                    [c.r, c.g, c.b, c.a];
+                            }
+                        }
+                    }
+                    for t in texels {
+                        for v in t {
                             bytes.extend_from_slice(&v.to_le_bytes());
                         }
                     }
@@ -1283,16 +1434,16 @@ fn upload_probe_cube_array(
             _ => layer_plus_one.push(0),
         }
     }
-    let side = if layers == 0 {
+    let (side_w, side_h) = if layers == 0 {
         bytes = vec![0u8; 16];
         layers = 1;
-        1
+        (1, 1)
     } else {
-        resolution
+        (atlas_w, atlas_h)
     };
     let size = wgpu::Extent3d {
-        width: side,
-        height: side,
+        width: side_w,
+        height: side_h,
         depth_or_array_layers: layers,
     };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -1315,8 +1466,8 @@ fn upload_probe_cube_array(
         &bytes,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(side * 16),
-            rows_per_image: Some(side),
+            bytes_per_row: Some(side_w * 16),
+            rows_per_image: Some(side_h),
         },
         size,
     );
@@ -1354,15 +1505,21 @@ fn apply_probe_fields(
     }
     let amb = sample_probes_at(probes, origin);
     model.probe_ambient = [amb.r, amb.g, amb.b, 0.0];
-    let found = probes
-        .iter()
-        .enumerate()
-        .find(|(_, p)| p.contains_point(origin) && p.captured.is_some());
+    // The same probe the software path binds (`probe_reflection_at`: the
+    // smallest captured box containing the origin).
+    let found = gdserver3d::reflection_probe::probe_index_at(probes, origin).map(|i| (i, &probes[i]));
     if let Some((i, p)) = found {
         let layer = cubes.layer_plus_one.get(i).copied().unwrap_or(0);
         if layer == 0 {
             return;
         }
+        // pat-t42ca: a captured probe REPLACES the ambient in the shader, so
+        // the additive uncaptured-probe sum no longer applies; `probe_ambient`
+        // carries the ConstantColor ambient instead.
+        let ac = p.ambient_color.srgb_to_linear();
+        let e = p.ambient_color_energy;
+        model.probe_ambient = [ac.r * e, ac.g * e, ac.b * e, 0.0];
+        model.probe_ambient_mode = p.ambient_mode as u32 + 1;
         let (bmin, bmax) = p.world_aabb_min_max();
         let o = p.capture_origin();
         model.probe_box_min = [bmin.x, bmin.y, bmin.z, p.intensity];

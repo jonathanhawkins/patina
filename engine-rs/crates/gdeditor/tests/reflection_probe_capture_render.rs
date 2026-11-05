@@ -314,6 +314,8 @@ fn box_projection_changes_the_sampled_direction() {
         // exactly where a default 1.0 blend band begins — so leaving it on would
         // couple a parallax assertion to a falloff curve.
         blend_distance: 0.0,
+        ambient_mode: gdserver3d::reflection_probe::ReflectionProbeAmbientMode::Disabled,
+        ambient_color: Color::new(0.0, 0.0, 0.0, 1.0),
     };
     let projected = ProbeReflection {
         box_projection: true,
@@ -444,6 +446,8 @@ fn blend_distance_fades_the_probe_out_at_its_boundary() {
         box_projection: false,
         intensity: 1.0,
         blend_distance: 2.0,
+        ambient_mode: gdserver3d::reflection_probe::ReflectionProbeAmbientMode::Disabled,
+        ambient_color: Color::new(0.0, 0.0, 0.0, 1.0),
     };
     let refl = Vector3::new(1.0, 0.0, 0.0);
     let at = |y: f32| probe.sample(Vector3::new(0.0, y, 0.0), refl).r;

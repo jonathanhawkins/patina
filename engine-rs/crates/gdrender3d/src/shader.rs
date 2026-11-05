@@ -771,9 +771,15 @@ impl FragmentShader for LambertFragmentShader {
         let normal = m.normal;
         let albedo = m.albedo;
 
-        let mut diffuse_r = uniforms.ambient.r * albedo.r;
-        let mut diffuse_g = uniforms.ambient.g * albedo.g;
-        let mut diffuse_b = uniforms.ambient.b * albedo.b;
+        // A captured probe REPLACES the ambient inside its box (pat-t42ca):
+        // the same `ProbeReflection::ambient` the PBR path uses.
+        let ambient = match uniforms.probe.as_ref() {
+            Some(probe) => probe.ambient(input.world_position, normal, uniforms.ambient),
+            None => uniforms.ambient,
+        };
+        let mut diffuse_r = ambient.r * albedo.r;
+        let mut diffuse_g = ambient.g * albedo.g;
+        let mut diffuse_b = ambient.b * albedo.b;
 
         for (i, light) in uniforms.lights.iter().enumerate() {
             // Godot's `light_cull_mask`: a light lights this mesh only when the
@@ -834,7 +840,9 @@ impl FragmentShader for LambertFragmentShader {
                     lerp_f(f0_d, albedo.b, m.metallic),
                 ];
                 let reflection = n * (2.0 * n_dot_v) - v;
-                let env = probe.sample(input.world_position, reflection);
+                // Roughness-filtered, as Godot samples every reflection
+                // (pat-9gjpr): `lod = sqrt(roughness) * MAX_ROUGHNESS_LOD`.
+                let env = probe.sample_rough(input.world_position, reflection, m.roughness);
 
                 // 🔑 Metals have no diffuse. At `metallic = 1.0` the surface
                 // must show the reflection INSTEAD of a Lambert term, not on
@@ -883,6 +891,11 @@ impl FragmentShader for PhongFragmentShader {
     }
 }
 
+/// Godot's non-physical light energy factor: `energy *= Math::PI`
+/// (light_storage.cpp, every light type) — the PBR BRDF terms carry 1/PI, so a
+/// light of energy 1 delivers `albedo * NdotL` like a Lambert one (pat-9gjpr).
+pub const GODOT_LIGHT_ENERGY_SCALE: f32 = std::f32::consts::PI;
+
 /// Burley diffuse + Schlick-GGX specular (Godot `light_compute` default).
 ///
 /// Ported from `scene_forward_lights_inc.glsl` (Godot 4.6.1): `D_GGX`,
@@ -910,39 +923,41 @@ pub fn pbr_shade(input: &FragmentInput, uniforms: &ShaderUniforms) -> Color {
         albedo.b * (1.0 - metallic),
     ];
 
+    let (mut r, mut g, mut b) = (0.0f32, 0.0f32, 0.0f32);
+    let mut ambient = uniforms.ambient;
+
+    // Image-based light from a captured ReflectionProbe, Godot's pipeline
+    // term for term (pat-t42ca, pat-9gjpr): the probe REPLACES the ambient
+    // with its most-blurred capture level along the normal, and the specular
+    // is the capture prefiltered at `sqrt(roughness) * MAX_ROUGHNESS_LOD`,
+    // scaled by specular occlusion and the split-sum environment BRDF. See
+    // [`probe_indirect`].
+    if let Some(probe) = uniforms.probe.as_ref() {
+        let (amb, spec) = probe_indirect(
+            probe,
+            input.world_position,
+            n,
+            v,
+            roughness,
+            metallic,
+            f0,
+            ambient,
+        );
+        ambient = amb;
+        r += spec[0];
+        g += spec[1];
+        b += spec[2];
+    }
+
     // Ambient is DIFFUSE light, so a metal takes none of it: Godot multiplies
     // it by albedo (`scene_forward_clustered.glsl:2147`) and then by
     // `1.0 - metallic` (`:2931`) — `albedo_lin` is exactly that product. Using
     // the raw albedo left a full grey ambient under every metal, so a mirror
     // showed the probe's reflection ADDED to a grey base (pink, not the red it
     // reflected) — the same defect the Lambert path's `keep` factor fixes.
-    let mut r = uniforms.ambient.r * albedo_lin[0];
-    let mut g = uniforms.ambient.g * albedo_lin[1];
-    let mut b = uniforms.ambient.b * albedo_lin[2];
-
-    // Image-based specular from a captured ReflectionProbe (pat-s3rrv.206).
-    //
-    // Reflect the view vector about the shading normal and look the result up
-    // in the probe's cubemap. This is what lets a probe MIRROR the scene, as
-    // opposed to the flat `ambient_color` term that was the only thing a probe
-    // could contribute before — `sample_probes_at` folds that in through
-    // `uniforms.ambient` above, and it carries no direction at all.
-    //
-    // ⚠️ Scaled by F0 and faded out with roughness. A rough surface has no
-    // single coherent mirror direction, so one cubemap texel is simply the
-    // wrong answer for it; a prefiltered mip chain is what Godot uses and is
-    // not built here. metallic = 1 / roughness = 0 — the mirror case the
-    // acceptance exercises — takes the reflection at full strength.
-    if let Some(probe) = uniforms.probe.as_ref() {
-        let reflection = n * (2.0 * n_dot_v) - v;
-        let sharpness = 1.0 - roughness.clamp(0.0, 1.0);
-        if sharpness > 0.0 {
-            let env = probe.sample(input.world_position, reflection);
-            r += env.r * f0[0] * sharpness;
-            g += env.g * f0[1] * sharpness;
-            b += env.b * f0[2] * sharpness;
-        }
-    }
+    r += ambient.r * albedo_lin[0];
+    g += ambient.g * albedo_lin[1];
+    b += ambient.b * albedo_lin[2];
 
     for (i, light) in uniforms.lights.iter().enumerate() {
         // Godot's `light_cull_mask`: a light lights this mesh only when the
@@ -972,7 +987,13 @@ pub fn pbr_shade(input: &FragmentInput, uniforms: &ShaderUniforms) -> Color {
         let light_scatter = 1.0 + (fd90 - 1.0) * pow5(1.0 - n_dot_l);
         let view_scatter = 1.0 + (fd90 - 1.0) * pow5(1.0 - n_dot_v);
         let burley = (1.0 / std::f32::consts::PI) * light_scatter * view_scatter;
-        let diffuse = n_dot_l * intensity * shadow * burley;
+        // ⚠️ Godot scales every light's energy by PI in non-physical units
+        // (light_storage.cpp:653 directional, :881 omni/spot), which cancels
+        // the 1/PI inside the Burley and D_GGX terms (pat-9gjpr). Without it
+        // a PBR surface took a third of Godot's direct light: lit grass read
+        // ~76 where Godot shows ~101. The Lambert path has no 1/PI, so it was
+        // already right and is not scaled.
+        let diffuse = n_dot_l * intensity * shadow * burley * GODOT_LIGHT_ENERGY_SCALE;
 
         r += albedo_lin[0] * light.color.r * diffuse;
         g += albedo_lin[1] * light.color.g * diffuse;
@@ -998,7 +1019,8 @@ pub fn pbr_shade(input: &FragmentInput, uniforms: &ShaderUniforms) -> Color {
             LightKind::Directional => 1.0,
             LightKind::Point | LightKind::Spot => 2.0,
         };
-        let spec = d * vis * n_dot_l * intensity * shadow * light.specular * specular_type_scale;
+        let spec = d * vis * n_dot_l * intensity * shadow * light.specular * specular_type_scale
+            * GODOT_LIGHT_ENERGY_SCALE;
         r += light.color.r * f[0] * spec;
         g += light.color.g * f[1] * spec;
         b += light.color.b * f[2] * spec;
@@ -1010,6 +1032,79 @@ pub fn pbr_shade(input: &FragmentInput, uniforms: &ShaderUniforms) -> Color {
         b + m.emission.b,
         albedo.a,
     )
+}
+
+/// Godot's split-sum environment BRDF `prefiltered_dfg(roughness, NdotV).xy`
+/// (pat-9gjpr), as `(x, y)` with `x` the Fresnel (f90) term and `y` the total,
+/// so `specular = (f90 - f0) * x + f0 * y`. Godot reads a baked LUT; this is
+/// Karis' analytic fit of the same integral (UE4 `EnvBRDFApprox`).
+pub fn env_brdf(roughness: f32, n_dot_v: f32) -> (f32, f32) {
+    let c0 = [-1.0f32, -0.0275, -0.572, 0.022];
+    let c1 = [1.0f32, 0.0425, 1.04, -0.04];
+    let r = [
+        roughness * c0[0] + c1[0],
+        roughness * c0[1] + c1[1],
+        roughness * c0[2] + c1[2],
+        roughness * c0[3] + c1[3],
+    ];
+    let a004 = (r[0] * r[0]).min((-9.28 * n_dot_v).exp2()) * r[0] + r[1];
+    let scale = -1.04 * a004 + r[2];
+    let bias = (1.04 * a004 + r[3]).max(0.0);
+    (bias, (scale + bias).max(1e-4))
+}
+
+/// A captured probe's ambient and specular for one fragment (pat-t42ca,
+/// pat-9gjpr), ported from `scene_forward_clustered.glsl`:
+///
+/// - ambient (2082-2096): `probe.ambient` — the capture's most-blurred level
+///   along `n`, replacing `base_ambient` by the probe's fade weight;
+/// - reflection vector (2052-2054): `mix(reflect(-v, n), n, roughness⁴)`;
+/// - reflection: the capture prefiltered at `sqrt(roughness) * 7`, times
+///   `intensity * blend` (the sky would fill `1 - blend`; Patina has no sky
+///   radiance map, so that share is black);
+/// - specular occlusion from the ambient's luminance (2137-2144);
+/// - `energy_compensation * ((f90 - f0) * dfg.x + f0 * dfg.y)` (2205-2213).
+///
+/// Returns `(ambient light, specular radiance)`; the caller multiplies the
+/// ambient by `albedo * (1 - metallic)` and adds the specular as is.
+#[allow(clippy::too_many_arguments)]
+pub fn probe_indirect(
+    probe: &gdserver3d::reflection_probe::ProbeReflection,
+    world_pos: Vector3,
+    n: Vector3,
+    v: Vector3,
+    roughness: f32,
+    metallic: f32,
+    f0: [f32; 3],
+    base_ambient: Color,
+) -> (Color, [f32; 3]) {
+    let roughness = roughness.clamp(0.0, 1.0);
+    let metallic = metallic.clamp(0.0, 1.0);
+    let ambient = probe.ambient(world_pos, n, base_ambient);
+    let n_dot_v_raw = n.dot(v);
+    let mirror = (n * (2.0 * n_dot_v_raw) - v).normalized();
+    let r4 = roughness * roughness * roughness * roughness;
+    let ref_vec = Vector3::new(
+        lerp_f(mirror.x, n.x, r4),
+        lerp_f(mirror.y, n.y, r4),
+        lerp_f(mirror.z, n.z, r4),
+    );
+    let env = probe.sample_rough(world_pos, ref_vec, roughness);
+
+    let lum = (ambient.r * 0.3 + ambient.g * 0.59 + ambient.b * 0.11) * 2.0;
+    let mut so = (lum * 4.0).min(1.0);
+    let reflective_f = (1.0 - roughness) * metallic;
+    so = (reflective_f * so * 10.0).min(1.0).max(so);
+
+    let n_dot_v = n_dot_v_raw.clamp(1e-4, 1.0);
+    let (x, y) = env_brdf(roughness, n_dot_v);
+    let f90 = (50.0 * f0[1]).clamp(metallic, 1.0);
+    let mut spec = [env.r, env.g, env.b];
+    for (c, s) in spec.iter_mut().enumerate() {
+        let ec = 1.0 + f0[c] * (1.0 / y - 1.0);
+        *s *= so * ec * ((f90 - f0[c]) * x + f0[c] * y);
+    }
+    (ambient, spec)
 }
 
 #[inline]
