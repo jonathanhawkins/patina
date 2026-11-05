@@ -28,6 +28,16 @@ fn boot_menu() -> MainLoop {
     boot(&game_dir(), "car_select/car_select.tscn")
 }
 
+/// `res://` roots are process-global: plain `cargo test` runs this file's
+/// tests on parallel threads, and a second test re-pointing the roots between
+/// another's boot and its script reads made that script "not found". Each
+/// test holds it for its whole body.
+static ROOTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn roots_lock() -> std::sync::MutexGuard<'static, ()> {
+    ROOTS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn boot(dir: &std::path::Path, scene: &str) -> MainLoop {
     gdobject::class_db::register_all_classes();
     let dir = dir.to_path_buf();
@@ -58,6 +68,7 @@ fn boot(dir: &std::path::Path, scene: &str) -> MainLoop {
 
 #[test]
 fn car_select_ready_runs_clean_and_focuses_the_first_car() {
+    let _roots = roots_lock();
     let mut ml = boot_menu();
     for _ in 0..3 {
         ml.step(1.0 / 60.0);
@@ -89,6 +100,7 @@ fn car_select_ready_runs_clean_and_focuses_the_first_car() {
 /// (`town.Mood`) was Nil. Same shape as the game's script, cut to those lines.
 #[test]
 fn load_scene_awaits_frame_post_draw_and_reads_the_towns_enum() {
+    let _roots = roots_lock();
     let dir = tempfile::tempdir().unwrap();
     let w = |name: &str, text: &str| std::fs::write(dir.path().join(name), text).unwrap();
     w(

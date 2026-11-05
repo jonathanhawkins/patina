@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import {
   parseRunnerResult, parseTscn, findPlaceholders, isPlaceholder, expectedRootType, missingMethods,
   unsupportedTypes, parseOutline, liveTreePlaceholders, placeholderCandidates, sceneFindings, dedupe, fileFormat,
+  scriptLoadFailures, totals,
 } from '../scene-audit.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -137,6 +138,33 @@ test('missing methods are pulled out of script errors, sorted and unique', () =>
   // The missing-method lines are not repeated as generic script errors.
   assert.deepEqual(f.filter((x) => x.startsWith('script error')), ['script error: /root/Main: _process(): type error: cannot divide Nil by Nil']);
   assert.equal(f.filter((x) => x.startsWith('missing method')).length, 2);
+});
+
+test('a script that failed to parse is its own finding, not an OK scene (pat-kkqnm)', () => {
+  // truck_town's vehicle.gd never loaded and the audit said OK: the runner's
+  // only trace was a stderr WARN. Both spellings are read; the same script
+  // reported both ways is ONE failure.
+  const errs = [
+    '/root/CarBase/Body: script failed to load: res://vehicles/vehicle.gd: parse error: unexpected token -> at line 122, col 30; expected :',
+    '/root/CarBase/Body: _ready(): type error: assertion failed',
+  ];
+  const stderr = [
+    '2026-11-05T11:27:26.347934Z  WARN patina_runner::project_boot: failed to parse GDScript path=/x/games/truck_town/vehicles/vehicle.gd error="RuntimeError { kind: ParseError }"',
+    '2026-11-05T11:27:26.348028Z  WARN patina_runner::project_boot: failed to parse GDScript path=/x/games/truck_town/vehicles/follow_camera.gd error="RuntimeError { kind: UndefinedVariable }"',
+  ];
+  const fails = scriptLoadFailures(errs, stderr);
+  assert.deepEqual(fails, [
+    '/x/games/truck_town/vehicles/follow_camera.gd: RuntimeError { kind: UndefinedVariable }',
+    'res://vehicles/vehicle.gd: parse error: unexpected token -> at line 122, col 30; expected :',
+  ]);
+  const r = parseRunnerResult({ code: 0, stdout: JSON.stringify({ tree: { children: [] }, script_errors: errs }), stderr: stderr.join('\n') });
+  assert.equal(r.script_load_failures.length, 2);
+  const s = { error: null, format: 'text', placeholders: [], missing_methods: [], script_errors: errs, script_load_failures: r.script_load_failures, unsupported: [] };
+  const f = sceneFindings(s);
+  assert.equal(f.filter((x) => x.startsWith('script load failure: ')).length, 2);
+  // The load failure is not repeated as a generic script error.
+  assert.deepEqual(f.filter((x) => x.startsWith('script error')), ['script error: /root/CarBase/Body: _ready(): type error: assertion failed']);
+  assert.equal(totals([{ ...s, ok: true, findings: f }], null).script_load_failures, 2);
 });
 
 test('unsupported types: what ClassDB lacks, file references exempt', () => {

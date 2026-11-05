@@ -330,6 +330,77 @@ pub enum LexError {
     },
 }
 
+/// One open nesting level while tokenizing (pat-rp4bp).
+///
+/// Godot's tokenizer is driven by the parser: `(`/`[`/`{` switch it into
+/// multiline mode (no NEWLINE, no indentation), and `parse_lambda` switches it
+/// BACK for the lambda body with `push_expression_indented_block` /
+/// `pop_expression_indented_block` (`gdscript_parser.cpp`). This tokenizer runs
+/// ahead of the parser, so it recognises the lambda body itself: a `func`
+/// inside brackets followed by its `:` at the same nesting level.
+enum Nest {
+    /// An open bracket: newlines and indentation are suppressed.
+    Bracket,
+    /// A lambda body inside brackets: newlines and indentation are live again.
+    Lambda {
+        /// The indent stack when the body began; restored when it ends, which
+        /// is what Godot's `pop_expression_indented_block` does.
+        saved_indent: Vec<usize>,
+        /// Indentation of the body's first line (multi-line bodies only).
+        body_indent: Option<usize>,
+        /// `func(x): return x` — the body is the rest of the header line.
+        single_line: bool,
+    },
+}
+
+/// Ends the innermost lambda body: emits the Dedents that close its block and
+/// restores the indent stack it started from.
+fn end_lambda(
+    nest: &mut Vec<Nest>,
+    indent_stack: &mut Vec<usize>,
+    tokens: &mut Vec<TokenSpan>,
+    line: usize,
+    col: usize,
+) {
+    if let Some(Nest::Lambda { saved_indent, .. }) = nest.pop() {
+        if indent_stack.len() > saved_indent.len() {
+            // The closer sits on the body's last line (`x = 1)`): the block
+            // still needs its terminating Newline before the Dedents.
+            if !matches!(tokens.last().map(|t| &t.token), Some(Token::Newline)) {
+                tokens.push(TokenSpan {
+                    token: Token::Newline,
+                    line,
+                    col,
+                });
+            }
+            while indent_stack.len() > saved_indent.len() {
+                indent_stack.pop();
+                tokens.push(TokenSpan {
+                    token: Token::Dedent,
+                    line,
+                    col,
+                });
+            }
+        }
+        *indent_stack = saved_indent;
+    }
+}
+
+/// A closing bracket: ends any lambda bodies opened inside it, then pops the
+/// bracket itself. Saturates on a stray closer so it cannot underflow.
+fn close_bracket(
+    nest: &mut Vec<Nest>,
+    indent_stack: &mut Vec<usize>,
+    tokens: &mut Vec<TokenSpan>,
+    line: usize,
+    col: usize,
+) {
+    while matches!(nest.last(), Some(Nest::Lambda { .. })) {
+        end_lambda(nest, indent_stack, tokens, line, col);
+    }
+    nest.pop();
+}
+
 /// Tokenizes GDScript source code into a sequence of [`TokenSpan`]s.
 ///
 /// Handles indentation tracking, producing `Indent` and `Dedent` tokens as
@@ -349,7 +420,15 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
     // makes a multi-line array literal, dictionary or call argument list legal.
     // Without it `var a = [\n 1,\n 2\n]` emitted a Newline mid-expression and
     // died in `parse_primary`, which never skips Newline/Indent (pat-mgixk.17).
-    let mut bracket_depth: i32 = 0;
+    //
+    // A lambda body inside brackets re-enables both (see [`Nest`]), so the
+    // nesting is a stack rather than a counter (pat-rp4bp): truck_town's
+    // `t.finished.connect(func() -> void:` + indented body + `)` died with
+    // "unexpected token =" because the body's Newline/Indent were swallowed.
+    let mut nest: Vec<Nest> = Vec::new();
+    // `nest.len()` at a `func` keyword seen inside brackets: the `:` at that
+    // same level opens the lambda's body.
+    let mut pending_lambda: Option<usize> = None;
 
     while pos < len {
         // Handle line-start indentation
@@ -397,8 +476,30 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
             // indent stack may move. Leaving the stack alone matters as much as
             // skipping the tokens — a pushed level would desync every Dedent
             // after the closing bracket.
-            if bracket_depth > 0 {
-                continue;
+            match nest.last_mut() {
+                Some(Nest::Bracket) => continue,
+                Some(Nest::Lambda {
+                    saved_indent,
+                    body_indent,
+                    ..
+                }) => {
+                    // A line indented less than the body's first line ends the
+                    // body (Godot: the DEDENT that ends `parse_suite`); the rest
+                    // of the line is bracket continuation again.
+                    let outer = *saved_indent.last().unwrap();
+                    let ends = match *body_indent {
+                        Some(b) => indent < b,
+                        None => indent <= outer,
+                    };
+                    if ends {
+                        end_lambda(&mut nest, &mut indent_stack, &mut tokens, line, 1);
+                        continue;
+                    }
+                    if body_indent.is_none() {
+                        *body_indent = Some(indent);
+                    }
+                }
+                None => {}
             }
 
             let current_indent = *indent_stack.last().unwrap();
@@ -464,13 +565,21 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
 
         // Newlines
         if ch == '\n' || ch == '\r' {
-            // Suppressed inside brackets — see `bracket_depth`.
-            if bracket_depth == 0 {
-                tokens.push(TokenSpan {
+            // Suppressed inside brackets — see `nest`.
+            match nest.last() {
+                Some(Nest::Bracket) => {}
+                // A one-line lambda body ends with its line; what follows is
+                // bracket continuation (Godot's parser skips the NEWLINE).
+                Some(Nest::Lambda {
+                    single_line: true, ..
+                }) => {
+                    nest.pop();
+                }
+                _ => tokens.push(TokenSpan {
                     token: Token::Newline,
                     line,
                     col,
-                });
+                }),
             }
             if ch == '\r' && pos + 1 < len && chars[pos + 1] == '\n' {
                 pos += 2;
@@ -737,6 +846,9 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
                 pos += 1;
                 col += 1;
             }
+            if ident == "func" && matches!(nest.last(), Some(Nest::Bracket)) {
+                pending_lambda = Some(nest.len());
+            }
             let token = match ident.as_str() {
                 "var" => Token::Var,
                 "func" => Token::Func,
@@ -941,31 +1053,71 @@ pub fn tokenize(source: &str) -> Result<Vec<TokenSpan>, LexError> {
             // `)`/`]`/`}` saturate at zero so a stray closer cannot drive the
             // depth negative and silently re-enable suppression later.
             '(' => {
-                bracket_depth += 1;
+                nest.push(Nest::Bracket);
                 Token::LParen
             }
             ')' => {
-                bracket_depth = (bracket_depth - 1).max(0);
+                close_bracket(&mut nest, &mut indent_stack, &mut tokens, line, col);
+                if pending_lambda.is_some_and(|d| d > nest.len()) {
+                    pending_lambda = None;
+                }
                 Token::RParen
             }
             '[' => {
-                bracket_depth += 1;
+                nest.push(Nest::Bracket);
                 Token::LBracket
             }
             ']' => {
-                bracket_depth = (bracket_depth - 1).max(0);
+                close_bracket(&mut nest, &mut indent_stack, &mut tokens, line, col);
+                if pending_lambda.is_some_and(|d| d > nest.len()) {
+                    pending_lambda = None;
+                }
                 Token::RBracket
             }
             '{' => {
-                bracket_depth += 1;
+                nest.push(Nest::Bracket);
                 Token::LBrace
             }
             '}' => {
-                bracket_depth = (bracket_depth - 1).max(0);
+                close_bracket(&mut nest, &mut indent_stack, &mut tokens, line, col);
+                if pending_lambda.is_some_and(|d| d > nest.len()) {
+                    pending_lambda = None;
+                }
                 Token::RBrace
             }
-            ':' => Token::Colon,
-            ',' => Token::Comma,
+            ':' => {
+                if pending_lambda == Some(nest.len()) && matches!(nest.last(), Some(Nest::Bracket))
+                {
+                    pending_lambda = None;
+                    let mut peek = pos + 1;
+                    while peek < len && (chars[peek] == ' ' || chars[peek] == '\t') {
+                        peek += 1;
+                    }
+                    let single_line = !(peek >= len
+                        || chars[peek] == '\n'
+                        || chars[peek] == '\r'
+                        || chars[peek] == '#');
+                    nest.push(Nest::Lambda {
+                        saved_indent: indent_stack.clone(),
+                        body_indent: None,
+                        single_line,
+                    });
+                }
+                Token::Colon
+            }
+            ',' => {
+                // `call(func(x): return x, 2)`: the comma ends a one-line body.
+                if matches!(
+                    nest.last(),
+                    Some(Nest::Lambda {
+                        single_line: true,
+                        ..
+                    })
+                ) {
+                    nest.pop();
+                }
+                Token::Comma
+            }
             '.' => Token::Dot,
             ';' => Token::Semicolon,
             '@' => Token::AtSign,

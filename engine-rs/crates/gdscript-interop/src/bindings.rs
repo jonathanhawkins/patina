@@ -275,6 +275,15 @@ pub trait ScriptInstance {
         Ok(())
     }
 
+    /// Runs member initializers that needed the node (`var base_fov := fov`)
+    /// and so could not run when the instance was constructed (pat-0ywbp).
+    /// Called by the scene tree at attach, with scene access bound, BEFORE
+    /// `_init` and the scene's property replay — Godot's order.
+    /// Default implementation is a no-op.
+    fn resolve_member_initializers(&mut self) -> Result<(), ScriptError> {
+        Ok(())
+    }
+
     /// Inject scene-tree access so the script can call get_node / emit_signal.
     fn set_scene_access(&mut self, _access: Box<dyn SceneAccess>, _node_id: u64) {}
 
@@ -286,6 +295,16 @@ pub trait ScriptInstance {
     /// SceneTree tick so `await` actually progresses at runtime. Default no-op
     /// for scripts without coroutine support (pat-nzgdu.6).
     fn poll_coroutines(&mut self, _delta: f32) {}
+
+    /// Errors raised by coroutine bodies resumed since the last call (by
+    /// [`poll_coroutines`](Self::poll_coroutines) or an await-signal notify),
+    /// as `(function name, message with its line)`. The scene tree drains them
+    /// into its script-error log right after each resume, so a failure after
+    /// an `await` is reported like a failed call instead of vanishing
+    /// (pat-c7i5e). Default: none.
+    fn take_coroutine_errors(&mut self) -> Vec<(String, String)> {
+        Vec::new()
+    }
 
     /// Delivers XR interface signals queued since the last frame.
     ///
