@@ -339,6 +339,9 @@ pub const LABEL3D_FONT_SIZE: i64 = 32;
 /// Rasterizes `text` into an RGBA image with the engine's built-in 5x7 bitmap
 /// font, transparent everywhere the glyphs do not cover.
 ///
+/// Since pat-3ljz4 `label3d_geometry` draws with [`rasterize_text_ttf`]
+/// (the real default face) instead; this stays for its existing callers.
+///
 /// ⚠️ **An APPROXIMATION of Godot's text, and deliberately so.** Godot renders
 /// Label3D through a TextServer with a real TTF face; Patina's only font is the
 /// 5x7 bitmap in `gdrender2d::font`, which is what the 2D canvas already draws
@@ -514,6 +517,142 @@ pub fn rasterize_text_outlined(
     })
 }
 
+/// The embedded default UI face, parsed once — the same face the 2D canvas
+/// draws default-theme text with (`TtfFont::builtin`).
+fn label3d_face() -> &'static gdrender2d::TtfFont {
+    static FACE: std::sync::OnceLock<gdrender2d::TtfFont> = std::sync::OnceLock::new();
+    FACE.get_or_init(gdrender2d::TtfFont::builtin)
+}
+
+/// Rasterizes `text` with the real default TTF face at `font_size` pixels,
+/// ONE TEXEL PER FONT PIXEL, as Godot's Label3D does (pat-3ljz4): Godot draws
+/// each glyph from the TextServer's `font_size` glyph cache and sizes it by
+/// `pixel_size` per font pixel, so a texture at font resolution under a quad of
+/// `texels * pixel_size` is the same geometry.
+///
+/// Replaces the 5x7 bitmap for Label3D: its slashed `0` and boxy cells drew the
+/// platformer's coin counter as a boxed glyph where Godot draws a plain digit.
+///
+/// Layout follows `Label3D::_shape`: each line is `ascent + descent` tall plus
+/// `line_spacing`, lines are centred horizontally, the block vertically. With
+/// `outline_radius > 0` (font px; Godot's stroker radius is `outline_size / 4`,
+/// see `label3d_geometry`) the glyph coverage is dilated by a round brush in
+/// `outline_color` UNDER the text, and the image is padded by the radius on
+/// every side so the quad stays centred where Godot centres the text.
+pub fn rasterize_text_ttf(
+    text: &str,
+    font_size: f32,
+    line_spacing: f32,
+    color: Color,
+    outline_radius: f32,
+    outline_color: Color,
+) -> Option<TextureImage> {
+    let face = label3d_face();
+    // Godot's `font_size` is the EM; `TtfFont` sizes by ascent - descent.
+    let px = face.px_size_for_em(font_size.max(1.0));
+    let lines: Vec<&str> = text.split('\n').collect();
+    let ascent = face.ascent(px);
+    let line_h = ascent + face.descent(px);
+    let widths: Vec<f32> = lines.iter().map(|l| face.measure_line(l, px)).collect();
+    let text_w = widths.iter().cloned().fold(0.0_f32, f32::max);
+    let text_h = lines.len() as f32 * (line_h + line_spacing) - line_spacing;
+    if text_w <= 0.0 || text_h <= 0.0 {
+        return None;
+    }
+    let pad = if outline_radius > 0.0 { outline_radius.ceil() as i64 + 1 } else { 0 };
+    let cw = text_w.ceil() as i64;
+    let ch = text_h.ceil() as i64;
+    let (w, h) = (cw + 2 * pad, ch + 2 * pad);
+    // Glyph coverage, 0..1, over the padded image.
+    let mut cov = vec![0.0_f32; (w * h) as usize];
+    for (li, line) in lines.iter().enumerate() {
+        let mut pen_x = (text_w - widths[li]) / 2.0;
+        let baseline = li as f32 * (line_h + line_spacing) + ascent;
+        let mut prev: Option<char> = None;
+        for c in line.chars() {
+            if let Some(p) = prev {
+                pen_x += face.kern(p, c, px);
+            }
+            if let Some(g) = face.rasterize(c, px) {
+                let ox = (pen_x + g.left).round() as i64 + pad;
+                let oy = (baseline + g.top).round() as i64 + pad;
+                for gy in 0..g.height {
+                    for gx in 0..g.width {
+                        let (x, y) = (ox + gx as i64, oy + gy as i64);
+                        if x < 0 || y < 0 || x >= w || y >= h {
+                            continue;
+                        }
+                        let a = g.coverage[gy * g.width + gx] as f32 / 255.0;
+                        let i = (y * w + x) as usize;
+                        cov[i] = (cov[i] + a).min(1.0);
+                    }
+                }
+            }
+            pen_x += face.advance(c, px);
+            prev = Some(c);
+        }
+    }
+    // Round dilation of the coverage for the outline ring (anti-aliased at
+    // the brush edge).
+    let outline: Vec<f32> = if outline_radius > 0.0 {
+        let r = outline_radius;
+        let ri = r.ceil() as i64;
+        let mut brush = Vec::new();
+        for dy in -ri..=ri {
+            for dx in -ri..=ri {
+                let wgt = (r + 0.5 - ((dx * dx + dy * dy) as f32).sqrt()).clamp(0.0, 1.0);
+                if wgt > 0.0 {
+                    brush.push((dx, dy, wgt));
+                }
+            }
+        }
+        let mut out = vec![0.0_f32; cov.len()];
+        for y in 0..h {
+            for x in 0..w {
+                let mut m = 0.0_f32;
+                for &(dx, dy, wgt) in &brush {
+                    let (sx, sy) = (x + dx, y + dy);
+                    if sx < 0 || sy < 0 || sx >= w || sy >= h {
+                        continue;
+                    }
+                    m = m.max(cov[(sy * w + sx) as usize] * wgt);
+                    if m >= 1.0 {
+                        break;
+                    }
+                }
+                out[(y * w + x) as usize] = m;
+            }
+        }
+        out
+    } else {
+        vec![0.0; cov.len()]
+    };
+    let pixels = cov
+        .iter()
+        .zip(&outline)
+        .map(|(&at, &ol)| {
+            let at = at * color.a;
+            let ao = ol * outline_color.a;
+            let a = at + ao * (1.0 - at);
+            if a <= 0.0 {
+                return TRANSPARENT;
+            }
+            let mix = |t: f32, o: f32| (t * at + o * ao * (1.0 - at)) / a;
+            Color::new(
+                mix(color.r, outline_color.r),
+                mix(color.g, outline_color.g),
+                mix(color.b, outline_color.b),
+                a,
+            )
+        })
+        .collect();
+    Some(TextureImage {
+        width: w as u32,
+        height: h as u32,
+        pixels,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Billboarding (pat-mgixk.34 section 2)
 // ---------------------------------------------------------------------------
@@ -605,41 +744,43 @@ fn scaled_columns(x: Vector3, y: Vector3, z: Vector3, scale: Vector3) -> Basis {
     }
 }
 
-/// The quad and material for a `Label3D`, or `None` when it has no text.
-/// The Label3D text texture, rasterized once per distinct (text, scale,
-/// colours, outline) and shared afterwards (pat-p3p1m).
-///
-/// `label3d_geometry` runs for every Label3D on every frame of the editor and
-/// Play render lists — under the editor-state lock — and the outlined raster
-/// is an O(pixels * outline^2) dilation: the platformer demo's one 48 pt label
-/// was a quarter of a 3D Play frame's CPU time. The texture depends only on the
-/// key, so the cache cannot change a pixel. `outline_px == 0` selects the plain
-/// `rasterize_text` path, exactly as the caller did before.
-fn cached_label_texture(
+/// The Label3D text texture, rasterized once per distinct input and shared
+/// afterwards: `label3d_geometry` runs for every Label3D on every frame under
+/// the editor lock, and the outline dilation is O(pixels * r^2) (pat-p3p1m).
+fn cached_label_texture_ttf(
     text: &str,
-    scale: u32,
+    font_size: i64,
+    line_spacing: f32,
     color: Color,
-    outline_px: u32,
+    outline_radius: f32,
     outline_color: Color,
 ) -> Option<std::sync::Arc<TextureImage>> {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
-    type Key = (String, u32, [u32; 4], u32, [u32; 4]);
+    type Key = (String, i64, u32, [u32; 4], u32, [u32; 4]);
     static CACHE: OnceLock<Mutex<HashMap<Key, Arc<TextureImage>>>> = OnceLock::new();
     let bits = |c: Color| [c.r.to_bits(), c.g.to_bits(), c.b.to_bits(), c.a.to_bits()];
-    let key: Key = (text.to_string(), scale, bits(color), outline_px, bits(outline_color));
+    let key: Key = (
+        text.to_string(),
+        font_size,
+        line_spacing.to_bits(),
+        bits(color),
+        outline_radius.to_bits(),
+        bits(outline_color),
+    );
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(hit) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
         return Some(hit);
     }
-    let texture = Arc::new(if outline_px > 0 {
-        rasterize_text_outlined(text, scale, color, outline_px, outline_color)?
-    } else {
-        rasterize_text(text, scale, color)?
-    });
+    let texture = Arc::new(rasterize_text_ttf(
+        text,
+        font_size.max(1) as f32,
+        line_spacing,
+        color,
+        outline_radius,
+        outline_color,
+    )?);
     if let Ok(mut c) = cache.lock() {
-        // Bounded: text animated every frame (a score label) must not grow
-        // this forever.
         if c.len() >= 256 {
             c.clear();
         }
@@ -756,14 +897,25 @@ pub fn label3d_geometry(tree: &SceneTree, nid: NodeId) -> Option<(Mesh3D, Materi
     // glyphs white in the texture and tints them through the albedo. Kept
     // branch-wise rather than unified so the no-outline case stays
     // bit-identical to what already shipped and was verified.
-    let (texture, albedo) = if outline_px > 0 {
+    let _ = (scale, outline_px); // the 5x7 path's inputs; see `rasterize_text`.
+    // pat-3ljz4: the real TTF face at `font_size`, one texel per font pixel.
+    // Godot's stroker radius is `outline_size / 4` font px (see above), and
+    // a transparent `outline_modulate` draws no outline surfaces at all
+    // (`label_3d.cpp`: `outline_modulate.a != 0.0 && outline_size > 0`).
+    let outline_radius = if outline_size > 0 && outline_modulate.a > 0.0 {
+        outline_size as f32 / 4.0
+    } else {
+        0.0
+    };
+    let line_spacing = as_f32(node.get_property("line_spacing")).unwrap_or(0.0);
+    let (texture, albedo) = if outline_radius > 0.0 {
         (
-            cached_label_texture(&text, scale, modulate, outline_px, outline_modulate)?,
+            cached_label_texture_ttf(&text, font_size, line_spacing, modulate, outline_radius, outline_modulate)?,
             Color::WHITE,
         )
     } else {
         (
-            cached_label_texture(&text, scale, Color::WHITE, 0, Color::WHITE)?,
+            cached_label_texture_ttf(&text, font_size, line_spacing, Color::WHITE, 0.0, Color::WHITE)?,
             modulate,
         )
     };

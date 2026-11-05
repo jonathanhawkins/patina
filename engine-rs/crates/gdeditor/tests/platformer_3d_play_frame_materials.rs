@@ -468,8 +468,8 @@ fn the_coin_counter_label_is_alpha_blended_text_with_a_thin_outline() {
     // Godot: stroke radius = outline_size / 4 font px = 3 px at 48 pt, i.e.
     // 3 * 42/48 = 2.6 -> 3 texels of this 42-texel-tall glyph.
     assert_eq!(gdeditor::sprite3d_render::label3d_outline_texels(12, 48, 6), 3);
-    // The built-in 5x7 "0" fills most of its cell, so only the corners and
-    // the counters stay clear (276 of 1728 texels at the fixed radius).
+    // Since pat-3ljz4 the digit is the real TTF face (one texel per font px),
+    // so the clear margin around and inside the "0" is most of the quad.
     assert!(
         clear * 10 > tex.pixels.len(),
         "the label quad must stay transparent around the text: \

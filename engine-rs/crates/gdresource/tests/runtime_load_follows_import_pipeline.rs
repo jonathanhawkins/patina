@@ -137,11 +137,9 @@ fn runtime_load_follows_import_pipeline() {
 /// declines the rest — so this is about which registrations exist, not about
 /// accepting everything.
 ///
-/// `.jpg` is deliberately **not** in the claimed list: the JPEG decoder lives in
-/// `gdresource/src/texture_import.rs`, which is declared as a module by no crate
-/// and therefore never compiles, and neither `jpeg-decoder` nor `image`'s `jpeg`
-/// feature is enabled in this workspace. Registering `.jpg` would hand callers a
-/// loader that cannot exist (pat-0q2kx.45).
+/// `.jpg`/`.jpeg` are claimed since pat-null9: the `image` crate's `jpeg` feature
+/// (zune-jpeg) is enabled and `import_image` sniffs the JPEG magic. (Before that
+/// the only JPEG decoder sat in the orphaned `texture_import.rs`, pat-0q2kx.45.)
 #[test]
 fn loader_claims_compiled_formats_and_declines_the_rest() {
     let loader = UnifiedLoader::new("/project");
@@ -151,6 +149,8 @@ fn loader_claims_compiled_formats_and_declines_the_rest() {
         "res://icon.png",
         "res://icon.ctex",
         "res://scene.tscn",
+        "res://photo.jpg",
+        "res://photo.jpeg",
     ] {
         assert!(
             loader.can_load_path(claimed),
@@ -158,8 +158,6 @@ fn loader_claims_compiled_formats_and_declines_the_rest() {
         );
     }
     for unclaimed in [
-        "res://photo.jpg",
-        "res://photo.jpeg",
         "res://notes.xyz",
         "res://noextension",
     ] {

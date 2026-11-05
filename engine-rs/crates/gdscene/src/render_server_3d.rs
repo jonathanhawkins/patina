@@ -1793,11 +1793,21 @@ impl RenderServer3DAdapter {
                 }
                 _ => match node.get_property("shader_path") {
                     gdvariant::Variant::String(p) if !p.is_empty() => {
-                        // res:// paths resolve relative to the cwd (project root
-                        // at runtime), matching the rest of the engine.
-                        let fs = p.strip_prefix("res://").unwrap_or(p.as_str());
-                        let res =
-                            gdresource::importers::load_gdshader(std::path::Path::new(fs)).ok()?;
+                        // `res://` resolves against the installed project root
+                        // (pat-0lcow) — it used to strip the prefix and read
+                        // relative to the process cwd, which is the project
+                        // root only when the runner was started inside it. A
+                        // root-less process (tools, tests) keeps the old
+                        // cwd-relative fallback.
+                        let resolved = if p.starts_with("res://") || p.starts_with("user://") {
+                            gdcore::resolve_path(&p).ok().filter(|f| f.exists())
+                        } else {
+                            None
+                        };
+                        let fs = resolved.unwrap_or_else(|| {
+                            std::path::PathBuf::from(p.strip_prefix("res://").unwrap_or(p.as_str()))
+                        });
+                        let res = gdresource::importers::load_gdshader(&fs).ok()?;
                         let code = match res.get_property("code") {
                             Some(gdvariant::Variant::String(c)) => c.clone(),
                             _ => return None,
@@ -2363,7 +2373,19 @@ pub fn gltf_surface_materials(path: &str, mesh_index: Option<i64>) -> Vec<Materi
                     let albedo = Color::new(albedo_lin.r, albedo_lin.g, albedo_lin.b, 1.0)
                         .linear_to_srgb();
                     let emission = color("material_emissive", Color::BLACK).linear_to_srgb();
+                    // The glTF's own image (pat-null9): the import records the
+                    // `images[].uri` of `baseColorTexture`, relative to the
+                    // .gltf. Godot's importer loads it as the material's
+                    // `albedo_texture`; this was recorded and never read, so
+                    // truck_town's lamp drew in its flat white factor.
+                    let albedo_texture = match s.get_property("material_albedo_texture") {
+                        Some(Variant::String(uri)) => {
+                            gltf_image_res_path(path, uri).and_then(|p| extracted_textures.get_or_load(&p))
+                        }
+                        _ => None,
+                    };
                     Material3D {
+                        albedo_texture,
                         albedo: Color::new(albedo.r, albedo.g, albedo.b, albedo_lin.a),
                         metallic: float("material_metallic", 1.0),
                         roughness: float("material_roughness", 1.0),
@@ -2382,6 +2404,48 @@ pub fn gltf_surface_materials(path: &str, mesh_index: Option<i64>) -> Vec<Materi
         .unwrap_or_default();
     CACHE.with(|c| c.borrow_mut().insert(key, out.clone()));
     out
+}
+
+/// The path of a glTF `images[].uri` resolved against the .gltf's directory,
+/// percent-decoded as glTF URIs are. `None` for a `data:` URI (embedded bytes
+/// are not decoded here yet).
+fn gltf_image_res_path(gltf_path: &str, uri: &str) -> Option<String> {
+    if uri.is_empty() || uri.starts_with("data:") {
+        return None;
+    }
+    let mut decoded = Vec::with_capacity(uri.len());
+    let bytes = uri.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+            if let Ok(b) = u8::from_str_radix(hex, 16) {
+                decoded.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[i]);
+        i += 1;
+    }
+    let rel = String::from_utf8(decoded).ok()?;
+    let mut parts: Vec<&str> = match gltf_path.rsplit_once('/') {
+        Some((dir, _)) => dir.split('/').collect(),
+        None => Vec::new(),
+    };
+    for seg in rel.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                // Never climb above `res:/` (`res:` + empty segment).
+                if parts.len() > 2 {
+                    parts.pop();
+                }
+            }
+            s => parts.push(s),
+        }
+    }
+    Some(parts.join("/"))
 }
 
 /// Godot's `String::validate_filename`: `: / \\ ? * " | % < >` become `_`.

@@ -21,7 +21,9 @@ ttf-parser = "0.25"
 # Pure-Rust WebP decoding (pat-nzgdu.8). Godot stores default 2D textures as
 # WebP-in-.ctex and decodes source .webp via libwebp; the `image` crate's webp
 # feature (backed by image-webp) gives the same decode with no C dependency.
-image = { version = "0.25", default-features = false, features = ["webp", "png"] }
+# `jpeg` (zune-jpeg, pure Rust) decodes source .jpg/.jpeg textures (pat-null9):
+# truck_town's tree trunk is a JPEG and drew untextured without it.
+image = { version = "0.25", default-features = false, features = ["webp", "png", "jpeg"] }
 # Pure-Rust, wasm-friendly SVG rasterization (pat-nzgdu.44). resvg re-exports
 # usvg + tiny_skia; tiny-skia 0.11.4 is already in the workspace lock, so this
 # reuses it rather than duplicating. Godot renders vector assets/icons this way.

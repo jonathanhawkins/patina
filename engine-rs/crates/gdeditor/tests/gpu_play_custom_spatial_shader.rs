@@ -54,10 +54,11 @@ fn project() -> String {
 fn play() -> (PreparedPlay3DFrame, HashMap<String, u64>) {
     gdobject::class_db::register_all_classes();
     let project = project();
-    // `resolve_shader_material` loads a `shader_path` (`res://stripes.gdshader`)
-    // relative to the working directory, which the editor binary runs in the
-    // project. Each nextest test is its own process, so this is not shared.
-    std::env::set_current_dir(&project).expect("cd into the fixture");
+    // No `set_current_dir` (pat-0lcow): `resolve_shader_material` resolves a
+    // `shader_path` (`res://stripes.gdshader`) against the project root that
+    // opening the project installs, not the process cwd. This test used to
+    // chdir into the fixture to make the shader load; without the chdir every
+    // pixel assertion below fails if `res://` reads from the cwd again.
     let port = TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -243,6 +244,25 @@ fn the_gpu_play_frame_matches_godot_and_each_fix_is_load_bearing() {
     let tested_frame = p.render_world();
     edit(&mut p, ids["XRay"], |i| i.material.as_mut().unwrap().no_depth_test = true);
     assert!(red_in_wall(&frame) > 40, "XRAY draws over the wall, as in Godot");
+    // pat-3ljz4: the text is the real TTF face at `font_size` = 64 px EM, one
+    // texel per font pixel under `pixel_size`, so the glyphs land where
+    // Godot's do. Godot (f00005.png, `r>150 g<90 b<90`): bbox x 198..229,
+    // y 116..124. The 5x7 bitmap path drew wider, taller cells (bbox
+    // 193..235 x 113..126).
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+    for y in 60..180 {
+        for x in 180..300 {
+            if reddish(px(&frame, x, y)) {
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+            }
+        }
+    }
+    for (got, want, what) in [(x0, 198, "left"), (x1, 229, "right"), (y0, 116, "top"), (y1, 124, "bottom")] {
+        assert!(
+            (got as i32 - want).abs() <= 2,
+            "XRAY {what} edge at {got}, Godot {want} (bbox {x0}..{x1} x {y0}..{y1})"
+        );
+    }
     assert_eq!(red_in_wall(&tested_frame), 0, "control: depth-tested, the wall hides it");
 
     // -- double_sided = false: HIDDEN is culled from behind ----------------

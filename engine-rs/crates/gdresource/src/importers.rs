@@ -161,6 +161,12 @@ fn load_ctex_file(path: &Path) -> EngineResult<Arc<Resource>> {
 
 /// Decode PNG bytes into a Texture2D resource (pixels included).
 pub fn import_image_bytes(data: &[u8], path: &Path) -> EngineResult<Arc<Resource>> {
+    // A JPEG (SOI marker `FF D8 FF`) — Godot's texture importer takes `.jpg`
+    // and `.jpeg` sources like any other image (pat-null9). Sniffed by magic,
+    // not extension, as the PNG path is.
+    if data.len() >= 3 && data[..3] == [0xFF, 0xD8, 0xFF] {
+        return import_jpeg_bytes(data, path);
+    }
     if data.len() < 29 {
         return Err(EngineError::Parse("PNG file too short".into()));
     }
@@ -375,6 +381,17 @@ fn rgba8_texture_resource(width: usize, height: usize, rgba: &[u8], path: &Path)
     res.set_property("pixels", Variant::Array(colors.into()));
     res.set_property("has_pixel_data", Variant::Bool(has_pixels));
     Arc::new(res)
+}
+
+/// Decodes JPEG bytes into a `Texture2D` [`Resource`] — the same contract as
+/// the png/webp loaders (pat-null9). Before this a `.jpeg` albedo map failed
+/// the PNG magic check, so the material fell back to its flat colour.
+pub fn import_jpeg_bytes(data: &[u8], path: &Path) -> EngineResult<Arc<Resource>> {
+    let rgba = ::image::load_from_memory_with_format(data, ::image::ImageFormat::Jpeg)
+        .map_err(|e| EngineError::Parse(format!("JPEG decode failed: {e}")))?
+        .to_rgba8();
+    let (w, h) = rgba.dimensions();
+    Ok(rgba8_texture_resource(w as usize, h as usize, rgba.as_raw(), path))
 }
 
 /// Loads a `.gltf`/`.glb` through the existing parser (pat-s3rrv.51).
@@ -1872,6 +1889,9 @@ impl ResourceFormatLoader {
     pub fn with_defaults() -> Self {
         let mut rfl = Self::new();
         rfl.register(".png", import_image);
+        // `import_image` sniffs the JPEG magic (pat-null9).
+        rfl.register(".jpg", import_image);
+        rfl.register(".jpeg", import_image);
         rfl.register(".webp", import_webp);
         rfl.register(".svg", crate::image_svg::import_svg);
         rfl.register(".ctex", load_ctex_file);
@@ -2670,6 +2690,8 @@ antialiased=true
         ".glb",
         ".gltf",
         ".hdr",
+        ".jpeg",
+        ".jpg",
         ".otf",
         ".png",
         ".res",

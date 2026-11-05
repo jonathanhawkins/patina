@@ -11980,6 +11980,33 @@ impl Interpreter {
                 }
                 Ok(Variant::Nil)
             }
+            // `Input.vibrate_handheld(duration_ms := 500, amplitude := -1.0)`
+            // (pat-null9). Godot implements it on Android, iOS and Web only and
+            // it is a no-op on desktop — but the method EXISTS everywhere, so a
+            // desktop game calling it (truck_town's vehicle.gd on every impact)
+            // must not raise.
+            "vibrate_handheld" => {
+                if args.len() > 2 {
+                    return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                        "Input.vibrate_handheld() takes at most 2 arguments".into(),
+                    )));
+                }
+                if let Some(a) = args.first() {
+                    if !matches!(a, Variant::Int(_)) {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "Input.vibrate_handheld() duration_ms must be an int".into(),
+                        )));
+                    }
+                }
+                if let Some(a) = args.get(1) {
+                    if !matches!(a, Variant::Int(_) | Variant::Float(_)) {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "Input.vibrate_handheld() amplitude must be a number".into(),
+                        )));
+                    }
+                }
+                Ok(Variant::Nil)
+            }
             other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                 format!("Input.{other}"),
             ))),
@@ -42444,6 +42471,22 @@ func fade(alpha):
         assert_eq!(state.borrow().vibrations.get(&0), Some(&(0.5, 0.9, 1.0)));
         interp.run("Input.stop_joy_vibration(0)\n").unwrap();
         assert!(state.borrow().vibrations.get(&0).is_none());
+    }
+
+    /// pat-null9: truck_town's vehicle.gd calls `Input.vibrate_handheld(100)`
+    /// on every impact. Godot has the method on every platform (a no-op on
+    /// desktop); Patina raised `UndefinedFunction` and aborted the
+    /// `_physics_process` that called it.
+    #[test]
+    fn input_vibrate_handheld_exists_and_is_a_desktop_no_op() {
+        let (mut interp, state) = input_cmd_interp();
+        let r = interp
+            .run("Input.vibrate_handheld(100)\nInput.vibrate_handheld()\nInput.vibrate_handheld(50, 0.5)\nreturn 7\n")
+            .expect("vibrate_handheld exists with 0..2 args");
+        assert_eq!(r.return_value, Some(Variant::Int(7)));
+        // A handheld vibration is not a joypad one.
+        assert!(state.borrow().vibrations.is_empty());
+        assert!(interp.run("Input.vibrate_handheld(1, 0.5, 3)\n").is_err());
     }
 
     #[test]

@@ -197,6 +197,8 @@ fn the_default_registry_counts_every_extension_it_registers() {
     let rfl = ResourceFormatLoader::with_defaults();
     let expected = [
         ".png",
+        ".jpg",
+        ".jpeg",
         ".webp",
         ".svg",
         ".ctex",
@@ -248,7 +250,9 @@ fn the_default_registry_counts_every_extension_it_registers() {
 #[test]
 fn the_orphaned_module_extensions_are_still_unregistered() {
     let rfl = ResourceFormatLoader::with_defaults();
-    for ext in [".jpg", ".jpeg", ".ogg", ".mp3", ".obj"] {
+    // `.jpg`/`.jpeg` left this list in pat-null9: the `image` crate's `jpeg`
+    // feature now decodes them through `import_image`.
+    for ext in [".ogg", ".mp3", ".obj"] {
         assert!(
             !rfl.can_load(ext),
             "{ext} is NOT part of pat-s3rrv.51's delivered scope — if this now \

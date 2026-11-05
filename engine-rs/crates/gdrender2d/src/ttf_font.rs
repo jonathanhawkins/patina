@@ -67,6 +67,17 @@ impl TtfFont {
         self.font.as_scaled(PxScale::from(px_size))
     }
 
+    /// The `px_size` (this type's unit: the pixel height of `ascent -
+    /// descent`) that renders the font at an EM of `em_px` pixels — Godot's
+    /// `font_size` (FreeType `FT_Set_Pixel_Sizes` sets the em). The two differ
+    /// by the face's `height / units_per_em`, ~1.27 for the built-in face.
+    pub fn px_size_for_em(&self, em_px: f32) -> f32 {
+        match self.font.units_per_em() {
+            Some(upem) if upem > 0.0 => em_px * self.font.height_unscaled() / upem,
+            _ => em_px,
+        }
+    }
+
     /// Whether the font contains a glyph for `ch` (id 0 is `.notdef`).
     pub fn has_glyph(&self, ch: char) -> bool {
         self.font.glyph_id(ch).0 != 0
