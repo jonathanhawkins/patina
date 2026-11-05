@@ -65,7 +65,12 @@ pub fn apply_camera_post(pixels: &mut [Color], width: u32, height: u32, env: &En
     };
     let pre_tonemap_glow = env.glow_blend_mode != GlowBlendMode::Softlight;
 
-    for (i, px) in pixels.iter_mut().enumerate() {
+    // Every pixel below depends only on its own value, its index and the
+    // (read-only) glow buffer, so a large frame is split across threads
+    // (pat-p3p1m): the per-pixel `powf` of the sRGB encode alone was ~10 ms of
+    // a 995x807 Play frame. Each pixel runs the identical code, so the output
+    // is bit-identical to the serial loop.
+    let shade = |i: usize, px: &mut Color| {
         let mut c = [px.r * exposure, px.g * exposure, px.b * exposure];
 
         // Pre-tonemap glow (every blend mode except soft light).
@@ -146,7 +151,44 @@ pub fn apply_camera_post(pixels: &mut [Color], width: u32, height: u32, env: &En
         px.r = r;
         px.g = g;
         px.b = b;
+    };
+    for_each_pixel_parallel(pixels, &shade);
+}
+
+/// Runs `f(index, pixel)` over every pixel, on several threads for a large
+/// frame. Small frames (tests, thumbnails, probe faces) stay on the caller's
+/// thread, where spawning would cost more than it saves.
+pub(crate) fn for_each_pixel_parallel<F>(pixels: &mut [Color], f: &F)
+where
+    F: Fn(usize, &mut Color) + Sync,
+{
+    const PARALLEL_MIN_PIXELS: usize = 1 << 16;
+    let n = pixels.len();
+    let threads = if n >= PARALLEL_MIN_PIXELS {
+        std::thread::available_parallelism()
+            .map(|t| t.get())
+            .unwrap_or(1)
+            .clamp(1, 8)
+    } else {
+        1
+    };
+    if threads <= 1 {
+        for (i, px) in pixels.iter_mut().enumerate() {
+            f(i, px);
+        }
+        return;
     }
+    let chunk = n.div_ceil(threads);
+    std::thread::scope(|scope| {
+        for (ci, part) in pixels.chunks_mut(chunk).enumerate() {
+            scope.spawn(move || {
+                let base = ci * chunk;
+                for (j, px) in part.iter_mut().enumerate() {
+                    f(base + j, px);
+                }
+            });
+        }
+    });
 }
 
 /// Godot's debanding dither (tonemap.glsl `screen_space_dither`): Iestyn's

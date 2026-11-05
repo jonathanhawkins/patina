@@ -110,6 +110,7 @@ pub mod open_scripts_panel;
 pub mod output_console;
 pub mod output_panel;
 pub mod pivot_marker;
+pub mod play_3d;
 pub mod play_custom_scene;
 pub mod plugin_manager;
 pub mod profiler_panel;

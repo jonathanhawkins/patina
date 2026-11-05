@@ -55,12 +55,10 @@ enum RenderJob {
     Gpu {
         vp: gdeditor::viewport_3d::Viewport3D,
         inputs: gdeditor::viewport_3d_render::Editor3DRenderInputs,
-        /// The canvas layers to composite OVER the rendered 3D frame
-        /// (pat-mgixk.36), already rasterized under the state lock with a
-        /// transparent clear. `None` for the editor's own idle 3D viewport,
-        /// which draws editor chrome rather than the game's HUD.
-        canvas: Option<gdrender2d::FrameBuffer>,
     },
+    /// A running 3D game (pat-p3p1m): everything that reads the tree was
+    /// snapshotted under the lock; the 3D render and the HUD raster run off it.
+    Play3D(gdeditor::play_3d::PreparedPlay3DFrame),
     /// Software-rendered 2D viewport (already rasterized under the lock).
     Cpu(gdrender2d::FrameBuffer),
     /// A running 2D game, gathered from the tree under the lock and rasterized
@@ -281,112 +279,33 @@ fn main() {
                 // What this branch actually needs to know is whether a 3D PASS is
                 // required; the HUD is composited over it either way below.
                 if gdeditor::scene_renderer::scene_has_3d_content(running_tree) {
-                    // Snapshot the tree-dependent inputs under the lock; GPU-render
-                    // off it (same lock-hold reduction as the editor path).
+                    // 🔑 ONE entry point for the running 3D view (pat-p3p1m):
+                    // `prepare_play_3d_frame` snapshots everything that reads
+                    // the tree here, under the lock; the GPU render AND the HUD
+                    // raster run off it below.
                     //
-                    // Game view (pat-0q2kx.30): the running scene is framed by its own
-                    // current Camera3D, not the editor's orbit camera, and shows none
-                    // of the editor furniture (grid, origin lines, the orange
-                    // camera/light marker cubes). `runtime_camera_override` is the
-                    // deliberate escape hatch — with it on we fall back to the editor
-                    // camera so a designer can fly around a running game. A 3D scene
-                    // with no Camera3D at all also falls back, which beats a black
-                    // frame.
-                    let game_camera = gdeditor::viewport_3d_render::game_camera_for_play(
+                    // The scene's current Camera3D frames it with the game's
+                    // environment and none of the editor furniture
+                    // (pat-0q2kx.30). With NO camera, Godot draws no World3D at
+                    // all — the view is the project's clear colour. This branch
+                    // used to fall back to a clone of the EDITOR viewport and
+                    // its editor render inputs instead, so a camera-less game
+                    // showed the editor's grid, axes, collision wireframes and
+                    // selection outlines. Only the explicit runtime camera
+                    // override still uses the editor camera.
+                    let clear = state
+                        .run_project_settings
+                        .as_ref()
+                        .unwrap_or(&state.project_settings)
+                        .default_clear_color();
+                    break 'job RenderJob::Play3D(gdeditor::play_3d::prepare_play_3d_frame(
                         running_tree,
+                        &state.editor_viewport_3d,
                         state.runtime_camera_override,
-                    );
-                    let mut vp = match game_camera {
-                        Some(camera) => gdeditor::viewport_3d_render::viewport_for_scene_camera(
-                            running_tree,
-                            camera,
-                            rw.max(1),
-                            rh.max(1),
-                        ),
-                        None => {
-                            let mut vp = state.editor_viewport_3d.clone();
-                            vp.width = rw.max(1);
-                            vp.height = rh.max(1);
-                            vp
-                        }
-                    };
-                    let inputs = match game_camera {
-                        Some(camera) => {
-                            vp.grid.visible = false;
-                            vp.show_origin = false;
-                            // The scene's own environment — its
-                            // `WorldEnvironment`, the camera's `environment`, or
-                            // the project default — in place of the editor
-                            // preview sky and preview sun (pat-mgixk.51). A
-                            // no-op for a scene that authors none.
-                            gdeditor::viewport_3d_render::apply_runtime_environment_3d(
-                                running_tree,
-                                camera,
-                                &mut vp,
-                            );
-                            gdeditor::viewport_3d_render::game_3d_render_inputs(
-                                running_tree,
-                                camera,
-                                &vp,
-                            )
-                        }
-                        None => {
-                            gdeditor::viewport_3d_render::editor_3d_render_inputs(&vp, running_tree)
-                        }
-                    };
-                    // The HUD (pat-mgixk.36). Godot's viewport draws its World3D
-                    // and then composites the canvas layers over it; this branch
-                    // used to publish the 3D frame alone, so a 3D game's
-                    // CanvasLayer UI was never drawn in the Play tab at all.
-                    //
-                    // Rasterized HERE, under the state lock, because it has to
-                    // read the tree; the composite itself happens off the lock
-                    // next to the GPU render. Same item order as
-                    // `scene_renderer::render_runtime_frame` (list -> Camera2D ->
-                    // window stretch) so both Play paths frame the HUD alike.
-                    //
-                    // ⚠️ KNOWN GAP, deliberately not fixed here: the 2D branch
-                    // below also runs `build_control_render_items`, the themed
-                    // Control pass that resolves container layout. It needs
-                    // `&mut` on the tree, which cannot be taken while
-                    // `running_tree` is borrowed, so wiring it in means
-                    // restructuring this branch. Plain CanvasItems — ColorRect,
-                    // Sprite2D, Label — composite correctly today; themed
-                    // containers over a 3D scene are follow-up work.
-                    let canvas = {
-                        let mut items =
-                            gdeditor::viewport_2d_render::build_runtime_render_list(running_tree);
-                        let canvas_size =
-                            gdcore::math::Vector2::new(rw.max(1) as f32, rh.max(1) as f32);
-                        let mut window = *running_tree.root_window();
-                        window.size = canvas_size;
-                        // The camera centres on the canvas (the base resolution
-                        // under stretch), not the window.
-                        if let Some(view) = gdeditor::viewport_2d_render::camera2d_view_transform(
-                            running_tree,
-                            gdscene::canvas_render::canvas_size_of(&window),
-                            None,
-                            1.0 / 60.0,
-                        ) {
-                            gdeditor::viewport_2d_render::apply_camera2d_view(&mut items, view);
-                        }
-                        gdeditor::viewport_2d_render::apply_stretch_transform(
-                            &mut items,
-                            window.stretch_transform(),
-                        );
-                        gdeditor::viewport_2d_render::rasterize_render_list(
-                            &items,
-                            rw.max(1),
-                            rh.max(1),
-                            gdeditor::scene_renderer::CANVAS_OVERLAY_CLEAR,
-                            None,
-                        )
-                    };
-                    RenderJob::Gpu {
-                        vp,
-                        inputs,
-                        canvas: Some(canvas),
-                    }
+                        clear,
+                        rw,
+                        rh,
+                    ));
                 } else {
                     // 2D running scene: rasterize the real CanvasItem pixels the
                     // game draws (pat-u3l8c.23) — textured sprites, color rects,
@@ -463,19 +382,14 @@ fn main() {
             match job {
                 // Running 3D scene: GPU-render off the lock, then publish BMP (the
                 // Game view streams BMP, like the editor viewport).
-                RenderJob::Gpu { vp, inputs, canvas } => {
-                    let mut img =
-                        gdeditor::viewport_3d_render::render_editor_3d_frame_gpu(&vp, &inputs);
-                    // The canvas goes on AFTER the 3D render, off the lock
-                    // (pat-mgixk.36). A scene with no CanvasItems rasterized a
-                    // fully transparent pass, which this skips pixel by pixel, so
-                    // a 3D-only game publishes the same bytes as before.
-                    if let Some(canvas) = canvas.as_ref() {
-                        gdeditor::scene_renderer::composite_canvas_over_bgra(&mut img, canvas);
-                    }
+                RenderJob::Play3D(prepared) => {
+                    let img = prepared.render();
                     let bmp = gdrender2d::encode_bmp_bgra(&img);
                     handle.update_frame_bmp(bmp, img.width, img.height);
                 }
+                // A Gpu job is only ever the editor's idle viewport; it is
+                // rendered by the idle branch, never here.
+                RenderJob::Gpu { .. } => unreachable!("Play never builds an editor-viewport job"),
                 // 2D running scene: canvas rasterizer, full-quality publish.
                 RenderJob::Cpu(fb) => handle.update_frame(fb),
                 RenderJob::Canvas(prepared, mut cache) => {
@@ -601,11 +515,7 @@ fn main() {
                         // a running game's frame. Compositing the scene's HUD over
                         // the spatial editor would paint game UI across the
                         // designer's view.
-                        RenderJob::Gpu {
-                            vp,
-                            inputs,
-                            canvas: None,
-                        }
+                        RenderJob::Gpu { vp, inputs }
                     } else {
                         // The three tree-independent inputs are copied into
                         // locals FIRST so their immutable borrows of `state`
@@ -664,11 +574,7 @@ fn main() {
                     // compositing) runs HERE, off the state lock, from the snapshot.
                     // Then encode BMP with a cheap per-row copy (no per-pixel Color
                     // pass) and publish. Only BMP is streamed live, so PNG is skipped.
-                    RenderJob::Gpu {
-                        vp,
-                        inputs,
-                        canvas: _,
-                    } => {
+                    RenderJob::Gpu { vp, inputs } => {
                         let raster_t = std::time::Instant::now();
                         let img =
                             gdeditor::viewport_3d_render::render_editor_3d_frame_gpu(&vp, &inputs);
@@ -689,7 +595,9 @@ fn main() {
                     RenderJob::Cpu(fb) => handle.update_frame_ex(fb, full_quality),
                     // Only the running-game branch above builds this; the idle
                     // viewport rasterizes under the lock.
-                    RenderJob::Canvas(..) => unreachable!("the idle viewport never defers a raster"),
+                    RenderJob::Canvas(..) | RenderJob::Play3D(..) => {
+                        unreachable!("the idle viewport never defers a raster")
+                    }
                 }
                 last_render_at = std::time::Instant::now();
                 last_frame_lowres = this_lowres;

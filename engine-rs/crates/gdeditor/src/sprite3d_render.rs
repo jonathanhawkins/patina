@@ -603,6 +603,48 @@ fn scaled_columns(x: Vector3, y: Vector3, z: Vector3, scale: Vector3) -> Basis {
 }
 
 /// The quad and material for a `Label3D`, or `None` when it has no text.
+/// The Label3D text texture, rasterized once per distinct (text, scale,
+/// colours, outline) and shared afterwards (pat-p3p1m).
+///
+/// `label3d_geometry` runs for every Label3D on every frame of the editor and
+/// Play render lists — under the editor-state lock — and the outlined raster
+/// is an O(pixels * outline^2) dilation: the platformer demo's one 48 pt label
+/// was a quarter of a 3D Play frame's CPU time. The texture depends only on the
+/// key, so the cache cannot change a pixel. `outline_px == 0` selects the plain
+/// `rasterize_text` path, exactly as the caller did before.
+fn cached_label_texture(
+    text: &str,
+    scale: u32,
+    color: Color,
+    outline_px: u32,
+    outline_color: Color,
+) -> Option<std::sync::Arc<TextureImage>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    type Key = (String, u32, [u32; 4], u32, [u32; 4]);
+    static CACHE: OnceLock<Mutex<HashMap<Key, Arc<TextureImage>>>> = OnceLock::new();
+    let bits = |c: Color| [c.r.to_bits(), c.g.to_bits(), c.b.to_bits(), c.a.to_bits()];
+    let key: Key = (text.to_string(), scale, bits(color), outline_px, bits(outline_color));
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
+        return Some(hit);
+    }
+    let texture = Arc::new(if outline_px > 0 {
+        rasterize_text_outlined(text, scale, color, outline_px, outline_color)?
+    } else {
+        rasterize_text(text, scale, color)?
+    });
+    if let Ok(mut c) = cache.lock() {
+        // Bounded: text animated every frame (a score label) must not grow
+        // this forever.
+        if c.len() >= 256 {
+            c.clear();
+        }
+        c.insert(key, texture.clone());
+    }
+    Some(texture)
+}
+
 pub fn label3d_geometry(tree: &SceneTree, nid: NodeId) -> Option<(Mesh3D, Material3D)> {
     let node = tree.get_node(nid)?;
     let text = match node.get_property("text") {
@@ -662,11 +704,14 @@ pub fn label3d_geometry(tree: &SceneTree, nid: NodeId) -> Option<(Mesh3D, Materi
     // bit-identical to what already shipped and was verified.
     let (texture, albedo) = if outline_px > 0 {
         (
-            rasterize_text_outlined(&text, scale, modulate, outline_px, outline_modulate)?,
+            cached_label_texture(&text, scale, modulate, outline_px, outline_modulate)?,
             Color::WHITE,
         )
     } else {
-        (rasterize_text(&text, scale, Color::WHITE)?, modulate)
+        (
+            cached_label_texture(&text, scale, Color::WHITE, 0, Color::WHITE)?,
+            modulate,
+        )
     };
 
     // ⚠️ LABEL3D_PIXEL_SIZE, not SPRITE3D_PIXEL_SIZE — 0.005 against 0.01.
@@ -685,7 +730,7 @@ pub fn label3d_geometry(tree: &SceneTree, nid: NodeId) -> Option<(Mesh3D, Materi
     );
     let material = Material3D {
         albedo,
-        albedo_texture: Some(std::sync::Arc::new(texture)),
+        albedo_texture: Some(texture),
         shading_mode: shading_for(node),
         // `double_sided` defaults to TRUE on Label3D (`doc/classes/Label3D.xml`),
         // unlike most materials — text is meant to be legible from behind.
