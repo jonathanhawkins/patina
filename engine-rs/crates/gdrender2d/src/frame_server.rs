@@ -142,9 +142,18 @@ struct SharedState {
 pub struct FrameServerHandle {
     state: Arc<SharedState>,
     thread: Option<JoinHandle<()>>,
+    port: Option<u16>,
 }
 
 impl FrameServerHandle {
+    /// The port actually listening, or `None` when the bind failed. With
+    /// `start(0)` this is the OS-chosen port, which lets a caller (and the
+    /// tests) avoid picking a "free" port that something else takes before the
+    /// bind.
+    pub fn port(&self) -> Option<u16> {
+        self.port
+    }
+
     /// Encodes the framebuffer as BMP and stores it for the next `/frame.bmp` request.
     pub fn update_frame(&self, fb: &FrameBuffer) {
         let bmp = encode_bmp(fb);
@@ -200,6 +209,10 @@ pub fn start(port: u16) -> FrameServerHandle {
             None
         }
     };
+    let bound_port = listener
+        .as_ref()
+        .and_then(|l| l.local_addr().ok())
+        .map(|a| a.port());
     let state_clone = Arc::clone(&state);
     let thread = thread::spawn(move || {
         if let Some(listener) = listener {
@@ -210,6 +223,7 @@ pub fn start(port: u16) -> FrameServerHandle {
     FrameServerHandle {
         state,
         thread: Some(thread),
+        port: bound_port,
     }
 }
 
@@ -482,9 +496,13 @@ mod tests {
     /// happen on the server thread, so this raced and lost under host load.
     #[test]
     fn start_returns_with_the_port_already_listening() {
+        // Port 0: the OS picks a port at the bind itself. A `free_port()` probe
+        // released its port before `start` re-bound it, so under a parallel
+        // workspace run another process could take it in between and the
+        // connect was refused for a reason unrelated to what this test checks.
         for _ in 0..20 {
-            let port = free_port();
-            let handle = start(port);
+            let handle = start(0);
+            let port = handle.port().expect("start(0) binds a port");
             let connected = TcpStream::connect(format!("127.0.0.1:{port}"));
             handle.stop();
             assert!(connected.is_ok(), "connect right after start: {connected:?}");
