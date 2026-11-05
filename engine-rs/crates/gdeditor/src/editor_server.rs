@@ -25087,6 +25087,33 @@ pub fn apply_project_path_roots(root: &str) {
     gdcore::set_path_roots(Some(std::path::PathBuf::from(root)), user_dir);
 }
 
+/// Opens the scene the editor binary is launched on, returning the tree, the
+/// edited scene's root and the file's text (for the save baseline).
+///
+/// 🔑 ClassDB is populated FIRST (pat-7puwj). The loader seeds each node's class
+/// defaults from `class_db::get_property_list` as it builds the node, once, so
+/// a scene loaded before `register_all_classes` stays bare forever: every
+/// property the `.tscn` omits reads `null`. The editor binary used to load its
+/// launch scene and only then build `EditorState` (whose `new` registers), so
+/// editor Play read truck_town's unset `CheckBox.button_pressed` as null where
+/// the runner — which registers before loading (`project_boot.rs` step 0) — read
+/// `false`, and `town.setup(car, cb, button_sdfgi.button_pressed)` died on
+/// "expected element of type bool, got Nil". A scene opened later through
+/// `/api/scene/load` was already seeded, which is why every HTTP-driven test
+/// stayed green.
+pub fn load_launch_scene(path: &str) -> Result<(SceneTree, NodeId, String), String> {
+    gdobject::class_db::register_all_classes();
+    gdobject::editor_plugin_classes::register_editor_plugin_classes();
+    let source = std::fs::read_to_string(path).map_err(|e| format!("failed to read {path}: {e}"))?;
+    let scene = PackedScene::from_tscn(&source).map_err(|e| format!("failed to parse {path}: {e}"))?;
+    let mut tree = SceneTree::new();
+    let root_id = tree.root_id();
+    // Instances expanded as the editor's own Open does (pat-hivyf).
+    let scene_root = gdscene::packed_scene::add_packed_scene_to_tree_for_editing(&mut tree, root_id, &scene)
+        .map_err(|e| format!("failed to instance {path}: {e}"))?;
+    Ok((tree, scene_root, source))
+}
+
 /// Loads and instantiates a `.tscn` from `path` into a fresh `SceneTree`.
 /// Mirrors the tree-building half of `api_load_scene`; reused when closing the
 /// active tab has to re-display the newly-focused tab's saved scene.

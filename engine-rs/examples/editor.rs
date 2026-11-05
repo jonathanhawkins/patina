@@ -29,7 +29,6 @@ use gdeditor::idle_render::ViewportRenderSignature;
 use gdrender2d::test_adapter::capture_frame;
 use gdrender2d::SoftwareRenderer;
 use gdscene::lifecycle::LifecycleManager;
-use gdscene::packed_scene::PackedScene;
 use gdscene::SceneTree;
 use gdserver2d::viewport::Viewport;
 use gdvariant::Variant;
@@ -103,21 +102,10 @@ fn main() {
         gdeditor::editor_server::apply_project_path_roots(&cwd.to_string_lossy());
     }
 
-    // Load the scene.
-    let source = std::fs::read_to_string(&scene_path)
-        .unwrap_or_else(|e| panic!("Failed to read {scene_path}: {e}"));
-    let packed = PackedScene::from_tscn(&source)
-        .unwrap_or_else(|e| panic!("Failed to parse {scene_path}: {e}"));
-
-    // Instance into a scene tree.
-    let mut tree = SceneTree::new();
-    let root_id = tree.root_id();
-    // Instances expanded as the editor's own Open does (pat-hivyf): a scene
-    // with editable children inside a glTF (the 3D platformer's player.tscn)
-    // could not be opened as placeholders at all.
-    let scene_root =
-        gdscene::packed_scene::add_packed_scene_to_tree_for_editing(&mut tree, root_id, &packed)
-            .unwrap_or_else(|e| panic!("Failed to instance scene: {e}"));
+    // Load the scene, with ClassDB populated first so every node carries its
+    // class defaults exactly as the runner's do (pat-7puwj).
+    let (mut tree, scene_root, source) = gdeditor::editor_server::load_launch_scene(&scene_path)
+        .unwrap_or_else(|e| panic!("Failed to open {scene_path}: {e}"));
 
     // Attach demo scripts so Script mode shows real content for a selected node
     // (pat-qtmbv): Player -> player.gd, Enemy -> enemy_spawner.gd. The selection
