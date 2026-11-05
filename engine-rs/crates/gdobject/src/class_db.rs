@@ -1250,6 +1250,9 @@ fn node_class() -> ClassRegistration {
         .method(MethodInfo::new("get_tree", 0).const_method())
         .method(MethodInfo::new("is_inside_tree", 0).const_method())
         .method(MethodInfo::new("queue_free", 0))
+        // pat-ghw2s: dispatched in `scripting.rs`; registered so `has_method`
+        // agrees with what a call actually does.
+        .method(MethodInfo::new("reset_physics_interpolation", 0))
         .method(MethodInfo::new("set_process", 1))
         .method(MethodInfo::new("is_processing", 0).const_method())
         .method(MethodInfo::new("set_physics_process", 1))

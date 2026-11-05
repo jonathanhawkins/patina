@@ -76,6 +76,8 @@ fn two_surface_mesh(extra: bool) -> Mesh3D {
             uvs: uv,
             indices: i,
             primitive_type: PrimitiveType::Triangles,
+            bone_weights: Vec::new(),
+            bone_indices: Vec::new(),
             lods: Vec::new(),
         });
     }

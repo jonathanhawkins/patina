@@ -181,11 +181,12 @@ pub fn skin_normal(
 /// skeleton's current global bone poses.
 ///
 /// Positions and (when present and parallel to positions) normals are blended
-/// over up to four influences per vertex. UVs, indices, primitive type and
-/// extra surfaces are copied unchanged. When the mesh is not skinned
-/// (`mesh.is_skinned() == false`) an unchanged clone is returned. The returned
-/// mesh has its own `bone_weights`/`bone_indices` cleared, since it has already
-/// been baked into pose space.
+/// over up to four influences per vertex, on the primary surface AND on every
+/// rigged additional surface. UVs, indices and primitive types are copied
+/// unchanged. When the mesh is not skinned (`mesh.is_skinned() == false`) an
+/// unchanged clone is returned. The returned mesh has every surface's
+/// `bone_weights`/`bone_indices` cleared, since it has already been baked into
+/// pose space.
 ///
 /// This is the CPU ("software") skinning path; a GPU path may follow.
 pub fn skin_mesh(mesh: &Mesh3D, skin: &Skin, bone_global_poses: &[Transform3D]) -> Mesh3D {
@@ -194,20 +195,53 @@ pub fn skin_mesh(mesh: &Mesh3D, skin: &Skin, bone_global_poses: &[Transform3D]) 
     }
 
     let mats = skin_matrices(skin, bone_global_poses);
-    let skin_normals = mesh.normals.len() == mesh.vertices.len();
 
     let mut out = mesh.clone();
-    for (vi, &v) in mesh.vertices.iter().enumerate() {
-        let w = mesh.bone_weights[vi];
-        let idx = mesh.bone_indices[vi];
-        out.vertices[vi] = skin_position(v, w, idx, &mats);
-        if skin_normals {
-            out.normals[vi] = skin_normal(mesh.normals[vi], w, idx, &mats);
-        }
+    if mesh.primary_is_skinned() {
+        skin_arrays(
+            &mut out.vertices,
+            &mut out.normals,
+            &mesh.bone_weights,
+            &mesh.bone_indices,
+            &mats,
+        );
     }
     out.bone_weights.clear();
     out.bone_indices.clear();
+    // Every surface is deformed by the same skin, as Godot's skeleton storage
+    // does per surface (pat-ghw2s). A surface without influences stays as it is.
+    for surface in &mut out.surfaces {
+        if surface.is_skinned() {
+            let weights = std::mem::take(&mut surface.bone_weights);
+            let indices = std::mem::take(&mut surface.bone_indices);
+            skin_arrays(
+                &mut surface.vertices,
+                &mut surface.normals,
+                &weights,
+                &indices,
+                &mats,
+            );
+        }
+    }
     out
+}
+
+/// Skins one surface's positions (and normals, when parallel) in place.
+fn skin_arrays(
+    vertices: &mut [Vector3],
+    normals: &mut [Vector3],
+    weights: &[[f32; 4]],
+    indices: &[[u32; 4]],
+    mats: &[Transform3D],
+) {
+    let skin_normals = normals.len() == vertices.len();
+    for vi in 0..vertices.len() {
+        let (w, idx) = (weights[vi], indices[vi]);
+        vertices[vi] = skin_position(vertices[vi], w, idx, mats);
+        if skin_normals {
+            normals[vi] = skin_normal(normals[vi], w, idx, mats);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -406,5 +440,46 @@ mod tests {
         assert!(n.x.abs() < 1e-4, "expected ~0 x: {n:?}");
         assert!(n.z.abs() < 1e-4, "expected ~0 z: {n:?}");
         assert!((n.y.abs() - 1.0).abs() < 1e-4, "expected |y|~1: {n:?}");
+    }
+
+    /// pat-ghw2s: a rigged ADDITIONAL surface is deformed by the same skin as
+    /// the primary one, and an unrigged surface is left alone. Only the primary
+    /// was skinned before, so the platformer robot's second primitive drew in
+    /// bind space.
+    #[test]
+    fn every_rigged_surface_is_skinned() {
+        use crate::mesh::Surface3D;
+        let mut mesh = rigged_quad();
+        let surface = |rigged: bool| Surface3D {
+            vertices: vec![Vector3::new(0.0, 1.0, 0.0)],
+            normals: vec![Vector3::new(0.0, 0.0, 1.0)],
+            uvs: vec![[0.0, 0.0]],
+            indices: vec![0],
+            primitive_type: PrimitiveType::Points,
+            bone_weights: if rigged { vec![[1.0, 0.0, 0.0, 0.0]] } else { Vec::new() },
+            bone_indices: if rigged { vec![[1, 0, 0, 0]] } else { Vec::new() },
+            lods: Vec::new(),
+        };
+        mesh.surfaces.push(surface(true));
+        mesh.surfaces.push(surface(false));
+
+        let mut skin = Skin::new();
+        skin.add_bind(0, Transform3D::IDENTITY);
+        skin.add_bind(1, Transform3D::IDENTITY);
+        let poses = [Transform3D::IDENTITY, translate(5.0, 0.0, 0.0)];
+        let out = skin_mesh(&mesh, &skin, &poses);
+
+        assert!(approx(out.vertices[2], Vector3::new(5.5, 1.0, 0.0)), "primary");
+        assert!(
+            approx(out.surfaces[0].vertices[0], Vector3::new(5.0, 1.0, 0.0)),
+            "rigged extra surface follows bind 1: {:?}",
+            out.surfaces[0].vertices[0]
+        );
+        assert!(out.surfaces[0].bone_weights.is_empty(), "baked: influences cleared");
+        assert!(
+            approx(out.surfaces[1].vertices[0], Vector3::new(0.0, 1.0, 0.0)),
+            "an unrigged surface is untouched"
+        );
+        assert!(mesh.is_skinned() && !mesh.surfaces[1].is_skinned());
     }
 }

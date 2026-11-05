@@ -782,6 +782,11 @@ pub struct SceneTree {
     /// Methods queued via [`call_deferred`](Self::call_deferred). Flushed after
     /// the process phase (before deletions), matching Godot's MessageQueue.
     pending_deferred_calls: Vec<DeferredCall>,
+    /// Nodes whose physics interpolation a script reset this frame
+    /// (`Node.reset_physics_interpolation()`, pat-ghw2s). The interpolation
+    /// buffers live on `MainLoop`, which a script cannot reach, so the request
+    /// is queued here and applied by the loop before its next capture/publish.
+    pending_interpolation_resets: Vec<NodeId>,
     /// Active SceneTreeTimers from [`create_timer`] (pat-z35r2.3).
     scene_timers: Vec<SceneTreeTimer>,
     /// Next timer id.
@@ -971,6 +976,7 @@ impl SceneTree {
             pending_shell_open: Vec::new(),
             pending_deletions: Vec::new(),
             pending_deferred_calls: Vec::new(),
+            pending_interpolation_resets: Vec::new(),
             scene_timers: Vec::new(),
             next_timer_id: 1,
             event_trace: EventTrace::new(),
@@ -9149,6 +9155,33 @@ impl SceneTree {
             args: args.to_vec(),
             callback: None,
         });
+    }
+
+    /// Godot's `Node.reset_physics_interpolation()` as a request (pat-ghw2s).
+    ///
+    /// Godot propagates `NOTIFICATION_RESET_PHYSICS_INTERPOLATION` to the node
+    /// AND every descendant (`node.cpp` `reset_physics_interpolation`), so a
+    /// teleported character's child meshes snap with it; the subtree is
+    /// captured now, while it is the subtree the script saw. A node outside the
+    /// tree is a no-op, as in Godot.
+    pub fn request_physics_interpolation_reset(&mut self, node_id: NodeId) {
+        let inside = self.get_node(node_id).is_some_and(|n| n.is_inside_tree());
+        if !inside {
+            return;
+        }
+        let mut stack = vec![node_id];
+        while let Some(id) = stack.pop() {
+            self.pending_interpolation_resets.push(id);
+            if let Some(n) = self.get_node(id) {
+                stack.extend(n.children().iter().copied());
+            }
+        }
+    }
+
+    /// Drains the nodes queued by
+    /// [`request_physics_interpolation_reset`](Self::request_physics_interpolation_reset).
+    pub fn take_physics_interpolation_resets(&mut self) -> Vec<NodeId> {
+        std::mem::take(&mut self.pending_interpolation_resets)
     }
 
     /// Number of deferred calls waiting to be flushed.

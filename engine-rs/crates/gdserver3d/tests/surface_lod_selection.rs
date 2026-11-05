@@ -19,6 +19,8 @@ fn surface_with_lods() -> Surface3D {
         // Full detail: 4 triangles.
         indices: (0..12).collect(),
         primitive_type: PrimitiveType::Triangles,
+        bone_weights: Vec::new(),
+        bone_indices: Vec::new(),
         lods: vec![
             SurfaceLod {
                 error: 1.0,
@@ -97,6 +99,8 @@ fn a_surface_without_lods_draws_its_own_indices() {
         uvs: Vec::new(),
         indices: (0..6).collect(),
         primitive_type: PrimitiveType::Triangles,
+        bone_weights: Vec::new(),
+        bone_indices: Vec::new(),
         lods: Vec::new(),
     };
     assert_eq!(s.select_lod(1000.0).len(), 6, "no levels means full detail");
