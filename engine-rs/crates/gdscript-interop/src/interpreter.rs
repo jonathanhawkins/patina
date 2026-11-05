@@ -5746,6 +5746,19 @@ impl Interpreter {
                         name: member.clone(),
                     });
                 }
+                // `await RenderingServer.frame_post_draw` (and `frame_pre_draw`)
+                // waits for the frame being drawn: the standard "show the
+                // loading screen, then do the slow work" idiom (truck_town's
+                // car_select.gd `_load_scene`). `RenderingServer` is not a
+                // variable, so this used to raise "undefined variable" and the
+                // chosen car never loaded. Patina has no draw-signal emitter,
+                // so it is a one-frame await — the same resume point
+                // `poll_coroutines` already documents for it.
+                if matches!(object.as_ref(), Expr::Ident(n) if n == "RenderingServer")
+                    && matches!(member.as_str(), "frame_post_draw" | "frame_pre_draw")
+                {
+                    return Ok(crate::coroutine::AwaitTarget::frames_variant(1));
+                }
                 let obj = self.eval_expr(object)?;
                 // ObjectId property access via scene_access
                 if let Variant::ObjectId(oid) = &obj {
@@ -5802,7 +5815,26 @@ impl Interpreter {
                     // released above because running `_get` needs it mutably.
                     if self.scene_access.is_some() {
                         let member = member.clone();
-                        return Ok(self.get_property_with_virtual(raw, &member));
+                        let value = self.get_property_with_virtual(raw, &member);
+                        // `button.grab_focus` with no call is a `Callable`
+                        // bound to that object (GDScript resolves a member
+                        // that is not a property but is a method to
+                        // `Callable(obj, name)`), so
+                        // `get_child(0).grab_focus.call_deferred()` works —
+                        // truck_town's car_select.gd `_ready` died here on
+                        // "cannot call method on Nil".
+                        if value.is_nil()
+                            && self
+                                .scene_access
+                                .as_ref()
+                                .is_some_and(|a| a.node_has_method(raw, &member))
+                        {
+                            return Ok(Variant::Callable(Box::new(CallableRef::Method {
+                                target_id: raw,
+                                method: member,
+                            })));
+                        }
+                        return Ok(value);
                     }
                 }
                 // `shader.code`, and any other property a loaded resource

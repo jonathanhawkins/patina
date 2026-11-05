@@ -414,6 +414,22 @@ impl ScriptInstance for GDScriptNodeInstance {
             .get(name)
             .or_else(|| self.instance.constants.get(name))
             .cloned()
+            // A named `enum Mood { … }` read from ANOTHER object
+            // (`town.Mood.DAY`, truck_town's car_select.gd) is the same
+            // Dictionary the script sees for its own bareword `Mood`; it was
+            // Nil, so `town.Mood.DAY` raised inside a resumed coroutine and
+            // the town never loaded. Sorted by value, as the interpreter
+            // seeds the in-script constant.
+            .or_else(|| {
+                let variants = self.instance.class_def.enums.get(name)?;
+                let mut pairs: Vec<(&String, &i64)> = variants.iter().collect();
+                pairs.sort_by_key(|(n, v)| (**v, (*n).clone()));
+                let mut dict = gdvariant::Dictionary::new();
+                for (n, v) in pairs {
+                    dict.insert(Variant::String(n.clone()), Variant::Int(*v));
+                }
+                Some(Variant::Dictionary(dict.into()))
+            })
     }
 
     fn set_property(&mut self, name: &str, value: Variant) -> bool {

@@ -19540,6 +19540,25 @@ pub fn register_2d_classes() {
                 // `accept_event()` is how a `_gui_input` handler stops an event
                 // from bubbling to ancestor Controls (pat-0q2kx.82).
                 .method(MethodInfo::new("accept_event", 0))
+                // The keyboard-focus methods `scripting.rs` dispatches
+                // (pat-0q2kx.84). Unregistered, `has_method("grab_focus")` was
+                // false, so `button.grab_focus` (no call) was Nil instead of a
+                // Callable and truck_town's car_select.gd
+                // `get_child(0).grab_focus.call_deferred()` raised. Arity and
+                // defaults from extension_api.json (Godot 4.6).
+                .method(
+                    MethodInfo::new("has_focus", 1)
+                        .const_method()
+                        .with_arguments(vec![PropertyInfo::new(
+                            "ignore_hidden_focus",
+                            Variant::Bool(false),
+                        )])
+                        .returns(Variant::Bool(false)),
+                )
+                .method(MethodInfo::new("grab_focus", 1).with_arguments(vec![
+                    PropertyInfo::new("hide_focus", Variant::Bool(false)),
+                ]))
+                .method(MethodInfo::new("release_focus", 0))
                 // Godot's 11 Control virtuals (`doc/classes/Control.xml`).
                 // `_gui_input` is the one every UI script overrides and ClassDB
                 // could not report it as overridable (pat-s3rrv.57).
