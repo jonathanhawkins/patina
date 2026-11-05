@@ -102,6 +102,8 @@ When V1 runtime is complete (`phase == "V1Complete"`), the planner shifts focus 
 
 - **`/editor-parity [area]`** — Visual comparison of Patina editor vs Godot 4.6.1. Screenshots both editors, compares layout/controls/styling across 5 dimensions, rates gaps as P1/P2/P3, and auto-creates beads. Areas: `scene tree`, `inspector`, `viewport`, `toolbar`, `filesystem`, `full`. Use this to measure progress and find new gaps.
 
+- **`/editor-tour <game>`** — Walks the browser editor itself area by area (docks, inspector per node kind, main screens, bottom panels, menus, dialogs) and reports console errors, failed requests, broken images, layout problems and empty panels, with a contact sheet. Run it periodically (e.g. on one `games/*` per planner pass, at `--size 1280x720` too) and after editor UI work lands; file one bead per root cause it finds. See `.claude/skills/editor-tour/SKILL.md`.
+
 - **`/swarm-monitor [session]`** — Monitor orchestrator health and all worker agents. Shows per-worker state, live pane snapshots, and detects issues (stalls, dead panes, coordinator down, cargo lock jams). Use this to keep the swarm healthy while it works editor beads.
 
 ### Editor parity beads structure
