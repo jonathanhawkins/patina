@@ -1927,7 +1927,22 @@ fn render_game_png(s: &mut EditorState, width: u32, height: u32) -> Result<Vec<u
         None => &mut st.scene_tree,
     };
     if crate::scene_renderer::scene_has_3d_content(tree) {
-        return Err("3D screenshots are not wired into the agent interface yet — use api GET /api/viewport/png for the editor's last rendered frame".to_string());
+        // The Play view's own 3D entry point (pat-p3p1m), so a screenshot is
+        // the frame the editor's Game tab draws for this tree: scene camera,
+        // game environment, HUD composited over it. Without it a 3D game had
+        // no frame-exact picture at all, so nothing could be diffed against
+        // Godot's (pat-xggzs).
+        let clear = settings.default_clear_color();
+        let img = crate::play_3d::prepare_play_3d_frame(
+            tree,
+            &st.editor_viewport_3d,
+            st.runtime_camera_override,
+            clear,
+            width,
+            height,
+        )
+        .render();
+        return Ok(gdrender2d::export::encode_png_bgra(&img));
     }
     let fb = crate::viewport_2d_render::render_play_frame(
         tree,
