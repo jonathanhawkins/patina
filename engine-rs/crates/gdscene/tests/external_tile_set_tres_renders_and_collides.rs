@@ -11,6 +11,18 @@ use gdscene::SceneTree;
 use gdcore::math::Vector2i;
 use std::collections::HashMap;
 
+/// Serializes the tests in this binary that touch the res:// path roots (pat-hukbz).
+///
+/// That state is process-global. Nextest gives each test its own process, but
+/// plain `cargo test` runs the tests as threads in ONE process, where they
+/// overwrote each other's state mid-test. Bind the guard for the whole test.
+/// Poison-tolerant, so one failing test does not fail the rest.
+#[must_use = "bind it for the whole test: `let _guard = serial();`"]
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 const TILESET_TRES: &str = r#"[gd_resource type="TileSet" format=3]
 
 [ext_resource type="Texture2D" path="res://tiles.png" id="1"]
@@ -30,6 +42,7 @@ sources/0 = SubResource("TileSetAtlasSource_a")
 
 #[test]
 fn a_tile_map_layer_with_an_external_tile_set_draws_and_collides() {
+    let _guard = serial();
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     std::fs::write(root.join("project.godot"), "config_version=5\n").unwrap();
@@ -121,6 +134,7 @@ sources/0 = SubResource("TileSetAtlasSource_a")
 
 #[test]
 fn alternative_tiles_keep_their_own_orientation_and_polygon() {
+    let _guard = serial();
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     std::fs::write(root.join("project.godot"), "config_version=5\n").unwrap();

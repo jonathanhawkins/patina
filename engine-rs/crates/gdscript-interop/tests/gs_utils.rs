@@ -16,6 +16,18 @@
 use gdscript_interop::interpreter::Interpreter;
 use gdvariant::Variant;
 
+/// Serializes the tests in this binary that touch the process-wide rid_allocate_id counter (pat-hukbz).
+///
+/// That state is process-global. Nextest gives each test its own process, but
+/// plain `cargo test` runs the tests as threads in ONE process, where they
+/// overwrote each other's state mid-test. Bind the guard for the whole test.
+/// Poison-tolerant, so one failing test does not fail the rest.
+#[must_use = "bind it for the whole test: `let _guard = serial();`"]
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Runs `src` and returns its `return` value. The trailing newline matches
 /// every script literal in the sibling interop tests.
 fn run_val(src: &str) -> Variant {
@@ -31,6 +43,7 @@ fn run_val(src: &str) -> Variant {
 /// than returning a wrong answer.
 #[test]
 fn the_new_utilities_are_callable_at_all() {
+    let _guard = serial();
     assert_eq!(
         run_val("return type_convert(\"5\", TYPE_INT)"),
         Variant::Int(5)
@@ -150,6 +163,7 @@ fn instance_id_zero_is_never_valid() {
 /// `rid_allocate_id` hands out fresh, non-reused, non-zero ids.
 #[test]
 fn rid_allocate_id_is_monotonic_and_never_zero() {
+    let _guard = serial();
     let two = run_val("var a = rid_allocate_id()\nvar b = rid_allocate_id()\nreturn b - a");
     assert_eq!(
         two,

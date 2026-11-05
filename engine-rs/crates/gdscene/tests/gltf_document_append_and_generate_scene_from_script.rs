@@ -19,6 +19,18 @@ use gdscene::{GDScriptNodeInstance, MainLoop};
 use gdscript_interop::bindings::ScriptInstance;
 use gdvariant::Variant;
 
+/// Serializes the tests in this binary that touch the res:// path roots (each test roots res:// at its own temp project) (pat-hukbz).
+///
+/// That state is process-global. Nextest gives each test its own process, but
+/// plain `cargo test` runs the tests as threads in ONE process, where they
+/// overwrote each other's state mid-test. Bind the guard for the whole test.
+/// Poison-tolerant, so one failing test does not fail the rest.
+#[must_use = "bind it for the whole test: `let _guard = serial();`"]
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// The gdresource glTF fixture, embedded so this test does not depend on a
 /// path between two crates' directories at runtime.
 const QUAD_GLB: &[u8] = include_bytes!("../../gdresource/fixtures/quad.glb");
@@ -75,6 +87,7 @@ fn project_with_fixture() -> tempfile::TempDir {
 /// **The acceptance test.**
 #[test]
 fn gltf_document_append_and_generate_scene_from_script() {
+    let _guard = serial();
     // Held for the whole test: dropping it deletes the file `res://` points at.
     let _project: tempfile::TempDir = project_with_fixture();
 
@@ -156,6 +169,7 @@ fn gltf_document_append_and_generate_scene_from_script() {
 /// == 0` guard impossible to write.
 #[test]
 fn a_fresh_gltf_state_answers_empty_rather_than_raising() {
+    let _guard = serial();
     const PROBE: &str = "\
 extends Node
 var nodes = -1
@@ -205,6 +219,7 @@ func _ready():
 /// answer these yet, so it says so.
 #[test]
 fn an_unsupported_gltf_state_getter_raises() {
+    let _guard = serial();
     const PROBE: &str = "\
 extends Node
 var reached_after = false
@@ -237,6 +252,7 @@ func _ready():
 /// inherit GLTFDocument/GLTFState's whole surface (pat-s3rrv.49).
 #[test]
 fn fbx_document_and_state_share_the_gltf_surface() {
+    let _guard = serial();
     let _project: tempfile::TempDir = project_with_fixture();
 
     const PROBE: &str = "\
@@ -281,6 +297,7 @@ func _ready():
 /// raising for.
 #[test]
 fn a_missing_file_returns_an_error_code_not_a_raise() {
+    let _guard = serial();
     let _project: tempfile::TempDir = project_with_fixture();
 
     const PROBE: &str = "\

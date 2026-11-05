@@ -24,6 +24,18 @@
 use gdscript_interop::interpreter::Interpreter;
 use gdvariant::Variant;
 
+/// Serializes the tests in this binary that touch the *Server*Manager singleton registries (pat-hukbz).
+///
+/// That state is process-global. Nextest gives each test its own process, but
+/// plain `cargo test` runs the tests as threads in ONE process, where they
+/// overwrote each other's state mid-test. Bind the guard for the whole test.
+/// Poison-tolerant, so one failing test does not fail the rest.
+#[must_use = "bind it for the whole test: `let _guard = serial();`"]
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Runs `src` and returns its `return` value.
 fn run_val(src: &str) -> Variant {
     let mut interp = Interpreter::new();
@@ -302,6 +314,7 @@ fn native_menu_constants_match_godots_values() {
 
 #[test]
 fn every_manager_names_the_server_patina_ships() {
+    let _guard = serial();
     for (singleton, shipped) in [
         ("PhysicsServer2DManager", "PatinaPhysics2D"),
         ("PhysicsServer3DManager", "PatinaPhysics3D"),
@@ -327,6 +340,7 @@ fn every_manager_names_the_server_patina_ships() {
 
 #[test]
 fn a_registered_server_becomes_findable_and_default() {
+    let _guard = serial();
     assert_eq!(
         run_val(
             "PhysicsServer3DManager.register_server(\"Custom3D\")\n\
@@ -336,6 +350,10 @@ fn a_registered_server_becomes_findable_and_default() {
         Variant::String("Custom3D".into()),
         "register_server + set_default_server must move the default"
     );
+    // The registry is process-global and outlives this test: put the shipped
+    // default back, or `every_manager_names_the_server_patina_ships` reads
+    // "Custom3D" whenever it runs after this one in the same process.
+    run_val("PhysicsServer3DManager.set_default_server(\"PatinaPhysics3D\")\nreturn 0\n");
 }
 
 // ---------------------------------------------------------------------------

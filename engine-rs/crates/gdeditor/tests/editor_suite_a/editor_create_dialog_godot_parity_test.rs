@@ -24,6 +24,16 @@ fn free_port() -> u16 {
 }
 
 fn make_server() -> (EditorServerHandle, u16) {
+    let (handle, port, _root) = make_server_with_root();
+    (handle, port)
+}
+
+/// Like `make_server`, plus the scene root's raw id.
+///
+/// Node ids come from a process-wide counter, so the root is id 1 only in a
+/// fresh process. Under nextest every test gets one; under plain `cargo test`
+/// the tests share a process and a hard-coded `1` names no node (pat-hukbz).
+fn make_server_with_root() -> (EditorServerHandle, u16, u64) {
     let port = free_port();
     let mut tree = SceneTree::new();
     let root = tree.root_id();
@@ -32,7 +42,7 @@ fn make_server() -> (EditorServerHandle, u16) {
     let state = EditorState::new(tree);
     let handle = EditorServerHandle::start(port, state);
     thread::sleep(Duration::from_millis(100));
-    (handle, port)
+    (handle, port, root.raw())
 }
 
 fn connect_with_retry(port: u16) -> TcpStream {
@@ -328,13 +338,13 @@ fn favorites_reorder_preserves_order() {
 
 #[test]
 fn node_add_records_recent_like_godot_confirm() {
-    let (handle, port) = make_server();
-    // Root of the test scene has raw id 1; create like the dialog does — the
-    // node is auto-named after its class, no prompt.
+    let (handle, port, root) = make_server_with_root();
+    // Create under the scene root like the dialog does — the node is
+    // auto-named after its class, no prompt.
     let resp = http_post(
         port,
         "/api/node/add",
-        r#"{"parent_id":1,"name":"Camera2D","class_name":"Camera2D"}"#,
+        &format!(r#"{{"parent_id":{root},"name":"Camera2D","class_name":"Camera2D"}}"#),
     );
     assert!(resp.contains("200"), "node add must succeed: {resp}");
 

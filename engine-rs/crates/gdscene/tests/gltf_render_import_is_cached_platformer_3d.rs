@@ -16,6 +16,18 @@ use gdscene::{NodeId, SceneTree};
 use gdvariant::Variant;
 use std::path::PathBuf;
 
+/// Serializes the tests in this binary that touch the res:// path roots and the process-wide glTF import counter (pat-hukbz).
+///
+/// That state is process-global. Nextest gives each test its own process, but
+/// plain `cargo test` runs the tests as threads in ONE process, where they
+/// overwrote each other's state mid-test. Bind the guard for the whole test.
+/// Poison-tolerant, so one failing test does not fail the rest.
+#[must_use = "bind it for the whole test: `let _guard = serial();`"]
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn platformer_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../games/platformer_3d")
 }
@@ -40,6 +52,7 @@ fn tree_with_glb_nodes(glb: &str, count: usize) -> (SceneTree, Vec<NodeId>) {
 
 #[test]
 fn a_res_path_glb_mesh_resolves_through_the_project_root() {
+    let _guard = serial();
     // The test process runs from crates/gdscene, so the bare `res://` string is
     // not a file `std::fs` can open from here.
     assert!(!std::path::Path::new("res://player/player.glb").exists());
@@ -55,6 +68,7 @@ fn a_res_path_glb_mesh_resolves_through_the_project_root() {
 
 #[test]
 fn a_glb_is_parsed_once_however_many_nodes_and_frames_draw_it() {
+    let _guard = serial();
     // enemy.glb is used by no other test in this binary, so the import
     // counter's delta belongs to this test alone.
     let (tree, ids) = tree_with_glb_nodes("res://enemy/enemy.glb", 4);

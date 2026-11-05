@@ -2519,6 +2519,12 @@ fn extract_z_index(node: &gdscene::node::Node) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    //! 🔑 Every test here starts with `clear_for_testing()` (pat-hukbz): a
+    //! test-scoped, EMPTY ClassDB. The marker arms (`draw_static_body`, the
+    //! Node2D diamond, …) only draw a node the canvas pass did not, and with
+    //! Sprite2D/StaticBody2D registered the canvas pass claims them. So these
+    //! tests pin the unregistered-fallback path, and under `cargo test` the
+    //! process-wide ClassDB holds whatever other tests registered.
     use super::*;
     use gdscene::node::Node;
 
@@ -2533,6 +2539,7 @@ mod tests {
 
     #[test]
     fn render_empty_scene() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         let fb = render_scene(&tree, None, 100, 100);
         assert_eq!(fb.width, 100);
@@ -2544,6 +2551,7 @@ mod tests {
 
     #[test]
     fn render_scene_dimensions() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         let fb = render_scene(&tree, None, 200, 150);
         assert_eq!(fb.width, 200);
@@ -2552,6 +2560,7 @@ mod tests {
 
     #[test]
     fn render_scene_with_node2d() {
+        gdobject::class_db::clear_for_testing();
         let (tree, _) = make_tree_with_node2d();
         let fb = render_scene(&tree, None, 200, 200);
         // The node should have drawn something — not all BG color.
@@ -2561,6 +2570,7 @@ mod tests {
 
     #[test]
     fn render_scene_with_sprite2d() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Sprite", "Sprite2D");
@@ -2575,6 +2585,7 @@ mod tests {
 
     #[test]
     fn render_scene_with_camera2d() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Cam", "Camera2D");
@@ -2589,6 +2600,7 @@ mod tests {
 
     #[test]
     fn selected_node_highlighting() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         let fb_no_sel = render_scene(&tree, None, 200, 200);
         let fb_sel = render_scene(&tree, Some(node_id), 200, 200);
@@ -2607,6 +2619,7 @@ mod tests {
 
     #[test]
     fn grid_draws_lines() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         let fb = render_scene(&tree, None, 200, 200);
         // Grid lines should produce pixels that differ from BG.
@@ -2616,6 +2629,7 @@ mod tests {
 
     #[test]
     fn compute_bounds_empty_scene() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         let bounds = compute_scene_bounds(&tree);
         assert_eq!(bounds.size, Vector2::ZERO);
@@ -2623,6 +2637,7 @@ mod tests {
 
     #[test]
     fn compute_bounds_single_node() {
+        gdobject::class_db::clear_for_testing();
         let (tree, _) = make_tree_with_node2d();
         let bounds = compute_scene_bounds(&tree);
         // Single node at (100, 100) → bounds is a zero-size rect at (100, 100).
@@ -2631,6 +2646,7 @@ mod tests {
 
     #[test]
     fn compute_bounds_multiple_nodes() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
 
@@ -2649,6 +2665,7 @@ mod tests {
 
     #[test]
     fn render_control_node() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Btn", "Button");
@@ -2664,6 +2681,7 @@ mod tests {
 
     #[test]
     fn render_default_class_node() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Custom", "CustomClass");
@@ -2677,6 +2695,7 @@ mod tests {
 
     #[test]
     fn render_multiple_nodes() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
 
@@ -2701,6 +2720,7 @@ mod tests {
 
     #[test]
     fn selected_dot_above_node() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         let fb = render_scene(&tree, Some(node_id), 200, 200);
         // The selected dot should be bright amber.
@@ -2714,6 +2734,7 @@ mod tests {
 
     #[test]
     fn node_without_position_at_origin() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let node = Node::new("Plain", "Node");
@@ -2726,6 +2747,7 @@ mod tests {
 
     #[test]
     fn render_is_deterministic() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         let fb1 = render_scene(&tree, Some(node_id), 200, 200);
         let fb2 = render_scene(&tree, Some(node_id), 200, 200);
@@ -2736,6 +2758,7 @@ mod tests {
 
     #[test]
     fn hit_test_finds_node() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         // Node is at (100, 100). Viewport is 200x200.
         // Scene bounds center = (100, 100), offset = (0, 0).
@@ -2746,6 +2769,7 @@ mod tests {
 
     #[test]
     fn hit_test_misses_empty_area() {
+        gdobject::class_db::clear_for_testing();
         let (tree, _) = make_tree_with_node2d();
         // Click far from the node at (100, 100).
         let result = hit_test(&tree, 200, 200, 0.0, 0.0);
@@ -2754,6 +2778,7 @@ mod tests {
 
     #[test]
     fn hit_test_returns_closest() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
 
@@ -2777,6 +2802,7 @@ mod tests {
 
     #[test]
     fn hit_test_skips_root() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         // Click at center — root should not be returned.
         let result = hit_test(&tree, 200, 200, 100.0, 100.0);
@@ -2785,6 +2811,7 @@ mod tests {
 
     #[test]
     fn hit_test_sprite2d_larger_radius() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
 
@@ -2800,6 +2827,7 @@ mod tests {
 
     #[test]
     fn hit_test_control_bounding_rect() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
 
@@ -2821,6 +2849,7 @@ mod tests {
 
     #[test]
     fn hit_test_prefers_higher_z_index() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
 
@@ -2842,6 +2871,7 @@ mod tests {
 
     #[test]
     fn hit_test_within_radius_boundary() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         // Node at (100, 100), Node2D hit radius = 15.
         // Click exactly at radius boundary (115, 100).
@@ -2855,6 +2885,7 @@ mod tests {
 
     #[test]
     fn pixel_to_scene_round_trip() {
+        gdobject::class_db::clear_for_testing();
         let (tree, _) = make_tree_with_node2d();
         // Node at (100, 100), viewport 200x200.
         // Offset should be (0, 0), so pixel (100, 100) = scene (100, 100).
@@ -2867,6 +2898,7 @@ mod tests {
 
     #[test]
     fn render_with_zoom_does_not_panic() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         let fb = render_scene_with_zoom_pan(&tree, Some(node_id), 200, 200, 2.0, (0.0, 0.0));
         assert_eq!(fb.width, 200);
@@ -2875,6 +2907,7 @@ mod tests {
 
     #[test]
     fn render_with_zoom_and_pan() {
+        gdobject::class_db::clear_for_testing();
         let (tree, _) = make_tree_with_node2d();
         let fb = render_scene_with_zoom_pan(&tree, None, 200, 200, 0.5, (50.0, -30.0));
         assert_eq!(fb.width, 200);
@@ -2882,6 +2915,7 @@ mod tests {
 
     #[test]
     fn pixel_to_scene_with_zoom_pan_identity() {
+        gdobject::class_db::clear_for_testing();
         let (tree, _) = make_tree_with_node2d();
         // zoom=1, pan=(0,0) should match regular pixel_to_scene.
         let a = pixel_to_scene(&tree, 200, 200, 100.0, 100.0);
@@ -2892,6 +2926,7 @@ mod tests {
 
     #[test]
     fn pixel_to_scene_zoom_scales_correctly() {
+        gdobject::class_db::clear_for_testing();
         let (tree, _) = make_tree_with_node2d();
         // At zoom=2, moving 10 pixels in screen space = 5 pixels in world space.
         let a = pixel_to_scene_with_zoom_pan(&tree, 200, 200, 2.0, (0.0, 0.0), 100.0, 100.0);
@@ -2904,6 +2939,7 @@ mod tests {
 
     #[test]
     fn pixel_to_scene_pan_offsets() {
+        gdobject::class_db::clear_for_testing();
         let (tree, _) = make_tree_with_node2d();
         // Panning right by 20px should shift the scene left by 20 world units (at zoom=1).
         let a = pixel_to_scene_with_zoom_pan(&tree, 200, 200, 1.0, (0.0, 0.0), 100.0, 100.0);
@@ -2916,6 +2952,7 @@ mod tests {
 
     #[test]
     fn hit_test_with_zoom_pan_finds_node() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         // At zoom=1, pan=(0,0), pixel (100,100) maps to scene (100,100) which is on the node.
         let result = hit_test_with_zoom_pan(&tree, 200, 200, 1.0, (0.0, 0.0), 100.0, 100.0);
@@ -2924,6 +2961,7 @@ mod tests {
 
     #[test]
     fn hit_test_with_zoom_pan_zoom_in() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         // At zoom=2, the node at world (100,100) appears at pixel
         // (100*2 + offset_x, 100*2 + offset_y) where offset = (100 - 100*2, 100 - 100*2) = (-100, -100).
@@ -2934,6 +2972,7 @@ mod tests {
 
     #[test]
     fn hit_test_with_zoom_pan_miss_after_pan() {
+        gdobject::class_db::clear_for_testing();
         let (tree, _) = make_tree_with_node2d();
         // Pan far away — node should no longer be at pixel (100,100).
         let result = hit_test_with_zoom_pan(&tree, 200, 200, 1.0, (500.0, 500.0), 100.0, 100.0);
@@ -2942,6 +2981,7 @@ mod tests {
 
     #[test]
     fn render_selected_has_gizmo() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         let fb_sel = render_scene_with_zoom_pan(&tree, Some(node_id), 200, 200, 1.0, (0.0, 0.0));
         let fb_no = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
@@ -2960,6 +3000,7 @@ mod tests {
 
     #[test]
     fn render_selected_has_green_gizmo() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         let fb_sel = render_scene_with_zoom_pan(&tree, Some(node_id), 200, 200, 1.0, (0.0, 0.0));
         let fb_no = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
@@ -2979,6 +3020,7 @@ mod tests {
 
     #[test]
     fn origin_crosshair_draws_red_horizontal_line() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         let fb = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
         // The origin crosshair at Y=0 should add some reddish blended pixels.
@@ -2998,6 +3040,7 @@ mod tests {
 
     #[test]
     fn origin_crosshair_draws_green_vertical_line() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         let fb = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
         // offset_x for an empty scene is 100.
@@ -3016,6 +3059,7 @@ mod tests {
 
     #[test]
     fn origin_crosshair_semi_transparent() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         let fb = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
         // The crosshair should be blended, not full red/green.
@@ -3037,6 +3081,7 @@ mod tests {
 
     #[test]
     fn rulers_draw_dark_background() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         let fb = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
         // The top-left corner should be ruler background (darker than BG).
@@ -3049,6 +3094,7 @@ mod tests {
 
     #[test]
     fn rulers_have_tick_marks() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         let fb = render_scene_with_zoom_pan(&tree, None, 400, 400, 1.0, (0.0, 0.0));
         // The ruler region should contain tick marks that differ from the ruler background.
@@ -3068,6 +3114,7 @@ mod tests {
 
     #[test]
     fn rulers_border_lines_present() {
+        gdobject::class_db::clear_for_testing();
         let tree = SceneTree::new();
         let fb = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
         // Vertical ruler border at x=RULER_SIZE.
@@ -3082,6 +3129,7 @@ mod tests {
 
     #[test]
     fn node2d_diamond_is_filled() {
+        gdobject::class_db::clear_for_testing();
         let (tree, _) = make_tree_with_node2d();
         let fb = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
         // Count amber pixels -- a filled diamond should have significantly more
@@ -3100,6 +3148,7 @@ mod tests {
 
     #[test]
     fn sprite2d_has_white_border_and_cross() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Sprite", "Sprite2D");
@@ -3117,6 +3166,7 @@ mod tests {
 
     #[test]
     fn camera2d_has_viewport_outline() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Cam", "Camera2D");
@@ -3138,6 +3188,7 @@ mod tests {
 
     #[test]
     fn collision_shape2d_renders_green_circle() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Col", "CollisionShape2D");
@@ -3154,6 +3205,7 @@ mod tests {
 
     #[test]
     fn area2d_renders_blue_tint() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Area", "Area2D");
@@ -3171,6 +3223,7 @@ mod tests {
 
     #[test]
     fn label_node_shows_aa_icon() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("MyLabel", "Label");
@@ -3193,6 +3246,7 @@ mod tests {
 
     #[test]
     fn button_renders_with_border() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Btn", "Button");
@@ -3217,6 +3271,7 @@ mod tests {
 
     #[test]
     fn selected_node_shows_label() {
+        gdobject::class_db::clear_for_testing();
         let (tree, node_id) = make_tree_with_node2d();
         let fb_sel = render_scene_with_zoom_pan(&tree, Some(node_id), 200, 200, 1.0, (0.0, 0.0));
         let fb_no = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
@@ -3236,6 +3291,7 @@ mod tests {
 
     #[test]
     fn non_selected_nodes_show_labels() {
+        gdobject::class_db::clear_for_testing();
         let (tree, _) = make_tree_with_node2d();
         let fb = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
         // Non-root nodes get labels too (in gray/white).
@@ -3251,6 +3307,7 @@ mod tests {
 
     #[test]
     fn bitmap_string_width_correct() {
+        gdobject::class_db::clear_for_testing();
         assert_eq!(bitmap_string_width(""), 0.0);
         assert_eq!(bitmap_string_width("A"), 5.0);
         assert_eq!(bitmap_string_width("AB"), 11.0);
@@ -3259,6 +3316,7 @@ mod tests {
 
     #[test]
     fn bitmap_char_draws_pixels() {
+        gdobject::class_db::clear_for_testing();
         let mut fb = FrameBuffer::new(20, 20, Color::BLACK);
         draw_bitmap_char(&mut fb, 5.0, 5.0, 'A', Color::WHITE);
         // The 'A' character should draw some white pixels.
@@ -3271,6 +3329,7 @@ mod tests {
 
     #[test]
     fn bitmap_char_clips_to_bounds() {
+        gdobject::class_db::clear_for_testing();
         let mut fb = FrameBuffer::new(10, 10, Color::BLACK);
         // Draw character partially off-screen; should not panic.
         draw_bitmap_char(&mut fb, -3.0, -3.0, '0', Color::WHITE);
@@ -3280,6 +3339,7 @@ mod tests {
 
     #[test]
     fn bitmap_string_draws_multiple_chars() {
+        gdobject::class_db::clear_for_testing();
         let mut fb = FrameBuffer::new(50, 20, Color::BLACK);
         draw_bitmap_string(&mut fb, 2.0, 5.0, "123", Color::WHITE);
         let white_count = fb.pixels.iter().filter(|&&p| p == Color::WHITE).count();
@@ -3297,6 +3357,7 @@ mod tests {
     /// ruler ticks must resolve to a distinct, non-placeholder glyph.
     #[test]
     fn editor_viewport_label_glyph_coverage() {
+        gdobject::class_db::clear_for_testing();
         // The old fallback drawn for unknown letters: a filled rectangle.
         const FALLBACK_BOX: [u8; 7] = [
             0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111,
@@ -3329,6 +3390,7 @@ mod tests {
 
     #[test]
     fn blend_pixel_alpha_compositing() {
+        gdobject::class_db::clear_for_testing();
         let mut fb = FrameBuffer::new(5, 5, Color::rgb(0.0, 0.0, 1.0));
         // Blend semi-transparent red on top of blue.
         fb.blend_pixel(2, 2, Color::new(1.0, 0.0, 0.0, 0.5));
@@ -3340,6 +3402,7 @@ mod tests {
 
     #[test]
     fn blend_pixel_fully_opaque_replaces() {
+        gdobject::class_db::clear_for_testing();
         let mut fb = FrameBuffer::new(5, 5, Color::rgb(0.0, 0.0, 1.0));
         fb.blend_pixel(1, 1, Color::rgb(1.0, 0.0, 0.0));
         let p = fb.get_pixel(1, 1);
@@ -3349,6 +3412,7 @@ mod tests {
 
     #[test]
     fn blend_pixel_fully_transparent_no_change() {
+        gdobject::class_db::clear_for_testing();
         let mut fb = FrameBuffer::new(5, 5, Color::rgb(0.0, 0.0, 1.0));
         fb.blend_pixel(1, 1, Color::new(1.0, 0.0, 0.0, 0.0));
         let p = fb.get_pixel(1, 1);
@@ -3360,6 +3424,7 @@ mod tests {
 
     #[test]
     fn dashed_line_draws_segments() {
+        gdobject::class_db::clear_for_testing();
         let mut fb = FrameBuffer::new(100, 10, Color::BLACK);
         draw_dashed_line(
             &mut fb,
@@ -3380,6 +3445,7 @@ mod tests {
 
     #[test]
     fn format_ruler_number_values() {
+        gdobject::class_db::clear_for_testing();
         assert_eq!(format_ruler_number(0.0), "0");
         assert_eq!(format_ruler_number(100.0), "100");
         assert_eq!(format_ruler_number(-200.0), "-200");
@@ -3390,12 +3456,14 @@ mod tests {
 
     #[test]
     fn snap_ruler_interval_at_normal_zoom() {
+        gdobject::class_db::clear_for_testing();
         let interval = snap_ruler_interval(100.0, 1.0);
         assert!((interval - 100.0).abs() < 0.01);
     }
 
     #[test]
     fn snap_ruler_interval_zoomed_out() {
+        gdobject::class_db::clear_for_testing();
         // At zoom 0.1, screen_size = 10 < 20, so interval should be 4x.
         let interval = snap_ruler_interval(100.0, 0.1);
         assert!((interval - 400.0).abs() < 0.01);
@@ -3403,6 +3471,7 @@ mod tests {
 
     #[test]
     fn snap_ruler_interval_zoomed_in() {
+        gdobject::class_db::clear_for_testing();
         // At zoom 3.0, screen_size = 300 > 200, so interval should be halved.
         let interval = snap_ruler_interval(100.0, 3.0);
         assert!((interval - 50.0).abs() < 0.01);
@@ -3412,6 +3481,7 @@ mod tests {
 
     #[test]
     fn selection_highlight_collision_shape() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Col", "CollisionShape2D");
@@ -3433,6 +3503,7 @@ mod tests {
 
     #[test]
     fn selection_highlight_area2d() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Area", "Area2D");
@@ -3455,6 +3526,7 @@ mod tests {
 
     #[test]
     fn render_scene_backward_compat() {
+        gdobject::class_db::clear_for_testing();
         // render_scene() should still work and produce output.
         let (tree, node_id) = make_tree_with_node2d();
         let fb = render_scene(&tree, Some(node_id), 200, 200);
@@ -3473,6 +3545,7 @@ mod tests {
 
     #[test]
     fn render_collision_shape_circle() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Shape", "CollisionShape2D");
@@ -3495,6 +3568,7 @@ mod tests {
 
     #[test]
     fn render_collision_shape_rectangle() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Shape", "CollisionShape2D");
@@ -3518,6 +3592,7 @@ mod tests {
 
     #[test]
     fn render_collision_shape_capsule() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Shape", "CollisionShape2D");
@@ -3541,6 +3616,7 @@ mod tests {
 
     #[test]
     fn render_collision_shape_default_when_no_type() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Shape", "CollisionShape2D");
@@ -3561,6 +3637,7 @@ mod tests {
 
     #[test]
     fn render_collision_shape_selected_has_handles() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Shape", "CollisionShape2D");
@@ -3587,6 +3664,7 @@ mod tests {
 
     #[test]
     fn render_character_body_2d() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Player", "CharacterBody2D");
@@ -3601,6 +3679,7 @@ mod tests {
 
     #[test]
     fn render_rigid_body_2d() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Ball", "RigidBody2D");
@@ -3618,6 +3697,7 @@ mod tests {
 
     #[test]
     fn render_static_body_2d() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Ground", "StaticBody2D");
@@ -3635,6 +3715,7 @@ mod tests {
 
     #[test]
     fn render_rigid_body_with_velocity_arrow() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut node = Node::new("Ball", "RigidBody2D");
@@ -3657,6 +3738,7 @@ mod tests {
 
     #[test]
     fn debug_hierarchy_hang_repro() {
+        gdobject::class_db::clear_for_testing();
         // Reproduce hierarchy.tscn: Node2D parent with Sprite2D child, wide spread positions
         let mut tree = SceneTree::new();
         let root = tree.root_id();
@@ -3736,6 +3818,7 @@ mod tests {
     /// properties, so a pass cannot come from some other cyan chrome.
     #[test]
     fn a_baked_navigation_region_draws_its_navmesh_in_the_editor_viewport() {
+        gdobject::class_db::clear_for_testing();
         let baked = render_scene(&nav_region_tree(true), None, 320, 240);
         let unbaked = render_scene(&nav_region_tree(false), None, 320, 240);
 
@@ -3776,6 +3859,7 @@ mod tests {
     /// skipping it.
     #[test]
     fn an_unbaked_navigation_region_draws_no_navmesh() {
+        gdobject::class_db::clear_for_testing();
         let fb = render_scene(&nav_region_tree(false), None, 320, 240);
         assert_eq!(
             navmesh_edge_pixels(&fb),
@@ -3798,6 +3882,7 @@ mod tests {
     /// twice as far from centre.
     #[test]
     fn the_navmesh_follows_the_regions_position_exactly_once() {
+        gdobject::class_db::clear_for_testing();
         let mut tree = SceneTree::new();
         let root = tree.root_id();
         let mut region = Node::new("Region", "NavigationRegion2D");

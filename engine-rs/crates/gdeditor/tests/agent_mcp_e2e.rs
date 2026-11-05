@@ -19,6 +19,18 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
 
+/// Serializes the tests in this binary that touch the res:// path roots (every /api/project/open calls set_path_roots) (pat-hukbz).
+///
+/// That state is process-global. Nextest gives each test its own process, but
+/// plain `cargo test` runs the tests as threads in ONE process, where they
+/// overwrote each other's state mid-test. Bind the guard for the whole test.
+/// Poison-tolerant, so one failing test does not fail the rest.
+#[must_use = "bind it for the whole test: `let _guard = serial();`"]
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 const PROJECT: &str = r#"config_version=5
 
 [application]
@@ -207,6 +219,7 @@ fn build_player(server: &Server) -> ToolResult {
 
 #[test]
 fn mcp_handshake_lists_tools_and_answers_notifications() {
+    let _guard = serial();
     let server = boot(None);
     let (status, init) = rpc(
         server.port(),
@@ -275,6 +288,7 @@ fn mcp_handshake_lists_tools_and_answers_notifications() {
 
 #[test]
 fn mcp_sits_behind_the_editor_token() {
+    let _guard = serial();
     let server = boot(Some("s3cret"));
     let (status, _) = rpc(server.port(), "tools/list", json!({}), None);
     assert_eq!(
@@ -297,6 +311,7 @@ fn mcp_sits_behind_the_editor_token() {
 
 #[test]
 fn edit_then_save_writes_a_scene_godot_can_load() {
+    let _guard = serial();
     let server = boot(None);
     let built = build_player(&server);
     assert!(!built.error, "{}", built.text);
@@ -356,6 +371,7 @@ fn edit_then_save_writes_a_scene_godot_can_load() {
 
 #[test]
 fn play_drives_an_action_and_reports_frame_tagged_output() {
+    let _guard = serial();
     let server = boot(None);
     assert!(!build_player(&server).error);
     let report = tool(
@@ -410,6 +426,7 @@ fn play_drives_an_action_and_reports_frame_tagged_output() {
 
 #[test]
 fn unknown_actions_are_rejected_with_the_declared_list() {
+    let _guard = serial();
     let server = boot(None);
     let report = tool(
         &server,
@@ -427,6 +444,7 @@ fn unknown_actions_are_rejected_with_the_declared_list() {
 
 #[test]
 fn script_errors_reach_the_report_and_the_errors_tab() {
+    let _guard = serial();
     let server = boot(None);
     let written = tool(
         &server,
@@ -467,6 +485,7 @@ fn script_errors_reach_the_report_and_the_errors_tab() {
 
 #[test]
 fn write_script_reports_syntax_errors_with_a_location() {
+    let _guard = serial();
     let server = boot(None);
     let written = tool(
         &server,
@@ -485,6 +504,7 @@ fn write_script_reports_syntax_errors_with_a_location() {
 
 #[test]
 fn screenshots_are_png_images_of_the_game_view() {
+    let _guard = serial();
     let server = boot(None);
     assert!(!build_player(&server).error);
     let report = tool(
@@ -521,6 +541,7 @@ fn png_rgba(png: &[u8]) -> (u32, u32, Vec<u8>) {
 /// it looks at fills the centre while the corners stay the clear colour.
 #[test]
 fn play_screenshots_a_3d_scene_through_its_camera() {
+    let _guard = serial();
     let server = boot(None);
     std::fs::write(
         server.path("box3d.tscn"),
@@ -580,6 +601,7 @@ current = true
 
 #[test]
 fn keep_running_then_step_continues_the_same_run_and_edits_are_refused_meanwhile() {
+    let _guard = serial();
     let server = boot(None);
     assert!(!build_player(&server).error);
     let first = tool(
@@ -639,6 +661,7 @@ fn keep_running_then_step_continues_the_same_run_and_edits_are_refused_meanwhile
 /// agent header with the wrong key gets limited as before.
 #[test]
 fn batch_edits_bypass_the_rate_limiter_but_forged_agent_keys_do_not() {
+    let _guard = serial();
     let server = boot(None);
     let mut ops = vec![json!({"op": "add", "type": "Node2D", "name": "Mover"})];
     for i in 0..120 {
@@ -669,6 +692,7 @@ fn batch_edits_bypass_the_rate_limiter_but_forged_agent_keys_do_not() {
 
 #[test]
 fn scene_new_creates_and_opens_a_file() {
+    let _guard = serial();
     let server = boot(None);
     let made = tool(
         &server,
@@ -699,6 +723,7 @@ fn scene_new_creates_and_opens_a_file() {
 /// another, so an RNG made in `_ready` was gone a frame later.
 #[test]
 fn objects_created_in_ready_survive_into_later_frames() {
+    let _guard = serial();
     let server = boot(None);
     let written = tool(
         &server,
@@ -726,6 +751,7 @@ fn objects_created_in_ready_survive_into_later_frames() {
 /// constants), and a scene change frees the old scene and expands instances.
 #[test]
 fn play_boots_a_project_the_way_godot_does() {
+    let _guard = serial();
     let server = boot(None);
     std::fs::write(
         server.path("project.godot"),
@@ -812,6 +838,7 @@ fn play_boots_a_project_the_way_godot_does() {
 /// node silently scriptless.
 #[test]
 fn a_script_that_fails_to_load_is_reported_in_the_play_report() {
+    let _guard = serial();
     let server = boot(None);
     std::fs::write(server.path("broken.gd"), "extends Node\nfunc _ready(:\n").unwrap();
     let attached = tool(
@@ -831,6 +858,7 @@ fn a_script_that_fails_to_load_is_reported_in_the_play_report() {
 
 #[test]
 fn mcp_refuses_requests_from_web_pages() {
+    let _guard = serial();
     let server = boot(None);
     let body = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}).to_string();
     let send = |origin: &str| {
@@ -864,6 +892,7 @@ fn mcp_refuses_requests_from_web_pages() {
 
 #[test]
 fn new_resource_then_undo_restores_the_previous_resource_whole() {
+    let _guard = serial();
     let server = boot(None);
     let built = tool(
         &server,
@@ -917,6 +946,7 @@ fn new_resource_then_undo_restores_the_previous_resource_whole() {
 
 #[test]
 fn control_offsets_are_anchored_to_the_game_viewport_not_the_editor_panel() {
+    let _guard = serial();
     let server = boot(None);
     // A full-rect Control: its anchors span the game's 1152x648 default
     // viewport, whatever size the editor panel happens to be.
@@ -945,6 +975,7 @@ fn control_offsets_are_anchored_to_the_game_viewport_not_the_editor_panel() {
 
 #[test]
 fn a_key_held_when_the_game_quits_is_released() {
+    let _guard = serial();
     let server = boot(None);
     let written = tool(
         &server,
@@ -966,6 +997,7 @@ fn a_key_held_when_the_game_quits_is_released() {
 
 #[test]
 fn the_errors_tab_stays_bounded_when_a_script_fails_every_frame() {
+    let _guard = serial();
     let server = boot(None);
     let written = tool(
         &server,
@@ -991,6 +1023,7 @@ fn the_errors_tab_stays_bounded_when_a_script_fails_every_frame() {
 /// project's actions — so every `move_*` stopped working for good.
 #[test]
 fn a_stuck_command_key_does_not_freeze_the_game() {
+    let _guard = serial();
     let server = boot(None);
     assert!(!build_player(&server).error);
     let report = tool(
@@ -1031,6 +1064,7 @@ fn a_stuck_command_key_does_not_freeze_the_game() {
 /// let go, as Godot releases pressed input on focus-out.
 #[test]
 fn the_game_view_releases_held_keys_when_the_page_loses_focus() {
+    let _guard = serial();
     let html = gdeditor::editor_ui::EDITOR_HTML;
     for needle in [
         "function releaseHeldGameKeys(",
@@ -1050,6 +1084,7 @@ fn the_game_view_releases_held_keys_when_the_page_loses_focus() {
 /// looked right while the browser drew the game 1:1 in a panel's corner.
 #[test]
 fn the_player_view_is_the_frame_the_browser_was_sent() {
+    let _guard = serial();
     let server = boot(None);
     let none = tool(&server, "screenshot", json!({"view": "player"}), None);
     assert!(none.error, "nothing published yet: {}", none.text);
@@ -1080,6 +1115,7 @@ fn the_player_view_is_the_frame_the_browser_was_sent() {
 /// input snapshot (how a swallowed keyup froze a game's controls).
 #[test]
 fn diagnose_reports_served_frames_refused_requests_and_a_fallback_key() {
+    let _guard = serial();
     let server = boot(None);
     let port = server.port();
     let (status, body) = http(port, "POST", "/api/runtime/play", "{}", None, None);
@@ -1159,6 +1195,7 @@ fn diagnose_reports_served_frames_refused_requests_and_a_fallback_key() {
 /// for, and named as a finding whenever the two disagree.
 #[test]
 fn diagnose_compares_the_running_windows_stretch_with_the_project() {
+    let _guard = serial();
     let project = format!(
         "{PROJECT}\n[display]\nwindow/size/viewport_width=640\nwindow/size/viewport_height=360\nwindow/stretch/mode=\"canvas_items\"\nwindow/stretch/aspect=\"keep\"\n"
     );
@@ -1199,6 +1236,7 @@ fn diagnose_compares_the_running_windows_stretch_with_the_project() {
 /// not start the game.
 #[test]
 fn a_timeline_click_presses_a_button() {
+    let _guard = serial();
     let server = boot(None);
     let built = tool(
         &server,
@@ -1245,6 +1283,7 @@ fn a_timeline_click_presses_a_button() {
 /// 40 frames reported a clean run in which the player never moved.
 #[test]
 fn godot_key_names_press_and_unknown_key_names_are_rejected() {
+    let _guard = serial();
     let server = boot(None);
     let written = tool(
         &server,
@@ -1284,6 +1323,7 @@ fn godot_key_names_press_and_unknown_key_names_are_rejected() {
 /// reporting a silent device as healthy.
 #[test]
 fn audio_without_a_device_is_reported_not_faked() {
+    let _guard = serial();
     let server = boot(None);
     let (status, body) = http(server.port(), "GET", "/api/runtime/audio?secs=2", "", None, None);
     assert_eq!(status, 200, "the route exists even with no device: {body}");

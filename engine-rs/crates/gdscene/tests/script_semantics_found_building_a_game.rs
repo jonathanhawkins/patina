@@ -8,6 +8,18 @@ use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
 use gdscene::{GDScriptNodeInstance, LifecycleManager, NodeId, SceneTree};
 use gdvariant::Variant;
 
+/// Serializes the tests in this binary that touch the res:// path roots (pat-hukbz).
+///
+/// That state is process-global. Nextest gives each test its own process, but
+/// plain `cargo test` runs the tests as threads in ONE process, where they
+/// overwrote each other's state mid-test. Bind the guard for the whole test.
+/// Poison-tolerant, so one failing test does not fail the rest.
+#[must_use = "bind it for the whole test: `let _guard = serial();`"]
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Instances `tscn`, attaches `scripts` (node path relative to the scene root,
 /// source), and runs the lifecycle — the runner's order.
 fn boot(tscn: &str, scripts: &[(&str, &str)]) -> (SceneTree, NodeId) {
@@ -144,6 +156,7 @@ fn is_and_as_test_a_nodes_class_and_ancestors() {
 
 #[test]
 fn change_scene_expands_instanced_sub_scenes() {
+    let _guard = serial();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("sub.tscn"),
@@ -268,6 +281,7 @@ fn instance_line(i: usize) -> String {
 
 #[test]
 fn a_self_instancing_scene_is_refused_without_recursing() {
+    let _guard = serial();
     let dir = tempfile::tempdir().unwrap();
     // a.tscn -> b.tscn -> a.tscn
     write(dir.path(), "a.tscn", "[gd_scene load_steps=2 format=3]\n\n[ext_resource type=\"PackedScene\" path=\"res://b.tscn\" id=\"1_s\"]\n\n[node name=\"A\" type=\"Node2D\"]\n\n[node name=\"B\" parent=\".\" instance=ExtResource(\"1_s\")]\n");
@@ -289,6 +303,7 @@ fn a_self_instancing_scene_is_refused_without_recursing() {
 
 #[test]
 fn a_level_with_thousands_of_instances_keeps_every_one() {
+    let _guard = serial();
     // The old guard counted total loads and silently dropped instance 4097+.
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "bullet.tscn", "[gd_scene format=3]\n\n[node name=\"Bullet\" type=\"Node2D\"]\n\n[node name=\"Tip\" type=\"Node2D\" parent=\".\"]\n");

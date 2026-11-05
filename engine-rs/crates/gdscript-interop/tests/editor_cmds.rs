@@ -13,10 +13,22 @@ use gdscript_interop::editor_commands;
 use gdscript_interop::interpreter::Interpreter;
 use gdvariant::Variant;
 
+/// Serializes the tests in this binary that touch the EditorCommandPalette store (pat-hukbz).
+///
+/// That state is process-global. Nextest gives each test its own process, but
+/// plain `cargo test` runs the tests as threads in ONE process, where they
+/// overwrote each other's state mid-test. Bind the guard for the whole test.
+/// Poison-tolerant, so one failing test does not fail the rest.
+#[must_use = "bind it for the whole test: `let _guard = serial();`"]
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Runs `check()` on a script and returns its value.
 ///
-/// The command store is process-global, so it is cleared first. Under nextest
-/// each test gets its own process, which is what makes that safe.
+/// The command store is process-global, so it is cleared first. That is safe
+/// only because the calling test holds `serial()`.
 fn call_check(src: &str) -> Variant {
     editor_commands::clear();
     let mut interp = Interpreter::new();
@@ -32,6 +44,7 @@ fn call_check(src: &str) -> Variant {
 /// A `@tool` plugin's registration reaches the store with every field intact.
 #[test]
 fn add_command_from_script_reaches_the_store() {
+    let _guard = serial();
     let src = "\
 @tool
 extends EditorPlugin
@@ -59,6 +72,7 @@ func check():
 /// `has_command` and `remove_command` answer from the same store.
 #[test]
 fn has_and_remove_round_trip() {
+    let _guard = serial();
     let src = "\
 @tool
 extends EditorPlugin
@@ -97,6 +111,7 @@ func check():
 /// become a shortcut of that name.
 #[test]
 fn the_none_shortcut_is_normalised_away() {
+    let _guard = serial();
     let src = "\
 @tool
 extends EditorPlugin
@@ -114,6 +129,7 @@ func check():
 /// key rather than one per enable.
 #[test]
 fn re_registering_replaces_instead_of_duplicating() {
+    let _guard = serial();
     let src = "\
 @tool
 extends EditorPlugin
@@ -137,6 +153,7 @@ func check():
 /// A key with no `/` still gets a usable category rather than an empty one.
 #[test]
 fn a_bare_key_gets_the_plugin_category() {
+    let _guard = serial();
     let src = "\
 @tool
 extends EditorPlugin
@@ -153,6 +170,7 @@ func check():
 /// a plugin script would look like a working registration.
 #[test]
 fn an_unknown_method_errors() {
+    let _guard = serial();
     let mut interp = Interpreter::new();
     let src = "\
 @tool
