@@ -39,9 +39,13 @@ fn unique_project_dir(tag: &str) -> PathBuf {
     dir
 }
 
-/// `Transform3D(xx,xy,xz, yx,yy,yz, zx,zy,zz, ox,oy,oz)` — three basis columns
-/// then the origin. This basis is a 90° rotation about +Y:
+/// `Transform3D(r0.x,r0.y,r0.z, r1.x,r1.y,r1.z, r2.x,r2.y,r2.z, ox,oy,oz)` —
+/// three basis ROWS then the origin (Godot writes `rows[i][j]`,
+/// variant_parser.cpp:2110). This basis is a 90° rotation about +Y:
 /// x → (0,0,-1), y → (0,1,0), z → (1,0,0). Origin starts at (5,6,7).
+///
+/// ⚠️ The literal used to be `(0, 0, -1, 0, 1, 0, 1, 0, 0, ...)`, written for
+/// Patina's old COLUMN reading (pat-sazee); Godot reads that as a -90° turn.
 const MAIN_TSCN: &str = r#"[gd_scene load_steps=2 format=3]
 
 [ext_resource type="Script" path="res://mover.gd" id="1_mover"]
@@ -49,7 +53,7 @@ const MAIN_TSCN: &str = r#"[gd_scene load_steps=2 format=3]
 [node name="Main" type="Node3D"]
 
 [node name="Mesh" type="MeshInstance3D" parent="."]
-transform = Transform3D(0, 0, -1, 0, 1, 0, 1, 0, 0, 5, 6, 7)
+transform = Transform3D(0, 0, 1, 0, 1, 0, -1, 0, 0, 5, 6, 7)
 script = ExtResource("1_mover")
 "#;
 

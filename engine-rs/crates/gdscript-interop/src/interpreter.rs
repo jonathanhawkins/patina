@@ -23310,16 +23310,18 @@ fn variant_to_gd_string(v: &Variant) -> String {
             format_gd_component(t.origin.x as f64),
             format_gd_component(t.origin.y as f64)
         ),
+        // ROW-major like Godot's `var_to_str` (variant_parser.cpp:2097); `Basis`
+        // stores columns, so row 0 is `b.x.x, b.y.x, b.z.x` (pat-sazee).
         Variant::Basis(b) => format!(
             "Basis({}, {}, {}, {}, {}, {}, {}, {}, {})",
             format_gd_component(b.x.x as f64),
-            format_gd_component(b.x.y as f64),
-            format_gd_component(b.x.z as f64),
             format_gd_component(b.y.x as f64),
-            format_gd_component(b.y.y as f64),
-            format_gd_component(b.y.z as f64),
             format_gd_component(b.z.x as f64),
+            format_gd_component(b.x.y as f64),
+            format_gd_component(b.y.y as f64),
             format_gd_component(b.z.y as f64),
+            format_gd_component(b.x.z as f64),
+            format_gd_component(b.y.z as f64),
             format_gd_component(b.z.z as f64)
         ),
         Variant::Quaternion(q) => format!(
@@ -23388,13 +23390,13 @@ fn variant_to_gd_string(v: &Variant) -> String {
         Variant::Transform3D(t) => format!(
             "Transform3D({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
             format_gd_component(t.basis.x.x as f64),
-            format_gd_component(t.basis.x.y as f64),
-            format_gd_component(t.basis.x.z as f64),
             format_gd_component(t.basis.y.x as f64),
-            format_gd_component(t.basis.y.y as f64),
-            format_gd_component(t.basis.y.z as f64),
             format_gd_component(t.basis.z.x as f64),
+            format_gd_component(t.basis.x.y as f64),
+            format_gd_component(t.basis.y.y as f64),
             format_gd_component(t.basis.z.y as f64),
+            format_gd_component(t.basis.x.z as f64),
+            format_gd_component(t.basis.y.z as f64),
             format_gd_component(t.basis.z.z as f64),
             format_gd_component(t.origin.x as f64),
             format_gd_component(t.origin.y as f64),
@@ -23424,6 +23426,15 @@ fn variant_to_gd_string(v: &Variant) -> String {
                 format_gd_component(c.b as f64),
                 format_gd_component(c.a as f64)
             ]))
+        ),
+        // Godot writes a Projection's sixteen cells COLUMN-major
+        // (`columns[i][j]`, variant_parser.cpp:2128) — unlike Basis — which is
+        // also `gdcore::math3d::Projection`'s `m[column][row]` storage. It used
+        // to fall through to `Display` (`[X: (...), ...]`), which `str_to_var`
+        // cannot read back.
+        Variant::Projection(p) => format!(
+            "Projection({})",
+            join_gd(p.m.iter().flatten().map(|c| format_gd_component(*c as f64)))
         ),
         // Objects, callables and signals have no re-parseable textual form in
         // Godot either; `Display` is the honest answer for them.

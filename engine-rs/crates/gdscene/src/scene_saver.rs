@@ -219,17 +219,22 @@ pub fn format_variant_value(v: &Variant) -> String {
         }
         // 3D math types serialize with their Godot constructor syntax, matching
         // the field order `gdresource::loader::parse_variant_value` reads back.
+        //
+        // ⚠️ Basis / Transform3D write the basis ROW-major (`rows[i][j]`,
+        // core/variant/variant_parser.cpp:2110), while `Basis` stores columns —
+        // hence `b.x.x, b.y.x, b.z.x, ...`. Column order transposed every saved
+        // rotation (pat-sazee).
         Variant::Basis(b) => {
             format!(
                 "Basis({}, {}, {}, {}, {}, {}, {}, {}, {})",
                 format_f32(b.x.x),
-                format_f32(b.x.y),
-                format_f32(b.x.z),
                 format_f32(b.y.x),
-                format_f32(b.y.y),
-                format_f32(b.y.z),
                 format_f32(b.z.x),
+                format_f32(b.x.y),
+                format_f32(b.y.y),
                 format_f32(b.z.y),
+                format_f32(b.x.z),
+                format_f32(b.y.z),
                 format_f32(b.z.z),
             )
         }
@@ -237,13 +242,13 @@ pub fn format_variant_value(v: &Variant) -> String {
             format!(
                 "Transform3D({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
                 format_f32(t.basis.x.x),
-                format_f32(t.basis.x.y),
-                format_f32(t.basis.x.z),
                 format_f32(t.basis.y.x),
-                format_f32(t.basis.y.y),
-                format_f32(t.basis.y.z),
                 format_f32(t.basis.z.x),
+                format_f32(t.basis.x.y),
+                format_f32(t.basis.y.y),
                 format_f32(t.basis.z.y),
+                format_f32(t.basis.x.z),
+                format_f32(t.basis.y.z),
                 format_f32(t.basis.z.z),
                 format_f32(t.origin.x),
                 format_f32(t.origin.y),

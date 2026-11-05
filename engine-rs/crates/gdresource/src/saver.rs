@@ -345,18 +345,20 @@ fn format_variant(v: &Variant) -> String {
             format_f32(a.size.y),
             format_f32(a.size.z)
         ),
-        // Three ROW vectors, the same walk the loader uses (loader.rs:647) and
-        // the same order as the basis embedded in Transform3D below.
+        // Three ROW vectors (`rows[i][j]`, Godot's variant_parser.cpp:2110), the
+        // walk `loader::basis_from_godot_rows` reads back, and the same order as
+        // the basis embedded in Transform3D below. `Basis` stores COLUMNS, so
+        // row 0 is `b.x.x, b.y.x, b.z.x` (pat-sazee).
         Variant::Basis(b) => format!(
             "Basis({}, {}, {}, {}, {}, {}, {}, {}, {})",
             format_f32(b.x.x),
-            format_f32(b.x.y),
-            format_f32(b.x.z),
             format_f32(b.y.x),
-            format_f32(b.y.y),
-            format_f32(b.y.z),
             format_f32(b.z.x),
+            format_f32(b.x.y),
+            format_f32(b.y.y),
             format_f32(b.z.y),
+            format_f32(b.x.z),
+            format_f32(b.y.z),
             format_f32(b.z.z)
         ),
         Variant::Transform2D(t) => format!(
@@ -371,13 +373,13 @@ fn format_variant(v: &Variant) -> String {
         Variant::Transform3D(t) => format!(
             "Transform3D({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
             format_f32(t.basis.x.x),
-            format_f32(t.basis.x.y),
-            format_f32(t.basis.x.z),
             format_f32(t.basis.y.x),
-            format_f32(t.basis.y.y),
-            format_f32(t.basis.y.z),
             format_f32(t.basis.z.x),
+            format_f32(t.basis.x.y),
+            format_f32(t.basis.y.y),
             format_f32(t.basis.z.y),
+            format_f32(t.basis.x.z),
+            format_f32(t.basis.y.z),
             format_f32(t.basis.z.z),
             format_f32(t.origin.x),
             format_f32(t.origin.y),

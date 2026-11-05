@@ -513,13 +513,20 @@ const FRONT_CAM: &str = "transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0
 
 /// Rotated 90° about Y and moved onto +X, looking back toward the origin.
 ///
-/// A `.tscn` `Transform3D` lists the basis as three COLUMNS then the origin, so
-/// this is `Ry(90°)`: the camera's local +X column is `(0, 0, -1)` and its +Z
-/// column is `(1, 0, 0)`, making its forward (−Z) point along `(-1, 0, 0)`.
+/// A `.tscn` `Transform3D` lists the basis as three ROWS then the origin
+/// (Godot writes `rows[i][j]`, variant_parser.cpp:2110), so this is `Ry(90°)`:
+/// the camera's local +X column is `(0, 0, -1)` and its +Z column is
+/// `(1, 0, 0)`, making its forward (−Z) point along `(-1, 0, 0)`. Godot 4.6.1
+/// writes `Transform3D(Basis(Vector3.UP, PI / 2), Vector3(6, 0, 0))` as
+/// `Transform3D(-4.371139e-08, 0, 1, 0, 1, 0, -1, 0, -4.371139e-08, 6, 0, 0)`.
+///
+/// ⚠️ This literal used to be `(0, 0, -1, 0, 1, 0, 1, 0, 0, ...)`, written for
+/// Patina's old COLUMN reading (pat-sazee). Godot reads that as `Ry(-90°)`,
+/// looking AWAY from the sprite along +X.
 /// A default `axis = AXIS_Z` sprite spans X/Y with its normal along Z, so from
 /// here it is exactly EDGE-ON — which is what makes the billboard difference a
 /// near-total one rather than a matter of degree.
-const SIDE_CAM: &str = "transform = Transform3D(0, 0, -1, 0, 1, 0, 1, 0, 0, 6, 0, 0)";
+const SIDE_CAM: &str = "transform = Transform3D(0, 0, 1, 0, 1, 0, -1, 0, 0, 6, 0, 0)";
 
 /// A lone `Sprite3D` at the origin. `pixel_size = 2.0` on the 1x1 red texture
 /// gives a 2x2-unit quad — the same geometry `sprite3d_hframes_frame_selects_one_cell`
