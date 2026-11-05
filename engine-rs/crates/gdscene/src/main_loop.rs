@@ -4086,6 +4086,12 @@ impl MainLoop {
             // would apply the PREVIOUS tick's deferrals in the middle of this
             // one's; flushing after the loop is what it already did.
             self.tree.process_deferred_calls();
+            // ...and the delete queue too: Godot's `SceneTree::physics_process`
+            // ends with `_flush_delete_queue()`, so a node `queue_free`d in
+            // `_physics_process` is gone before this frame's `_process` reads
+            // it (pat-ivcj2). It survived to the end of the frame, so its own
+            // `_process` ran once more and `get_node_or_null` still found it.
+            self.tree.process_deletions();
 
             self.physics_accumulator -= physics_dt;
             self.physics_time += physics_dt;
@@ -4304,6 +4310,12 @@ impl MainLoop {
         let process_frame_root = self.tree.root_id();
         self.tree
             .emit_signal(process_frame_root, "process_frame", &[]);
+        // Godot flushes the MessageQueue right after emitting `process_frame`
+        // and BEFORE `_process` (scene/main/scene_tree.cpp `SceneTree::process`:
+        // `emit_signal("process_frame"); MessageQueue::flush(); _process(false)`),
+        // so a `call_deferred` from a `process_frame` handler runs ahead of
+        // this frame's `_process` (pat-ivcj2), not at the frame's end.
+        self.tree.process_deferred_calls();
         self.tree.process_internal_frame();
         // Bound here as well as around the physics phase: `PhysicsServer2D` calls
         // from `_process` are ordinary Godot, and leaving the idle phase unbound

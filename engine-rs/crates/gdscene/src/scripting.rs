@@ -486,10 +486,17 @@ impl ScriptInstance for GDScriptNodeInstance {
             // the latter leaves `current_function` unset, so the setter body's own
             // `self.prop = value` does not recognise that it is already inside the
             // setter and fires it a second time.
-            return self
-                .interpreter
-                .call_property_setter(&mut self.instance, &setter, value)
-                .is_ok();
+            // A setter that raises is still a write the script TOOK (Godot
+            // reports the error and moves on). The error was dropped here, so a
+            // failing setter was invisible (pat-ivcj2); it is queued for the
+            // host's error log under the setter's own name instead.
+            if let Err(err) =
+                self.interpreter
+                    .call_property_setter(&mut self.instance, &setter, value)
+            {
+                self.interpreter.record_detached_error(setter, err);
+            }
+            return true;
         }
         if self.instance.properties.contains_key(name) {
             self.instance.properties.insert(name.to_string(), value);
@@ -3384,11 +3391,10 @@ impl SceneAccess for SceneTreeAccessor {
         if crate::node2d::set_derived_property(self.tree_mut(), nid, prop, &value) {
             return;
         }
-        // Try script property first
-        if let Some(script) = self.tree_mut().get_script_mut(nid) {
-            if script.set_property(prop, value.clone()) {
-                return;
-            }
+        // Try script property first — with scene access installed, so a
+        // `set = fn` setter can reach the tree (pat-ivcj2).
+        if self.tree_mut().set_script_property_with_access(nid, prop, value.clone()) == Some(true) {
+            return;
         }
         // Then try node property
         let path_follow = match self.tree_mut().get_node_mut(nid) {
@@ -3485,6 +3491,45 @@ impl SceneAccess for SceneTreeAccessor {
     fn node_has_method(&self, node: u64, method: &str) -> bool {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
         self.tree().node_has_method(nid, method)
+    }
+
+    fn node_has_property(&self, node: u64, prop: &str) -> Option<bool> {
+        // Handles that name no node (SceneTree, tweens, query params, …) are
+        // not judged: each has its own property surface.
+        if is_scene_tree_handle(node) || is_phys_query_handle(node) {
+            return None;
+        }
+        let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        let tree = self.tree();
+        let n = tree.get_node(nid)?;
+        // Carried: authored in the .tscn, seeded from ClassDB, synced from the
+        // script, or written at runtime.
+        if n.has_property(prop) {
+            return Some(true);
+        }
+        let class = n.class_name().to_string();
+        if gdobject::class_db::class_has_property(&class, prop)
+            || gdobject::class_db::class_get_integer_constant(&class, prop).is_some()
+            // `Object.script` is a property in Godot but no class documents it.
+            || prop == "script"
+        {
+            return Some(true);
+        }
+        // The script's members / constants / enums, whether it is in the arena
+        // or checked out and running.
+        let in_script = match tree.get_script(nid) {
+            Some(script) => {
+                script.get_property(prop).is_some()
+                    || script.list_properties().iter().any(|p| p.name == prop)
+            }
+            None => crate::scene_tree::running_script_has_property(nid, prop).unwrap_or(false),
+        };
+        if in_script {
+            return Some(true);
+        }
+        // Finally Godot's own documented properties for the class. A class
+        // Godot does not document answers `None`: it cannot be judged.
+        gdobject::class_db::godot_class_has_property(&class, prop)
     }
 
     fn node_method_argument_count(&self, node: u64, method: &str) -> Option<i64> {
@@ -8186,6 +8231,14 @@ impl SceneAccess for SceneTreeAccessor {
         if nid == tree.root_id()
             && gdscript_interop::interpreter::MULTIPLAYER_SIGNALS.contains(&name)
         {
+            return true;
+        }
+        // 0c. Likewise the SceneTree's own signals: `get_tree().process_frame`
+        //     is a Signal bound to the root (the main loop emits it there), and
+        //     the root's class declares none of them — so the connect
+        //     pre-check refused `get_tree().process_frame.connect(cb)` with
+        //     ERR_INVALID_PARAMETER and `cb` never ran (pat-ivcj2).
+        if nid == tree.root_id() && SCENE_TREE_SIGNALS.contains(&name) {
             return true;
         }
         // 1. The attached script's `signal` declarations — the case the

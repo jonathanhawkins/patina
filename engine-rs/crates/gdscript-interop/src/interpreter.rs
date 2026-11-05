@@ -1619,6 +1619,15 @@ impl Interpreter {
         std::mem::take(&mut self.coroutine_errors)
     }
 
+    /// Queues an error raised by a function the host ran OUTSIDE a call it
+    /// reports on — a property setter run by an engine-side write
+    /// (`set_deferred`, `other.prop = v`) — onto the same list
+    /// [`Self::take_coroutine_errors`] drains, so it reaches the script error
+    /// log under the function that raised it (pat-ivcj2).
+    pub fn record_detached_error(&mut self, function: String, err: RuntimeError) {
+        self.coroutine_errors.push((function, err));
+    }
+
     /// Creates a new interpreter with an empty environment.
     pub fn new() -> Self {
         Self {
@@ -4807,6 +4816,21 @@ impl Interpreter {
                                 method: name.to_string(),
                             })));
                         }
+                        // ...and so is a bareword naming one of the node's
+                        // NATIVE methods: `add_child.call_deferred(n)` is the
+                        // idiom Godot's own docs use (pat-ivcj2). It raised
+                        // "undefined variable: 'add_child'" and aborted the rest
+                        // of the function.
+                        if let (Some(ref access), Some(node_id)) =
+                            (&self.scene_access, self.current_node_id)
+                        {
+                            if access.node_has_method(node_id, name) {
+                                return Ok(Variant::Callable(Box::new(CallableRef::Method {
+                                    target_id: node_id,
+                                    method: name.to_string(),
+                                })));
+                            }
+                        }
                     }
                     // @GlobalScope named constants (KEY_*/OK/ERR_*/TYPE_*/...) are
                     // barewords in GDScript. Resolve them last, after user locals,
@@ -6023,6 +6047,19 @@ impl Interpreter {
                                 target_id: raw,
                                 method: member,
                             })));
+                        }
+                        // A name the object does not have at all is an error in
+                        // Godot, not Nil: "Invalid access to property or key
+                        // 'x' on a base object of type 'Node2D (main.gd)'"
+                        // (gdscript_vm.cpp OPCODE_GET_NAMED). Patina answered
+                        // Nil silently (pat-w0q0w). Raised only when the scene
+                        // can JUDGE the name (`Some(false)`); an object it cannot
+                        // judge keeps the permissive Nil.
+                        if value.is_nil() && self.object_lacks_property(raw, &member) {
+                            return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                                "Invalid access to property or key '{member}' on a base object of type '{}'.",
+                                self.godot_object_type_description(raw)
+                            ))));
                         }
                         return Ok(value);
                     }
@@ -10447,15 +10484,19 @@ impl Interpreter {
                 Ok(None)
             }
             "set_deferred" => {
-                if let (Some(Variant::String(prop)), Some(value)) = (args.first(), args.get(1)) {
+                // `set_deferred(&"mood", v)` passes a StringName — the spelling
+                // Godot's docs and truck_town use — so both string kinds name the
+                // property (pat-ivcj2: the StringName form fell through).
+                let prop = match args.first() {
+                    Some(Variant::String(s)) => Some(s.clone()),
+                    Some(Variant::StringName(s)) => Some(s.as_str().to_string()),
+                    _ => None,
+                };
+                if let (Some(prop), Some(value)) = (prop, args.get(1)) {
                     if let (Some(ref mut access), Some(node_id)) =
                         (&mut self.scene_access, self.current_node_id)
                     {
-                        access.call_deferred(
-                            node_id,
-                            "set",
-                            &[Variant::String(prop.clone()), value.clone()],
-                        );
+                        access.call_deferred(node_id, "set", &[Variant::String(prop), value.clone()]);
                         return Ok(Some(Variant::Nil));
                     }
                 }
@@ -18104,6 +18145,7 @@ impl Interpreter {
                     "set_deferred" => {
                         let prop = match args.first() {
                             Some(Variant::String(s)) => s.clone(),
+                            Some(Variant::StringName(s)) => s.as_str().to_string(),
                             _ => {
                                 return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                                     "set_deferred() takes (property, value)".into(),
@@ -18155,7 +18197,26 @@ impl Interpreter {
                         } else {
                             args[1..].to_vec()
                         };
-                        self.call_object_method(id, &name, &call_args)
+                        let result = self.call_object_method(id, &name, &call_args);
+                        // Godot names the TARGET method, not `call`: "Invalid
+                        // call. Nonexistent function 'x (via call)' in base
+                        // 'Node2D (main.gd)'" (gdscript_vm.cpp OPCODE_CALL).
+                        // Patina said "method not found: 'call'" (pat-w0q0w).
+                        // Only a miss on THIS name is rewritten — an error the
+                        // called method itself raised keeps its own text.
+                        match result {
+                            Err(e)
+                                if method == "call"
+                                    && matches!(&e.kind, RuntimeErrorKind::UndefinedFunction(n)
+                                        if *n == name || *n == format!("ObjectId.{name}")) =>
+                            {
+                                Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                                    "Invalid call. Nonexistent function '{name} (via call)' in base '{}'.",
+                                    self.godot_object_type_description(id)
+                                ))))
+                            }
+                            other => other,
+                        }
                     }
                     // Godot `Object.has_method` reports script and native methods.
                     "has_method" => {
@@ -20018,11 +20079,82 @@ impl Interpreter {
     /// Without the second half, a `CharacterBody2D` script calling
     /// `move_and_slide()` with no receiver died on `UndefinedFunction`, since
     /// the interpreter only knew script-defined functions here (pat-0q2kx.16).
+    /// Godot's `_get_var_type` for an object (gdscript_vm.cpp): its class, plus
+    /// ` (<script>)` when it has a script — the script's `class_name`, else its
+    /// file name. `Node2D (main.gd)` is what Godot's error messages print.
+    /// Whether object `id` provably has no property `member` (pat-w0q0w).
+    ///
+    /// The running script's own instance is checked here — its members are on
+    /// `self_instance`, which the scene cannot see while the call runs — and
+    /// everything else is the scene's [`SceneAccess::node_has_property`].
+    fn object_lacks_property(&self, id: u64, member: &str) -> bool {
+        if self.current_node_id == Some(id) {
+            if let Some(inst) = self.self_instance.as_ref() {
+                if inst.properties.contains_key(member)
+                    || inst.constants.contains_key(member)
+                    || inst.class_def.enums.contains_key(member)
+                    || inst.class_def.getters.contains_key(member)
+                {
+                    return false;
+                }
+            }
+        }
+        matches!(
+            self.scene_access
+                .as_ref()
+                .and_then(|access| access.node_has_property(id, member)),
+            Some(false)
+        )
+    }
+
+    fn godot_object_type_description(&self, id: u64) -> String {
+        let Some(access) = self.scene_access.as_ref() else {
+            return "Object".to_string();
+        };
+        let class = access.get_class(id).unwrap_or_else(|| "Object".to_string());
+        let script = if self.current_node_id == Some(id) {
+            self.self_instance
+                .as_ref()
+                .and_then(|inst| inst.class_def.name.clone())
+                .or_else(|| self.script_path.clone().or_else(|| access.get_script_path(id)))
+        } else {
+            access
+                .script_class_chain(id)
+                .into_iter()
+                .next()
+                .or_else(|| access.get_script_path(id))
+        }
+        // The loader records the script's `res://` path on the node itself,
+        // which is the only place it is visible while that script is running
+        // (it is out of the arena then).
+        .or_else(|| match access.get_node_property(id, "_script_path") {
+            Variant::String(p) if !p.is_empty() => Some(p),
+            _ => None,
+        });
+        match script {
+            Some(s) => {
+                let shown = s.rsplit('/').next().unwrap_or(&s).to_string();
+                format!("{class} ({shown})")
+            }
+            None => class,
+        }
+    }
+
     fn call_self_func_or_native(
         &mut self,
         name: &str,
         args: &[Variant],
     ) -> Result<Variant, RuntimeError> {
+        // A bare `call("m", ...)` is `self.call(...)`: straight to the object
+        // `call` arm, which names the missing TARGET as Godot does. Through the
+        // generic fallback below, that arm's error was swallowed and the miss
+        // was reported against `call` itself (pat-w0q0w).
+        if name == "call" && !self.function_registry.contains_key("call") {
+            if let (Some(id), true) = (self.current_node_id, self.scene_access.is_some()) {
+                let receiver = Variant::ObjectId(gdcore::id::ObjectId::from_raw(id));
+                return self.call_method_on(&receiver, name, args, &Expr::SelfRef);
+            }
+        }
         match self.call_user_func(name, args) {
             Err(e) if matches!(e.kind, RuntimeErrorKind::UndefinedFunction(_)) => {
                 if let Some(id) = self.current_node_id {
