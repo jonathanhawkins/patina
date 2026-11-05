@@ -1396,7 +1396,13 @@ impl SoftwareRenderer3D {
                     let distance = view_pos.length();
                     let world_pos = camera_transform.xform(view_pos);
                     // Aerial perspective samples the sky along the view ray.
-                    let sky_in_view = env.sky.as_ref().map(|s| {
+                    // `fog_process` reads it ONLY when `fog_aerial_perspective`
+                    // > 0, so skip it otherwise: for a custom `shader_type sky`
+                    // this is a whole shader-program evaluation per pixel, and
+                    // with it on every pixel the official 3D platformer's Play
+                    // frame took ~870 ms (its fog has aerial perspective 0).
+                    let wants_sky = env.fog_aerial_perspective > 0.0;
+                    let sky_in_view = env.sky.as_ref().filter(|_| wants_sky).map(|s| {
                         sample_sky_color(
                             &s.material,
                             &view_dir_world,
@@ -2069,12 +2075,21 @@ pub fn sky_suns_from_lights(lights: &[Light3D]) -> Vec<SkySun> {
 
 /// Samples a sky material color for the given world-space view direction.
 /// `pub(crate)` so the sky parity tests can probe materials directly.
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread sampled a sky (test-only probe for passes that
+    /// must not evaluate the sky when its result is unused).
+    pub(crate) static SKY_SAMPLES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) fn sample_sky_color(
     material: &SkyMaterial,
     dir: &Vector3,
     energy: f32,
     suns: &[SkySun],
 ) -> Color {
+    #[cfg(test)]
+    SKY_SAMPLES.with(|c| c.set(c.get() + 1));
     match material {
         SkyMaterial::Procedural(mat) => sample_procedural_sky(mat, dir, energy, suns),
         SkyMaterial::Physical(mat) => sample_physical_sky(mat, dir, energy, suns),
@@ -4305,6 +4320,49 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(environment_ambient_color(&env_d), Color::BLACK);
+    }
+
+    /// The fog pass samples the sky only for aerial perspective, the one term
+    /// that reads it. It used to sample it for EVERY geometry pixel regardless;
+    /// with the official 3D platformer's `shader_type sky` that is a shader
+    /// program per pixel, and its Play frame took ~870 ms though its fog has
+    /// `fog_aerial_perspective` 0. Small frames shade on this thread, so the
+    /// thread-local counter sees every sample.
+    #[test]
+    fn fog_pass_samples_the_sky_only_for_aerial_perspective() {
+        let (w, h) = (8u32, 8u32);
+        let depth = vec![0.5f32; (w * h) as usize];
+        let ident = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let run = |aerial: f32| {
+            let env = Environment3D {
+                fog_enabled: true,
+                fog_density: 0.05,
+                fog_aerial_perspective: aerial,
+                background_mode: BackgroundMode::Sky,
+                sky: Some(gdserver3d::sky::Sky::default()),
+                ..Default::default()
+            };
+            let mut px = vec![Color::new(0.2, 0.4, 0.6, 1.0); (w * h) as usize];
+            let before = SKY_SAMPLES.with(|c| c.get());
+            SoftwareRenderer3D::apply_fog_pass(
+                &mut px,
+                &depth,
+                w,
+                h,
+                &env,
+                &ident,
+                &Transform3D::IDENTITY,
+                &[],
+            );
+            SKY_SAMPLES.with(|c| c.get()) - before
+        };
+        assert_eq!(run(0.0), 0, "no aerial perspective: the sky is unused");
+        assert_eq!(run(1.0), u64::from(w * h), "aerial perspective samples it per pixel");
     }
 
     /// `fog_process` (the pure Godot fog math) — exponential falloff, height
