@@ -91,11 +91,21 @@ pub fn global_y(tree: &SceneTree, node_id: NodeId) -> f32 {
 /// `y_sort_enabled`, siblings are sorted by ascending global Y (higher on the
 /// screen draws first / behind); otherwise scene-tree (insertion) order is kept.
 pub fn draw_ordered_children(tree: &SceneTree, parent_id: NodeId) -> Vec<NodeId> {
+    // The parent's own child list, in order: the same nodes, in the same order,
+    // that filtering a whole-tree walk by `parent()` yields — without walking
+    // the whole tree once PER PARENT (pat-414k3). The HUD pass calls this for
+    // every canvas node of a 3D game whose tree holds thousands of nodes, under
+    // the editor-state lock, every Play frame.
     let mut children: Vec<NodeId> = tree
-        .all_nodes_in_tree_order()
-        .into_iter()
-        .filter(|&id| tree.get_node(id).and_then(|n| n.parent()) == Some(parent_id))
-        .collect();
+        .get_node(parent_id)
+        .map(|p| {
+            p.children()
+                .iter()
+                .copied()
+                .filter(|&id| tree.get_node(id).and_then(|n| n.parent()) == Some(parent_id))
+                .collect()
+        })
+        .unwrap_or_default();
     let y_sort = tree
         .get_node(parent_id)
         .map(|n| prop_bool(n, "y_sort_enabled", false))
