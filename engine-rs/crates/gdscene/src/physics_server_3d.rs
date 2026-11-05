@@ -785,6 +785,17 @@ impl PhysicsServer3D {
         self.world.gravity = gravity;
     }
 
+    /// The total gravity at a node's body — what `PhysicsBody3D.get_gravity()`
+    /// answers (pat-v3co1): the space default plus any `Area3D` override the
+    /// body overlaps. A node with no registered body (not yet synced) gets the
+    /// space default, which is also what Godot reports before the first step.
+    pub fn body_total_gravity(&self, node_id: NodeId) -> Vector3 {
+        match self.body_for_node(node_id) {
+            Some(id) => self.world.body_total_gravity(id),
+            None => self.world.gravity,
+        }
+    }
+
     /// Returns the number of tracked physics bodies.
     pub fn body_count(&self) -> usize {
         self.node_to_body.len()

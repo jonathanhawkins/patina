@@ -414,13 +414,17 @@ pub fn get_global_transform(tree: &SceneTree, node_id: NodeId) -> Transform3D {
 }
 
 /// Sets the node's local position such that its global position equals `pos`.
+///
+/// ⚠️ Through [`effective_parent_global`], so a `top_level` node's local
+/// position IS its global one (pat-v3co1). This used to divide by the parent's
+/// global transform even for a top-level node — whose global transform then
+/// ignored that parent again on read — so `look_at_from_position` /
+/// `global_position = p` on a top-level node landed it at the wrong place,
+/// offset by the parent. The official 3D platformer's follow camera
+/// (`set_as_top_level(true)` + `look_at_from_position`) never followed the
+/// player because of it.
 pub fn set_global_position(tree: &mut SceneTree, node_id: NodeId, pos: Vector3) {
-    let parent_global = tree
-        .get_node(node_id)
-        .and_then(|n| n.parent())
-        .map(|pid| get_global_transform(tree, pid))
-        .unwrap_or(Transform3D::IDENTITY);
-
+    let parent_global = effective_parent_global(tree, node_id);
     let local_pos = parent_global.inverse().xform(pos);
     set_position(tree, node_id, local_pos);
 }
@@ -1242,13 +1246,11 @@ pub fn remote_target_transform(
 /// property, and while `get_local_transform` prefers that key, `get_position`
 /// prefers the separate `position` property — so a transform-only write would
 /// leave `get_position` reporting a stale value for a node this pushes to.
+///
+/// ⚠️ A `top_level` node has no effective parent, so its local transform is
+/// the global one (pat-v3co1) — see [`set_global_position`].
 pub fn set_global_transform(tree: &mut SceneTree, node_id: NodeId, t: Transform3D) {
-    let parent_global = tree
-        .get_node(node_id)
-        .and_then(|n| n.parent())
-        .map(|pid| get_global_transform(tree, pid))
-        .unwrap_or(Transform3D::IDENTITY);
-
+    let parent_global = effective_parent_global(tree, node_id);
     let local = parent_global.inverse() * t;
     if let Some(node) = tree.get_node_mut(node_id) {
         store_local_transform(node, local);
@@ -1982,12 +1984,11 @@ fn is_node3d(tree: &SceneTree, node_id: NodeId) -> bool {
         .unwrap_or(false)
 }
 
-/// The parent's global transform, or identity at the top of the chain.
+/// The transform a global write is divided by: the parent's global transform,
+/// or identity at the top of the chain OR for a `top_level` node, whose global
+/// transform does not include its parent (pat-v3co1).
 fn parent_global(tree: &SceneTree, node_id: NodeId) -> Transform3D {
-    tree.get_node(node_id)
-        .and_then(|n| n.parent())
-        .map(|pid| get_global_transform(tree, pid))
-        .unwrap_or(Transform3D::IDENTITY)
+    effective_parent_global(tree, node_id)
 }
 
 /// Reads one of Node3D's COMPUTED properties, or `None` for a name it does not

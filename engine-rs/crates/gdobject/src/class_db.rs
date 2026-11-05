@@ -2827,7 +2827,10 @@ pub fn register_3d_classes() {
             .property(PropertyInfo::new(
                 "axis_lock_angular_z",
                 Variant::Bool(false),
-            )),
+            ))
+            // Godot 4.3+ (doc/classes/PhysicsBody3D.xml), dispatched by
+            // gdscene's `get_gravity` arm for PhysicsBody3D nodes (pat-v3co1).
+            .method(MethodInfo::new("get_gravity", 0).const_method()),
     );
 
     register_class(
@@ -9190,6 +9193,13 @@ pub fn register_3d_classes() {
                 .property(
                     PropertyInfo::new("hit_back_faces", Variant::Bool(true))
                         .with_accessors("is_hit_back_faces_enabled", "set_hit_back_faces"),
+                )
+                // `Array[RID]` of bodies the ray ignores
+                // (doc/classes/PhysicsRayQueryParameters3D.xml). Was missing,
+                // so `.new()` built an object without it (pat-v3co1).
+                .property(
+                    PropertyInfo::new("exclude", Variant::Array(Default::default()))
+                        .with_accessors("get_exclude", "set_exclude"),
                 )
                 .method(MethodInfo::new("create", 4).static_method()),
         );

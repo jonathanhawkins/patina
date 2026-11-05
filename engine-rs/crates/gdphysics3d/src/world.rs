@@ -1618,17 +1618,53 @@ impl PhysicsWorld3D {
         if body.body_type != BodyType3D::Rigid {
             return (self.gravity, None, None);
         }
-        if self.area_store.area_count() == 0 {
+        let overlapping = self.overlapping_areas_by_priority(body);
+        if overlapping.is_empty() {
             return (self.gravity, None, None);
         }
+        let gravity = self.fold_area_gravity(&overlapping, body.position);
 
-        // ⚠️ NOT filtered on `gravity_space_override` (pat-s3rrv.102). Godot
-        // resolves gravity, linear damp and angular damp as three INDEPENDENT
-        // channels, so an area that overrides only damping has
-        // `gravity_space_override == Disabled` and was previously dropped here
-        // — before its damp mode was ever consulted. Each channel applies its
-        // own `Disabled` check below instead; the gravity arm already no-ops on
-        // `Disabled`, so widening this filter leaves gravity unchanged.
+        let lin_damp = resolve_damp(&overlapping, |a| {
+            (a.linear_damp_space_override, a.linear_damp)
+        });
+        let ang_damp = resolve_damp(&overlapping, |a| {
+            (a.angular_damp_space_override, a.angular_damp)
+        });
+        (gravity, lin_damp, ang_damp)
+    }
+
+    /// The total gravity acting at a body: the space's default with every
+    /// overlapping [`Area3D`]'s gravity override folded in — Godot's
+    /// `PhysicsDirectBodyState3D.get_total_gravity()`, which is what
+    /// `PhysicsBody3D.get_gravity()` answers (pat-v3co1).
+    ///
+    /// ⚠️ For EVERY body type, unlike `effective_space_params`: a
+    /// `CharacterBody3D` is kinematic, gets no integrated gravity, and is
+    /// exactly the body whose script reads this (`velocity += get_gravity() *
+    /// delta`). An unknown id answers the space default.
+    pub fn body_total_gravity(&self, id: BodyId3D) -> Vector3 {
+        match self.bodies.get(&id) {
+            Some(body) => {
+                let overlapping = self.overlapping_areas_by_priority(body);
+                self.fold_area_gravity(&overlapping, body.position)
+            }
+            None => self.gravity,
+        }
+    }
+
+    /// The areas overlapping `body` whose mask sees its layer, lowest priority
+    /// first so the highest is applied last and wins a `Replace`.
+    ///
+    /// ⚠️ NOT filtered on `gravity_space_override` (pat-s3rrv.102). Godot
+    /// resolves gravity, linear damp and angular damp as three INDEPENDENT
+    /// channels, so an area that overrides only damping has
+    /// `gravity_space_override == Disabled` and must still reach the damp
+    /// resolution. Each channel applies its own `Disabled` check instead; the
+    /// gravity fold already no-ops on `Disabled`.
+    fn overlapping_areas_by_priority(&self, body: &PhysicsBody3D) -> Vec<&Area3D> {
+        if self.area_store.area_count() == 0 {
+            return Vec::new();
+        }
         let mut overlapping: Vec<&Area3D> = self
             .area_store
             .areas()
@@ -1638,33 +1674,26 @@ impl PhysicsWorld3D {
                     .colliding
             })
             .collect();
-        if overlapping.is_empty() {
-            return (self.gravity, None, None);
-        }
-        // Highest priority applied last so it wins a `Replace`.
         overlapping.sort_by(|x, y| {
             x.priority
                 .partial_cmp(&y.priority)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+        overlapping
+    }
 
+    /// Folds the areas' gravity channel into the space default, in order.
+    fn fold_area_gravity(&self, overlapping: &[&Area3D], at: Vector3) -> Vector3 {
         let mut gravity = self.gravity;
-        for area in &overlapping {
-            let g = area.gravity_vector(body.position);
+        for area in overlapping {
+            let g = area.gravity_vector(at);
             match area.gravity_space_override {
                 SpaceOverride::Replace | SpaceOverride::ReplaceCombine => gravity = g,
                 SpaceOverride::Combine | SpaceOverride::CombineReplace => gravity = gravity + g,
                 SpaceOverride::Disabled => {}
             }
         }
-
-        let lin_damp = resolve_damp(&overlapping, |a| {
-            (a.linear_damp_space_override, a.linear_damp)
-        });
-        let ang_damp = resolve_damp(&overlapping, |a| {
-            (a.angular_damp_space_override, a.angular_damp)
-        });
-        (gravity, lin_damp, ang_damp)
+        gravity
     }
 
     /// Continuous collision detection for a body that moved from `prev` to its

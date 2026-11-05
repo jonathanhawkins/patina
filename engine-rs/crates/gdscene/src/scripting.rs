@@ -1722,6 +1722,10 @@ fn shape_query_3d_from_params(
 const WORLD_3D_HANDLE: u64 = PHYS_QUERY_TAG | 0x11;
 /// `World3D.direct_space_state`'s value.
 const SPACE_STATE_3D_HANDLE: u64 = PHYS_QUERY_TAG | 0x12;
+/// `World3D.get_space()`'s RID — the one 3D space, which
+/// `PhysicsServer3D.space_get_direct_state` maps back to the space state
+/// (pat-v3co1).
+const SPACE_3D_RID: u64 = PHYS_QUERY_TAG | 0x13;
 /// Marks a ray-parameters handle; the low bits are its registry key.
 const RAY_PARAMS_BASE: u64 = PHYS_QUERY_TAG | 0x1000;
 
@@ -2603,6 +2607,10 @@ impl SceneAccess for SceneTreeAccessor {
         if is_phys_query_handle(node) {
             if node == WORLD_3D_HANDLE && prop == "direct_space_state" {
                 return Variant::ObjectId(ObjectId::from_raw(SPACE_STATE_3D_HANDLE));
+            }
+            // `World3D.space` (pat-v3co1), the property `get_space()` reads.
+            if node == WORLD_3D_HANDLE && prop == "space" {
+                return Variant::Rid(gdcore::id::Rid::from_raw(SPACE_3D_RID));
             }
             if node == WORLD_2D_HANDLE && prop == "direct_space_state" {
                 return Variant::ObjectId(ObjectId::from_raw(SPACE_STATE_2D_HANDLE));
@@ -4380,6 +4388,31 @@ impl SceneAccess for SceneTreeAccessor {
             // space state are fixed singletons — one `PhysicsWorld3D` per tree —
             // so they are constant handles rather than registry entries.
             "get_world_3d" => Some(Variant::ObjectId(ObjectId::from_raw(WORLD_3D_HANDLE))),
+            // `World3D.space` / `get_space()` and its method spelling of
+            // `direct_space_state` (pat-v3co1). The official 3D platformer's
+            // camera writes the server form,
+            // `PhysicsServer3D.space_get_direct_state(get_world_3d().get_space())`,
+            // which raised "method not found" every physics frame.
+            "get_space" if node == WORLD_3D_HANDLE => {
+                Some(Variant::Rid(gdcore::id::Rid::from_raw(SPACE_3D_RID)))
+            }
+            "get_direct_space_state" if node == WORLD_3D_HANDLE => {
+                Some(Variant::ObjectId(ObjectId::from_raw(SPACE_STATE_3D_HANDLE)))
+            }
+            // `CollisionObject3D.get_rid()` (pat-v3co1) — the handle a script
+            // passes in a ray query's `exclude` so the ray ignores its own body
+            // (the 3D platformer's follow camera excludes the player this way).
+            // A body's server RID is opaque in Godot; here it is the node's own
+            // object id, which is stable before the body is first synced and
+            // which `intersect_ray` resolves back to the body.
+            "get_rid"
+                if self
+                    .tree()
+                    .get_node(nid)
+                    .is_some_and(|n| n.is_class("CollisionObject3D")) =>
+            {
+                Some(Variant::Rid(gdcore::id::Rid::from_raw(node)))
+            }
             // Queries on the space-state handle. Guarded on the receiver being
             // that handle so these names cannot shadow a same-named script or
             // node method on an ordinary node.
@@ -4541,11 +4574,33 @@ impl SceneAccess for SceneTreeAccessor {
                     // Godot's default mask is all layers.
                     _ => u32::MAX,
                 };
-                let world = self.physics_3d()?.world();
+                let server = self.physics_3d()?;
+                // `exclude` (pat-v3co1): bodies the ray must not see, as the
+                // RIDs `CollisionObject3D.get_rid()` hands out (a node's object
+                // id). It used to be ignored, so a ray cast from inside the
+                // caster's own body — the 3D platformer's follow camera, whose
+                // rays start at the player — could report the caster.
+                let excluded: std::collections::HashSet<gdphysics3d::body::BodyId3D> =
+                    match params.properties.get("exclude") {
+                        Some(Variant::Array(items)) => items
+                            .to_vec()
+                            .iter()
+                            .filter_map(|v| match v {
+                                Variant::Rid(rid) => Some(rid.id()),
+                                Variant::ObjectId(oid) => Some(oid.raw()),
+                                _ => None,
+                            })
+                            .filter_map(|raw| {
+                                server.body_for_node(NodeId::from_object_id(ObjectId::from_raw(raw)))
+                            })
+                            .collect(),
+                        _ => Default::default(),
+                    };
+                let world = server.world();
                 let query = gdphysics3d::query::PhysicsRayQuery3D::new(from, to);
                 let hit = match query.intersect(world.bodies().filter(|b| {
                     // `collision_mask` selects which layers the ray sees.
-                    (b.collision_layer & mask) != 0
+                    (b.collision_layer & mask) != 0 && !excluded.contains(&b.id)
                 })) {
                     Some(hit) => hit,
                     None => return Some(Variant::Dictionary(gdvariant::Dictionary::new().into())),
@@ -5269,6 +5324,25 @@ impl SceneAccess for SceneTreeAccessor {
                     .map(|p| p.body_total_gravity(nid))
                     .unwrap_or(gdphysics2d::world::DEFAULT_GRAVITY_2D);
                 Some(Variant::Vector2(g))
+            }
+            // `PhysicsBody3D.get_gravity()` — the 3D twin (pat-v3co1). Was
+            // missing for 3D, so the official 3D platformer's player
+            // (CharacterBody3D) and enemies (RigidBody3D, in
+            // `_integrate_forces`) raised "method not found" every physics
+            // frame: the player never fell or moved, the enemies never walked.
+            // With no 3D server bound, Godot's built-in default
+            // (`physics/3d/default_gravity` 9.8 straight down).
+            "get_gravity"
+                if self
+                    .tree()
+                    .get_node(nid)
+                    .is_some_and(|n| n.is_class("PhysicsBody3D")) =>
+            {
+                let g = self
+                    .physics_3d()
+                    .map(|p| p.body_total_gravity(nid))
+                    .unwrap_or(gdcore::math::Vector3::new(0.0, -9.8, 0.0));
+                Some(Variant::Vector3(g))
             }
             "test_move" => {
                 let motion = args
@@ -9106,6 +9180,16 @@ impl SceneAccess for SceneTreeAccessor {
         // accepts nothing else, so without this the whole query surface is
         // unreachable from script no matter what ClassDB knows about it.
         match (type_name, method) {
+            // `PhysicsServer3D.space_get_direct_state(space)` (pat-v3co1): the
+            // server spelling of `get_world_3d().direct_space_state`. There is
+            // one 3D space per tree, so only its RID (from `World3D.get_space()`)
+            // resolves; anything else is Godot's null for an unknown space.
+            ("PhysicsServer3D", "space_get_direct_state") => Some(match args.first() {
+                Some(Variant::Rid(rid)) if rid.id() == SPACE_3D_RID => {
+                    Variant::ObjectId(ObjectId::from_raw(SPACE_STATE_3D_HANDLE))
+                }
+                _ => Variant::Nil,
+            }),
             ("PhysicsRayQueryParameters2D", "create") => {
                 let from = match args.first() {
                     Some(Variant::Vector2(v)) => *v,
