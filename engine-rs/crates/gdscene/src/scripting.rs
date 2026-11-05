@@ -3563,20 +3563,29 @@ impl SceneAccess for SceneTreeAccessor {
                     );
                     return Some(Variant::Bool(touching));
                 }
-                "get_skidinfo" => {
-                    // Godot returns 1.0 for full grip and falls toward 0 as the
-                    // tire slips; an airborne wheel reports full grip because it
-                    // is not slipping against anything.
-                    let v = match self
-                        .tree()
-                        .get_node(nid)
-                        .map(|n| n.get_property("_wheel_compression"))
-                    {
+                // `m_skidInfo` / `m_rpm` from the vehicle's friction pass
+                // (pat-qg3nu). Skid is 1.0 at full grip and falls toward 0 as
+                // the tire slides; Godot's initial value is 0 before the first
+                // tick.
+                "get_skidinfo" | "get_rpm" => {
+                    let key = if method == "get_rpm" { "_wheel_rpm" } else { "_wheel_skidinfo" };
+                    let v = match self.tree().get_node(nid).map(|n| n.get_property(key)) {
                         Some(Variant::Float(f)) => f,
                         Some(Variant::Int(i)) => i as f64,
-                        _ => 1.0,
+                        _ => 0.0,
                     };
                     return Some(Variant::Float(v));
+                }
+                "get_contact_normal" => {
+                    let p = match self
+                        .tree()
+                        .get_node(nid)
+                        .map(|n| n.get_property("_wheel_contact_normal"))
+                    {
+                        Some(Variant::Vector3(v)) => v,
+                        _ => gdcore::math::Vector3::ZERO,
+                    };
+                    return Some(Variant::Vector3(p));
                 }
                 "get_contact_point" => {
                     let p = match self

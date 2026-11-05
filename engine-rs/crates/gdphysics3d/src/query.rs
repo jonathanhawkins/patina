@@ -102,17 +102,11 @@ impl PhysicsRayQuery3D {
             if (self.collision_mask & body.collision_layer) == 0 {
                 continue;
             }
-            // Bounding-sphere reject before the exact test (pat-2ifdx): a
-            // GridMap level is thousands of bodies, and the convex segment test
-            // rebuilds a hull's face planes every call.
-            if !segment_may_reach(self.from, dir, max_dist, body) {
-                continue;
-            }
-
             if let Some(hit) = ray_test_body(
                 self.from,
                 dir,
                 body,
+                max_dist,
                 self.hit_from_inside,
                 self.hit_back_faces,
             ) {
@@ -134,50 +128,103 @@ impl PhysicsRayQuery3D {
 }
 
 /// Whether the segment `from + dir * t`, `t` in `[0, max_dist]`, comes within
-/// the bounding sphere of `body`'s primary shape — the shape [`ray_test_body`]
-/// tests. Conservative: `false` only when no hit is possible.
-fn segment_may_reach(from: Vector3, dir: Vector3, max_dist: f32, body: &PhysicsBody3D) -> bool {
-    if matches!(body.shape, Shape3D::WorldBoundaryShape { .. }) {
+/// the bounding sphere of `shape` placed at `position`/`rotation`.
+/// Conservative: `false` only when no hit is possible.
+fn segment_may_reach(
+    from: Vector3,
+    dir: Vector3,
+    max_dist: f32,
+    position: Vector3,
+    rotation: gdcore::math3d::Quaternion,
+    shape: &Shape3D,
+) -> bool {
+    if matches!(shape, Shape3D::WorldBoundaryShape { .. }) {
         return true;
     }
-    let local = body.shape.bounding_aabb();
+    let local = shape.bounding_aabb();
     let half = local.size * 0.5;
     let radius = half.length();
-    let centre = body.position + body.rotation.xform(local.position + half);
+    let centre = position + rotation.xform(local.position + half);
     let t = (centre - from).dot(dir).clamp(0.0, max_dist);
     let closest = from + dir * t;
     (centre - closest).length_squared() <= radius * radius + 1e-6
 }
 
-/// Tests a ray against a single body, exactly, for every shape kind.
+/// Tests a ray against EVERY shape of a body and returns the closest hit.
+///
+/// 🔑 Every shape, at its own offset (pat-qg3nu). This used to test only the
+/// primary shape, at the BODY origin: an imported glTF `StaticBody3D` carries
+/// several colliders (truck_town's Terrain holds the grass, road and outer
+/// ground trimeshes), so a ray down onto the road found nothing, and every
+/// `VehicleWheel3D` reported no contact while bodies rested on that road.
+///
+/// A bounding-sphere reject runs before each exact test (pat-2ifdx): a GridMap
+/// level is thousands of bodies, and the convex segment test rebuilds a hull's
+/// face planes every call.
+fn ray_test_body(
+    origin: Vector3,
+    dir: Vector3,
+    body: &PhysicsBody3D,
+    max_dist: f32,
+    hit_from_inside: bool,
+    hit_back_faces: bool,
+) -> Option<RaycastHit3D> {
+    let primary = (
+        body.position + body.rotation.xform(body.shape_offset),
+        body.rotation * body.shape_rotation,
+        &body.shape,
+    );
+    let extras = body.extra_shapes.iter().map(|(offset, rotation, shape)| {
+        (body.position + body.rotation.xform(*offset), body.rotation * *rotation, shape)
+    });
+    let mut closest: Option<RaycastHit3D> = None;
+    for (position, rotation, shape) in std::iter::once(primary).chain(extras) {
+        if !segment_may_reach(origin, dir, max_dist, position, rotation, shape) {
+            continue;
+        }
+        let Some(hit) = ray_test_shape(origin, dir, body.id, position, rotation, shape, hit_from_inside, hit_back_faces) else {
+            continue;
+        };
+        if closest.as_ref().map_or(true, |c| hit.distance < c.distance) {
+            closest = Some(hit);
+        }
+    }
+    closest
+}
+
+/// Tests a ray against one shape, exactly, for every shape kind.
 ///
 /// Mirrors Godot's `GodotPhysicsDirectSpaceState3D::intersect_ray`, which
 /// transforms the segment into each shape's local frame and dispatches to that
-/// shape's `intersect_segment` (godot_shape_3d.cpp). Because `body.rotation` is
+/// shape's `intersect_segment` (godot_shape_3d.cpp). Because `rotation` is
 /// a pure rotation, the ray parameter `t` is identical in both frames, so the
 /// world-space distance is the local-space one and only the normal has to be
 /// rotated back.
 ///
 /// `hit_from_inside` / `hit_back_faces` mirror the same-named
 /// `PhysicsRayQueryParameters3D` flags.
-fn ray_test_body(
+#[allow(clippy::too_many_arguments)]
+fn ray_test_shape(
     origin: Vector3,
     dir: Vector3,
-    body: &PhysicsBody3D,
+    body_id: BodyId3D,
+    position: Vector3,
+    rotation: gdcore::math3d::Quaternion,
+    shape: &Shape3D,
     hit_from_inside: bool,
     hit_back_faces: bool,
 ) -> Option<RaycastHit3D> {
-    let inv_rot = body.rotation.inverse();
-    let local_origin = inv_rot.xform(origin - body.position);
+    let inv_rot = rotation.inverse();
+    let local_origin = inv_rot.xform(origin - position);
     let local_dir = inv_rot.xform(dir);
 
     // Godot: a ray whose origin is already inside a shape either reports a
     // zero-normal hit at the origin (`hit_from_inside`) or skips that shape
     // entirely — it never reports the far surface.
-    if body.shape.contains_point(local_origin) {
+    if shape.contains_point(local_origin) {
         return if hit_from_inside {
             Some(RaycastHit3D {
-                body_id: body.id,
+                body_id,
                 point: origin,
                 normal: Vector3::ZERO,
                 distance: 0.0,
@@ -187,7 +234,7 @@ fn ray_test_body(
         };
     }
 
-    let (t, local_normal) = match body.shape {
+    let (t, local_normal) = match *shape {
         Shape3D::Sphere { radius } => ray_sphere_local(local_origin, local_dir, radius)?,
         Shape3D::BoxShape { half_extents } => ray_obb_local(local_origin, local_dir, half_extents)?,
         Shape3D::CapsuleShape { radius, height } => {
@@ -232,9 +279,9 @@ fn ray_test_body(
     };
 
     Some(RaycastHit3D {
-        body_id: body.id,
+        body_id,
         point: origin + dir * t,
-        normal: body.rotation.xform(local_normal),
+        normal: rotation.xform(local_normal),
         distance: t,
     })
 }
@@ -1139,6 +1186,36 @@ mod tests {
             Shape3D::Sphere { radius: 1.0 },
             1.0,
         )
+    }
+
+    /// pat-qg3nu: a ray must test EVERY shape of a body, each at its own
+    /// offset. A static body whose primary shape sits far away and whose
+    /// second shape (an imported glTF's road collider) lies under the ray used
+    /// to report nothing.
+    #[test]
+    fn ray_hits_a_bodys_offset_and_extra_shapes() {
+        let mut body = box_body(1, Vector3::ZERO, Vector3::new(1.0, 1.0, 1.0));
+        body.shape_offset = Vector3::new(50.0, 0.0, 0.0);
+        body.extra_shapes.push((
+            Vector3::new(0.0, -5.0, 0.0),
+            Quaternion::IDENTITY,
+            Shape3D::BoxShape { half_extents: Vector3::new(2.0, 0.5, 2.0) },
+        ));
+        let bodies = [body];
+        // Down onto the extra shape: its top face is at y -4.5.
+        let hit = PhysicsRayQuery3D::new(Vector3::new(0.5, 0.0, 0.0), Vector3::new(0.5, -10.0, 0.0))
+            .intersect(bodies.iter())
+            .expect("the extra shape under the ray");
+        assert!((hit.point.y + 4.5).abs() < 1e-4, "hit {hit:?}");
+        assert!((hit.normal.y - 1.0).abs() < 1e-4);
+        // The primary shape is tested at its OFFSET, not at the body origin.
+        assert!(PhysicsRayQuery3D::new(Vector3::new(0.0, 3.0, 0.0), Vector3::new(0.0, 0.0, 0.0))
+            .intersect(bodies.iter())
+            .is_none());
+        let hit = PhysicsRayQuery3D::new(Vector3::new(50.0, 3.0, 0.0), Vector3::new(50.0, 0.0, 0.0))
+            .intersect(bodies.iter())
+            .expect("the offset primary shape");
+        assert!((hit.point.y - 1.0).abs() < 1e-4, "hit {hit:?}");
     }
 
     fn box_body(id: u64, pos: Vector3, half: Vector3) -> PhysicsBody3D {

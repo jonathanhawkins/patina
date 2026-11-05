@@ -429,6 +429,22 @@ pub fn set_global_position(tree: &mut SceneTree, node_id: NodeId, pos: Vector3) 
     set_position(tree, node_id, local_pos);
 }
 
+/// The node's WORLD orientation, scale discarded.
+pub fn get_global_rotation_quaternion(tree: &SceneTree, node_id: NodeId) -> gdcore::math3d::Quaternion {
+    get_global_transform(tree, node_id).basis.get_rotation_quaternion()
+}
+
+/// Sets the node's local rotation so that its WORLD orientation is `q`,
+/// keeping its local position and scale (pat-qg3nu). The physics servers
+/// simulate world orientations, so a body under a rotated parent (truck_town's
+/// car under `InstancePos`, turned 90 degrees) must be de-parented on the way
+/// back, exactly as its position is by [`set_global_position`].
+pub fn set_global_rotation_quaternion(tree: &mut SceneTree, node_id: NodeId, q: gdcore::math3d::Quaternion) {
+    let parent = effective_parent_global(tree, node_id).basis.get_rotation_quaternion();
+    let local = (parent.inverse() * q).normalized();
+    set_rotation(tree, node_id, local.to_euler());
+}
+
 /// Sets the `"visible"` property on a 3D node.
 pub fn set_visible(tree: &mut SceneTree, node_id: NodeId, visible: bool) {
     if let Some(node) = tree.get_node_mut(node_id) {

@@ -160,6 +160,10 @@ pub struct PhysicsBody3D {
     pub collision_layer: u32,
     /// Collision mask bitmask: which layers this body scans for collisions.
     pub collision_mask: u32,
+    /// Principal moments of inertia that replace the shape-derived ones
+    /// (pat-qg3nu): a body's authored `inertia`, or the inertia about the
+    /// body ORIGIN when its centre of mass is custom-placed there.
+    pub inertia_override: Option<Vector3>,
     /// Accumulated force for the current frame.
     accumulated_force: Vector3,
     /// Accumulated torque for the current frame.
@@ -226,6 +230,7 @@ impl PhysicsBody3D {
             max_contacts_reported: 0,
             collision_layer: 1,
             collision_mask: 1,
+            inertia_override: None,
             accumulated_force: Vector3::ZERO,
             accumulated_torque: Vector3::ZERO,
             contacts: Vec::new(),
@@ -380,7 +385,14 @@ impl PhysicsBody3D {
                     self.angular_velocity.z * half_dt,
                     1.0,
                 );
-                self.rotation = (self.rotation * dq).normalized();
+                // 🔑 `dq * rotation`, LEFT-multiplied (pat-qg3nu):
+                // `angular_velocity` is WORLD-space, as in Godot, and
+                // `rotation * dq` applies it in the body's LOCAL frame. The two
+                // agree only while the body is unrotated, so the bug hid
+                // until a body started turned: truck_town's car sits under an
+                // `InstancePos` rotated 90 degrees about Y, so its pitch
+                // integrated as a ROLL and the parked car rolled over.
+                self.rotation = (dq * self.rotation).normalized();
             }
         }
 
@@ -621,6 +633,35 @@ impl PhysicsBody3D {
     /// Convex/concave/plane shapes fall back to a solid sphere of the shape's
     /// bounding radius.
     pub fn local_inertia(&self) -> Vector3 {
+        if let Some(i) = self.inertia_override {
+            return i;
+        }
+        self.shape_inertia()
+    }
+
+    /// The primary shape's inertia about the body ORIGIN rather than the
+    /// shape's own centre: [`Self::shape_inertia`] plus the parallel-axis term
+    /// for [`Self::shape_offset`] (diagonal only; Godot's vehicle reads only the
+    /// main diagonal too). This is Jolt's mass properties for a body whose
+    /// `center_of_mass_mode` is CUSTOM at the origin (`OffsetCenterOfMassShape`
+    /// translates the inner shape's inertia, `MassProperties::Translate`).
+    ///
+    /// truck_town's minivan: a 0.95 x 1 x 2.33 box 0.59 m above the origin,
+    /// 40 kg, pitches about (35.5, 21.3, 20.2), not the box's own
+    /// (21.4, 21.1, 6.4); with the latter it pitched 1.4x too fast onto a ramp.
+    pub fn shape_inertia_about_origin(&self) -> Vector3 {
+        let i = self.shape_inertia();
+        let d = self.shape_offset;
+        let m = self.mass.max(0.0);
+        Vector3::new(
+            i.x + m * (d.y * d.y + d.z * d.z),
+            i.y + m * (d.x * d.x + d.z * d.z),
+            i.z + m * (d.x * d.x + d.y * d.y),
+        )
+    }
+
+    /// The primary shape's principal moments about its own centre.
+    pub fn shape_inertia(&self) -> Vector3 {
         let m = self.mass.max(0.0);
         if m <= 0.0 {
             return Vector3::ZERO;
@@ -708,6 +749,49 @@ mod tests {
             Shape3D::Sphere { radius: 1.0 },
             1.0,
         )
+    }
+
+    /// pat-qg3nu: angular velocity is WORLD-space. A body turned 90 degrees
+    /// about Y spinning about world Z must end up rotated about world Z, not
+    /// about its own local Z (which points along world -X).
+    #[test]
+    fn angular_velocity_integrates_in_world_space() {
+        let mut b = make_rigid(Vector3::ZERO);
+        let start = Quaternion::from_axis_angle(Vector3::new(0.0, 1.0, 0.0), std::f32::consts::FRAC_PI_2);
+        b.rotation = start;
+        b.can_sleep = false;
+        b.angular_velocity = Vector3::new(0.0, 0.0, 1.0);
+        for _ in 0..30 {
+            b.integrate(1.0 / 120.0, Vector3::ZERO);
+        }
+        let want = (Quaternion::from_axis_angle(Vector3::new(0.0, 0.0, 1.0), 0.25) * start).normalized();
+        let probe = Vector3::new(0.3, 0.7, -0.2);
+        let (got, exp) = (b.rotation.xform(probe), want.xform(probe));
+        assert!((got - exp).length() < 2e-3, "rotated {probe:?} to {got:?}, world-Z spin gives {exp:?}");
+    }
+
+    /// pat-qg3nu: a box carried 0.59 m above a custom centre of mass at the
+    /// origin turns about the origin (parallel-axis theorem), as Jolt's
+    /// `OffsetCenterOfMassShape` does: truck_town's minivan box.
+    #[test]
+    fn shape_inertia_about_origin_adds_the_parallel_axis_term() {
+        let mut b = PhysicsBody3D::new(
+            BodyId3D(0),
+            BodyType3D::Rigid,
+            Vector3::ZERO,
+            Shape3D::BoxShape { half_extents: Vector3::new(0.477039, 0.5, 1.16331) },
+            40.0,
+        );
+        b.shape_offset = Vector3::new(0.0, 0.588269, 0.0774262);
+        let own = b.shape_inertia();
+        let about = b.shape_inertia_about_origin();
+        assert!((own.x - 21.38).abs() < 0.05 && (own.z - 6.37).abs() < 0.05, "{own:?}");
+        assert!((about.x - 35.46).abs() < 0.05, "{about:?}");
+        assert!((about.y - 21.31).abs() < 0.05, "{about:?}");
+        assert!((about.z - 20.21).abs() < 0.05, "{about:?}");
+        assert_eq!(b.local_inertia(), own, "no override: the shape's own inertia");
+        b.inertia_override = Some(about);
+        assert_eq!(b.local_inertia(), about);
     }
 
     // pat-nzgdu.62: constant surface velocity (conveyor / turntable) a body

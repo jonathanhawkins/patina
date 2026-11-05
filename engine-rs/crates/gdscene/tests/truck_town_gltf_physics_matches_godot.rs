@@ -208,7 +208,7 @@ fn rigid_body(tree: &mut SceneTree, name: &str, shape: &str, key: &str, value: V
 /// |---|---|---|
 /// | unit box | (-15.957, 8, 12.389), flat road at y 5.182 | (-15.957, 5.6807, 12.389) |
 /// | r=0.5 sphere | (-20.085, 8, 17.12), flat road | (-20.085, 5.6807, 17.12) |
-/// | r=0.5 sphere | (0, 20, 0), a hole in the grass mesh | y 0.4999 on OuterGroundCollider (box, top y 0) |
+/// | r=0.5 sphere | (0, 20, 0), a hole in the grass mesh | clips the hole's rim at tick ~170 and bounces off: (-0.1840, 10.2228, 1.1113) at tick 200, rolling on OuterGroundCollider (box, top y 0) at (-1.0434, 0.4999, 8.3874) at tick 500 |
 /// | unit box | (35.48, 12, 10), the 6 degree road by the car spawn | (35.4948, 9.2836, 10.0241) |
 ///
 /// Without the import every one of them free-falls past y -100.
@@ -223,8 +223,14 @@ fn bodies_dropped_on_the_town_rest_where_godots_do() {
     let mut ml = MainLoop::new(tree);
     ml.set_physics_ticks_per_second(120);
     ml.register_physics_bodies();
-    for _ in 0..600 {
+    // The hole sphere is checked along its path: it is still rolling at tick
+    // 600 in Godot (0.39 m/s), so its end point is not a rest pose.
+    let mut hole_at = Vec::new();
+    for tick in 1..=600 {
         ml.step(1.0 / 120.0);
+        if tick == 200 || tick == 500 {
+            hole_at.push(gdscene::node3d::get_global_transform(ml.tree(), hole_sphere).origin);
+        }
     }
     let pos = |id| gdscene::node3d::get_global_transform(ml.tree(), id).origin;
     for (name, id) in [("flat box", flat_box), ("flat sphere", flat_sphere), ("hole sphere", hole_sphere), ("slope box", slope_box)] {
@@ -237,8 +243,13 @@ fn bodies_dropped_on_the_town_rest_where_godots_do() {
     assert!(near(p, (-15.957, 5.6807, 12.389), 0.01), "box on the flat road at {p:?}; Godot (-15.957, 5.6807, 12.389)");
     let p = pos(flat_sphere);
     assert!(near(p, (-20.085, 5.6807, 17.12), 0.01), "sphere on the flat road at {p:?}; Godot (-20.085, 5.6807, 17.12)");
-    let p = pos(hole_sphere);
-    assert!((p.y - 0.4999).abs() < 0.01, "sphere on the outer ground at {p:?}; Godot y 0.4999");
+    // pat-qg3nu: this used to assert only "y 0.4999 at tick 600", which
+    // Patina met by falling straight through the hole; with the 3D space's
+    // default damping (0.1) it clips the rim and bounces like Godot's.
+    let p = hole_at[0];
+    assert!(near(p, (-0.1840, 10.2228, 1.1113), 0.05), "sphere bouncing off the hole rim at tick 200: {p:?}; Godot (-0.1840, 10.2228, 1.1113)");
+    let p = hole_at[1];
+    assert!(near(p, (-1.0434, 0.4999, 8.3874), 0.1), "sphere on the outer ground at tick 500: {p:?}; Godot (-1.0434, 0.4999, 8.3874)");
     // The sloped road: Patina's single-contact solver lets the box settle a
     // few centimetres off Godot's pose, but it must REST, not slide away (it
     // slid 4 m while the trimesh contact point sat at a phantom support).

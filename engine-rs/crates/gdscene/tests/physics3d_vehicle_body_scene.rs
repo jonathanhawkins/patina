@@ -187,10 +187,14 @@ fn physics3d_vehicle_body_scene() {
         "engine_force = 200 for 2 s must move the car more than 1 m, went \
          {travelled} m (from {before:?} to {after:?})"
     );
-    // Godot's forward is -Z, so a car with no steering must travel that way.
+    // ⚠️ A VehicleBody3D drives along its +Z, NOT Godot's usual -Z forward
+    // (pat-qg3nu): `_update_friction` pushes along `normal x axle` (-Z) by
+    // `-engine_force * step`. Measured on Godot 4.6.1: truck_town's minivan
+    // under throttle goes from z 0.62 to 12.15 in 240 ticks. This used to
+    // assert -Z, which only Patina's old hand-rolled drive model satisfied.
     assert!(
-        after.z < before.z,
-        "the car must drive along its forward axis (-Z), z went {} -> {}",
+        after.z > before.z,
+        "the car must drive along its +Z axis, z went {} -> {}",
         before.z,
         after.z
     );
