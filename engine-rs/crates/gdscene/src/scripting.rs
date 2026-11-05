@@ -5041,8 +5041,9 @@ impl SceneAccess for SceneTreeAccessor {
                 // Try the synchronous slide first. `None` means the 2D server
                 // does not own this node — a scripted CharacterBody3D arrives
                 // here too, because this dispatch table answers the method for
-                // every node — and then the deferred request below is still the
-                // real mechanism, consumed by
+                // every node — and the 3D server is tried next, also
+                // synchronously (pat-hwhbj). Only when neither is bound does
+                // the deferred request below remain, consumed by
                 // `character3d::process_character_movement`.
                 let addr = self.tree().script_physics_addr();
                 let slid = if addr == 0 {
@@ -5073,6 +5074,27 @@ impl SceneAccess for SceneTreeAccessor {
                         unsafe { &mut *(addr as *mut crate::physics_server::PhysicsServer) };
                     physics.script_move_and_slide(self.tree_mut(), nid, dt)
                 };
+                // Not a 2D character: try the 3D server, synchronously too
+                // (pat-hwhbj). Same SAFETY contract as `physics_3d()`; the
+                // shared borrow of the server is disjoint from the tree.
+                let slid = slid.or_else(|| {
+                    let addr3 = self.tree().script_physics_3d_addr();
+                    if addr3 == 0 {
+                        return None;
+                    }
+                    let dt = self.tree().script_physics_delta() as f32;
+                    // SAFETY: see `physics_3d()` — non-zero addr = live server,
+                    // a sibling of the tree, so no aliasing with `tree_mut()`.
+                    let physics3 = unsafe {
+                        &*(addr3 as *const crate::physics_server_3d::PhysicsServer3D)
+                    };
+                    crate::character3d::script_move_and_slide_3d(
+                        self.tree_mut(),
+                        physics3,
+                        nid,
+                        dt,
+                    )
+                });
 
                 match slid {
                     Some(collided) => {

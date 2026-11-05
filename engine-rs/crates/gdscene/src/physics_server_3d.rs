@@ -782,6 +782,21 @@ pub struct PhysicsServer3D {
     /// is not retried every rebuild.
     gridmap_shape_cache: HashMap<String, Option<Shape3D>>,
     gravity: Vector3,
+    /// Bodies registered by the sync of the CURRENT physics tick, cleared by
+    /// [`begin_physics_tick`](Self::begin_physics_tick) (pat-d4ghb).
+    ///
+    /// Godot runs a tick's scripts BEFORE its space step, and a body's gravity
+    /// is only computed by a step, so a body's first `_physics_process` reads
+    /// `get_gravity() == ZERO` (measured on Godot 4.6.1 + Jolt: the 3D
+    /// platformer's player reads `(0, 0, 0)` at physics frame 1 and
+    /// `(0, -22, 0)` from frame 2). Patina registers and steps BEFORE the
+    /// script phase, so without this the first tick already fell, and every
+    /// later sample of the player was one tick of gravity ahead.
+    fresh_bodies: HashSet<BodyId3D>,
+    /// True while `MainLoop` runs the `_integrate_forces` pass, which (unlike
+    /// `_physics_process`) already sees the real gravity on a body's first
+    /// tick — Godot calls it from inside the step that computes it.
+    force_integration_phase: bool,
 }
 
 /// A `GridMap` node's registration in the physics world (pat-2ifdx).
@@ -830,6 +845,8 @@ impl PhysicsServer3D {
             gridmaps: HashMap::new(),
             gridmap_shape_cache: HashMap::new(),
             gravity: Vector3::new(0.0, -9.8, 0.0),
+            fresh_bodies: HashSet::new(),
+            force_integration_phase: false,
         }
     }
 
@@ -854,6 +871,8 @@ impl PhysicsServer3D {
             gridmaps: HashMap::new(),
             gridmap_shape_cache: HashMap::new(),
             gravity,
+            fresh_bodies: HashSet::new(),
+            force_integration_phase: false,
         }
     }
 
@@ -876,12 +895,39 @@ impl PhysicsServer3D {
     /// The total gravity at a node's body — what `PhysicsBody3D.get_gravity()`
     /// answers (pat-v3co1): the space default plus any `Area3D` override the
     /// body overlaps. A node with no registered body (not yet synced) gets the
-    /// space default, which is also what Godot reports before the first step.
+    /// space default.
+    ///
+    /// ⚠️ ZERO for a body registered in the current tick (pat-d4ghb): Godot
+    /// has not stepped it yet when its first `_physics_process` runs, and the
+    /// gravity a body reports is the one its last step computed. See
+    /// `fresh_bodies`.
     pub fn body_total_gravity(&self, node_id: NodeId) -> Vector3 {
         match self.body_for_node(node_id) {
+            Some(id) if self.fresh_bodies.contains(&id) && !self.force_integration_phase => {
+                Vector3::ZERO
+            }
             Some(id) => self.world.body_total_gravity(id),
             None => self.world.gravity,
         }
+    }
+
+    /// Marks the start of a physics tick: bodies registered by the previous
+    /// tick's sync are no longer fresh (pat-d4ghb).
+    ///
+    /// `MainLoop` calls it at the start of every tick, before the sync that
+    /// registers this tick's new bodies.
+    pub fn begin_physics_tick(&mut self) {
+        self.fresh_bodies.clear();
+    }
+
+    /// Brackets the `_integrate_forces` pass (see `force_integration_phase`).
+    pub fn set_force_integration_phase(&mut self, on: bool) {
+        self.force_integration_phase = on;
+    }
+
+    /// Every node that has a body in the world.
+    pub fn registered_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.node_to_body.keys().copied()
     }
 
     /// Returns the number of tracked physics bodies.
@@ -1186,6 +1232,7 @@ impl PhysicsServer3D {
 
                         let actual_id = self.world.add_body(body);
                         self.node_to_body.insert(nid, actual_id);
+                        self.fresh_bodies.insert(actual_id);
                     }
 
                     // Rigid bodies used to get nothing after registration, so every

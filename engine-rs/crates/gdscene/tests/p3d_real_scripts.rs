@@ -305,9 +305,12 @@ fn player_camera_and_enemy_scripts_run_without_errors_and_fall_at_project_gravit
     ml.step(DT);
     let vy = vec3(ml.tree().get_node(player).unwrap().get_property("velocity"), "velocity").y;
     // `velocity += get_gravity() * delta` from rest, before any contact. The
-    // 1/60 frame is two 1/120 physics ticks, so the sum is 22 * (1/60) either
-    // way; the player starts 1 m above the floor, out of reach in 1/60 s.
-    let want = -22.0 * DT as f32;
+    // 1/60 frame is two 1/120 physics ticks, but only the SECOND falls:
+    // `get_gravity()` reads ZERO in a body's first `_physics_process`, before
+    // any step has computed it (pat-d4ghb; measured on Godot 4.6.1 + Jolt with
+    // games/platformer_3d: frame 1 velocity.y = -0.183333 = -22/120). The
+    // player starts 1 m above the floor, out of reach in 1/60 s.
+    let want = -22.0 * (DT / 2.0) as f32;
     assert!(
         (vy - want).abs() < 1e-3,
         "first-frame fall must be the project's 22 m/s² * dt = {want}, got {vy}"

@@ -267,6 +267,23 @@ fn apply_state(tree: &mut SceneTree, id: NodeId, state: DirectBodyState2D) {
 /// BEFORE that sync is what makes the script's override take effect this step
 /// rather than next.
 pub fn run_integrate_forces_3d(tree: &mut SceneTree, gravity: Vector3, dt: f32) {
+    run_integrate_forces_3d_where(tree, gravity, dt, |_| true);
+}
+
+/// [`run_integrate_forces_3d`] for only the bodies `in_space` accepts.
+///
+/// `MainLoop` passes "already has a body in the world" (pat-d4ghb): a node
+/// whose body the server has not registered has no state to integrate.
+///
+/// ⚠️ `MainLoop` now calls this AFTER the step, not before the sync as the
+/// paragraph above describes: on Godot 4.6.1 + Jolt the velocity a custom
+/// integrator writes takes effect in the NEXT step (see the call site).
+pub fn run_integrate_forces_3d_where(
+    tree: &mut SceneTree,
+    gravity: Vector3,
+    dt: f32,
+    in_space: impl Fn(NodeId) -> bool,
+) {
     let targets: Vec<NodeId> = tree
         .all_nodes_in_tree_order()
         .into_iter()
@@ -274,7 +291,7 @@ pub fn run_integrate_forces_3d(tree: &mut SceneTree, gravity: Vector3, dt: f32) 
             tree.get_node(*id).is_some_and(|n| {
                 n.class_name() == "RigidBody3D"
                     && matches!(n.get_property("custom_integrator"), Variant::Bool(true))
-            })
+            }) && in_space(*id)
         })
         .collect();
 

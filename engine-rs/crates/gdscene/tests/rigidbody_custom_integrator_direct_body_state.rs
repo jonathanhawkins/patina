@@ -253,6 +253,9 @@ fn two_d_and_three_d_states_do_not_cross_dispatch() {
     let p2 = position(&ml2, id2);
 
     let (mut ml3, id3) = scene_3d_with(true);
+    // TWO ticks in 3D: the velocity a 3D `_integrate_forces` writes moves the
+    // body from the NEXT step, as on Godot 4.6.1 + Jolt (pat-d4ghb).
+    ml3.step(PHYSICS_DT);
     ml3.step(PHYSICS_DT);
     let p3 = position_3d(&ml3, id3);
 

@@ -421,6 +421,18 @@ impl CharacterBody3D {
 
         // --- Apply the sliding motion, sub-stepping large moves. -------------
         let mut motion_out = motion;
+        // The character's OWN velocity as Godot's slide loop leaves it
+        // (platform carry excluded). Godot changes `velocity` inside the loop
+        // only for the cases `slide_step` handles (a grounded body walking into
+        // a wall, the wall-min-slide stop, ceilings); everything else keeps the
+        // velocity the script set, apart from the floor reset below.
+        //
+        // ⚠️ This used to zero every AXIS whose motion a collision absorbed. A
+        // grounded player walking diagonally into a slanted wall kept its full
+        // x speed (neither axis was absorbed) where Godot slides the velocity
+        // along the wall: (3.2, 0, 0) became Godot's (0.61, 0, 1.22) on the 3D
+        // platformer, and Patina's player ground on into the wall (pat-d4ghb).
+        let mut output_vel = velocity;
         let speed = motion.length();
         if speed >= 1e-8 {
             let safe_dist = self.safe_step_distance();
@@ -433,7 +445,13 @@ impl CharacterBody3D {
                     break;
                 }
 
-                let sub_result = self.slide_step(sub, bodies, was_on_floor, vel_dir_facing_up);
+                let sub_result = self.slide_step(
+                    sub,
+                    bodies,
+                    was_on_floor,
+                    vel_dir_facing_up,
+                    &mut output_vel,
+                );
 
                 // If a component was absorbed by collision, zero it so later
                 // sub-steps stop advancing along it.
@@ -447,19 +465,6 @@ impl CharacterBody3D {
                     motion_out.z = 0.0;
                 }
             }
-        }
-
-        // Map absorbed axes onto the character's OWN velocity for the return
-        // value (platform carry is intentionally excluded from the result).
-        let mut output_vel = velocity;
-        if motion.x.abs() > 1e-8 && motion_out.x == 0.0 {
-            output_vel.x = 0.0;
-        }
-        if motion.y.abs() > 1e-8 && motion_out.y == 0.0 {
-            output_vel.y = 0.0;
-        }
-        if motion.z.abs() > 1e-8 && motion_out.z == 0.0 {
-            output_vel.z = 0.0;
         }
 
         // --- Floor snapping (Grounded only) ----------------------------------
@@ -507,6 +512,7 @@ impl CharacterBody3D {
         bodies: &[&PhysicsBody3D],
         was_on_floor: bool,
         vel_dir_facing_up: bool,
+        vel: &mut Vector3,
     ) -> Vector3 {
         let mut remaining = step_vel;
         // The displacement still to APPLY this iteration — distinct from
@@ -631,6 +637,9 @@ impl CharacterBody3D {
                     position: self.position,
                     remainder: Vector3::ZERO,
                 });
+                // Godot: `velocity = velocity.slide(up_direction)`.
+                let up = self.up_direction;
+                *vel = *vel - up * vel.dot(up);
                 return Vector3::ZERO;
             }
 
@@ -658,24 +667,75 @@ impl CharacterBody3D {
                 && up_dot >= -floor_cos;
 
             if is_wall_surface {
-                // wall_min_slide_angle: near-floor "wall" edges shouldn't slide
-                // (jitter guard) — stop instead.
-                if self.wall_min_slide_angle > 0.0 {
-                    let angle_from_up = up_dot.clamp(-1.0, 1.0).acos();
-                    if angle_from_up < self.wall_min_slide_angle {
-                        remaining = Vector3::ZERO;
-                        break;
+                let up = self.up_direction;
+                let motion_slide_up = step_vel - up * step_vel.dot(up);
+                let forward = {
+                    let h = surface_normal - up * surface_normal.dot(up);
+                    if h.length_squared() > 1e-12 {
+                        h.normalized()
+                    } else {
+                        Vector3::ZERO
                     }
-                }
-                // floor_block_on_wall: a grounded character cannot climb the wall
-                // it walks into — drop any upward slide component.
-                if was_on_floor && self.floor_block_on_wall {
-                    let up = self.up_direction;
+                };
+                if self.floor_block_on_wall
+                    && motion_slide_up.dot(surface_normal) <= 0.0
+                    && was_on_floor
+                    && !vel_dir_facing_up
+                {
+                    // Godot's `floor_block_on_wall` branch
+                    // (`_move_and_slide_grounded`): a grounded body walking into
+                    // a wall keeps only the motion and velocity ALONG it —
+                    // `motion = motion.slide(forward)`,
+                    // `velocity = velocity.slide(forward)` — with `forward` the
+                    // wall normal flattened onto the floor plane (pat-d4ghb).
+                    remaining = remaining - forward * remaining.dot(forward);
+                    *vel = *vel - forward * vel.dot(forward);
+                    // ⚠️ Godot also CANCELS a wall approach shorter than
+                    // `min(0.1, margin * 20)` and re-applies the remaining motion
+                    // slid along the wall. Not reproduced: where that leaves the
+                    // body depends on where Jolt's cast first split the motion
+                    // on the FLOOR (measured at the platformer's x = 5.66 wall:
+                    // a floor contact after 0.0155 of a 0.0276 step, from a body
+                    // resting 1e-4 above the floor), which this push-out solver
+                    // has no equivalent of. Emulating the cancel without it
+                    // landed 1.3e-2 from Godot; plain push-out lands 5.7e-3.
+                    // ...and cannot climb it.
                     let up_comp = remaining.dot(up);
                     if up_comp > 0.0 {
                         remaining = remaining - up * up_comp;
                     }
+                } else if was_on_floor
+                    && self.wall_min_slide_angle > 0.0
+                    && motion_slide_up.length_squared() > 1e-12
+                {
+                    // Godot's "stop horizontal motion when under wall slide
+                    // threshold": the angle is between the MOTION and the wall
+                    // (head-on is 0), not between the wall normal and up — that
+                    // reading could never fire, since a wall is by definition
+                    // more than `floor_max_angle` from up.
+                    let motion_angle = (-forward.dot(motion_slide_up.normalized()))
+                        .clamp(-1.0, 1.0)
+                        .acos()
+                        .abs();
+                    if motion_angle < self.wall_min_slide_angle {
+                        remaining = up * remaining.dot(up);
+                        *vel = up * vel.dot(up);
+                    } else {
+                        *vel = *vel - surface_normal * vel.dot(surface_normal);
+                    }
+                } else {
+                    // Any other wall contact slides the velocity along the
+                    // wall. Measured on Godot 4.6.1 + Jolt: an airborne sphere
+                    // moving (6, 0, 3) into an x-facing wall reads (0, 0, 3)
+                    // after `move_and_slide()`.
+                    *vel = *vel - surface_normal * vel.dot(surface_normal);
                 }
+            } else if self.motion_mode == MotionMode::Floating {
+                *vel = *vel - surface_normal * vel.dot(surface_normal);
+            } else if up_dot < -floor_cos && self.slide_on_ceiling && vel_dir_facing_up {
+                // Godot: a rising body's velocity slides along the ceiling —
+                // measured, (2, 6, 0) into a flat ceiling reads (2, 0, 0).
+                *vel = *vel - surface_normal * vel.dot(surface_normal);
             }
         }
 
@@ -758,34 +818,6 @@ impl CharacterBody3D {
         best.map(|(i, _, n)| (i, n))
     }
 
-    /// Finds the deepest floor-angled contact at `probe_pos`, returning the
-    /// surface normal and penetration depth.
-    fn deepest_floor_contact(
-        &self,
-        probe_pos: Vector3,
-        bodies: &[&PhysicsBody3D],
-    ) -> Option<(Vector3, f32)> {
-        let floor_cos = self.floor_max_angle.cos();
-        let mut best: Option<(Vector3, f32)> = None;
-
-        for body in bodies {
-            if (self.collision_mask & body.collision_layer) == 0 {
-                continue;
-            }
-            let r = self.collide_body(probe_pos, body);
-            if r.colliding && r.depth > 0.0 {
-                let normal = -r.normal;
-                if normal.dot(self.up_direction) > floor_cos
-                    && (best.is_none() || r.depth > best.as_ref().unwrap().1)
-                {
-                    best = Some((normal, r.depth));
-                }
-            }
-        }
-
-        best
-    }
-
     /// Casts the shape downward up to `floor_snap_length` to keep the character
     /// glued to slopes/stairs when it would otherwise leave the floor.
     ///
@@ -806,13 +838,43 @@ impl CharacterBody3D {
         if along_up > 1e-6 {
             return;
         }
-        // Only snap when we were grounded or are actively descending.
-        let descending = along_up < -1e-6;
-        if !was_on_floor && !descending {
+        // Only snap a body that was ON THE FLOOR at the start of the call:
+        // Godot's `_snap_on_floor` returns early on `!p_was_on_floor`
+        // (`character_body_3d.cpp`). This used to snap any DESCENDING body too,
+        // so a falling character was yanked onto a floor up to
+        // `floor_snap_length` below it a tick or more early: the 3D
+        // platformer's player landed at physics frame 10 at y = -4.0 where
+        // Godot lands at frame 15 at -3.999 (pat-d4ghb).
+        if !was_on_floor {
             return;
         }
 
         self.snap_probe(bodies);
+    }
+
+    /// Seeds the contact state the PREVIOUS `move_and_slide` left (pat-d4ghb).
+    ///
+    /// Godot's `CharacterBody3D` is one long-lived object, so `was_on_floor`,
+    /// the floor normal and the platform velocity carry from call to call.
+    /// Patina's scene bridge builds a fresh solver body per call from the
+    /// node's published properties, and without this every call started
+    /// airborne: the floor snap never fired for a walking body, and
+    /// `floor_block_on_wall` / the platform on-leave velocity never applied.
+    pub fn restore_contact_state(
+        &mut self,
+        on_floor: bool,
+        on_wall: bool,
+        on_ceiling: bool,
+        floor_normal: Vector3,
+        wall_normal: Vector3,
+        platform_velocity: Vector3,
+    ) {
+        self.on_floor = on_floor;
+        self.on_wall = on_wall;
+        self.on_ceiling = on_ceiling;
+        self.floor_normal = floor_normal;
+        self.wall_normal = wall_normal;
+        self.platform_velocity = platform_velocity;
     }
 
     /// Godot's **manual** `apply_floor_snap()` (pat-s3rrv.103).
@@ -837,21 +899,86 @@ impl CharacterBody3D {
 
     /// The downward probe both snap paths share.
     ///
-    /// Walks outward from the body in `SNAP_SAMPLES` steps up to
-    /// `floor_snap_length` and stops at the first floor contact, placing the
-    /// body exactly on it. Extracted so the manual and automatic snaps cannot
-    /// drift into finding the floor at different distances.
+    /// Godot's `apply_floor_snap` (`character_body_3d.cpp`) as a shape cast
+    /// (pat-d4ghb): cast the body straight down `floor_snap_length`, stop at
+    /// the FIRST contact of any kind, and snap only if that contact is a floor.
+    /// The body then moves along the up axis ONLY ("ensure that we only move
+    /// the body along the up axis"), and not at all when the travel is within
+    /// `safe_margin`.
+    ///
+    /// ⚠️ This used to place the body at `probe + normal * depth` from the
+    /// first sample that overlapped a floor-angled surface. Over a ledge the
+    /// capsule meets the edge with a TILTED normal, so that pushed the player
+    /// sideways (z drifted 4.5e-3 walking straight along x off the platformer's
+    /// first ledge) and the coarse sampling dropped the floor a tick before
+    /// Godot did. It also skipped a WALL contact to find a floor below it,
+    /// where Godot's cast stops at the wall and does not snap.
+    ///
+    /// Extracted so the manual and automatic snaps cannot drift into finding
+    /// the floor at different distances.
     fn snap_probe(&mut self, bodies: &[&PhysicsBody3D]) {
+        let up = self.up_direction;
+        let start = self.position;
+        let touches = |t: f32| self.deepest_contact(start - up * t, bodies);
+
+        // Coarse march to the first sample that touches anything, then bisect
+        // the interval for the contact distance.
+        let mut free = 0.0f32;
+        let mut hit = None;
         for i in 1..=SNAP_SAMPLES {
             let t = self.floor_snap_length * (i as f32 / SNAP_SAMPLES as f32);
-            let probe_pos = self.position - self.up_direction * t;
-            if let Some((normal, depth)) = self.deepest_floor_contact(probe_pos, bodies) {
-                self.position = probe_pos + normal * depth;
-                self.on_floor = true;
-                self.floor_normal = normal;
-                return;
+            if touches(t).is_some() {
+                hit = Some(t);
+                break;
+            }
+            free = t;
+        }
+        let Some(mut blocked) = hit else {
+            return;
+        };
+        for _ in 0..24 {
+            let mid = 0.5 * (free + blocked);
+            if touches(mid).is_some() {
+                blocked = mid;
+            } else {
+                free = mid;
             }
         }
+        let Some((normal, _)) = touches(blocked) else {
+            return;
+        };
+        // Godot's floor test: angle <= floor_max_angle + FLOOR_ANGLE_THRESHOLD.
+        let angle = normal.dot(up).clamp(-1.0, 1.0).acos();
+        if angle > self.floor_max_angle + 0.01 {
+            return;
+        }
+        // The cast stops `safe_margin` short of contact.
+        let travel = free - self.safe_margin;
+        if travel > self.safe_margin {
+            self.position = start - up * travel;
+        }
+        self.on_floor = true;
+        self.floor_normal = normal;
+    }
+
+    /// The deepest contact of any orientation at `probe_pos`, as a surface
+    /// normal (pointing at the character) and depth.
+    fn deepest_contact(
+        &self,
+        probe_pos: Vector3,
+        bodies: &[&PhysicsBody3D],
+    ) -> Option<(Vector3, f32)> {
+        let mut best: Option<(Vector3, f32)> = None;
+        for body in bodies {
+            if (self.collision_mask & body.collision_layer) == 0 {
+                continue;
+            }
+            let r = self.collide_body(probe_pos, body);
+            if r.colliding && r.depth > 0.0 && best.is_none_or(|(_, d)| r.depth > d) {
+                best = Some((-r.normal, r.depth));
+            }
+        }
+        best
     }
 
     /// Classifies a collision normal as floor, wall, or ceiling.
@@ -973,6 +1100,48 @@ mod tests {
         );
         body.collision_layer = 1;
         body
+    }
+
+    /// pat-d4ghb: Godot snaps only a body that WAS on the floor. A falling
+    /// body 0.05 above a floor (inside the 0.1 snap length) stays airborne and
+    /// moves by its own motion only.
+    #[test]
+    fn a_falling_body_is_not_snapped_onto_the_floor_below() {
+        // Floor top at y = 0; sphere bottom at 0.05 + 0.02 after the motion.
+        let floor = make_static_floor(-1.0);
+        let bodies: Vec<&PhysicsBody3D> = vec![&floor];
+        let mut c = CharacterBody3D::new(Vector3::new(0.0, 1.07, 0.0), Shape3D::Sphere { radius: 1.0 });
+        c.move_and_slide(Vector3::new(0.0, -0.02, 0.0), &bodies);
+        assert!(!c.is_on_floor(), "an airborne body is not snapped");
+        assert!((c.position.y - 1.05).abs() < 1e-5, "moved by its motion only: {}", c.position.y);
+
+        // The same body grounded by the previous call IS snapped, along up only,
+        // `safe_margin` short of the floor.
+        let mut g = CharacterBody3D::new(Vector3::new(0.0, 1.07, 0.0), Shape3D::Sphere { radius: 1.0 });
+        g.restore_contact_state(true, false, false, Vector3::new(0.0, 1.0, 0.0), Vector3::ZERO, Vector3::ZERO);
+        g.move_and_slide(Vector3::new(0.0, -0.02, 0.0), &bodies);
+        assert!(g.is_on_floor(), "a grounded body is snapped");
+        assert!((g.position.y - 1.001).abs() < 1e-4, "snapped to safe_margin: {}", g.position.y);
+        assert!(g.position.x.abs() < 1e-6 && g.position.z.abs() < 1e-6);
+    }
+
+    /// pat-d4ghb, measured on Godot 4.6.1 + Jolt: a GROUNDED body walking
+    /// diagonally into a wall keeps only the velocity along the wall, and the
+    /// floor reset zeroes its y: (6, -0.2, 3) reads (0, 0, 3).
+    #[test]
+    fn a_grounded_body_walking_into_a_wall_slides_its_velocity() {
+        let floor = make_static_floor(-1.0);
+        let wall = make_static_wall(5.0);
+        let bodies: Vec<&PhysicsBody3D> = vec![&floor, &wall];
+        // Sphere radius 1 resting on y = 0 (centre 1.001), 0.01 from the wall
+        // face at x = 4.
+        let mut c = CharacterBody3D::new(Vector3::new(2.99, 1.001, 0.0), Shape3D::Sphere { radius: 1.0 });
+        c.restore_contact_state(true, false, false, Vector3::new(0.0, 1.0, 0.0), Vector3::ZERO, Vector3::ZERO);
+        let dt = 1.0 / 60.0;
+        let out = c.move_and_slide(Vector3::new(6.0, -0.2, 3.0) * dt, &bodies) / dt;
+        assert!(c.is_on_wall(), "touching the wall");
+        assert!(out.x.abs() < 1e-3 && out.y.abs() < 1e-3, "slid velocity {out:?}");
+        assert!((out.z - 3.0).abs() < 1e-3, "kept the along-wall speed: {out:?}");
     }
 
     fn make_static_wall(x: f32) -> PhysicsBody3D {
@@ -1336,6 +1505,16 @@ mod tests {
                 Shape3D::Sphere { radius: 1.0 },
             );
             c.floor_snap_length = snap_len;
+            // RESTING on the slope, i.e. grounded by the previous call: Godot
+            // snaps only a body that was on the floor (pat-d4ghb).
+            c.restore_contact_state(
+                true,
+                false,
+                false,
+                Vector3::new(-0.5, 0.866_025_4, 0.0),
+                Vector3::ZERO,
+                Vector3::ZERO,
+            );
             // Move horizontally (descending side) with a touch of gravity.
             c.move_and_slide(Vector3::new(0.1, -0.01, 0.0), &bodies);
             (c.is_on_floor(), c.position.y)

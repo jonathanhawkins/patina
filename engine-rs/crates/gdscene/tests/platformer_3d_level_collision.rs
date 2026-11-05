@@ -312,21 +312,28 @@ fn player_stands_on_the_level_and_walks_forward_like_godot() {
                 Variant::Bool(true)
             );
         }
-        if tick == 300 {
+        // ⚠️ The Godot probe sampled from its own `_physics_process`, which
+        // runs BEFORE the player's in the same tick, so its "tick 300" is the
+        // state after 299 ticks. This test used to read after 300 and passed
+        // only because Patina deferred `move_and_slide` to the next tick, so
+        // the position it reported was one tick stale (pat-hwhbj).
+        if tick == 299 {
             assert_near(
                 origin(&ml, "/root/Game/Player"),
                 Vector3::new(-7.754435, -3.999599, 3.9334),
-                0.02,
+                0.002,
                 "player after 0.5 s of move_forward",
             );
         }
+        if tick == 359 {
+            assert_near(
+                origin(&ml, "/root/Game/Player"),
+                Vector3::new(-4.721112, -3.999599, 3.933393),
+                0.002,
+                "player after 1 s of move_forward",
+            );
+        }
     }
-    assert_near(
-        origin(&ml, "/root/Game/Player"),
-        Vector3::new(-4.721112, -3.999599, 3.933393),
-        0.02,
-        "player after 1 s of move_forward",
-    );
     let errors = ml.tree_mut().drain_script_errors();
     assert!(errors.is_empty(), "script errors: {errors:?}");
 }

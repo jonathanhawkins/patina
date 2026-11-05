@@ -146,6 +146,24 @@ test('MCP probe lines parse into a frame-sorted trace, keeping unresolved probes
   assert.match(tr['/root/Game/Coin:position'][0].error, /no node/);
 });
 
+test('two watched properties of the SAME node each keep their own values', () => {
+  // The editor prints one probe line per property. Each watch used to record
+  // the OTHER property's line as an error, and the per-frame dedupe then kept
+  // whichever came last, so `--watch P:position --watch P:velocity` turned
+  // position into all nulls (pat-d4ghb).
+  const text = [
+    'probes:',
+    '  f0 /root/Game/Player: position=Vector3(0, 1, 2)',
+    '  f0 /root/Game/Player: velocity=Vector3(0, 0, 0)',
+    '  f1 /root/Game/Player: position=Vector3(0.5, 1, 2)',
+    '  f1 /root/Game/Player: velocity=Vector3(3, 0, 0)',
+  ].join('\n');
+  const watches = [parseWatch('/root/Game/Player:position'), parseWatch('/root/Game/Player:velocity')];
+  const tr = parseMcpProbes(text, watches);
+  assert.deepEqual(tr['/root/Game/Player:position'].map((s) => s.value), [[0, 1, 2], [0.5, 1, 2]]);
+  assert.deepEqual(tr['/root/Game/Player:velocity'].map((s) => s.value), [[0, 0, 0], [3, 0, 0]]);
+});
+
 test('the Godot capture normalises to the same trace shape', () => {
   const cap = { frames: [{ frame: 0, values: { 'a:p': [1, 2] } }, { frame: 1, values: { 'a:p': null }, errors: { 'a:p': 'no node at a' } }] };
   const tr = traceFromGodot(cap, [parseWatch('a:p')]);

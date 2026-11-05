@@ -4115,6 +4115,7 @@ impl MainLoop {
         let simulate = !paused;
         self.physics_accumulator += delta_secs;
         let mut physics_steps = 0u32;
+        let mut stashed_just_input: Option<crate::scene_tree::JustInput> = None;
         // `Engine.is_in_physics_frame()` is true for the whole fixed-step
         // section, so a script called from `_physics_process` can tell which
         // callback it is running in (pat-0q2kx.121).
@@ -4146,16 +4147,41 @@ impl MainLoop {
                 // inside `_integrate_forces` reads the 3D server, and unbound it
                 // fell back to the built-in 9.8 — so the platformer's enemies
                 // fell at 9.8 while the project (and the player) used 22.
-                self.bind_script_servers();
-                crate::integrate_forces::run_integrate_forces_3d(
-                    &mut self.tree,
-                    self.physics_server_3d.gravity(),
-                    physics_dt as f32,
-                );
-                self.unbind_script_servers();
+                // pat-d4ghb: bodies registered by the PREVIOUS tick stop
+                // reading zero gravity in `_physics_process`, as in Godot.
+                self.physics_server_3d.begin_physics_tick();
                 self.physics_server_3d.sync_to_physics(&self.tree);
                 self.physics_server_3d.step(physics_dt as f32);
                 self.physics_server_3d.sync_from_physics(&mut self.tree);
+
+                // `_integrate_forces` runs AFTER the step (pat-d4ghb), so the
+                // velocity a custom integrator writes moves the body in the NEXT
+                // step. Measured on Godot 4.6.1 + Jolt with the 3D platformer's
+                // enemies (custom_integrator): by frame 1 the callback has run
+                // twice (Skeleton rotation 0.0667 = 2 x 4/120 rad, velocity
+                // -0.3667 = 2 x 22/120) but the body has moved by ONE tick of
+                // -0.1833 only. Calling it before the sync, as this used to,
+                // moved the enemy by the velocity of the same step: every enemy
+                // fell one tick ahead, and starting it a tick late instead (to
+                // fix the position) left it one turn short of Godot.
+                //
+                // The callback reads the real gravity even for a body registered
+                // this tick: Godot's first callback already reports (0, -22, 0).
+                self.physics_server_3d.set_force_integration_phase(true);
+                self.bind_script_servers();
+                // Snapshotted rather than borrowed from the server: the bound
+                // script servers hand callbacks a raw `&mut` to it, so a live
+                // `&` here would alias that.
+                let in_space: std::collections::HashSet<crate::node::NodeId> =
+                    self.physics_server_3d.registered_nodes().collect();
+                crate::integrate_forces::run_integrate_forces_3d_where(
+                    &mut self.tree,
+                    self.physics_server_3d.gravity(),
+                    physics_dt as f32,
+                    |id| in_space.contains(&id),
+                );
+                self.unbind_script_servers();
+                self.physics_server_3d.set_force_integration_phase(false);
 
                 // -- ragdoll writeback (pat-0q2kx.203) --
                 // Simulated PhysicalBone3D bodies push their transforms onto the
@@ -4403,6 +4429,18 @@ impl MainLoop {
             self.physics_accumulator -= physics_dt;
             self.physics_time += physics_dt;
             physics_steps += 1;
+            // Godot answers `is_action_just_pressed/released` in a physics
+            // callback for ONE physics tick, the first after the event
+            // (`Input::is_action_just_released` compares the action's
+            // `released_physics_frame` with the current physics frame). With
+            // several ticks per frame (the 3D platformer runs 2) every later
+            // tick of this frame must read them false; they are handed back
+            // after the loop for `_process`, whose answer is per process frame
+            // (pat-d4ghb: `vertical_velocity *= 0.7` on jump release ran twice,
+            // so the jump was cut to 0.49).
+            if physics_steps == 1 {
+                stashed_just_input = self.tree.take_just_input();
+            }
             self.physics_tick_counter += 1;
             // Publish inside the loop so a script running in `_physics_process`
             // reads the tick it is currently in, not last frame's count.
@@ -4413,6 +4451,9 @@ impl MainLoop {
             );
         }
         gdscript_interop::set_engine_in_physics_frame(false);
+        if let Some(just) = stashed_just_input.take() {
+            self.tree.restore_just_input(just);
+        }
 
         // -- interpolation publish (pat-0q2kx.219) --
         // How far this render frame sits past the last completed tick. With

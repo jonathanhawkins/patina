@@ -1921,6 +1921,19 @@ fn read_probe(tree: &SceneTree, probe: &Probe) -> String {
             let value = match tree.get_script(id).and_then(|s| s.get_property(prop)) {
                 Some(v) => v,
                 None => match node.get_property(prop) {
+                    // `global_position` is DERIVED in Godot (the parent chain,
+                    // `top_level` included), never stored, so it read null here
+                    // and a `--watch <camera>:global_position` compared nothing.
+                    Variant::Nil if prop == "global_position" => {
+                        let class = node.class_name();
+                        if gdobject::class_db::is_parent_class(class, "Node3D") {
+                            Variant::Vector3(gdscene::node3d::get_global_transform(tree, id).origin)
+                        } else if gdobject::class_db::is_parent_class(class, "Node2D") {
+                            Variant::Vector2(gdscene::node2d::get_global_position(tree, id))
+                        } else {
+                            Variant::Nil
+                        }
+                    }
                     Variant::Nil => {
                         registered_default(node.class_name(), prop).unwrap_or(Variant::Nil)
                     }
@@ -2770,6 +2783,38 @@ mod tests {
             base_size: gdcore::math::Vector2::new(640.0, 360.0),
             ..ContentScaleConfig::default()
         }
+    }
+
+    /// pat-d4ghb: `global_position` is derived, never stored, so a probe of it
+    /// read `null` and `--watch <camera>:global_position` compared nothing.
+    /// It must follow the parent chain — and stop at a `top_level` node.
+    #[test]
+    fn a_global_position_probe_composes_the_parent_chain() {
+        gdobject::class_db::register_all_classes();
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut parent = gdscene::node::Node::new("Game", "Node3D");
+        parent.set_property(
+            "position",
+            Variant::Vector3(gdcore::math::Vector3::new(10.0, 0.0, 0.0)),
+        );
+        let parent = tree.add_child(root, parent).unwrap();
+        let mut child = gdscene::node::Node::new("Cam", "Camera3D");
+        child.set_property(
+            "position",
+            Variant::Vector3(gdcore::math::Vector3::new(1.0, 2.0, 3.0)),
+        );
+        tree.add_child(parent, child).unwrap();
+        let probe = Probe {
+            node: "/root/Game/Cam".into(),
+            props: vec!["global_position".into()],
+            at: None,
+            every: None,
+        };
+        assert_eq!(
+            read_probe(&tree, &probe),
+            "/root/Game/Cam: global_position=Vector3(11, 2, 3)"
+        );
     }
 
     #[test]

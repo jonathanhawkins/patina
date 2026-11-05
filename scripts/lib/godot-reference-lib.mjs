@@ -161,6 +161,10 @@ export function parseMcpProbes(text, watches) {
       if (w.path !== node) continue;
       const pm = new RegExp(`(?:^|\\s)${escapeRe(w.prop)}=(.*)$`).exec(rest);
       if (pm) trace[w.id].push({ frame, value: numbersOf(pm[1]), raw: pm[1].trim() });
+      // Another watched property of the SAME node (`velocity=...` while this
+      // watch is `position`): not an error for this watch. Recording it as one
+      // let `dedupeByFrame` replace the real value with null.
+      else if (/^[A-Za-z_][\w/]*=/.test(rest.trim())) continue;
       else trace[w.id].push({ frame, value: null, raw: rest.trim(), error: rest.trim() });
     }
   }
