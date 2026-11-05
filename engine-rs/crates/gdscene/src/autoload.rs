@@ -31,7 +31,6 @@ use gdvariant::Variant;
 
 use crate::lifecycle::LifecycleManager;
 use crate::node::{Node, NodeId};
-use crate::packed_scene::{add_packed_scene_to_tree, PackedScene};
 use crate::scene_tree::SceneTree;
 use crate::scripting::GDScriptNodeInstance;
 
@@ -194,8 +193,9 @@ fn instantiate_one(
 
     if lower.ends_with(".tscn") || lower.ends_with(".scn") {
         // Scene autoload: instance the packed scene and rename its root.
-        let source = std::fs::read_to_string(&fs_path).ok()?;
-        let scene = PackedScene::from_tscn(&source).ok()?;
+        // Text `.tscn` or binary `.scn` (pat-33wmr).
+        let bytes = std::fs::read(&fs_path).ok()?;
+        let scene = crate::binary_scene::packed_scene_from_bytes(&bytes, &entry.path).ok()?;
         // Runtime load: expand the autoload scene's own `instance=` children.
         let node_id =
             crate::packed_scene::add_packed_scene_to_tree_from_res(tree, root_id, &scene).ok()?;

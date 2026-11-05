@@ -9600,8 +9600,9 @@ impl SceneTree {
     /// mid-run. `MainLoop::step` drives the deferred apply each frame.
     pub fn change_scene_to_file(&mut self, path: &str) -> EngineResult<()> {
         let resolved = gdcore::resolve_path(path)?;
-        let source = std::fs::read_to_string(&resolved)?;
-        let scene = crate::packed_scene::PackedScene::from_tscn(&source)?;
+        let bytes = std::fs::read(&resolved)?;
+        // Text `.tscn` or binary `.scn` (pat-33wmr).
+        let scene = crate::binary_scene::packed_scene_from_bytes(&bytes, path)?;
         self.pending_scene = Some(PendingSceneChange::Packed(scene));
         Ok(())
     }

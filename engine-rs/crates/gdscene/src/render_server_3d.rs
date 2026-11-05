@@ -1568,6 +1568,15 @@ impl RenderServer3DAdapter {
                 // Fall through to default cube if loading fails.
             }
 
+            // A saved ArrayMesh (`.res` binary / `.tres` text) carries its
+            // real geometry (pat-33wmr). A file that is not an ArrayMesh
+            // (a PrimitiveMesh `.tres`) answers None and keeps the old path.
+            if crate::array_mesh::is_mesh_resource_path(&path) {
+                if let Some(mesh) = crate::array_mesh::load_array_mesh_file(&path) {
+                    return mesh;
+                }
+            }
+
             // A resolved `primitive:<Class>` marker names its class exactly.
             // ⚠️ It must be consulted BEFORE the substring guesses below, which
             // predate it and are wrong for several types: "primitive:TorusMesh"

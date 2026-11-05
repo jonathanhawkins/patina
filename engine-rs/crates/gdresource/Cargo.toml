@@ -13,6 +13,10 @@ thiserror.workspace = true
 tracing.workspace = true
 serde_json.workspace = true
 miniz_oxide = "0.8"
+# Pure-Rust zstd decoder for Godot's RSCC-compressed binary resources
+# (`FileAccessCompressed`, mode Zstd is the resource saver's default). The
+# encoder half is used only by tests to build fixtures.
+ruzstd = "0.8"
 ttf-parser = "0.25"
 # Pure-Rust WebP decoding (pat-nzgdu.8). Godot stores default 2D textures as
 # WebP-in-.ctex and decodes source .webp via libwebp; the `image` crate's webp

@@ -10435,7 +10435,10 @@ fn api_load_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
         }
     };
 
-    let source = match std::fs::read_to_string(&path) {
+    // Text `.tscn` or binary `.scn` (pat-33wmr).
+    let source = match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|bytes| {
+        gdscene::binary_scene::scene_source_from_bytes(&bytes, &path).map_err(|e| e.to_string())
+    }) {
         Ok(s) => s,
         Err(e) => {
             send_error(stream, 400, &format!("failed to read: {e}"));

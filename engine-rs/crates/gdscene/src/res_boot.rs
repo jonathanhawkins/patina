@@ -44,7 +44,6 @@ use gdresource::{AutoloadEntry, ProjectLoader};
 use gdvariant::Variant;
 
 use crate::node::{Node, NodeId};
-use crate::packed_scene::{add_packed_scene_to_tree, PackedScene};
 use crate::scene_tree::SceneTree;
 
 /// A project booted entirely out of `res://`.
@@ -77,9 +76,10 @@ pub fn load_scene_into_tree(
     res_path: &str,
 ) -> Result<NodeId, String> {
     let res_path = &gdresource::importers::remap_path(res_path);
-    let source = FileAccess::read_file_string(res_path)
+    let bytes = FileAccess::read_file_bytes(res_path)
         .map_err(|e| format!("failed to read scene '{res_path}': {e}"))?;
-    let packed = PackedScene::from_tscn(&source)
+    // Text `.tscn` or binary `.scn` (pat-33wmr).
+    let packed = crate::binary_scene::packed_scene_from_bytes(&bytes, res_path)
         .map_err(|e| format!("failed to parse scene '{res_path}': {e}"))?;
     // A RUNTIME load: every `instance=` sub-scene is expanded. The plain
     // instancer leaves them as childless placeholders (the editor's shape).
