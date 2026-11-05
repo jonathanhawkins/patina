@@ -158,3 +158,68 @@ test('a Color property\'s alpha field shows "1.00" in full', { skip }, async () 
   assert.ok(data.elements.some((e) => e.tag === 'input' && e.text === '1.00'), 'the alpha field was laid out');
   assert.deepEqual(clippedText(data).filter((f) => f.detail.includes('1.00')), []);
 });
+
+// pat-xtwz2: Godot's application/config/description is PROPERTY_HINT_MULTILINE_TEXT
+// (EditorPropertyMultilineText), so a sentence-long description wraps in the
+// dialog. Patina used a one-line <input>, and the tour reported dodge's
+// description as cut off in every game.
+test('Project Settings > Description is multi-line and shows a long description in full', { skip }, async () => {
+  await layoutAt(1280, 720, 'x');
+  const desc = 'This is a simple game where your character must move and avoid the enemies for as long as possible.';
+  const data = await tab.evaluate(`(() => {
+    document.getElementById('project-settings-dialog').style.display = 'flex';
+    const el = document.getElementById('pset-desc');
+    el.value = ${JSON.stringify(desc)};
+    return { tag: el.tagName, fits: el.scrollHeight <= el.clientHeight + 1,
+             area: (${collectArea.toString()})({ root: '#project-settings-dialog' }) };
+  })()`);
+  assert.equal(data.tag, 'TEXTAREA', 'the description must be a multi-line editor');
+  assert.ok(data.fits, 'the wrapped description fits without scrolling');
+  assert.deepEqual(clippedText(data.area).filter((f) => f.sel.includes('pset-desc')), []);
+});
+
+// pat-skh4t, the layout half: the rounded value fits its field. Built the way
+// createPropertyRow builds a Vector3 row (insp-row > insp-value > label +
+// input.vec-input per axis), at the tour's default size where platformer_3d's
+// Coin1 position showed "18.531" cut to "18.".
+test('a Vector3 field shows "18.531" in full (1600x1000)', { skip }, async () => {
+  await layoutAt(1600, 1000, 'x');
+  const data = await tab.evaluate(`(() => {
+    const host = document.getElementById('inspector-content');
+    const axis = (a) => '<span class="vec-label">' + a + '</span><input type="number" step="0.1" class="vec-input" value="18.531">';
+    host.innerHTML = '<div class="insp-row"><span class="insp-fav-btn">*</span><div class="insp-label">Position</div><div class="insp-value">'
+      + axis('x') + axis('y') + axis('z') + '</div></div>';
+    const area = (${collectArea.toString()})({ root: '#inspector-content' });
+    // The value itself fits: the ellipsis is a fallback, not the fix.
+    area.fits = [...host.querySelectorAll('.vec-input')].every((i) => i.scrollWidth <= i.clientWidth);
+    return area;
+  })()`);
+  assert.equal(data.elements.filter((e) => e.tag === 'input' && e.text === '18.531').length, 3, 'the three fields were laid out');
+  assert.ok(data.fits, '"18.531" is wider than its field');
+  assert.deepEqual(clippedText(data).filter((f) => f.detail.includes('18.531')), []);
+});
+
+// pat-skh4t: Godot shows a float rounded to its step (EditorSpinSlider:
+// String::num(value, Math::range_step_decimals(step)); unhinted floats use
+// interface/inspector/default_float_step = 0.001). Patina printed the raw f64,
+// "18.531099319458008", which no inspector field is wide enough for. The
+// helper is lifted out of the page and run on its own.
+test('inspector floats are shown rounded to their step, as Godot does', () => {
+  const html = editorHtml();
+  const start = html.indexOf('function inspectorFloatText(');
+  assert.ok(start >= 0, 'inspectorFloatText is the one formatter every inspector float field uses');
+  const end = html.indexOf('\n  }\n', start) + 4;
+  const fmt = new Function(`${html.slice(start, end)}; return inspectorFloatText;`)();
+  assert.equal(fmt(18.531099319458008), '18.531');
+  assert.equal(fmt(0.30000000000000004), '0.3');
+  assert.equal(fmt(100), '100');
+  assert.equal(fmt(1.26, 0.1), '1.3');
+  assert.equal(fmt(7.123456, 0.0001), '7.1235');
+  assert.equal(fmt(3.7, 1), '4');
+  // Every raw-value assignment in the inspector's float/vector fields goes
+  // through it: no `inp.value = arr[i]` left that would print 17 digits.
+  const rowStart = html.indexOf("} else if (type === 'Float')");
+  const row = html.slice(rowStart, html.indexOf("} else if (type === 'Color')", rowStart));
+  assert.ok(row.length > 1000, 'the Float..Vector4 branches of createPropertyRow');
+  assert.deepEqual(row.match(/\.value = (arr\[[a-z]+\]|v) != null \? (arr\[[a-z]+\]|v) : 0;/g) || [], []);
+});

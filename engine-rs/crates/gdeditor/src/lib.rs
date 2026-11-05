@@ -1076,13 +1076,35 @@ impl EditorCommand {
                 root_id,
                 source_path,
             } => {
-                use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
+                use gdscene::packed_scene::{
+                    add_packed_scene_to_tree, add_packed_scene_to_tree_from_res, PackedScene,
+                    INSTANCE_EXPANDED_KEY,
+                };
                 let packed = PackedScene::from_tscn(tscn_source).map_err(|e| {
                     gdcore::error::EngineError::InvalidOperation(format!(
                         "failed to parse tscn: {e}"
                     ))
                 })?;
-                let scene_root = add_packed_scene_to_tree(tree, *parent_id, &packed)?;
+                // 🔑 Expanded, as the editor's own Open builds a scene
+                // (pat-i5igl): the instance's nodes, owned by its root, are its
+                // FOREIGN nodes, and its own `instance=` sub-scenes are built
+                // too. The placeholder builder cannot do that, so a scene with
+                // an editable child of an instance — the platformer's
+                // player.tscn, whose `Robot` lives inside player.glb — failed
+                // with "parent path not found". A scene whose sub-scenes cannot
+                // be read still instances, as placeholders.
+                let scene_root = match add_packed_scene_to_tree_from_res(tree, *parent_id, &packed) {
+                    Ok(root) => {
+                        if let Some(node) = tree.get_node_mut(root) {
+                            node.set_property(INSTANCE_EXPANDED_KEY, Variant::Bool(true));
+                        }
+                        root
+                    }
+                    Err(e) => {
+                        tracing::warn!("InstanceScene: expanding failed ({e}); instancing placeholders");
+                        add_packed_scene_to_tree(tree, *parent_id, &packed)?
+                    }
+                };
                 *root_id = Some(scene_root);
 
                 // Record the originating scene path on the instanced root so

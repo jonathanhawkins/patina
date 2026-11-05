@@ -897,6 +897,12 @@ pub struct SceneTree {
     /// here, standing in for Godot's "drawing is only valid inside `_draw`"
     /// rule (a `draw_rect` outside `_draw` is silently dropped, as it is there).
     draw_capture: Option<Vec<gdserver2d::canvas::DrawCommand>>,
+    /// Per edited-scene root: the `.tscn` it was opened from and what the
+    /// saver generated for it right then (pat-i5igl). `TscnSaver::save_tree`
+    /// saves such a root as an EDIT of that file, so whatever the generator
+    /// cannot reproduce (nested sub-resources, uids, unique_ids, an instance's
+    /// untouched foreign nodes) is kept from the original.
+    save_baselines: HashMap<NodeId, crate::scene_saver::SaveBaseline>,
 }
 
 impl std::fmt::Debug for SceneTree {
@@ -911,6 +917,24 @@ impl std::fmt::Debug for SceneTree {
 }
 
 impl SceneTree {
+    /// The save baseline recorded for the scene rooted at `root`, if any
+    /// (see [`crate::scene_saver::TscnSaver::save_tree`]).
+    pub fn save_baseline(&self, root: NodeId) -> Option<&crate::scene_saver::SaveBaseline> {
+        self.save_baselines.get(&root)
+    }
+
+    /// Records (or, with `None`, forgets) the save baseline of `root`'s scene.
+    pub fn set_save_baseline(&mut self, root: NodeId, baseline: Option<crate::scene_saver::SaveBaseline>) {
+        match baseline {
+            Some(b) => {
+                self.save_baselines.insert(root, b);
+            }
+            None => {
+                self.save_baselines.remove(&root);
+            }
+        }
+    }
+
     /// Creates a new scene tree with an empty root node named `"root"`.
     ///
     /// The root is a **`Window`** (pat-nzgdu.87), matching Godot, where
@@ -1001,6 +1025,7 @@ impl SceneTree {
             custom_draw_commands: HashMap::new(),
             scripted_resource_commands: HashMap::new(),
             draw_capture: None,
+            save_baselines: HashMap::new(),
         }
     }
 

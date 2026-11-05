@@ -233,6 +233,11 @@ pub struct PackedScene {
     /// from `libraries` sub-resources; an imported scene has none, so they are
     /// carried here and attached by [`finish_scene_level`].
     gltf_animations: Option<std::sync::Arc<Vec<crate::animation::Animation>>>,
+    /// The `.tscn` text this scene was parsed from, so a tree opened for
+    /// EDITING can save as an edit of that file (pat-i5igl /
+    /// [`crate::scene_saver::TscnSaver::save_tree`]). `None` for a scene not
+    /// read from text (a glTF import, a synthesized scene).
+    source_text: Option<std::sync::Arc<str>>,
 }
 
 /// Percent-encodes a marker property value.
@@ -2379,7 +2384,13 @@ impl PackedScene {
             sub_resource_props,
             editable_instances,
             gltf_animations: None,
+            source_text: Some(std::sync::Arc::from(source)),
         })
+    }
+
+    /// The `.tscn` text this scene was parsed from, if it was.
+    pub fn source_text(&self) -> Option<&str> {
+        self.source_text.as_deref()
     }
 
     /// Builds a scene from code-synthesized nodes (an imported glTF scene;
@@ -2419,6 +2430,7 @@ impl PackedScene {
             } else {
                 Some(std::sync::Arc::new(animations))
             },
+            source_text: None,
         }
     }
 
@@ -5139,6 +5151,10 @@ pub fn add_packed_scene_to_tree_for_editing(
         if let Some(node) = target.and_then(|id| tree.get_node_mut(id)) {
             node.set_property("_editable_children", Variant::Bool(true));
         }
+    }
+    // The opened scene saves as an edit of the file it came from (pat-i5igl).
+    if let Some(source) = scene.source_text() {
+        crate::scene_saver::TscnSaver::capture_baseline(tree, root, source.to_string());
     }
     Ok(root)
 }

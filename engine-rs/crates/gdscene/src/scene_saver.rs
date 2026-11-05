@@ -30,12 +30,29 @@ fn dict_key_display(k: &Variant) -> String {
     }
 }
 
+/// A dictionary key as Godot writes it: a String quoted, a StringName as
+/// `&"..."`, anything else in its own constructor syntax.
+fn format_dict_key(k: &Variant) -> String {
+    match k {
+        Variant::String(_) | Variant::StringName(_) => format_variant_value(k),
+        Variant::Int(_) | Variant::Float(_) | Variant::Bool(_) => format_variant_value(k),
+        other => format!("\"{}\"", other.to_string_lossy()),
+    }
+}
+
 pub fn format_variant_value(v: &Variant) -> String {
     match v {
         Variant::Nil => "null".to_string(),
         Variant::Bool(b) => b.to_string(),
         Variant::Int(i) => i.to_string(),
         Variant::Float(f) => format_float(*f),
+        // A resource held INSIDE a container (an AnimationLibrary's `_data`, a
+        // SpriteFrames frame's `texture`) is stored as its reference string;
+        // Godot writes the reference itself, `SubResource("id")`.
+        Variant::String(s) if s.starts_with("SubResource:") || s.starts_with("ExtResource:") => {
+            let (kind, id) = s.split_once(':').unwrap();
+            format!("{kind}(\"{id}\")")
+        }
         Variant::String(s) => {
             let escaped = s
                 .replace('\\', "\\\\")
@@ -127,17 +144,21 @@ pub fn format_variant_value(v: &Variant) -> String {
         Variant::Dictionary(dict) => {
             // Keys are Variants; render each to a stable display string and sort
             // for deterministic output.
-            let mut pairs: Vec<(String, String)> = dict
+            let mut pairs: Vec<(String, String, String)> = dict
                 .to_dict()
                 .iter()
-                .map(|(k, v)| (dict_key_display(k), format_variant_value(v)))
+                .map(|(k, v)| (dict_key_display(k), format_dict_key(k), format_variant_value(v)))
                 .collect();
             pairs.sort_by(|a, b| a.0.cmp(&b.0));
-            let pairs: Vec<String> = pairs
-                .iter()
-                .map(|(k, v)| format!("\"{}\": {}", k, v))
-                .collect();
-            format!("{{{}}}", pairs.join(", "))
+            if pairs.is_empty() {
+                return "{}".to_string();
+            }
+            // Godot's VariantWriter puts every entry on its own line —
+            // `{\n"a": 1,\n"b": 2\n}` — and a key keeps its own type (a
+            // StringName key is `&"spin"`), pat-l0afa. The one-line form was
+            // never what a Godot-saved file holds.
+            let pairs: Vec<String> = pairs.iter().map(|(_, k, v)| format!("{k}: {v}")).collect();
+            format!("{{\n{}\n}}", pairs.join(",\n"))
         }
         // Packed arrays serialize as `PackedXArray(elem, elem, …)`, with
         // vector/color elements flattened into their components (Godot syntax).
@@ -329,6 +350,7 @@ impl AnimationTables {
 /// name, so re-saving an unchanged scene produces an unchanged file rather than
 /// churning ids.
 fn collect_animation_tables(tree: &SceneTree, node_ids: &[NodeId]) -> AnimationTables {
+    let mut used_stems = std::collections::HashSet::new();
     let mut text = String::new();
     let mut players: HashMap<NodeId, (String, Option<String>)> = HashMap::new();
     let mut count = 0usize;
@@ -344,7 +366,7 @@ fn collect_animation_tables(tree: &SceneTree, node_ids: &[NodeId]) -> AnimationT
             .get_node(nid)
             .map(|n| n.name().to_string())
             .unwrap_or_else(|| "AnimationPlayer".to_string());
-        let stem = sanitize_resource_id(&node_name);
+        let stem = unique_stem(&mut used_stems, sanitize_resource_id(&node_name));
 
         // Deterministic order: a HashMap iteration order would reshuffle the
         // file on every save and make diffs meaningless.
@@ -557,6 +579,7 @@ impl SpriteFramesTables {
 /// Sub-resource and texture ids are derived from the node, animation and path
 /// names, so re-saving an unchanged scene produces an unchanged file.
 fn collect_spriteframes_tables(tree: &SceneTree, node_ids: &[NodeId]) -> SpriteFramesTables {
+    let mut used_stems = std::collections::HashSet::new();
     let mut text = String::new();
     let mut nodes: HashMap<NodeId, String> = HashMap::new();
     let mut ext: BTreeMap<String, (String, String)> = BTreeMap::new();
@@ -571,7 +594,7 @@ fn collect_spriteframes_tables(tree: &SceneTree, node_ids: &[NodeId]) -> SpriteF
         if anim_names.is_empty() {
             continue;
         }
-        let stem = sanitize_resource_id(node.name());
+        let stem = unique_stem(&mut used_stems, sanitize_resource_id(node.name()));
         let sub_id = format!("SpriteFrames_{stem}");
 
         let mut anim_blocks: Vec<String> = Vec::new();
@@ -678,6 +701,7 @@ impl TileSetTables {
 /// sources/0 = SubResource("TileSetAtlasSource_Layer_0")
 /// ```
 fn collect_tileset_tables(tree: &SceneTree, node_ids: &[NodeId]) -> TileSetTables {
+    let mut used_stems = std::collections::HashSet::new();
     let mut text = String::new();
     let mut nodes: HashMap<NodeId, String> = HashMap::new();
     let mut ext: std::collections::BTreeMap<String, (String, String)> =
@@ -697,7 +721,7 @@ fn collect_tileset_tables(tree: &SceneTree, node_ids: &[NodeId]) -> TileSetTable
         if source_ids.is_empty() {
             continue;
         }
-        let stem = sanitize_resource_id(node.name());
+        let stem = unique_stem(&mut used_stems, sanitize_resource_id(node.name()));
         let tile_size = match node.get_property(crate::tilemap::TILE_SET_TILE_SIZE) {
             Variant::Vector2i(v) => v,
             _ => gdcore::math::Vector2i::new(16, 16),
@@ -1241,6 +1265,20 @@ fn update_mode_to_int(m: crate::animation::TrackUpdateMode) -> i64 {
     }
 }
 
+/// `stem`, or `stem_2`, `stem_3`, ... when another node of the scene already
+/// took it: ids built from node NAMES collided for two same-named nodes (two
+/// moving platforms' `AnimationPlayer`s both wrote
+/// `Animation_AnimationPlayer_move`), and a re-load kept only one of them.
+fn unique_stem(used: &mut std::collections::HashSet<String>, stem: String) -> String {
+    let mut candidate = stem.clone();
+    let mut n = 2;
+    while !used.insert(candidate.clone()) {
+        candidate = format!("{stem}_{n}");
+        n += 1;
+    }
+    candidate
+}
+
 /// Reduces a name to the `[A-Za-z0-9_]` set Godot uses for sub-resource ids.
 fn sanitize_resource_id(name: &str) -> String {
     name.chars()
@@ -1271,6 +1309,15 @@ fn format_f32(f: f32) -> String {
 // TscnSaver
 // ---------------------------------------------------------------------------
 
+/// What a scene opened for editing is saved against (see
+/// [`TscnSaver::save_tree`]): the file it was read from, and the generator's
+/// output for the tree at that moment.
+#[derive(Debug, Clone)]
+pub struct SaveBaseline {
+    pub original: String,
+    pub generated: String,
+}
+
 /// Saves a [`SceneTree`] subtree as `.tscn` text.
 pub struct TscnSaver;
 
@@ -1281,10 +1328,48 @@ impl TscnSaver {
     /// descendants get a relative `parent` path from the subtree root.
     /// Signal connections from the tree's signal stores are appended as
     /// `[connection]` sections.
+    ///
+    /// 🔑 A scene opened FOR EDITING carries a [`SaveBaseline`]: the file it
+    /// was read from and what [`generate`](Self::generate) produced for it then
+    /// (pat-i5igl). Such a scene is saved as an edit of that file
+    /// ([`crate::tscn_merge::merge_edits`]): an unedited scene saves
+    /// byte-for-byte as it was read, and an edit rewrites only what changed.
+    /// Without this, everything the generator cannot rebuild from the node
+    /// property bags was lost on save — coin.tscn's `GradientTexture2D ->
+    /// Gradient` came back as a bare reference, the `uid`s and `unique_id`s
+    /// were dropped, and an instance's untouched foreign nodes were written
+    /// out as override entries.
     pub fn save_tree(tree: &SceneTree, root_id: NodeId) -> String {
+        let generated = Self::generate(tree, root_id);
+        match tree.save_baseline(root_id) {
+            Some(b) => crate::tscn_merge::merge_edits(&b.original, &b.generated, &generated),
+            None => generated,
+        }
+    }
+
+    /// Records that `root_id`'s scene is, as of now, the file `original`, so
+    /// later [`save_tree`](Self::save_tree) calls save edits of it. Call it
+    /// after opening a scene (once every pass that settles the tree has run)
+    /// and after every save.
+    pub fn capture_baseline(tree: &mut SceneTree, root_id: NodeId, original: String) {
+        let generated = Self::generate(tree, root_id);
+        tree.set_save_baseline(root_id, Some(SaveBaseline { original, generated }));
+    }
+
+    /// The `.tscn` text rebuilt from the tree alone, ignoring any baseline:
+    /// what [`save_tree`](Self::save_tree) writes for a scene that was never
+    /// read from a file.
+    pub fn generate(tree: &SceneTree, root_id: NodeId) -> String {
         // Collect subtree in depth-first (top-down) order.
         let mut node_ids = Vec::new();
         tree.collect_subtree_top_down(root_id, &mut node_ids);
+        // An instance's nodes belong to the INSTANCED scene's file. Godot
+        // writes none of them unless the instance has Editable Children
+        // (`SceneState::_parse_node` only visits a foreign node through an
+        // editable instance), so neither do we — before this every instanced
+        // coin's whole subtree, AnimationPlayer libraries included, was written
+        // into level.tscn, all under the same colliding sub-resource ids.
+        node_ids.retain(|&id| !is_hidden_foreign(tree, root_id, id));
 
         // Reconstruct the external/inline resource tables from node references
         // and `__resref__`/`_instance_path`/`_script_path` companions so the
@@ -1372,6 +1457,9 @@ impl TscnSaver {
         out.push_str(&sframes.text);
         out.push_str(&tilesets.text);
 
+        // What each instanced scene itself says, to write only overrides.
+        let mut instance_bases = InstanceBases::default();
+
         // Build a map from NodeId -> relative path within the subtree.
         let mut id_to_path: HashMap<NodeId, String> = HashMap::new();
         id_to_path.insert(root_id, ".".to_string());
@@ -1390,6 +1478,7 @@ impl TscnSaver {
                     None,
                     false,
                     &skip_keys_for(&anims, &sframes, &tilesets, nid),
+                    None,
                 );
                 write_animation_player_props(&mut out, &anims, nid);
                 write_spriteframes_props(&mut out, &sframes, nid);
@@ -1414,12 +1503,14 @@ impl TscnSaver {
                 // entry — no `type=`, no `instance=` — as Godot writes an
                 // editable child (pat-hivyf).
                 let foreign = crate::packed_scene::is_foreign_node(tree, root_id, nid);
+                let base = instance_bases.base_of(tree, root_id, nid);
                 write_node_section(
                     &mut out,
                     node,
                     Some(&parent_path),
                     foreign,
                     &skip_keys_for(&anims, &sframes, &tilesets, nid),
+                    base,
                 );
                 write_animation_player_props(&mut out, &anims, nid);
                 write_spriteframes_props(&mut out, &sframes, nid);
@@ -1447,7 +1538,7 @@ impl TscnSaver {
             }
         }
 
-        out
+        undeclared_references_back_to_strings(out)
     }
 
     /// Serializes only a specific subtree (not necessarily the scene root).
@@ -1457,6 +1548,133 @@ impl TscnSaver {
     pub fn save_subtree(tree: &SceneTree, subtree_root: NodeId) -> String {
         Self::save_tree(tree, subtree_root)
     }
+}
+
+/// A `SubResource("id")` the text never declares (a nested sub-resource whose
+/// body the tree did not keep) would not load; it is written back as the
+/// `"SubResource:id"` string the property bag holds, as before.
+fn undeclared_references_back_to_strings(text: String) -> String {
+    let declared: std::collections::HashSet<String> = text
+        .lines()
+        .filter(|l| l.starts_with("[sub_resource "))
+        .filter_map(|l| {
+            let at = l.find(" id=\"")? + 5;
+            let end = l[at..].find('"')?;
+            Some(l[at..at + end].to_string())
+        })
+        .collect();
+    let needle = "SubResource(\"";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find(needle) {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + needle.len()..];
+        match after.find("\")") {
+            Some(end) if !declared.contains(&after[..end]) => {
+                out.push_str(&format!("\"SubResource:{}\"", &after[..end]));
+                rest = &after[end + 2..];
+            }
+            _ => {
+                out.push_str(needle);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The instanced scenes of one save, each opened once into a scratch tree, so
+/// a node of an instance can be compared with what its scene says.
+#[derive(Default)]
+struct InstanceBases {
+    scenes: HashMap<String, Option<(SceneTree, NodeId)>>,
+}
+
+impl InstanceBases {
+    /// The node `id` stands for in its instance's own scene, if `id` belongs
+    /// to an instance of a `.tscn` that can be read.
+    fn base_of(&mut self, tree: &SceneTree, scene_root: NodeId, id: NodeId) -> Option<&crate::node::Node> {
+        let scope = instance_scope(tree, scene_root, id)?;
+        let path = match tree.get_node(scope)?.get_property("_instance_path") {
+            Variant::String(p) if p.ends_with(".tscn") => p,
+            _ => return None,
+        };
+        let rel = relative_path(tree, scope, id)?;
+        let entry = self.scenes.entry(path.clone()).or_insert_with(|| {
+            let file = gdcore::resolve_path(&path).ok()?;
+            let text = std::fs::read_to_string(file).ok()?;
+            let scene = crate::packed_scene::PackedScene::from_tscn(&text).ok()?;
+            let mut scratch = SceneTree::new();
+            let r = scratch.root_id();
+            let root = crate::packed_scene::add_packed_scene_to_tree_from_res(&mut scratch, r, &scene).ok()?;
+            Some((scratch, root))
+        });
+        let (scratch, root) = entry.as_ref()?;
+        let at = if rel == "." { Some(*root) } else { scratch.get_node_relative(*root, &rel) };
+        scratch.get_node(at?)
+    }
+}
+
+/// `id`'s path below `ancestor` (`.` for the ancestor itself).
+fn relative_path(tree: &SceneTree, ancestor: NodeId, id: NodeId) -> Option<String> {
+    let mut parts = Vec::new();
+    let mut cursor = id;
+    while cursor != ancestor {
+        let node = tree.get_node(cursor)?;
+        parts.push(node.name().to_string());
+        cursor = node.parent()?;
+    }
+    if parts.is_empty() {
+        return Some(".".to_string());
+    }
+    parts.reverse();
+    Some(parts.join("/"))
+}
+
+/// Whether `id` is a node of an instanced scene that the edited scene's file
+/// does not show: it lies inside an instance whose children are not editable.
+fn is_hidden_foreign(tree: &SceneTree, scene_root: NodeId, id: NodeId) -> bool {
+    if !crate::packed_scene::is_foreign_node(tree, scene_root, id) {
+        return false;
+    }
+    let mut cursor = tree.get_node(id).and_then(|n| n.parent());
+    while let Some(p) = cursor {
+        if p == scene_root {
+            break;
+        }
+        let Some(node) = tree.get_node(p) else { break };
+        if !node.get_property("_instance_path").is_nil()
+            && !matches!(node.get_property("_editable_children"), Variant::Bool(true))
+        {
+            return true;
+        }
+        cursor = node.parent();
+    }
+    false
+}
+
+/// The instance a node belongs to: the outermost instance root (a scene-own
+/// node with `instance=`) that is `id` itself or contains it as a foreign
+/// node, or `None` for a node the edited scene declares itself.
+fn instance_scope(tree: &SceneTree, scene_root: NodeId, id: NodeId) -> Option<NodeId> {
+    let foreign = crate::packed_scene::is_foreign_node(tree, scene_root, id);
+    let mut cursor = Some(id);
+    while let Some(c) = cursor {
+        if c == scene_root {
+            return None;
+        }
+        let node = tree.get_node(c)?;
+        let is_instance = !node.get_property("_instance_path").is_nil();
+        if is_instance && !crate::packed_scene::is_foreign_node(tree, scene_root, c) {
+            return (c == id || foreign).then_some(c);
+        }
+        if !foreign {
+            return None;
+        }
+        cursor = node.parent();
+    }
+    None
 }
 
 /// The `uid://...` the loader cached for `property`'s `ExtResource` reference,
@@ -1635,6 +1853,13 @@ fn tileset_custom_data_layer_types(node: &crate::node::Node) -> Vec<i32> {
     }
 }
 
+/// Whether `key` is engine plumbing kept on a node — a resource cache, an
+/// instance marker, runtime state — rather than a property Godot has. The
+/// saver never writes one and the inspector never lists one.
+pub fn is_internal_property(key: &str) -> bool {
+    is_internal_prop(key)
+}
+
 /// Property keys that are internal companions, never emitted as scene
 /// properties (they are re-encoded as resource references / header attributes).
 fn is_internal_prop(key: &str) -> bool {
@@ -1797,6 +2022,13 @@ fn is_internal_prop(key: &str) -> bool {
         // (pat-s3rrv.207). It is rebuilt into a `[sub_resource]` section, so
         // emitting it as a node property too would duplicate the data.
         || key.starts_with("__subres__")
+        // The allowlist above missed `__material__*`, `__mesh__*`,
+        // `__physics_material__*` and `__canvas_material__*` (sub-resource
+        // bodies flattened onto MeshInstance3D / CollisionObject / CanvasItem
+        // nodes), so every save of a 3D scene wrote them as node properties
+        // Godot has never heard of (pat-l0afa). No Godot storage property
+        // starts with `__`, so every such key is engine plumbing.
+        || key.starts_with("__")
 }
 
 /// The `type=` an external resource is declared as in a `[ext_resource]` header,
@@ -1928,6 +2160,7 @@ fn write_node_section(
     parent_path: Option<&str>,
     foreign: bool,
     skip_keys: &[&str],
+    instance_base: Option<&crate::node::Node>,
 ) {
     out.push('\n');
 
@@ -2002,12 +2235,45 @@ fn write_node_section(
             .find(|p| p.name == k)
             .is_some_and(|p| &p.default_value == v)
     };
-    let mut props: Vec<(&String, &Variant)> = node
+    // 🔑 A Node3D stores ONE property, `transform` (pat-l0afa). `position`,
+    // `rotation`, `scale`, `quaternion`, `basis` and `rotation_degrees` are
+    // editor views of it (PROPERTY_USAGE_EDITOR, no STORAGE, in
+    // `Node3D::_bind_methods`), so Godot's saver never writes them; Patina
+    // mirrors all of them onto the node (`node3d::store_local_transform`) and
+    // wrote every one back next to `transform`. The value written is the
+    // canonical local transform, so an edit made through any view is kept.
+    let node3d_transform = crate::node3d::looks_like_node3d(node)
+        .then(|| Variant::Transform3D(crate::node3d::local_transform_of(node)));
+    const NODE3D_VIEWS: &[&str] =
+        &["position", "rotation", "rotation_degrees", "scale", "quaternion", "basis", "transform"];
+    let mut owned: Vec<(String, Variant)> = node
         .properties()
         .filter(|(k, _)| !is_internal_prop(k) && !skip_keys.contains(&k.as_str()))
+        .filter(|(k, _)| node3d_transform.is_none() || !NODE3D_VIEWS.contains(&k.as_str()))
         .filter(|(k, v)| !is_class_default(k, v) || sub_ref.contains_key(k.as_str()))
+        // 🔑 An instance (or an editable child of one) writes only what
+        // differs from the instanced scene, as Godot's `SceneState::_parse_node`
+        // compares against the instance's own state. Without this every coin
+        // in level.tscn repeated coin.tscn's `script`, collision layers and
+        // `monitorable` as overrides.
+        .filter(|(k, v)| instance_base.is_none_or(|b| b.get_property(k) != **v))
+        .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    props.sort_by_key(|(k, _)| k.as_str().to_owned());
+    if let Some(t) = node3d_transform {
+        let identity = Variant::Transform3D(gdcore::math3d::Transform3D::IDENTITY);
+        let base_t = instance_base
+            .filter(|b| crate::node3d::looks_like_node3d(b))
+            .map(|b| Variant::Transform3D(crate::node3d::local_transform_of(b)));
+        let unchanged = match base_t {
+            Some(b) => b == t,
+            None => t == identity,
+        };
+        if !unchanged && !skip_keys.contains(&"transform") {
+            owned.push(("transform".to_string(), t));
+        }
+    }
+    owned.sort_by(|a, b| a.0.cmp(&b.0));
+    let props: Vec<(&String, &Variant)> = owned.iter().map(|(k, v)| (k, v)).collect();
     for (key, value) in props {
         // Property that references an inline sub-resource (mesh/shape/etc): emit
         // the canonical `SubResource("id")` regardless of any resolved marker.
@@ -2110,6 +2376,15 @@ fn write_connections(
             };
 
             for conn in signal.connections() {
+                // A connection inside one instance (both ends in the same
+                // instanced scene) is that scene's own `[connection]`; Godot
+                // does not repeat it in the scene that instances it.
+                if let Some(&to_nid) = object_id_to_node_id.get(&conn.target_id) {
+                    let from_scope = instance_scope(tree, _root_id, nid);
+                    if from_scope.is_some() && from_scope == instance_scope(tree, _root_id, to_nid) {
+                        continue;
+                    }
+                }
                 // Resolve target ObjectId -> NodeId -> path.
                 let to_path = object_id_to_node_id
                     .get(&conn.target_id)
@@ -2294,8 +2569,9 @@ mod tests {
         d.insert("b".to_string(), Variant::Int(2));
         d.insert("a".to_string(), Variant::Int(1));
         let result = format_variant_value(&Variant::Dictionary(d.into()));
-        // Keys are sorted.
-        assert_eq!(result, "{\"a\": 1, \"b\": 2}");
+        // Keys are sorted, one entry per line, as Godot's VariantWriter writes
+        // them (pat-l0afa).
+        assert_eq!(result, "{\n\"a\": 1,\n\"b\": 2\n}");
     }
 
     #[test]

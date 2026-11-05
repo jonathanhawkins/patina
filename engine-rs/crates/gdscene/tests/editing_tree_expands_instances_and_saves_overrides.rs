@@ -41,7 +41,9 @@ fn the_glb_instance_is_expanded_marked_and_its_nodes_are_foreign() {
 #[test]
 fn the_saver_writes_foreign_nodes_as_typeless_overrides_and_keeps_editable() {
     let (tree, root) = open_player();
-    let text = TscnSaver::save_tree(&tree, root);
+    // The GENERATOR (no file baseline) is what this checks: an opened scene
+    // saves as an edit of its file, which keeps these entries verbatim anyway.
+    let text = TscnSaver::generate(&tree, root);
     assert!(text.contains("[node name=\"Player\" parent=\".\" instance=ExtResource("), "{text}");
     assert!(text.contains("[node name=\"Robot\" parent=\"Player/Skeleton/Skeleton3D\"]\n"), "no type= on a glTF node:\n{text}");
     assert!(text.contains("[node name=\"Bullet\" type=\"Marker3D\" parent=\"Player/Skeleton\"]"), "{text}");

@@ -96,6 +96,22 @@ impl Default for VcsStatus {
 // Git integration
 // ---------------------------------------------------------------------------
 
+/// The working-tree root of the repository that contains `project_dir`,
+/// discovered upward the way godot-git-plugin's `git_repository_discover`
+/// does, or `None` when `project_dir` is in no repository.
+pub fn repository_top_level(project_dir: &Path) -> Option<std::path::PathBuf> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(project_dir)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let top = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!top.is_empty()).then(|| std::path::PathBuf::from(top))
+}
+
 /// Queries git for the current VCS status of the given project directory.
 ///
 /// Returns a [`VcsStatus`] with branch info, file statuses, and summary counts.

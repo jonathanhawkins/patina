@@ -335,30 +335,17 @@ impl SceneSaveBaseline {
     /// The text to write for `root`'s scene, whose saver output is now
     /// `generated`.
     ///
-    /// Unedited, it is the file exactly as opened. Edited, a scene holding
-    /// expanded instances is merged into the original
-    /// ([`gdscene::tscn_merge::merge_edits`]) so the instances' foreign nodes
-    /// stay out of the file and the editable-children entries keep their
-    /// `parent_id_path`/`unique_id`; any other scene is written as the saver
-    /// writes it, as before.
-    pub fn text_to_save(&self, tree: &SceneTree, root: NodeId, generated: String) -> String {
-        if self.root != root.raw() {
-            return generated;
-        }
-        if generated == self.generated {
+    /// Unedited, it is the file exactly as opened. Edited, it is `generated`:
+    /// [`TscnSaver::save_tree`] already saves an opened scene as an edit of
+    /// its file (the tree carries the baseline, pat-i5igl), whether or not it
+    /// holds expanded instances. Before that only a scene WITH instances was
+    /// merged, so an edited coin.tscn was written from the generator alone and
+    /// lost its nested `GradientTexture2D -> Gradient`.
+    pub fn text_to_save(&self, _tree: &SceneTree, root: NodeId, generated: String) -> String {
+        if self.root == root.raw() && generated == self.generated {
             return self.original.clone();
         }
-        let mut ids = Vec::new();
-        tree.collect_subtree_top_down(root, &mut ids);
-        let has_expanded_instance = ids.iter().any(|&id| {
-            tree.get_node(id)
-                .is_some_and(|n| n.has_property(gdscene::packed_scene::INSTANCE_EXPANDED_KEY))
-        });
-        if has_expanded_instance {
-            gdscene::tscn_merge::merge_edits(&self.original, &self.generated, &generated)
-        } else {
-            generated
-        }
+        generated
     }
 }
 
@@ -3569,12 +3556,12 @@ fn handle_connection(
         // Shader Editor live validation (Godot ShaderTextEditor::_validate_script).
         ("POST", "/api/shader_validate") => api_validate_shader_source(&req.body, &mut stream),
         // pat-1zlel: Version control integration
-        ("GET", "/api/vcs/status") => api_vcs_status(&mut stream),
-        ("GET", "/api/vcs/diff") => api_vcs_diff(&req.query, &mut stream),
-        ("GET", "/api/vcs/log") => api_vcs_log(&req.query, &mut stream),
-        ("POST", "/api/vcs/stage") => api_vcs_stage(&req.body, &mut stream),
-        ("POST", "/api/vcs/unstage") => api_vcs_unstage(&req.body, &mut stream),
-        ("POST", "/api/vcs/discard") => api_vcs_discard(&req.body, &mut stream),
+        ("GET", "/api/vcs/status") => api_vcs_status(state, &mut stream),
+        ("GET", "/api/vcs/diff") => api_vcs_diff(state, &req.query, &mut stream),
+        ("GET", "/api/vcs/log") => api_vcs_log(state, &req.query, &mut stream),
+        ("POST", "/api/vcs/stage") => api_vcs_stage(state, &req.body, &mut stream),
+        ("POST", "/api/vcs/unstage") => api_vcs_unstage(state, &req.body, &mut stream),
+        ("POST", "/api/vcs/discard") => api_vcs_discard(state, &req.body, &mut stream),
         // pat-0q2kx.11: Export dialog preset CRUD, persisted to
         // export_presets.cfg. The client has called these since pat-4cexp; they
         // had no routes and 404'd through the fallback below.
@@ -4629,6 +4616,17 @@ pub(crate) fn node_properties_json(
                 // `ExtResource("id")` property (pat-0q2kx.6) — internal, and the
                 // real property is already listed.
                 && !name.starts_with("__extres__")
+                // Every other engine-side companion the saver also keeps out of
+                // the file: an instance root listed `_instance`,
+                // `_instance_path`, `_instance_expanded` and `__extuid__script`
+                // as editable rows ("Instance Path: res://touch_screen_ui/..."),
+                // which Godot's inspector never shows.
+                //
+                // ⚠️ The `__<resource>__*` body caches (`__shape__radius`, …)
+                // stay listed: they are how a flattened sub-resource is edited
+                // from this panel today.
+                && !(gdscene::scene_saver::is_internal_property(name)
+                    && (!name.starts_with("__") || name.starts_with("__extuid__")))
         })
         .collect();
     extras.sort_by(|a, b| a.0.cmp(b.0));
@@ -10302,11 +10300,13 @@ fn api_save_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
         send_error(stream, 500, &format!("failed to write: {e}"));
         return;
     }
-    // The file now says `tscn`, and the saver says `generated` for this tree.
+    // The file now says `tscn`: later saves are edits of it.
+    TscnSaver::capture_baseline(&mut state.scene_tree, save_root, tscn.clone());
+    let _ = generated;
     state.scene_save_baseline = Some(SceneSaveBaseline {
         root: save_root.raw(),
         original: tscn.clone(),
-        generated,
+        generated: tscn.clone(),
     });
 
     // pat-s3rrv.66: `_save_external_data` runs AFTER the scene is written, not
@@ -10599,8 +10599,16 @@ fn api_load_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
             // unedited save compares equal (pat-hivyf). A binary `.scn` was
             // decoded to text above: not the bytes on disk, so no baseline.
             state.scene_save_baseline = if path.ends_with(".tscn") {
+                // Re-taken now that the passes above have settled the tree, so
+                // they do not read as edits.
+                if let Some(root) = edited_scene_root(&state.scene_tree) {
+                    TscnSaver::capture_baseline(&mut state.scene_tree, root, source.clone());
+                }
                 SceneSaveBaseline::capture(&state.scene_tree, source.clone())
             } else {
+                if let Some(root) = edited_scene_root(&state.scene_tree) {
+                    state.scene_tree.set_save_baseline(root, None);
+                }
                 None
             };
             state.selected_node = None;
@@ -19460,6 +19468,11 @@ fn api_instance_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut 
             return;
         }
     };
+    // The instance's own sub-scenes resolve through `res://` while it is
+    // expanded (pat-i5igl), as a scene Open does.
+    if let Some(project) = state.project_root.clone() {
+        apply_project_path_roots(&project);
+    }
 
     let mut cmd = EditorCommand::InstanceScene {
         parent_id,
@@ -28238,9 +28251,29 @@ fn api_validate_shader_source(body: &str, stream: &mut TcpStream) {
 // pat-1zlel: Version control integration
 // ---------------------------------------------------------------------------
 
+/// The directory every `/api/vcs/*` git command runs in (pat-24o1e).
+///
+/// Godot's VCS plugin opens the repository it DISCOVERS from the project path
+/// (godot-git-plugin `_initialize`: `git_repository_discover(project_path,
+/// across_fs=1)`), so a project nested in a bigger repo shows that repo, with
+/// repo-relative paths. Patina used the PROCESS cwd instead, so the panel
+/// showed whatever repo the editor binary happened to be launched from, not
+/// the project's. Discovery now starts at the project root, and commands run
+/// at the repository's top level so the repo-relative paths `status` lists are
+/// the same paths `diff`/`stage`/`discard` accept.
+fn vcs_repo_dir(state: &Arc<Mutex<EditorState>>) -> std::path::PathBuf {
+    let project = state
+        .lock()
+        .ok()
+        .and_then(|s| s.project_root.clone())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    crate::vcs::repository_top_level(&project).unwrap_or(project)
+}
+
 /// `GET /api/vcs/status` — returns git status for the project directory.
-fn api_vcs_status(stream: &mut TcpStream) {
-    let cwd = std::env::current_dir().unwrap_or_default();
+fn api_vcs_status(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
+    let cwd = vcs_repo_dir(state);
     let status = crate::vcs::query_git_status(&cwd);
     match serde_json::to_string(&status) {
         Ok(json) => send_json(stream, &json),
@@ -28251,7 +28284,7 @@ fn api_vcs_status(stream: &mut TcpStream) {
 }
 
 /// `GET /api/vcs/diff?file=<path>&staged=<bool>` — returns diff for a file.
-fn api_vcs_diff(query: &str, stream: &mut TcpStream) {
+fn api_vcs_diff(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
     let file = match query_param(query, "file") {
         Some(f) => f.to_string(),
         None => {
@@ -28260,7 +28293,7 @@ fn api_vcs_diff(query: &str, stream: &mut TcpStream) {
         }
     };
     let staged = query_param(query, "staged").map_or(false, |v| v == "true" || v == "1");
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = vcs_repo_dir(state);
     let diff = if staged {
         crate::vcs::get_file_diff_staged(&cwd, &file)
     } else {
@@ -28272,18 +28305,18 @@ fn api_vcs_diff(query: &str, stream: &mut TcpStream) {
 }
 
 /// `GET /api/vcs/log?count=<N>` — returns recent commit log.
-fn api_vcs_log(query: &str, stream: &mut TcpStream) {
+fn api_vcs_log(state: &Arc<Mutex<EditorState>>, query: &str, stream: &mut TcpStream) {
     let count: u32 = query_param(query, "count")
         .and_then(|v| v.parse().ok())
         .unwrap_or(20);
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = vcs_repo_dir(state);
     let commits = crate::vcs::get_commit_log(&cwd, count);
     let json = serde_json::to_string(&commits).unwrap_or_else(|_| "[]".into());
     send_json(stream, &format!(r#"{{"commits":{json}}}"#));
 }
 
 /// `POST /api/vcs/stage` — stages a file for commit.
-fn api_vcs_stage(body: &str, stream: &mut TcpStream) {
+fn api_vcs_stage(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let p = match parse_json_body(body) {
         Some(v) => v,
         None => {
@@ -28298,7 +28331,7 @@ fn api_vcs_stage(body: &str, stream: &mut TcpStream) {
             return;
         }
     };
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = vcs_repo_dir(state);
     match crate::vcs::stage_file(&cwd, &file) {
         Ok(()) => send_json(stream, r#"{"ok":true}"#),
         Err(e) => send_error(stream, 500, &e),
@@ -28306,7 +28339,7 @@ fn api_vcs_stage(body: &str, stream: &mut TcpStream) {
 }
 
 /// `POST /api/vcs/unstage` — unstages a file.
-fn api_vcs_unstage(body: &str, stream: &mut TcpStream) {
+fn api_vcs_unstage(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let p = match parse_json_body(body) {
         Some(v) => v,
         None => {
@@ -28321,7 +28354,7 @@ fn api_vcs_unstage(body: &str, stream: &mut TcpStream) {
             return;
         }
     };
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = vcs_repo_dir(state);
     match crate::vcs::unstage_file(&cwd, &file) {
         Ok(()) => send_json(stream, r#"{"ok":true}"#),
         Err(e) => send_error(stream, 500, &e),
@@ -28329,7 +28362,7 @@ fn api_vcs_unstage(body: &str, stream: &mut TcpStream) {
 }
 
 /// `POST /api/vcs/discard` — discards working tree changes for a file.
-fn api_vcs_discard(body: &str, stream: &mut TcpStream) {
+fn api_vcs_discard(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpStream) {
     let p = match parse_json_body(body) {
         Some(v) => v,
         None => {
@@ -28344,7 +28377,7 @@ fn api_vcs_discard(body: &str, stream: &mut TcpStream) {
             return;
         }
     };
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = vcs_repo_dir(state);
     match crate::vcs::discard_changes(&cwd, &file) {
         Ok(()) => send_json(stream, r#"{"ok":true}"#),
         Err(e) => send_error(stream, 500, &e),
@@ -29453,16 +29486,22 @@ position = Vector2(10, 20)
             "instanced root records its source .tscn path"
         );
 
-        // The instanced subtree is embedded (the child Sprite came along).
-        let sprite = instanced["children"]
+        // The instanced subtree is built (the child Sprite came along) but
+        // belongs to the INSTANCE (pat-i5igl): the dock does not list it, as
+        // Godot's hides an instance's children unless Editable Children is on,
+        // and the saver writes the instance as its one `instance=` line.
+        {
+            let st = handle.state().lock().unwrap();
+            let t = &st.scene_tree;
+            let inst = find_node_by_raw_id(t, root_id).expect("instanced root");
+            let sprite = t.get_node_relative(inst, "Sprite").expect("instanced subtree is built under the root");
+            let scene_root = t.get_node(t.root_id()).unwrap().children()[0];
+            assert!(gdscene::packed_scene::is_foreign_node(t, scene_root, sprite));
+        }
+        let listed = instanced["children"]
             .as_array()
-            .expect("instanced root has children")
-            .iter()
-            .find(|c| c["name"] == "Sprite");
-        assert!(
-            sprite.is_some(),
-            "instanced subtree is embedded under the root"
-        );
+            .map_or(false, |c| c.iter().any(|c| c["name"] == "Sprite"));
+        assert!(!listed, "an instance's own nodes are not listed in the dock");
 
         // Cleanup.
         let _ = std::fs::remove_dir_all(&dir);
@@ -34004,10 +34043,13 @@ position = Vector2(10, 20)
             scene_resp.contains("Enemy"),
             "tree should contain Enemy node"
         );
-        assert!(
-            scene_resp.contains("Sprite"),
-            "tree should contain Sprite node"
-        );
+        // The instance's Sprite is built, as the instance's node (pat-i5igl).
+        {
+            let st = handle.state().lock().unwrap();
+            let t = &st.scene_tree;
+            let inst = find_node_by_raw_id(t, v["id"].as_u64().unwrap()).unwrap();
+            assert!(t.get_node_relative(inst, "Sprite").is_some(), "tree should contain Sprite node");
+        }
 
         // Cleanup.
         let _ = std::fs::remove_dir_all(&dir);
