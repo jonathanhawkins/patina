@@ -7059,6 +7059,8 @@ mod tests {
             indices: extra.indices.clone(),
             primitive_type: extra.primitive_type,
             lods: Vec::new(),
+            bone_weights: Vec::new(),
+            bone_indices: Vec::new(),
         });
         let mut inst = Instance3D::new(gdserver3d::instance::Instance3DId(1));
         inst.material = Some(Material3D {

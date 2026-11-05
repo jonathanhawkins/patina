@@ -366,3 +366,31 @@ fn the_enemy_glb_draws_with_its_gltf_materials_per_surface() {
     // emissiveFactor (1, 0.5, 0.5) linear -> sRGB (1, 0.735, 0.735).
     assert!((glow.emission.r - 1.0).abs() < 1e-3 && (glow.emission.g - 0.735).abs() < 0.003);
 }
+
+/// pat-zwvgw: `player.glb.import` maps the glb's `player_gray` / `player_glow`
+/// materials to the external `player_gray.tres` / `player_glow.tres`, and the
+/// robot draws with those — as Godot's scene importer does — not with the
+/// glb's embedded colours.
+#[test]
+fn the_robot_draws_with_the_external_materials_its_import_names() {
+    let (prepared, paths) = play_frame(320, 180);
+    let Play3DScene::Camera { inputs, .. } = &prepared.scene else {
+        panic!("game.tscn has a current Camera3D");
+    };
+    let robot = items_at(
+        &inputs.items,
+        &paths,
+        "/root/Game/Player/Player/Skeleton/Skeleton3D/Robot",
+    );
+    assert_eq!(robot.len(), 1);
+    let gray = robot[0].material.as_ref().expect("surface 0: player_gray");
+    // player_gray.tres: albedo 0.8, metallic 1, roughness 0.4 (the glb's own
+    // player_gray is 0.4 linear with roughness 0.8).
+    assert!((gray.albedo.r - 0.8).abs() < 1e-4, "{:?}", gray.albedo);
+    assert_eq!(gray.metallic, 1.0);
+    assert!((gray.roughness - 0.4).abs() < 1e-4);
+    let glow = robot[0].surface_materials[0]
+        .as_ref()
+        .expect("surface 1: player_glow");
+    assert!((glow.albedo.b - 1.75).abs() < 1e-4, "{:?}", glow.albedo);
+}

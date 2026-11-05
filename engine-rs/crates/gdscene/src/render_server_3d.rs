@@ -2255,6 +2255,7 @@ pub fn gltf_surface_materials(path: &str, mesh_index: Option<i64>) -> Vec<Materi
         .ok()
         .filter(|p| p.exists())
         .unwrap_or_else(|| std::path::PathBuf::from(on_disk));
+    let external = gltf_external_materials(path);
     let out: Vec<Material3D> = gdresource::import_gltf(&resolved)
         .map(|res| {
             let mut subs: Vec<(&String, &Arc<gdresource::Resource>)> = match mesh_index {
@@ -2281,6 +2282,13 @@ pub fn gltf_surface_materials(path: &str, mesh_index: Option<i64>) -> Vec<Materi
             subs.retain(|(_, s)| s.get_property("vertices").is_some());
             subs.iter()
                 .map(|(_, s)| {
+                    // The import's external material for this glTF material
+                    // name wins, as it does in Godot's scene importer.
+                    if let Some(Variant::String(name)) = s.get_property("material_name") {
+                        if let Some(mat) = external.get(name) {
+                            return mat.clone();
+                        }
+                    }
                     let color = |k: &str, d: Color| match s.get_property(k) {
                         Some(Variant::Color(c)) => *c,
                         _ => d,
@@ -2311,6 +2319,70 @@ pub fn gltf_surface_materials(path: &str, mesh_index: Option<i64>) -> Vec<Materi
         })
         .unwrap_or_default();
     CACHE.with(|c| c.borrow_mut().insert(key, out.clone()));
+    out
+}
+
+/// The external materials a glTF's `.import` maps its materials to
+/// (`_subresources.materials.<name>`, `use_external/enabled = true`), by glTF
+/// material name, loaded from each one's `use_external/fallback_path`
+/// (pat-zwvgw). The official 3D platformer's robot draws with
+/// `player_gray.tres` / `player_glow.tres` this way, not the glb's own colours.
+fn gltf_external_materials(gltf_path: &str) -> HashMap<String, Material3D> {
+    let mut out = HashMap::new();
+    let import_path = format!("{gltf_path}.import");
+    let Ok(text) = gdcore::file_access::FileAccess::read_file_string(&import_path) else {
+        return out;
+    };
+    let Some(start) = text.find("\"materials\": {") else {
+        return out;
+    };
+    let body = &text[start + "\"materials\": {".len()..];
+    let mut textures = MaterialTextureCache::new();
+    // Entries look like `"name": {\n"use_external/enabled": true, ... }`.
+    let mut rest = body;
+    while let Some(q) = rest.find('"') {
+        let after = &rest[q + 1..];
+        let Some(end) = after.find('"') else { break };
+        let name = &after[..end];
+        let tail = &after[end + 1..];
+        let Some(open) = tail.find('{') else { break };
+        if !tail[..open].trim().starts_with(':') {
+            break;
+        }
+        let Some(close) = tail[open..].find('}') else { break };
+        let entry = &tail[open + 1..open + close];
+        let enabled = entry.contains("\"use_external/enabled\": true");
+        let fallback = entry
+            .split("\"use_external/fallback_path\": \"")
+            .nth(1)
+            .and_then(|s| s.split('"').next());
+        if let (true, Some(path)) = (enabled, fallback) {
+            if let Ok(src) = gdcore::file_access::FileAccess::read_file_string(path) {
+                if let Ok(res) = gdresource::loader::TresLoader::new().parse_str(&src, path) {
+                    let props: HashMap<String, Variant> = res
+                        .properties()
+                        .map(|(k, v)| {
+                            let v = match v {
+                                Variant::String(r) => r
+                                    .strip_prefix("ExtResource:")
+                                    .and_then(|id| res.ext_resources.get(id))
+                                    .map(|e| Variant::String(e.path.clone()))
+                                    .unwrap_or_else(|| v.clone()),
+                                _ => v.clone(),
+                            };
+                            (k.clone(), v)
+                        })
+                        .collect();
+                    out.insert(name.to_string(), material3d_from_props(&props, &mut textures));
+                }
+            }
+        }
+        rest = &tail[open + close + 1..];
+        // The `materials` block ends at the next unmatched `}`.
+        if rest.trim_start().starts_with('}') {
+            break;
+        }
+    }
     out
 }
 
