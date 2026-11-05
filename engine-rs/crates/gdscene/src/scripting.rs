@@ -4079,6 +4079,12 @@ impl SceneAccess for SceneTreeAccessor {
             "is_physics_processing" => {
                 Some(Variant::Bool(self.tree().is_node_physics_processing(nid)))
             }
+            // `Node.reset_physics_interpolation()` — Patina renders physics
+            // bodies at their last tick with no interpolation, so there is no
+            // interpolated history to discard. A no-op rather than "method not
+            // found": the official 3D platformer calls it every time the player
+            // respawns, and raising aborted the rest of `_physics_process`.
+            "reset_physics_interpolation" => Some(Variant::Nil),
             // -- the rest of Node's process surface (pat-mgixk.57) ----------
             //
             // `set_process` / `set_physics_process` / `is_processing` /

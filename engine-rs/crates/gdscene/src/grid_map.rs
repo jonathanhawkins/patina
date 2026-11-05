@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use gdcore::error::EngineResult;
 use gdcore::math::Vector3;
-use gdcore::math3d::Basis;
+use gdcore::math3d::{Basis, Transform3D};
 use gdvariant::Variant;
 
 use crate::packed_scene::PackedScene;
@@ -17,6 +17,18 @@ const INVALID_CELL_ITEM: i32 = 0xFFFF;
 pub struct MeshLibraryItem {
     pub name: String,
     pub mesh_path: String,
+    /// `item/<id>/mesh_transform`: where the mesh sits inside its cell. Godot
+    /// draws a cell's mesh at `cell_xform * mesh_transform` (grid_map.cpp,
+    /// `_octant_update`), so a library that offsets or rotates a tile mesh
+    /// relies on this. Identity when unauthored.
+    pub mesh_transform: Transform3D,
+    /// `item/<id>/shapes`: the item's collision shapes as `(shape resource
+    /// path, transform in the cell)`, in authored order. Godot's flat
+    /// `[Shape3D, Transform3D, Shape3D, Transform3D, ...]` array, paired up.
+    ///
+    /// ⚠️ NOT affected by `mesh_transform` — Godot places shapes at
+    /// `cell_xform * shape_xform` only.
+    pub shapes: Vec<(String, Transform3D)>,
 }
 
 /// MeshLibrary resource (subset).
@@ -35,6 +47,8 @@ impl MeshLibrary {
             MeshLibraryItem {
                 name: name.into(),
                 mesh_path: mesh_path.into(),
+                mesh_transform: Transform3D::IDENTITY,
+                shapes: Vec::new(),
             },
         );
     }
@@ -49,8 +63,8 @@ impl MeshLibrary {
     ///
     /// Godot writes one flat property block per item — `item/<id>/name`,
     /// `item/<id>/mesh`, plus `mesh_transform` / `shapes` / `navigation_mesh` /
-    /// `preview`. Only the name and the mesh path are read here; the rest is
-    /// data the GridMap render path does not consume yet.
+    /// `preview`. The name, mesh path, `mesh_transform` and `shapes` are read
+    /// (pat-2ifdx); navigation and preview are not consumed yet.
     ///
     /// An item with a name but **no** mesh is skipped: it contributes no
     /// geometry, and admitting it would put an entry with an empty path into the
@@ -80,6 +94,14 @@ impl MeshLibrary {
         // HashMap, so `name` and `mesh` arrive in either order.
         let mut names: HashMap<i32, String> = HashMap::new();
         let mut meshes: HashMap<i32, String> = HashMap::new();
+        let mut mesh_transforms: HashMap<i32, Transform3D> = HashMap::new();
+        let mut shapes: HashMap<i32, Vec<(String, Transform3D)>> = HashMap::new();
+        // `ExtResource("id")` arrives as `"ExtResource:<id>"`; the path lives on
+        // the header entry.
+        let ext_path = |reference: &str| -> Option<String> {
+            let ext_id = reference.strip_prefix("ExtResource:")?;
+            resource.ext_resources.get(ext_id).map(|e| e.path.clone())
+        };
         for (key, value) in resource.properties() {
             let Some(rest) = key.strip_prefix("item/") else {
                 continue;
@@ -95,13 +117,35 @@ impl MeshLibrary {
                     names.insert(id, name.clone());
                 }
                 ("mesh", Variant::String(reference)) => {
-                    // The loader stores `ExtResource("id")` as a string with an
-                    // `ExtResource:` prefix; the path lives on the header entry.
-                    if let Some(ext_id) = reference.strip_prefix("ExtResource:") {
-                        if let Some(ext) = resource.ext_resources.get(ext_id) {
-                            meshes.insert(id, ext.path.clone());
-                        }
+                    if let Some(path) = ext_path(reference) {
+                        meshes.insert(id, path);
                     }
+                }
+                ("mesh_transform", Variant::Transform3D(t)) => {
+                    mesh_transforms.insert(id, *t);
+                }
+                // `[Shape3D, Transform3D, Shape3D, Transform3D, ...]`. A shape
+                // without a following transform sits at the cell centre, which
+                // is what Godot's setter does with a short array.
+                ("shapes", Variant::Array(items)) => {
+                    let items = items.to_vec();
+                    let mut list = Vec::new();
+                    let mut i = 0;
+                    while i < items.len() {
+                        let path = match &items[i] {
+                            Variant::String(r) => ext_path(r),
+                            _ => None,
+                        };
+                        let xform = match items.get(i + 1) {
+                            Some(Variant::Transform3D(t)) => *t,
+                            _ => Transform3D::IDENTITY,
+                        };
+                        if let Some(path) = path {
+                            list.push((path, xform));
+                        }
+                        i += 2;
+                    }
+                    shapes.insert(id, list);
                 }
                 _ => {}
             }
@@ -111,6 +155,14 @@ impl MeshLibrary {
         for (id, mesh_path) in meshes {
             let name = names.get(&id).cloned().unwrap_or_default();
             library.set_item(id, name, mesh_path);
+            if let Some(item) = library.items.get_mut(&id) {
+                if let Some(t) = mesh_transforms.get(&id) {
+                    item.mesh_transform = *t;
+                }
+                if let Some(list) = shapes.remove(&id) {
+                    item.shapes = list;
+                }
+            }
         }
         Some(library)
     }
@@ -297,6 +349,9 @@ pub struct GridMap {
     /// captured on `.tscn` load. The `MeshLibrary` contents themselves live in a
     /// separate resource file and are populated by a future MeshLibrary loader.
     pub mesh_library_resource: Option<String>,
+    /// `cell_center_x/y/z` (all `true` in Godot). A centred axis places the
+    /// cell's origin half a cell in from its corner — Godot's `_get_offset`.
+    pub cell_center: [bool; 3],
     cells: HashMap<GridCell, i32>,
     /// Per-cell orientation; absent means Godot's default of 0.
     orientations: HashMap<GridCell, u8>,
@@ -308,9 +363,64 @@ impl GridMap {
             cell_size: 2.0,
             mesh_library: MeshLibrary::new(),
             mesh_library_resource: None,
+            cell_center: [true; 3],
             cells: HashMap::new(),
             orientations: HashMap::new(),
         }
+    }
+
+    /// Godot's `_get_offset`: half a cell on every axis whose `cell_center_*`
+    /// is set.
+    pub fn cell_offset(&self) -> Vector3 {
+        let half = |on: bool| if on { self.cell_size * 0.5 } else { 0.0 };
+        Vector3::new(
+            half(self.cell_center[0]),
+            half(self.cell_center[1]),
+            half(self.cell_center[2]),
+        )
+    }
+
+    /// Godot's `map_to_local`: the cell's origin in the GridMap's local space.
+    pub fn map_to_local(&self, cell: GridCell) -> Vector3 {
+        Vector3::new(
+            cell.x as f32 * self.cell_size,
+            cell.y as f32 * self.cell_size,
+            cell.z as f32 * self.cell_size,
+        ) + self.cell_offset()
+    }
+
+    /// The cell's placement in GridMap-local space: its orientation basis at
+    /// [`map_to_local`](Self::map_to_local). Godot builds exactly this in
+    /// `_octant_update` (`xform.basis = _ortho_bases[rot]; xform.origin =
+    /// cellpos * cell_size + ofs`) and composes both the item's
+    /// `mesh_transform` and every shape transform onto it.
+    pub fn cell_transform(&self, cell: GridCell) -> Transform3D {
+        Transform3D {
+            basis: orientation_basis(self.cell_orientation(cell)),
+            origin: self.map_to_local(cell),
+        }
+    }
+
+    /// Every collision shape the used cells contribute, in GridMap-local space:
+    /// `(cell_xform * shape_xform, shape resource path)` per item shape
+    /// (pat-2ifdx). Empty until a library with `item/<id>/shapes` is loaded.
+    ///
+    /// Sorted by cell so the order — and so the physics body ids built from
+    /// it — is deterministic despite the cell `HashMap`.
+    pub fn collision_shapes(&self) -> Vec<(Transform3D, String)> {
+        let mut cells: Vec<(&GridCell, &i32)> = self.cells.iter().collect();
+        cells.sort_by_key(|(c, _)| (c.x, c.y, c.z));
+        let mut out = Vec::new();
+        for (cell, id) in cells {
+            let Some(item) = self.mesh_library.get_item(*id) else {
+                continue;
+            };
+            let xform = self.cell_transform(*cell);
+            for (path, shape_xform) in &item.shapes {
+                out.push((xform * *shape_xform, path.clone()));
+            }
+        }
+        out
     }
 
     pub fn set_cell_item(&mut self, cell: GridCell, item: i32) {
@@ -341,12 +451,7 @@ impl GridMap {
         let mut out = Vec::new();
         for (cell, id) in &self.cells {
             if let Some(item) = self.mesh_library.get_item(*id) {
-                let pos = gdcore::math::Vector3::new(
-                    cell.x as f32 * self.cell_size,
-                    cell.y as f32 * self.cell_size,
-                    cell.z as f32 * self.cell_size,
-                );
-                out.push((pos, item.mesh_path.clone()));
+                out.push((self.map_to_local(*cell), item.mesh_path.clone()));
             }
         }
         out
@@ -363,16 +468,13 @@ impl GridMap {
         let mut out = Vec::new();
         for (cell, id) in &self.cells {
             if let Some(item) = self.mesh_library.get_item(*id) {
-                let pos = Vector3::new(
-                    cell.x as f32 * self.cell_size,
-                    cell.y as f32 * self.cell_size,
-                    cell.z as f32 * self.cell_size,
-                );
-                out.push((
-                    pos,
-                    orientation_basis(self.cell_orientation(*cell)),
-                    item.mesh_path.clone(),
-                ));
+                // 🔑 Godot draws the mesh at `cell_xform * mesh_transform`,
+                // where `cell_xform.origin` is the cell CENTRE (`map_to_local`,
+                // half a cell in from the corner on every `cell_center_*`
+                // axis). Placing it at `cell * cell_size` shifted the whole
+                // level by half a cell against its own collision (pat-2ifdx).
+                let t = self.cell_transform(*cell) * item.mesh_transform;
+                out.push((t.origin, t.basis, item.mesh_path.clone()));
             }
         }
         out
@@ -486,6 +588,7 @@ impl GridMap {
         if let Variant::Vector3(v) = node.get_property("cell_size") {
             grid.cell_size = v.x;
         }
+        grid.cell_center = read_cell_center(node);
 
         // mesh_library: `ExtResource("id")` -> resolved `res://` path.
         if let Variant::String(ref ext_ref) = node.get_property("mesh_library") {
@@ -534,6 +637,7 @@ impl GridMap {
         if let Variant::Vector3(v) = node.get_property("cell_size") {
             grid.cell_size = v.x;
         }
+        grid.cell_center = read_cell_center(node);
 
         match node.get_property("__extres__mesh_library") {
             Variant::String(path) => grid.mesh_library_resource = Some(path),
@@ -558,6 +662,13 @@ impl GridMap {
 
         Some(grid)
     }
+}
+
+/// `cell_center_x/y/z`, each defaulting to Godot's `true` when absent or not a
+/// bool.
+fn read_cell_center(node: &crate::node::Node) -> [bool; 3] {
+    let on = |key: &str| !matches!(node.get_property(key), Variant::Bool(false));
+    [on("cell_center_x"), on("cell_center_y"), on("cell_center_z")]
 }
 
 // ---------------------------------------------------------------------------
@@ -828,12 +939,8 @@ pub fn call_gridmap_method(
             let cell = cell_arg(0);
             let cs = node_cell_size(tree, node_id);
             let off = node_cell_offset(tree, node_id);
-            // ⚠️ Godot's map_to_local returns the cell CENTRE. The render path
-            // places each cell's mesh at the cell CORNER
-            // (`mesh_instances_oriented`: `cell * cell_size`, no offset), so the
-            // two disagree by half a cell. That divergence is PRE-EXISTING and
-            // deliberately not changed here: shifting mesh placement would move
-            // every cell of every existing GridMap render. Reported, not fixed.
+            // Godot's map_to_local returns the cell CENTRE — the same origin
+            // `GridMap::map_to_local` gives the render and collision paths.
             Variant::Vector3(Vector3::new(
                 cell.x as f32 * cs + off.x,
                 cell.y as f32 * cs + off.y,
@@ -955,7 +1062,9 @@ mod tests {
         assert_eq!(g.used_cells().len(), 1);
         let inst = g.mesh_instances();
         assert_eq!(inst.len(), 1);
-        assert!((inst[0].0.x - 2.0).abs() < 1e-5);
+        // Godot's map_to_local: x = 1 * 2 + 1 (cell_center_x), the cell's
+        // CENTRE (pat-2ifdx).
+        assert!((inst[0].0.x - 3.0).abs() < 1e-5);
     }
 
     #[test]

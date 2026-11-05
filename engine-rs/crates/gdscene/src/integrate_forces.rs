@@ -282,9 +282,26 @@ pub fn run_integrate_forces_3d(tree: &mut SceneTree, gravity: Vector3, dt: f32) 
         let Some(state) = build_state_3d(tree, id, gravity, dt) else {
             continue;
         };
+        let (lin_in, ang_in, sleeping_in) =
+            (state.linear_velocity, state.angular_velocity, state.sleeping);
         let handle = new_direct_body_state_3d_handle(state);
         tree.call_script_with_access(id, "_integrate_forces", &[Variant::ObjectId(handle)]);
-        if let Some(out) = take_direct_body_state_3d(handle) {
+        if let Some(mut out) = take_direct_body_state_3d(handle) {
+            // 🔑 Writing a velocity through the state WAKES the body, as in
+            // Godot (`set_linear_velocity` / `set_angular_velocity` wake it, in
+            // both GodotPhysics and Jolt) — unless the script itself chose the
+            // sleep state in the same call (pat-1unro).
+            //
+            // Without it a custom-integrator body went to sleep on its first
+            // quiet tick and never woke: the solver stopped moving it while
+            // `_integrate_forces` kept adding gravity to the velocity it read
+            // back, so a resting enemy's `linear_velocity.y` grew downward
+            // without bound (-36 after 4 s) and the body never walked.
+            let velocity_written =
+                out.linear_velocity != lin_in || out.angular_velocity != ang_in;
+            if velocity_written && out.sleeping == sleeping_in {
+                out.sleeping = false;
+            }
             apply_state_3d(tree, id, out);
         }
     }

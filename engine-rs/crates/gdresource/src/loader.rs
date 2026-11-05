@@ -552,7 +552,18 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
         return Err(EngineError::Parse(format!("invalid Transform2D: {s}")));
     }
 
-    // Transform3D(xx, xy, xz, yx, yy, yz, zx, zy, zz, ox, oy, oz)
+    // Transform3D(r0c0, r0c1, r0c2, r1c0, r1c1, r1c2, r2c0, r2c1, r2c2, ox, oy, oz)
+    //
+    // 🔑 The nine basis numbers are ROW-major: Godot's writer walks
+    // `basis.rows[i][j]` and its reader feeds them to the nine-argument
+    // `Basis(...)` constructor, which fills rows. Real Godot 4.6 parses
+    // `Transform3D(1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 0, 0)` to `basis.x == (1, 4,
+    // 7)`. This engine's `Basis` stores COLUMNS, so taking each triple as a
+    // column TRANSPOSED every authored rotation — for a rotation, its inverse.
+    // The official 3D platformer's player (turned 90 degrees about Y) faced
+    // the opposite way, its follow camera sat in front of it, and "forward"
+    // walked it backwards (pat-2ifdx). The binary loader already read rows
+    // (`res_loader.rs`, `basis_from_rows`); only the text path was wrong.
     if let Some(inner) = try_strip_call(s, "Transform3D") {
         let parts = split_args(inner);
         if parts.len() == 12 {
@@ -569,10 +580,11 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
             let oy = parse_f32(&parts[10])?;
             let oz = parse_f32(&parts[11])?;
             return Ok(Variant::Transform3D(Transform3D {
+                // Rows in, columns stored: column x is (r0c0, r1c0, r2c0).
                 basis: Basis {
-                    x: Vector3::new(xx, xy, xz),
-                    y: Vector3::new(yx, yy, yz),
-                    z: Vector3::new(zx, zy, zz),
+                    x: Vector3::new(xx, yx, zx),
+                    y: Vector3::new(xy, yy, zy),
+                    z: Vector3::new(xz, yz, zz),
                 },
                 origin: Vector3::new(ox, oy, oz),
             }));
@@ -800,10 +812,12 @@ pub fn parse_variant_value(s: &str) -> EngineResult<Variant> {
         if parts.len() == 9 {
             let f: Result<Vec<f32>, _> = parts.iter().map(|p| parse_f32(p)).collect();
             let f = f?;
+            // ROW-major, exactly like the basis inside `Transform3D(...)`
+            // above (pat-2ifdx).
             return Ok(Variant::Basis(Basis {
-                x: Vector3::new(f[0], f[1], f[2]),
-                y: Vector3::new(f[3], f[4], f[5]),
-                z: Vector3::new(f[6], f[7], f[8]),
+                x: Vector3::new(f[0], f[3], f[6]),
+                y: Vector3::new(f[1], f[4], f[7]),
+                z: Vector3::new(f[2], f[5], f[8]),
             }));
         }
         return Err(EngineError::Parse(format!("invalid Basis: {s}")));
