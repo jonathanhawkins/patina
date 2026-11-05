@@ -241,6 +241,8 @@ fn extra_surfaces_are_included() {
         uvs: Vec::new(),
         indices: vec![0, 1, 2],
         primitive_type: PrimitiveType::Triangles,
+        bone_weights: Vec::new(),
+        bone_indices: Vec::new(),
         lods: Vec::new(),
     });
 

@@ -724,6 +724,8 @@ impl ArrayMesh {
                 uvs,
                 indices,
                 primitive_type,
+                bone_weights: Vec::new(),
+                bone_indices: Vec::new(),
                 lods: Vec::new(),
             });
         }

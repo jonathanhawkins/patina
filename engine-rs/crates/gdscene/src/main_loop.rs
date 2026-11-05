@@ -2915,6 +2915,17 @@ impl MainLoop {
         }
     }
 
+    /// Applies every `reset_physics_interpolation()` a script queued on the tree
+    /// (pat-ghw2s). With interpolation off Godot ignores the call, and so does
+    /// draining the queue without applying it.
+    fn apply_script_interpolation_resets(&mut self) {
+        for id in self.tree.take_physics_interpolation_resets() {
+            if self.physics_interpolation_enabled {
+                self.reset_physics_interpolation(id);
+            }
+        }
+    }
+
     /// Godot's `Node.reset_physics_interpolation()` — call after teleporting a
     /// body so the next frame renders it where it now is, instead of streaking
     /// it through the gap it never travelled.
@@ -4339,6 +4350,10 @@ impl MainLoop {
                 // phase so a `_physics_process` that moved a body is included —
                 // the rendered blend must interpolate what actually happened.
                 if self.physics_interpolation_enabled {
+                    // A script's `reset_physics_interpolation()` from this
+                    // tick's `_physics_process` lands BEFORE the capture, so the
+                    // capture records only the post-teleport transform.
+                    self.apply_script_interpolation_resets();
                     self.physics_interpolation.capture(&self.tree);
                     // The 3D bodies settle in the same tick (pat-0q2kx.250), so
                     // they are captured here too rather than on a separate cadence
@@ -4398,6 +4413,9 @@ impl MainLoop {
         // physics at 20 tps and 60 fps rendering, two frames in three do no
         // physics at all — those are exactly the frames that used to show a
         // stale transform and now show a blended one.
+        // Also from `_process`, or a tick-less frame. Drained even with
+        // interpolation off, so the queue cannot grow without bound.
+        self.apply_script_interpolation_resets();
         if self.physics_interpolation_enabled {
             let fraction = (self.physics_accumulator / physics_dt) as f32;
             self.physics_interpolation

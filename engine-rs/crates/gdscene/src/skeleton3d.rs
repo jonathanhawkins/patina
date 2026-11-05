@@ -1866,7 +1866,6 @@ pub fn skeletons_in_tree(tree: &SceneTree) -> Vec<NodeId> {
 /// as a follow-up.
 pub fn apply_animation_bone_tracks(tree: &mut SceneTree) {
     use crate::animation::TrackType;
-    use std::collections::HashMap;
 
     fn is_bone_track(t: TrackType) -> bool {
         matches!(
@@ -1882,13 +1881,16 @@ pub fn apply_animation_bone_tracks(tree: &mut SceneTree) {
             Some(p) => p,
             None => continue,
         };
-        let types: HashMap<(String, String), TrackType> = player
-            .current_track_types()
+        // 🔑 Typed values, not a `(node, prop) -> type` lookup (pat-ghw2s): a
+        // bone's position, rotation and scale tracks share `Skeleton3D:<bone>`,
+        // so a lookup table held ONE type for all three and every position was
+        // written as a scale — the rig never left its rest pose.
+        let values: Vec<(String, String, TrackType, Variant)> = player
+            .get_current_values_typed()
             .into_iter()
-            .filter(|(_, _, t)| is_bone_track(*t))
-            .map(|(n, p, t)| ((n, p), t))
+            .filter(|(_, _, t, _)| is_bone_track(*t))
             .collect();
-        if types.is_empty() {
+        if values.is_empty() {
             continue;
         }
         // Tracks that must NOT become a pose. Godot cancels `root_motion_track`
@@ -1918,11 +1920,7 @@ pub fn apply_animation_bone_tracks(tree: &mut SceneTree) {
             tree.get_node_or_null(id, &root_node).unwrap_or(id)
         };
 
-        for (track_node, prop, value) in player.get_current_values_targeted() {
-            let track_type = match types.get(&(track_node.clone(), prop.clone())) {
-                Some(t) => *t,
-                None => continue,
-            };
+        for (track_node, prop, track_type, value) in values {
             // ⚠️ Keyed on the PROPERTY path, which is what the set holds:
             // `consume_root_motion` matches `t.property_path == track_path`
             // (`animation.rs:1698`) and `non_property_track_paths` pushes
@@ -1970,13 +1968,13 @@ pub fn apply_animation_bone_tracks(tree: &mut SceneTree) {
             Some(t) => t,
             None => continue,
         };
-        let types: HashMap<(String, String), TrackType> = anim_tree
-            .current_track_types()
+        // Typed for the same reason as the player branch (pat-ghw2s).
+        let values: Vec<(String, String, TrackType, Variant)> = anim_tree
+            .get_current_values_typed()
             .into_iter()
-            .filter(|(_, _, t)| is_bone_track(*t))
-            .map(|(n, p, t)| ((n, p), t))
+            .filter(|(_, _, t, _)| is_bone_track(*t))
             .collect();
-        if types.is_empty() {
+        if values.is_empty() {
             continue;
         }
         // Same base resolution as the player branch: the mixer's `root_node`,
@@ -1988,11 +1986,7 @@ pub fn apply_animation_bone_tracks(tree: &mut SceneTree) {
             tree.get_node_or_null(id, &root_node).unwrap_or(id)
         };
 
-        for (track_node, prop, value) in anim_tree.get_current_values_targeted() {
-            let track_type = match types.get(&(track_node.clone(), prop.clone())) {
-                Some(t) => *t,
-                None => continue,
-            };
+        for (track_node, prop, track_type, value) in values {
             let target = if track_node.is_empty() || track_node == "." {
                 base
             } else {

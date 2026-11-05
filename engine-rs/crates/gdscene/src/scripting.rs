@@ -4151,6 +4151,14 @@ impl SceneAccess for SceneTreeAccessor {
             "get_physics_process_priority" => Some(Variant::Int(
                 self.tree().node_physics_process_priority(nid) as i64,
             )),
+            // Godot's `Node.reset_physics_interpolation()` (pat-ghw2s). The
+            // platformer's Player calls it after teleporting back to its spawn
+            // point; without an arm every such frame raised "method not found"
+            // and the respawn streaked across the level.
+            "reset_physics_interpolation" => {
+                self.tree_mut().request_physics_interpolation_reset(nid);
+                Some(Variant::Nil)
+            }
             "can_process" => {
                 // Godot's `Node.can_process()` is the pause question only — it
                 // reports whether `process_mode` lets the node run under the

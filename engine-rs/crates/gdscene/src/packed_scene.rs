@@ -2350,6 +2350,12 @@ impl PackedScene {
         }
     }
 
+    /// The clips of a scene built from a glTF document, for the importer to
+    /// apply its `.import` settings to (pat-3mbf5). `None` for any other scene.
+    pub fn gltf_animations_mut(&mut self) -> Option<&mut Vec<crate::animation::Animation>> {
+        self.gltf_animations.as_mut().map(std::sync::Arc::make_mut)
+    }
+
     /// Returns the class name of the inline sub-resource with `id`, if any
     /// (e.g. `"Environment"`, `"Sky"`, `"ProceduralSkyMaterial"`).
     pub fn sub_resource_type(&self, id: &str) -> Option<&str> {
