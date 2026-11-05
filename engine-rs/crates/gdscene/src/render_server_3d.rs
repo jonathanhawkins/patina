@@ -2994,6 +2994,17 @@ pub fn sync_light_properties(node: &crate::node::Node, light: &mut Light3D) {
     if let Variant::Bool(b) = node.get_property("directional_shadow_blend_splits") {
         light.blend_splits = b;
     }
+    // pat-772py: what sizes and filters a camera-fitted directional map.
+    // `shadow_blur` scales Godot's PCF radius AND its constant bias.
+    if let Some(v) = num("shadow_blur") {
+        light.directional_shadow.blur = v;
+    }
+    if let Some(v) = num("directional_shadow_pancake_size") {
+        light.directional_shadow.pancake_size = v;
+    }
+    if let Variant::Int(m) = node.get_property("directional_shadow_mode") {
+        light.directional_shadow.mode = m.clamp(0, 2) as u8;
+    }
 }
 
 fn extract_vector3_array(v: &gdvariant::Variant) -> Option<Vec<Vector3>> {

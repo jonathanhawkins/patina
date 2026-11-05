@@ -1120,6 +1120,39 @@ impl PackedScene {
             }
         }
 
+        // pat-772py: a Decal's projected textures may be inline
+        // GradientTexture2Ds too: the 3D platformer's BlobShadow is
+        // `texture_albedo = SubResource("GradientTexture2D_kvc1x")`, a radial
+        // black-to-transparent blob. With no file behind it the renderer could
+        // load nothing and projected the flat `modulate` (white) through the
+        // whole box, a grey rectangle. Same descriptor mechanism as the
+        // material albedo above, in a `__gentex__<key>` companion so the
+        // authored reference still round-trips.
+        for tmpl in &mut templates {
+            for key in [
+                "texture_albedo",
+                "texture_normal",
+                "texture_orm",
+                "texture_emission",
+            ] {
+                let Some(tex_id) = sub_ref_id(tmpl.properties.get(key)) else {
+                    continue;
+                };
+                if sub_resources.get(&tex_id).map(String::as_str) != Some("GradientTexture2D") {
+                    continue;
+                }
+                let Some(tex_props) = sub_resource_props.get(&tex_id) else {
+                    continue;
+                };
+                let gradient = sub_ref_id(tex_props.get("gradient"))
+                    .and_then(|gid| sub_resource_props.get(&gid));
+                tmpl.properties.insert(
+                    format!("__gentex__{key}"),
+                    Variant::String(crate::gradient_texture::descriptor(tex_props, gradient)),
+                );
+            }
+        }
+
         // Flatten a node-level `CanvasItemMaterial` onto the node under
         // `__canvas_material__*` (pat-0q2kx.131).
         //

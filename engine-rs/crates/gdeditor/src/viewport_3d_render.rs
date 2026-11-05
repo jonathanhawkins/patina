@@ -1143,6 +1143,42 @@ pub struct SceneLight3D {
     pub directional_shadow_max_distance: f32,
     pub directional_shadow_fade_start: f32,
     pub editor_only: bool,
+    /// What sizes and filters a directional light's camera-fitted shadow map
+    /// (pat-772py): `shadow_blur`, `directional_shadow_pancake_size` and
+    /// `directional_shadow_mode` off the node, and the project's
+    /// `directional_shadow/size` and `soft_shadow_filter_quality`.
+    pub directional_shadow: gdserver3d::light::DirectionalShadowParams,
+}
+
+/// The project's directional-shadow settings
+/// (`rendering/lights_and_shadows/directional_shadow/size` and
+/// `.../soft_shadow_filter_quality`) folded into `params` (pat-772py).
+///
+/// Gated on `res://project.godot` being readable, so a scene assembled in Rust
+/// keeps Godot's defaults, which `DirectionalShadowParams::default` already
+/// carries.
+fn with_project_directional_shadow(
+    mut params: gdserver3d::light::DirectionalShadowParams,
+) -> gdserver3d::light::DirectionalShadowParams {
+    let Ok(text) = gdcore::file_access::FileAccess::read_file_string("res://project.godot") else {
+        return params;
+    };
+    let Ok(settings) = gdcore::project_settings::ProjectSettings::from_godot_format(&text) else {
+        return params;
+    };
+    if let Some(v) = settings
+        .get("rendering/lights_and_shadows/directional_shadow/size")
+        .and_then(|v| v.as_int())
+    {
+        params.atlas_size = v.clamp(16, 16384) as u32;
+    }
+    if let Some(v) = settings
+        .get("rendering/lights_and_shadows/directional_shadow/soft_shadow_filter_quality")
+        .and_then(|v| v.as_int())
+    {
+        params.soft_quality = v.clamp(0, 5) as u8;
+    }
+    params
 }
 
 /// Collects the scene's `DirectionalLight3D` nodes in tree order (capped at 4,
@@ -1274,6 +1310,7 @@ fn scene_lights(tree: &SceneTree) -> Vec<SceneLight3D> {
             shadow_split_3: synced.shadow_split_3,
             blend_splits: synced.blend_splits,
             editor_only: bool_prop_3d_render(tree, nid, "editor_only"),
+            directional_shadow: synced.directional_shadow,
         });
         positional += 1;
     }
@@ -1412,6 +1449,7 @@ fn scene_directional_lights(tree: &SceneTree) -> Vec<SceneLight3D> {
             shadow_split_3: synced.shadow_split_3,
             blend_splits: synced.blend_splits,
             editor_only: bool_prop_3d_render(tree, nid, "editor_only"),
+            directional_shadow: with_project_directional_shadow(synced.directional_shadow),
         });
         if lights.len() >= 4 {
             break;
@@ -2453,6 +2491,15 @@ thread_local! {
 /// spellings are accepted, companion first, so a scene-loaded node and a
 /// hand-built one behave the same. An empty path is `None`, not `Some("")`.
 fn env_texture_path(node: &gdscene::node::Node, key: &str) -> Option<String> {
+    // An inline GradientTexture2D travels as a generator descriptor, which the
+    // texture cache turns into pixels (pat-772py: the 3D platformer's
+    // BlobShadow). Checked first: the property itself then holds only the
+    // unloadable `SubResource:` reference.
+    if let gdvariant::Variant::String(d) = node.get_property(&format!("__gentex__{key}")) {
+        if !d.is_empty() {
+            return Some(d);
+        }
+    }
     let raw = match node.get_property(&format!("__extres__{key}")) {
         gdvariant::Variant::String(s) => s,
         _ => match node.get_property(key) {
@@ -2921,6 +2968,7 @@ pub(crate) fn scene_light_to_light3d(sl: &SceneLight3D, id: Light3DId) -> Light3
     light.shadow_split_2 = sl.shadow_split_2;
     light.shadow_split_3 = sl.shadow_split_3;
     light.blend_splits = sl.blend_splits;
+    light.directional_shadow = sl.directional_shadow;
     // Godot's sky_mode: LIGHT_ONLY lights shade the scene but draw no sky
     // sun disc (sky_suns_from_lights filters on this); SKY_ONLY lights draw
     // the disc but do not shade the scene (affects_scene gates that).

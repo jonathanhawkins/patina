@@ -221,7 +221,17 @@ struct LightData {
     // is still 160 bytes and every offset below the matrix is untouched.
     directional_shadow_max_distance: f32,
     directional_shadow_fade_start: f32,
-    _specular_pad2: f32,
+    // This light's map size over the shadow atlas layer size: maps of different
+    // sizes share one array texture, each in its layer's top-left corner
+    // (pat-772py). The last of `specular`'s pads.
+    shadow_uv_scale: f32,
+    // pat-772py: Godot's directional filter, a NEW 16-byte row (160 -> 176).
+    // `shadow_pcf_radius < 0` keeps the legacy single nearest compare (spot
+    // maps and an unfitted directional one).
+    shadow_depth_bias: f32,
+    shadow_texel_world: f32,
+    shadow_pcf_radius: f32,
+    shadow_pcf_taps: u32,
 };
 
 struct LightArray {
@@ -519,10 +529,95 @@ fn omni_shadow_factor(light: LightData, world_pos: vec3<f32>, normal: vec3<f32>)
     return 1.0;
 }
 
-fn directional_shadow_factor(light: LightData, world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
+// Godot's `quick_hash` (`scene_forward_lights_inc.glsl`): the per-pixel
+// rotation of the PCF disk, so the tap pattern becomes fine noise instead of
+// banding.
+fn shadow_quick_hash(pos: vec2<f32>) -> f32 {
+    let magic = vec3<f32>(0.06711056, 0.00583715, 52.9829189);
+    return fract(magic.z * fract(dot(pos, magic.xy)));
+}
+
+// One bilinear depth-compare tap at `p`, in texels of this light's map: the
+// `sampler2DShadow` + linear filter Godot samples with, done by hand on the
+// R32Float atlas. Returns the LIT fraction. Texels outside the map are lit.
+fn shadow_tap_bilinear(layer: i32, p: vec2<f32>, size: f32, depth: f32) -> f32 {
+    let q = p - vec2<f32>(0.5);
+    let base = floor(q);
+    let f = q - base;
+    let b = vec2<i32>(base);
+    var lit: array<f32, 4>;
+    for (var k = 0; k < 4; k = k + 1) {
+        let t = b + vec2<i32>(k & 1, k >> 1u);
+        var v = 1.0;
+        if (t.x >= 0 && t.y >= 0 && f32(t.x) < size && f32(t.y) < size) {
+            let stored = textureLoad(shadow_depth, t, layer, 0).r;
+            if (stored < SHADOW_EMPTY && depth > stored) {
+                v = 0.0;
+            }
+        }
+        lit[k] = v;
+    }
+    return mix(mix(lit[0], lit[1], f.x), mix(lit[2], lit[3], f.x), f.y);
+}
+
+// pat-772py: a camera-fitted directional map is sampled the way Godot's
+// forward renderer samples it (`scene_forward_clustered.glsl:2285-2430`):
+//
+// - `BIAS_FUNC`'s normal offset: the GEOMETRY normal times
+//   `1 - max(0, dot(L, -n))`, times `shadow_normal_bias * texel`, with its
+//   component along the light ray removed;
+// - the constant bias, already folded to this map's normalized depth on the CPU;
+// - `sample_directional_pcf_shadow`: `taps` bilinear compares on a Vogel disk
+//   rotated per pixel by `quick_hash(gl_FragCoord)`, or ONE bilinear compare at
+//   the HARD level.
+fn fitted_directional_shadow(light: LightData, world_pos: vec3<f32>, geo_normal: vec3<f32>, frag_xy: vec2<f32>) -> f32 {
+    let l = light.direction;
+    var nb = geo_normal * (1.0 - max(0.0, dot(l, -geo_normal)))
+        * light.shadow_normal_bias * light.shadow_texel_world;
+    nb = nb - l * dot(l, nb);
+    let clip = light.shadow_view_proj * vec4<f32>(world_pos + nb, 1.0);
+    if (clip.w <= 0.0) {
+        return 1.0;
+    }
+    let ndc = clip.xyz / clip.w;
+    let u = (ndc.x + 1.0) * 0.5;
+    let v = (1.0 - ndc.y) * 0.5;
+    if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) {
+        return 1.0; // Outside shadow map = lit.
+    }
+    let size = f32(textureDimensions(shadow_depth).x) * light.shadow_uv_scale;
+    let p = vec2<f32>(u, v) * size;
+    let depth = ndc.z - light.shadow_depth_bias;
+    let layer = light.shadow_map_index;
+    var lit = 0.0;
+    if (light.shadow_pcf_taps == 0u) {
+        lit = shadow_tap_bilinear(layer, p, size, depth);
+    } else {
+        let r = shadow_quick_hash(frag_xy) * 6.28318530718;
+        let sr = sin(r);
+        let cr = cos(r);
+        let n = f32(light.shadow_pcf_taps);
+        for (var i = 0u; i < light.shadow_pcf_taps; i = i + 1u) {
+            // Godot's `get_vogel_disk`: r = sqrt(i + 0.5) / sqrt(n), theta = 2.4 i.
+            let kr = sqrt(f32(i) + 0.5) / sqrt(n);
+            let kt = f32(i) * 2.4;
+            let k = vec2<f32>(cos(kt) * kr, sin(kt) * kr);
+            // GLSL `mat2(vec2(cr, -sr), vec2(sr, cr)) * k`.
+            let rk = vec2<f32>(cr * k.x + sr * k.y, -sr * k.x + cr * k.y);
+            lit = lit + shadow_tap_bilinear(layer, p + rk * light.shadow_pcf_radius, size, depth);
+        }
+        lit = lit / n;
+    }
+    return 1.0 - (1.0 - lit) * clamp(light.shadow_opacity, 0.0, 1.0);
+}
+
+fn directional_shadow_factor(light: LightData, world_pos: vec3<f32>, normal: vec3<f32>, geo_normal: vec3<f32>, frag_xy: vec2<f32>) -> f32 {
     // kind 0 = directional, 2 = spot (both use the 2D depth map).
     if (light.shadow_enabled == 0u || (light.kind != 0u && light.kind != 2u) || light.shadow_map_index < 0) {
         return 1.0;
+    }
+    if (light.kind == 0u && light.shadow_pcf_radius >= 0.0) {
+        return fitted_directional_shadow(light, world_pos, geo_normal, frag_xy);
     }
     let biased = world_pos + shadow_normal_offset(light, world_pos, normal);
     let clip = light.shadow_view_proj * vec4<f32>(biased, 1.0);
@@ -541,10 +636,12 @@ fn directional_shadow_factor(light: LightData, world_pos: vec3<f32>, normal: vec
         return 1.0; // Outside shadow map = lit.
     }
 
-    let dims = textureDimensions(shadow_depth);
-    let tx = i32(u * f32(dims.x));
-    let ty = i32(v * f32(dims.y));
-    if (tx < 0 || ty < 0 || tx >= i32(dims.x) || ty >= i32(dims.y)) {
+    // `shadow_uv_scale`: this map fills only the top-left of its atlas layer
+    // when a larger map shares the array (pat-772py).
+    let dims = vec2<f32>(textureDimensions(shadow_depth)) * light.shadow_uv_scale;
+    let tx = i32(u * dims.x);
+    let ty = i32(v * dims.y);
+    if (tx < 0 || ty < 0 || f32(tx) >= dims.x || f32(ty) >= dims.y) {
         return 1.0;
     }
     let layer = light.shadow_map_index;
@@ -741,7 +838,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let n_dot_l = max(dot(normal, light_dir), 0.0);
         // Each factor is 1.0 for light kinds it doesn't handle, so the
         // product applies whichever map (2D or cubemap) this light carries.
-        let raw_shadow = directional_shadow_factor(light, in.world_position, normal)
+        let raw_shadow = directional_shadow_factor(light, in.world_position, normal, geo_normal, in.clip_position.xy)
             * omni_shadow_factor(light, in.world_position, normal);
         let shadow = directional_shadow_fade(light, in.world_position, raw_shadow);
         let contrib = n_dot_l * intensity * shadow;
@@ -1346,10 +1443,21 @@ pub struct GpuLightData {
     /// 0.999 clamp is applied in the shader, matching the software path and
     /// Godot itself — the authored value must round-trip.
     pub directional_shadow_fade_start: f32,
-    /// The last of the three pads. ⚠️ Still must be a bare `f32`: see the note
-    /// on `specular` above for why a `vec3`/array pad breaks the two layouts
-    /// apart.
-    pub _specular_pad2: f32,
+    /// This light's shadow map size over the atlas layer size (pat-772py):
+    /// maps of different sizes share one array texture, each in the top-left
+    /// of its layer. Was the last of `specular`'s three pads.
+    pub shadow_uv_scale: f32,
+    /// pat-772py: a NEW 16-byte row (160 -> 176 bytes). The constant bias in
+    /// this map's normalized depth (Godot's formula, see
+    /// `shadow_map::ShadowFilter`).
+    pub shadow_depth_bias: f32,
+    /// World size of one texel of this light's map.
+    pub shadow_texel_world: f32,
+    /// PCF radius in texels of this light's map; NEGATIVE selects the legacy
+    /// single nearest compare.
+    pub shadow_pcf_radius: f32,
+    /// Vogel-disk taps (0 = one bilinear tap).
+    pub shadow_pcf_taps: u32,
 }
 
 /// Light array uniform (bind group 2). Fixed-size array of 16 lights.
@@ -2539,7 +2647,11 @@ fn empty_gpu_light() -> GpuLightData {
         // keep it consistent with the light that later fills the slot.
         directional_shadow_max_distance: 100.0,
         directional_shadow_fade_start: 0.8,
-        _specular_pad2: 0.0,
+        shadow_uv_scale: 1.0,
+        shadow_depth_bias: 0.0,
+        shadow_texel_world: 0.0,
+        shadow_pcf_radius: -1.0,
+        shadow_pcf_taps: 0,
     }
 }
 
@@ -2622,7 +2734,11 @@ fn light_to_gpu(light: &Light3D, camera: Vector3) -> GpuLightData {
         specular: light.specular,
         directional_shadow_max_distance: light.directional_shadow_max_distance,
         directional_shadow_fade_start: light.directional_shadow_fade_start,
-        _specular_pad2: 0.0,
+        shadow_uv_scale: 1.0,
+        shadow_depth_bias: 0.0,
+        shadow_texel_world: 0.0,
+        shadow_pcf_radius: -1.0,
+        shadow_pcf_taps: 0,
     }
 }
 
@@ -2638,6 +2754,9 @@ fn pack_lights_from_maps(
     let mut light_data = LightArrayData {
         lights: [empty_gpu_light(); gdserver3d::light::MAX_SCENE_LIGHTS],
     };
+    // Every map sits in the top-left of an atlas layer this big (see
+    // `upload_shadow_depth_array`).
+    let atlas_size = maps.iter().map(|m| m.size).max().unwrap_or(1).max(1);
     for (i, light) in lights
         .iter()
         .enumerate()
@@ -2655,6 +2774,13 @@ fn pack_lights_from_maps(
             {
                 gpu.shadow_view_proj = mul_mat4(&sm.proj_matrix, &sm.view_matrix);
                 gpu.shadow_map_index = layer as i32;
+                gpu.shadow_uv_scale = sm.size as f32 / atlas_size as f32;
+                if let Some(f) = sm.filter {
+                    gpu.shadow_depth_bias = f.depth_bias;
+                    gpu.shadow_texel_world = f.texel_world;
+                    gpu.shadow_pcf_radius = f.radius_texels.max(0.0);
+                    gpu.shadow_pcf_taps = f.taps;
+                }
             }
         }
         // Point lights index into the omni face array instead: base layer =
@@ -2754,6 +2880,18 @@ fn shadow_light_signature(lights: &[Light3D]) -> (u64, bool) {
         ] {
             h.write_u32(f.to_bits());
         }
+        // A camera-fitted directional map moves with the camera (pat-772py):
+        // its frame is part of what the map depends on. Snapped, so this only
+        // changes every few world units of camera travel.
+        if casts && l.light_type == LightType::Directional && l.shadow_camera.is_some() {
+            let frame = crate::shadow_map::directional_shadow_frame(l);
+            h.write_u32(frame.size);
+            for col in frame.view.iter().chain(frame.proj.iter()) {
+                for v in col {
+                    h.write_u32(v.to_bits());
+                }
+            }
+        }
     }
     (h.finish(), any_shadow)
 }
@@ -2815,20 +2953,28 @@ fn upload_shadow_depth_array(
         bytes.extend_from_slice(&f32::MAX.to_le_bytes());
         (1, 1, 1, bytes)
     } else {
-        let (dw, dh) = maps[0].depth.dimensions();
-        let mut bytes = Vec::with_capacity(maps.len() * (dw * dh) as usize * 4);
-        for sm in maps {
-            // Every layer must match the array texture's dimensions — a
-            // mismatched map would silently shear all following layers.
-            debug_assert_eq!(
-                sm.depth.dimensions(),
-                (dw, dh),
-                "shadow maps in one atlas must share dimensions"
-            );
-            for &d in sm.depth.as_slice() {
-                bytes.extend_from_slice(&d.to_le_bytes());
+        // Maps of different sizes share the array (pat-772py: a camera-fitted
+        // directional map is larger than a spot map). Each goes in the
+        // top-left of a layer as big as the largest, the rest of the layer is
+        // the empty sentinel, and `shadow_uv_scale` tells the shader how much
+        // of the layer is its map.
+        let dw = maps.iter().map(|m| m.depth.dimensions().0).max().unwrap_or(1);
+        let dh = maps.iter().map(|m| m.depth.dimensions().1).max().unwrap_or(1);
+        // Row copies, not per-texel pushes: a fitted map is 2048² texels and
+        // this runs whenever a caster moves.
+        let (dwu, dhu) = (dw as usize, dh as usize);
+        let mut texels = vec![f32::MAX; maps.len() * dwu * dhu];
+        for (layer, sm) in maps.iter().enumerate() {
+            let (mw, mh) = sm.depth.dimensions();
+            let (mw, mh) = (mw as usize, mh as usize);
+            let src = sm.depth.as_slice();
+            let base = layer * dwu * dhu;
+            for y in 0..mh {
+                texels[base + y * dwu..base + y * dwu + mw]
+                    .copy_from_slice(&src[y * mw..(y + 1) * mw]);
             }
         }
+        let bytes: Vec<u8> = bytemuck::cast_slice(&texels).to_vec();
         (dw, dh, maps.len() as u32, bytes)
     };
 
@@ -4287,8 +4433,26 @@ impl GpuRenderer3D {
         }
     }
 
-    fn ensure_shadow_atlas(&mut self, camera: Vector3) -> LightArrayData {
-        self.ensure_shadow_atlas_with(camera, None)
+    fn ensure_shadow_atlas(&mut self, viewport: &Viewport3D) -> LightArrayData {
+        self.ensure_shadow_atlas_with(viewport, None)
+    }
+
+    /// Hands every directional light the camera its shadow map is fitted to
+    /// (pat-772py), as Godot fits the map to the frustum of the camera being
+    /// drawn.
+    fn fit_directional_shadows_to(&mut self, viewport: &Viewport3D) {
+        let camera = gdserver3d::light::ShadowCamera {
+            transform: viewport.camera_transform,
+            fov_y: viewport.fov,
+            aspect: viewport.aspect(),
+            near: viewport.near,
+            far: viewport.far,
+        };
+        for l in self.lights.iter_mut() {
+            if l.light_type == LightType::Directional {
+                l.shadow_camera = Some(camera);
+            }
+        }
     }
 
     /// [`Self::ensure_shadow_atlas`], looking each instance's mesh fingerprint
@@ -4299,9 +4463,11 @@ impl GpuRenderer3D {
     /// can belong to a different mesh by now.
     fn ensure_shadow_atlas_with(
         &mut self,
-        camera: Vector3,
+        viewport: &Viewport3D,
         mesh_keys: Option<&HashMap<usize, u64>>,
     ) -> LightArrayData {
+        self.fit_directional_shadows_to(viewport);
+        let camera = viewport.camera_transform.origin;
         // In id order, so the key and the caster list are the same every frame
         // for the same scene.
         let mut ordered: Vec<(&u64, &Instance3D)> = self.instances.iter().collect();
@@ -4613,7 +4779,7 @@ impl GpuRenderer3D {
         self.prime_editor_draw_caches();
         let mesh_keys = std::mem::take(&mut self.editor_frame_mesh_keys);
         let light_data =
-            self.ensure_shadow_atlas_with(viewport.camera_transform.origin, Some(&mesh_keys));
+            self.ensure_shadow_atlas_with(viewport, Some(&mesh_keys));
         self.editor_frame_mesh_keys = mesh_keys;
         self.ensure_probe_cubes();
         self.ensure_sky_panorama(viewport.environment.as_ref());
@@ -5187,7 +5353,8 @@ impl GpuRenderer3D {
             depth_buf.unmap();
 
             let fx_inv_proj = invert_projection(&projection_matrix);
-            crate::renderer::SoftwareRenderer3D::apply_decal_pass(
+            let decal_receivers: Vec<&Instance3D> = self.instances.values().collect();
+            crate::renderer::SoftwareRenderer3D::apply_decal_pass_masked(
                 &mut pixels,
                 &depth,
                 w,
@@ -5195,6 +5362,7 @@ impl GpuRenderer3D {
                 &self.decals,
                 &fx_inv_proj,
                 &viewport.camera_transform,
+                &decal_receivers,
             );
             // Environment fog covers the decal-modulated surface, in the
             // software renderer's order (decal -> fog -> fog volumes), and with
@@ -5360,7 +5528,7 @@ impl GpuRenderer3D {
         let draw_calls = self.build_draw_calls();
         // Shadow atlas + light uniforms (pat-32edz / pat-2be0q): cached across
         // frames, regenerated only when the shadow-relevant state changes.
-        let light_data = self.ensure_shadow_atlas(viewport.camera_transform.origin);
+        let light_data = self.ensure_shadow_atlas(viewport);
         self.ensure_probe_cubes();
         self.ensure_sky_panorama(viewport.environment.as_ref());
 
@@ -5912,7 +6080,8 @@ impl GpuRenderer3D {
         // Both passes are the software implementations, called directly rather
         // than reimplemented — one copy of the projection math means the two
         // backends cannot drift apart.
-        crate::renderer::SoftwareRenderer3D::apply_decal_pass(
+        let decal_receivers: Vec<&Instance3D> = self.instances.values().collect();
+        crate::renderer::SoftwareRenderer3D::apply_decal_pass_masked(
             &mut pixels,
             &depth,
             w,
@@ -5920,6 +6089,7 @@ impl GpuRenderer3D {
             &self.decals,
             &fog_inv_proj,
             &viewport.camera_transform,
+            &decal_receivers,
         );
         crate::renderer::SoftwareRenderer3D::apply_fog_pass(
             &mut pixels,
@@ -6188,8 +6358,8 @@ mod tests {
         // it and a stale size here stays invisible; anyone growing
         // `GpuLightData` must update THIS assertion, `light_data_size` and
         // `light_array_size` below, and the byte-level layout tests.
-        assert_eq!(std::mem::size_of::<GpuLightData>(), 160);
-        assert_eq!(std::mem::size_of::<LightArrayData>(), 160 * 16);
+        assert_eq!(std::mem::size_of::<GpuLightData>(), 176); // pat-772py row
+        assert_eq!(std::mem::size_of::<LightArrayData>(), 176 * 16);
     }
 
     #[test]
@@ -6463,13 +6633,13 @@ mod tests {
     fn light_data_size() {
         // Base 64 + shadow row 16 + shadow_view_proj mat4 (64) + specular
         // row 16 = 160 (pat-32edz, grown twice by pat-s3rrv.90).
-        assert_eq!(std::mem::size_of::<GpuLightData>(), 160);
+        assert_eq!(std::mem::size_of::<GpuLightData>(), 176); // pat-772py row
     }
 
     #[test]
     fn light_array_size() {
-        // 16 * 160 = 2560 bytes.
-        assert_eq!(std::mem::size_of::<LightArrayData>(), 2560);
+        // 16 * 176 = 2816 bytes (pat-772py added a row).
+        assert_eq!(std::mem::size_of::<LightArrayData>(), 2816);
     }
 
     #[test]
@@ -6611,7 +6781,8 @@ mod tests {
 
         assert_eq!(
             std::mem::size_of::<GpuLightData>(),
-            160,
+            // 176 since pat-772py's shadow-filter row.
+            176,
             "the uniform ARRAY stride must stay a multiple of 16"
         );
         assert_eq!(std::mem::size_of::<GpuLightData>() % 16, 0);
@@ -6634,6 +6805,37 @@ mod tests {
     /// ⚠️ Asserting the struct field alone would pass against a uniform that is
     /// uploaded and never read, which is the failure mode this whole bead is
     /// about.
+    /// pat-772py: the shadow-filter fields sit where WGSL reads them. WGSL
+    /// `LightData` puts `shadow_uv_scale` in `specular`'s last pad (offset
+    /// 156) and the new row at 160..176.
+    #[test]
+    fn shadow_filter_gpu_row_matches_the_wgsl_struct() {
+        let mut gpu = light_to_gpu(&Light3D::directional(Light3DId(1)), Vector3::ZERO);
+        gpu.shadow_uv_scale = 0.125;
+        gpu.shadow_depth_bias = 0.25;
+        gpu.shadow_texel_world = 0.5;
+        gpu.shadow_pcf_radius = 0.75;
+        gpu.shadow_pcf_taps = 8;
+        let bytes = bytemuck::bytes_of(&gpu);
+        let f = |o: usize| f32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
+        assert_eq!(f(156), 0.125);
+        assert_eq!(f(160), 0.25);
+        assert_eq!(f(164), 0.5);
+        assert_eq!(f(168), 0.75);
+        assert_eq!(u32::from_le_bytes(bytes[172..176].try_into().unwrap()), 8);
+        for field in [
+            "shadow_uv_scale: f32",
+            "shadow_depth_bias: f32",
+            "shadow_texel_world: f32",
+            "shadow_pcf_radius: f32",
+            "shadow_pcf_taps: u32",
+        ] {
+            assert!(SHADER_3D_WGSL.contains(field), "WGSL LightData lacks {field}");
+        }
+        // A light with no fitted map keeps the legacy nearest compare.
+        assert!(empty_gpu_light().shadow_pcf_radius < 0.0);
+    }
+
     #[test]
     fn shadow_opacity_gpu_reaches_both_shader_branches() {
         assert!(
@@ -6642,8 +6844,9 @@ mod tests {
         );
         assert_eq!(
             SHADER_3D_WGSL.matches("light.shadow_opacity").count(),
-            2,
-            "both omni_shadow_factor and directional_shadow_factor must use it"
+            3,
+            "omni_shadow_factor, directional_shadow_factor and the camera-fitted \
+             directional branch (pat-772py) must all use it"
         );
         // The old unconditional `return 0.0;` inside a shadow test is what this
         // replaces; a stray one left behind would mean one branch still ignores
@@ -6853,7 +7056,8 @@ mod tests {
         let bytes = bytemuck::bytes_of(&gpu);
         assert_eq!(
             std::mem::size_of::<GpuLightData>(),
-            160,
+            // 176 since pat-772py's shadow-filter row.
+            176,
             "reusing a reserved pad must NOT move any offset below; the size \
              grew only later, when light_specular added a row after the matrix"
         );
@@ -7004,7 +7208,8 @@ mod tests {
 
         assert_eq!(
             std::mem::size_of::<GpuLightData>(),
-            160,
+            // 176 since pat-772py's shadow-filter row.
+            176,
             "offsets below the matrix unchanged; 160 since light_specular's row"
         );
         assert_eq!(
@@ -7079,7 +7284,8 @@ mod tests {
 
         assert_eq!(
             std::mem::size_of::<GpuLightData>(),
-            160,
+            // 176 since pat-772py's shadow-filter row.
+            176,
             "offsets below the matrix unchanged; 160 since light_specular's row"
         );
         assert_eq!(
@@ -7118,7 +7324,8 @@ mod tests {
 
         assert_eq!(
             std::mem::size_of::<GpuLightData>(),
-            160,
+            // 176 since pat-772py's shadow-filter row.
+            176,
             "specular's row grows the struct from 144 to 160"
         );
         assert_eq!(
@@ -7143,10 +7350,14 @@ mod tests {
         // four bytes are still pad. Left as a byte assertion rather than
         // deleted: a stale non-zero tail is exactly what a future field
         // forgetting its initializer would look like.
+        //
+        // pat-772py spent that last pad on `shadow_uv_scale`, whose neutral
+        // value is 1.0 (the map fills its whole atlas layer), so the tail is
+        // now an explicit 1.0 rather than zero.
         assert_eq!(
             &bytes[156..160],
-            &[0u8; 4],
-            "the one remaining pad slot must be an explicit zero"
+            &1.0f32.to_le_bytes(),
+            "the last of specular's pads is shadow_uv_scale, explicitly 1.0"
         );
     }
 
@@ -7251,7 +7462,8 @@ mod tests {
 
         assert_eq!(
             std::mem::size_of::<GpuLightData>(),
-            160,
+            // 176 since pat-772py's shadow-filter row.
+            176,
             "reusing specular's reserved pads must NOT grow the struct"
         );
         assert_eq!(
