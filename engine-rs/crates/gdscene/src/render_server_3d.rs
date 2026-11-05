@@ -2305,7 +2305,9 @@ pub fn gltf_surface_materials(path: &str, mesh_index: Option<i64>) -> Vec<Materi
         .ok()
         .filter(|p| p.exists())
         .unwrap_or_else(|| std::path::PathBuf::from(on_disk));
-    let external = gltf_external_materials(path);
+    let mut external = gltf_external_materials(path);
+    let extracted_dir = gltf_extracted_material_dir(path);
+    let mut extracted_textures = MaterialTextureCache::new();
     let out: Vec<Material3D> = gdresource::import_gltf(&resolved)
         .map(|res| {
             let mut subs: Vec<(&String, &Arc<gdresource::Resource>)> = match mesh_index {
@@ -2337,6 +2339,16 @@ pub fn gltf_surface_materials(path: &str, mesh_index: Option<i64>) -> Vec<Materi
                     if let Some(Variant::String(name)) = s.get_property("material_name") {
                         if let Some(mat) = external.get(name) {
                             return mat.clone();
+                        }
+                        // An extracted material file wins in the same way.
+                        if let Some(dir) = extracted_dir.as_deref() {
+                            let file = format!("{dir}/{}.tres", validate_filename(name));
+                            if let Some(mat) =
+                                material3d_from_tres_file(&file, &mut extracted_textures)
+                            {
+                                external.insert(name.clone(), mat.clone());
+                                return mat;
+                            }
                         }
                     }
                     let color = |k: &str, d: Color| match s.get_property(k) {
@@ -2370,6 +2382,14 @@ pub fn gltf_surface_materials(path: &str, mesh_index: Option<i64>) -> Vec<Materi
         .unwrap_or_default();
     CACHE.with(|c| c.borrow_mut().insert(key, out.clone()));
     out
+}
+
+/// Godot's `String::validate_filename`: `: / \\ ? * " | % < >` become `_`.
+fn validate_filename(name: &str) -> String {
+    name.trim()
+        .chars()
+        .map(|c| if ":/\\?*\"|%<>".contains(c) { '_' } else { c })
+        .collect()
 }
 
 /// The external materials a glTF's `.import` maps its materials to
@@ -2407,24 +2427,8 @@ fn gltf_external_materials(gltf_path: &str) -> HashMap<String, Material3D> {
             .nth(1)
             .and_then(|s| s.split('"').next());
         if let (true, Some(path)) = (enabled, fallback) {
-            if let Ok(src) = gdcore::file_access::FileAccess::read_file_string(path) {
-                if let Ok(res) = gdresource::loader::TresLoader::new().parse_str(&src, path) {
-                    let props: HashMap<String, Variant> = res
-                        .properties()
-                        .map(|(k, v)| {
-                            let v = match v {
-                                Variant::String(r) => r
-                                    .strip_prefix("ExtResource:")
-                                    .and_then(|id| res.ext_resources.get(id))
-                                    .map(|e| Variant::String(e.path.clone()))
-                                    .unwrap_or_else(|| v.clone()),
-                                _ => v.clone(),
-                            };
-                            (k.clone(), v)
-                        })
-                        .collect();
-                    out.insert(name.to_string(), material3d_from_props(&props, &mut textures));
-                }
+            if let Some(mat) = material3d_from_tres_file(path, &mut textures) {
+                out.insert(name.to_string(), mat);
             }
         }
         rest = &tail[open + close + 1..];
@@ -2434,6 +2438,60 @@ fn gltf_external_materials(gltf_path: &str) -> HashMap<String, Material3D> {
         }
     }
     out
+}
+
+/// A material `.tres` as a [`Material3D`], its `ExtResource` textures resolved
+/// through the file's own ext table. `None` when unreadable.
+fn material3d_from_tres_file(path: &str, textures: &mut MaterialTextureCache) -> Option<Material3D> {
+    let src = gdcore::file_access::FileAccess::read_file_string(path).ok()?;
+    let res = gdresource::loader::TresLoader::new().parse_str(&src, path).ok()?;
+    let props: HashMap<String, Variant> = res
+        .properties()
+        .map(|(k, v)| {
+            let v = match v {
+                Variant::String(r) => r
+                    .strip_prefix("ExtResource:")
+                    .and_then(|id| res.ext_resources.get(id))
+                    .map(|e| Variant::String(e.path.clone()))
+                    .unwrap_or_else(|| v.clone()),
+                _ => v.clone(),
+            };
+            (k.clone(), v)
+        })
+        .collect();
+    Some(material3d_from_props(&props, textures))
+}
+
+/// The directory a scene `.import` with `materials/extract` != 0 ("Extract
+/// Once" / "Extract and Overwrite") saved its materials to, or `None` when it
+/// keeps them internal (pat-i4jgd).
+///
+/// Godot then draws each surface with `<dir>/<material name>.tres`
+/// (`ResourceImporterScene::_post_fix_node`: `spath.path_join(mat_id
+/// .validate_filename() + ext)`, `spath` = `materials/extract_path` or the
+/// source's own directory) -- NOT the glTF's own material. truck_town's
+/// Sketchfab tree ships `Leav_material.tres` (`transparency = 4`, alpha
+/// depth pre-pass, `cull_mode = 2`) and `tree_material.tres` this way.
+fn gltf_extracted_material_dir(gltf_path: &str) -> Option<String> {
+    let text =
+        gdcore::file_access::FileAccess::read_file_string(&format!("{gltf_path}.import")).ok()?;
+    let file = gdresource::importers::parse_import_file(&text).ok()?;
+    let params = file.other_sections.get("params")?;
+    let extract = params.get("materials/extract").and_then(|v| v.trim().parse::<i64>().ok());
+    if extract.unwrap_or(0) == 0 {
+        return None;
+    }
+    // Only `.tres` (extract_format 0) is read here.
+    if params
+        .get("materials/extract_format")
+        .is_some_and(|v| v.trim() != "0")
+    {
+        return None;
+    }
+    match params.get("materials/extract_path").map(|v| v.trim().trim_matches('"')) {
+        Some(p) if !p.is_empty() => Some(p.trim_end_matches('/').to_string()),
+        _ => gltf_path.rsplit_once('/').map(|(dir, _)| dir.to_string()),
+    }
 }
 
 pub fn material_from_gltf_resource(resource: &gdresource::Resource) -> Option<Material3D> {
