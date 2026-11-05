@@ -1547,8 +1547,8 @@ impl RenderServer3DAdapter {
 
             // Try glTF loading for .glb / .gltf paths.
             if lower.ends_with(".glb") || lower.ends_with(".gltf") {
-                let file_path = std::path::Path::new(&path);
-                if let Ok(resource) = gdresource::import_gltf(file_path) {
+                // Parsed once per file, not per node per frame (pat-ujiku).
+                if let Some(resource) = import_gltf_cached(&path) {
                     // `gltf_mesh_index` says WHICH mesh of the file this node
                     // uses. A node instantiated from a glTF scene always carries
                     // it (`gltf_scene::build_gltf_subtree`); without it the only
@@ -1689,8 +1689,7 @@ impl RenderServer3DAdapter {
         if let Some(path) = node3d::get_mesh_path(tree, nid) {
             let lower = path.to_lowercase();
             if lower.ends_with(".glb") || lower.ends_with(".gltf") {
-                let file_path = std::path::Path::new(&path);
-                if let Ok(resource) = gdresource::import_gltf(file_path) {
+                if let Some(resource) = import_gltf_cached(&path) {
                     if let Some(mat) = material_from_gltf_resource(&resource) {
                         return mat;
                     }
@@ -2042,6 +2041,57 @@ impl std::fmt::Debug for RenderServer3DAdapter {
 // ---------------------------------------------------------------------------
 // glTF resource → Mesh3D conversion
 // ---------------------------------------------------------------------------
+
+/// How many times [`import_gltf_cached`] actually parsed a file (pat-ujiku).
+/// Instrumentation for the reuse tests.
+static GLTF_IMPORTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The number of glTF files [`import_gltf_cached`] has parsed in this process.
+pub fn gltf_import_count() -> u64 {
+    GLTF_IMPORTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Imports a `.glb` / `.gltf` once per file and hands every later caller the
+/// same parsed [`gdresource::Resource`] (pat-ujiku).
+///
+/// The render paths used to call `gdresource::import_gltf` for EVERY mesh node
+/// on EVERY frame — a skinned character re-read and re-parsed its whole file
+/// once per surface node, under the editor-state lock. It also passed the
+/// `res://` path straight to `std::fs`, which only worked when the process ran
+/// from the project directory and never for a game shipped in a pack.
+///
+/// Reads through [`gdcore::file_access::FileAccess::read_file_bytes`] (packs,
+/// then the project root), falling back to the path relative to the working
+/// directory. A loose file is re-imported when its modification time changes,
+/// so an asset re-exported while the editor runs still shows up.
+pub fn import_gltf_cached(path: &str) -> Option<Arc<gdresource::Resource>> {
+    use std::sync::Mutex;
+    use std::time::SystemTime;
+    type Entry = (Option<SystemTime>, Arc<gdresource::Resource>);
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<String, Entry>>> = std::sync::OnceLock::new();
+
+    let disk = gdcore::file_access::resolve_path(path)
+        .ok()
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| std::path::PathBuf::from(path.strip_prefix("res://").unwrap_or(path)));
+    let stamp = std::fs::metadata(&disk).and_then(|m| m.modified()).ok();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some((cached_stamp, res)) = cache.lock().ok()?.get(path) {
+        if *cached_stamp == stamp {
+            return Some(Arc::clone(res));
+        }
+    }
+    let bytes = gdcore::file_access::FileAccess::read_file_bytes(path)
+        .ok()
+        .or_else(|| std::fs::read(&disk).ok())?;
+    GLTF_IMPORTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let res = gdresource::gltf_import::import_gltf_bytes(&bytes, &disk).ok()?;
+    cache
+        .lock()
+        .ok()?
+        .insert(path.to_string(), (stamp, Arc::clone(&res)));
+    Some(res)
+}
 
 /// Extracts a [`Mesh3D`] from the first sub-resource of a glTF [`Resource`]
 /// produced by [`gdresource::import_gltf`].
