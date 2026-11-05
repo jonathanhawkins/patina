@@ -1,0 +1,142 @@
+{
+  "frames": 12,
+  "prints": [],
+  "project": "custom_spatial_shader",
+  "signals": [],
+  "tree": [
+    {
+      "class": "Node3D",
+      "path": "Main",
+      "properties": {
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "visible": true
+      }
+    },
+    {
+      "class": "Label3D",
+      "path": "Main/Backface",
+      "properties": {
+        "position": [
+          0.0,
+          1.6,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          3.142,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "text": "HIDDEN",
+        "visible": true
+      }
+    },
+    {
+      "class": "Camera3D",
+      "path": "Main/Camera3D",
+      "properties": {
+        "position": [
+          0.0,
+          0.0,
+          5.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "visible": true
+      }
+    },
+    {
+      "class": "MeshInstance3D",
+      "path": "Main/Stripes",
+      "properties": {
+        "position": [
+          -1.2,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "visible": true
+      }
+    },
+    {
+      "class": "MeshInstance3D",
+      "path": "Main/Wall",
+      "properties": {
+        "position": [
+          1.3,
+          0.0,
+          1.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "visible": true
+      }
+    },
+    {
+      "class": "Label3D",
+      "path": "Main/XRay",
+      "properties": {
+        "position": [
+          1.3,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "text": "XRAY",
+        "visible": true
+      }
+    }
+  ]
+}

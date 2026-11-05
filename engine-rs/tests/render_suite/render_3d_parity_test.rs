@@ -1409,12 +1409,13 @@ fn reflection_probe_overlapping_probes_sum_contributions() {
     let sample = renderer.sample_reflection_probes(Vector3::ZERO);
     assert!(approx_color(sample, Color::new(0.6, 0.6, 0.6, 1.0), 1e-5));
 }
-
-/// Oracle: shifting `origin_offset` translates the probe's AABB. A point at
-/// (5, 0, 0) with offset (5, 0, 0) is the new center and is therefore inside;
-/// a point at (-1, 0, 0) is outside the shifted box.
+/// Oracle: `origin_offset` moves the CAPTURE point and the box-projection
+/// offset only, never the influence box. Godot: renderer_scene_cull.cpp:3614
+/// renders the faces from `origin_offset`, and light_storage.cpp:1797 passes it
+/// as `box_offset`, while the probe's extents stay centred on its transform.
+/// This test used to assert the box itself moved, the model pat-t42ca corrected.
 #[test]
-fn reflection_probe_origin_offset_shifts_aabb() {
+fn reflection_probe_origin_offset_does_not_move_the_influence_box() {
     let mut renderer = SoftwareRenderer3D::new();
     renderer.add_reflection_probe(ReflectionProbeId(1));
     let mut probe = make_probe(
@@ -1429,10 +1430,10 @@ fn reflection_probe_origin_offset_shifts_aabb() {
     probe.origin_offset = Vector3::new(5.0, 0.0, 0.0);
     renderer.update_reflection_probe(&probe);
 
-    // New AABB: x in [0, 10], y/z in [-5, 5].
-    let inside = renderer.sample_reflection_probes(Vector3::new(5.0, 0.0, 0.0));
+    // The box is still x in [-5, 5]: -4 is inside, +7 (inside a shifted box) is not.
+    let inside = renderer.sample_reflection_probes(Vector3::new(-4.0, 0.0, 0.0));
     assert_eq!(inside, Color::new(1.0, 1.0, 1.0, 1.0));
-    let outside = renderer.sample_reflection_probes(Vector3::new(-1.0, 0.0, 0.0));
+    let outside = renderer.sample_reflection_probes(Vector3::new(7.0, 0.0, 0.0));
     assert_eq!(outside, Color::new(0.0, 0.0, 0.0, 1.0));
 }
 
