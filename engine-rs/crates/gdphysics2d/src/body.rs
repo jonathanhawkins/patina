@@ -291,6 +291,11 @@ pub struct PhysicsBody2D {
     /// does upstream. Before this the authored number never reached the body at
     /// all — the shape-derived value was always used.
     pub custom_inertia: Option<f32>,
+    /// Whether the body is a `CharacterBody2D`. Godot's `move_and_slide`
+    /// never takes a WALL's velocity from another character
+    /// (`character_body_2d.cpp` `_set_collision_direction`), so the solver
+    /// has to be able to tell.
+    pub is_character_body: bool,
 }
 
 impl PhysicsBody2D {
@@ -340,6 +345,7 @@ impl PhysicsBody2D {
             continuous_cd: false,
             omit_force_integration: false,
             custom_inertia: None,
+            is_character_body: false,
         }
     }
 

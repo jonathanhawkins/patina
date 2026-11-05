@@ -1015,9 +1015,14 @@ pub fn get_screen_center_position(
     viewport_size: Vector2,
 ) -> Vector2 {
     let config = camera2d_config_from_node(tree, node_id);
-    let target = get_global_transform(tree, node_id).origin + get_camera_offset(tree, node_id);
+    // 🔑 `offset` is added AFTER the limits, not to the target: Godot clamps
+    // `screen_rect` to the limits and only then does
+    // `screen_rect.position += offset` (camera_2d.cpp:253). The 2D Platformer's
+    // camera (offset (0, 50), limit_bottom 690) shows 50 px more below its
+    // bottom limit than a clamp of `target + offset` would allow.
+    let target = get_global_transform(tree, node_id).origin;
     let half_view = camera2d_half_view(viewport_size, config.zoom);
-    clamp_camera_to_limits(&config, target, half_view)
+    clamp_camera_to_limits(&config, target, half_view) + get_camera_offset(tree, node_id)
 }
 
 // ===========================================================================

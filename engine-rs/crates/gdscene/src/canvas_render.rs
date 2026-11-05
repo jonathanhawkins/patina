@@ -2693,8 +2693,7 @@ pub fn camera2d_view_transform(
     let camera = current_camera2d(tree)?;
     let config = node2d::camera2d_config_from_node(tree, camera);
     // The camera's own global position plus its `offset`, as Godot's target.
-    let target =
-        node2d::get_global_transform(tree, camera).origin + node2d::get_camera_offset(tree, camera);
+    let target = node2d::get_global_transform(tree, camera).origin;
     let center = resolve_camera2d_center(
         tree,
         camera,
@@ -2768,13 +2767,22 @@ fn resolve_camera2d_center(
     previous_center: Option<Vector2>,
     dt: f32,
 ) -> Vector2 {
+    // 🔑 `offset` is added AFTER the limits, not to the target: Godot clamps
+    // `screen_rect` to the limits and only then does
+    // `screen_rect.position += offset` (camera_2d.cpp:253). The 2D Platformer's
+    // camera (offset (0, 50), limit_bottom 690) shows 50 px more below its
+    // bottom limit than a clamp of `target + offset` would allow.
+    // `target` is the camera's origin WITHOUT the offset; centres handed in or
+    // published are screen centres WITH it.
+    let offset = node2d::get_camera_offset(tree, camera);
     match (previous_center, published_camera2d_center(tree, camera)) {
         (Some(prev), _) => {
-            node2d::compute_camera2d_position(config, prev, target, viewport_size, dt)
+            node2d::compute_camera2d_position(config, prev - offset, target, viewport_size, dt)
+                + offset
         }
         (None, Some(published)) => published,
         (None, None) => {
-            node2d::compute_camera2d_position(config, target, target, viewport_size, dt)
+            node2d::compute_camera2d_position(config, target, target, viewport_size, dt) + offset
         }
     }
 }
@@ -2875,8 +2883,7 @@ pub fn camera2d_center(
 ) -> Option<Vector2> {
     let camera = current_camera2d(tree)?;
     let config = node2d::camera2d_config_from_node(tree, camera);
-    let target =
-        node2d::get_global_transform(tree, camera).origin + node2d::get_camera_offset(tree, camera);
+    let target = node2d::get_global_transform(tree, camera).origin;
     Some(resolve_camera2d_center(
         tree,
         camera,

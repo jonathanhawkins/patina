@@ -720,6 +720,13 @@ pub struct PhysicsServer {
     /// second, which is also the only ordering that yields the velocity for the
     /// step that is about to run.
     animatable_motion: HashMap<BodyId, Vector2>,
+    /// Bodies that have been through at least one physics step. Godot computes
+    /// a body's total gravity inside the step (`GodotBody2D::integrate_forces`
+    /// starts with `gravity = Vector2(0, 0)`), so until a body's first step
+    /// `get_gravity()` reads ZERO: the official 2D Platformer's player falls
+    /// one tick later than "always default gravity" — f1 is y = 636.6458 (one
+    /// tick of 2100 px/s^2), not two.
+    stepped_bodies: std::collections::HashSet<BodyId>,
     /// Maps scene node IDs to area IDs.
     node_to_area: HashMap<NodeId, AreaId>,
     /// Maps joint scene nodes to the world joints built from them, so a
@@ -787,6 +794,7 @@ impl PhysicsServer {
             node_to_body: HashMap::new(),
             body_to_node: HashMap::new(),
             animatable_motion: HashMap::new(),
+            stepped_bodies: std::collections::HashSet::new(),
             node_to_area: HashMap::new(),
             node_to_joint: HashMap::new(),
             area_to_node: HashMap::new(),
@@ -1604,6 +1612,7 @@ impl PhysicsServer {
             .body_for_node(node_id)
             .and_then(|id| self.world.get_body(id))
         {
+            Some(body) if !self.stepped_bodies.contains(&body.id) => Vector2::ZERO,
             Some(body) => self.area_store.compute_body_gravity(body, default_gravity),
             None => default_gravity,
         }
@@ -1665,6 +1674,7 @@ impl PhysicsServer {
 
                 let mass = float_prop(tree, node_id, "mass", 1.0) as f32;
                 let mut body = PhysicsBody2D::new(BodyId(0), body_type, pos, shape, mass);
+                body.is_character_body = class == "CharacterBody2D";
                 // The collider child's own offset/rotation relative to the body
                 // (pat-s3rrv.25). The origin is scaled by the same accumulated
                 // scale already baked into the geometry above: a body scaled 2x
@@ -2235,11 +2245,14 @@ impl PhysicsServer {
                 },
             );
 
-            let result = gdphysics2d::tilemap_collision::tilemap_to_physics(
+            // Godot merges each physics quadrant's row of tiles into one
+            // polygon before it builds shapes (`tilemap_to_physics_merged`).
+            let result = gdphysics2d::tilemap_collision::tilemap_to_physics_merged(
                 &mut self.world,
                 &infos,
                 tile_size,
                 origin,
+                gdphysics2d::tilemap_collision::DEFAULT_PHYSICS_QUADRANT_SIZE,
             );
             // The TileSet physics layer's bits (Godot default 1 and 1).
             let bits = |key: &str| match node.get_property(key) {
@@ -2711,6 +2724,10 @@ impl PhysicsServer {
     /// Otherwise the plain [`step`](gdphysics2d::world::PhysicsWorld2D::step) is
     /// used, leaving default gravity behaviour untouched.
     pub fn step_physics(&mut self, dt: f32) {
+        // Every body in the space is integrated by this step, so from here on
+        // its gravity is known (see `stepped_bodies`).
+        let ids: Vec<BodyId> = self.world.bodies().map(|b| b.id).collect();
+        self.stepped_bodies.extend(ids);
         // Phase 0a: an AnimatableBody2D's per-tick displacement becomes the
         // body's velocity for the step about to run (pat-s3rrv.93). This is the
         // value `CharacterBody2D`'s floor carry reads off whatever it is
@@ -3238,12 +3255,17 @@ impl PhysicsServer {
         let Some(body) = self.world.get_body(body_id) else {
             return false;
         };
-        let mut character = PhysicsCharacterBody2D::new(body.position, body.shape.clone());
+        // Godot moves from the NODE's global transform: the server body of a
+        // kinematic body only catches up at the physics step.
+        let from = crate::node2d::get_global_position(tree, node_id);
+        let mut character = PhysicsCharacterBody2D::new(from, body.shape.clone());
+        character.rotation = crate::node2d::get_global_rotation(tree, node_id);
         // The CollisionShape2D's offset inside the body — without it the
         // character collided as if its shape were centred on the origin.
         character.shape_offset = body.shape_transform;
         character.collision_layer = body.collision_layer;
         character.collision_mask = body.collision_mask;
+        character.safe_margin = float_prop(tree, node_id, "safe_margin", 0.08) as f32;
         let obstacles = self.obstacle_bodies(node_id);
         let hit = character.move_and_collide(motion, &obstacles);
         let end = character.position;
@@ -3354,7 +3376,9 @@ impl PhysicsServer {
                 continue;
             }
 
-            self.slide_character(tree, node_id, body_id, dt);
+            // After the step: the move is committed at once, as the step
+            // that would commit it has already run this tick.
+            self.slide_character(tree, node_id, body_id, dt, true);
         }
     }
 
@@ -3384,6 +3408,7 @@ impl PhysicsServer {
         node_id: NodeId,
         body_id: BodyId,
         dt: f32,
+        commit: bool,
     ) -> bool {
         // `velocity` is in pixels-per-second (Godot contract). Cross-frame
         // state (is_on_floor, platform_velocity) is persisted on the node.
@@ -3400,8 +3425,18 @@ impl PhysicsServer {
         // Captured BEFORE the move: `get_real_velocity()` is the motion
         // actually achieved, which is only knowable by differencing the
         // start and end positions (pat-s3rrv.97).
-        let start_position = body.position;
-        let mut character = PhysicsCharacterBody2D::new(body.position, body.shape.clone());
+        //
+        // 🔑 From the NODE's global position, not the server body's. Godot's
+        // `move_and_slide` starts at `get_global_transform()`, and a kinematic
+        // body's server transform only follows at the physics step
+        // (`GodotBody2D::set_state(TRANSFORM)` stores `new_transform`; the step
+        // commits it). So every OTHER body sees this one where the last step
+        // left it — which is why the slide below no longer writes the server
+        // body: `sync_to_physics` does that at the end of the tick, exactly
+        // when Godot's step would.
+        let start_position = crate::node2d::get_global_position(tree, node_id);
+        let mut character = PhysicsCharacterBody2D::new(start_position, body.shape.clone());
+        character.rotation = crate::node2d::get_global_rotation(tree, node_id);
         // The CollisionShape2D's offset inside the body — without it the
         // character collided as if its shape were centred on the origin.
         character.shape_offset = body.shape_transform;
@@ -3414,14 +3449,47 @@ impl PhysicsServer {
             "floor_max_angle",
             std::f64::consts::FRAC_PI_4,
         ) as f32;
-        character.floor_snap_length = float_prop(tree, node_id, "floor_snap_length", 0.0) as f32;
-        character.floor_stop_on_slope = bool_prop(tree, node_id, "floor_stop_on_slope", false);
+        // Fallbacks are Godot's defaults (doc/classes/CharacterBody2D.xml).
+        character.floor_snap_length = float_prop(tree, node_id, "floor_snap_length", 1.0) as f32;
+        character.floor_stop_on_slope = bool_prop(tree, node_id, "floor_stop_on_slope", true);
         character.floor_constant_speed = bool_prop(tree, node_id, "floor_constant_speed", false);
         character.floor_block_on_wall = bool_prop(tree, node_id, "floor_block_on_wall", true);
         character.slide_on_ceiling = bool_prop(tree, node_id, "slide_on_ceiling", true);
         character.max_slides = u32_prop(tree, node_id, "max_slides", 4).max(1) as usize;
-        character.set_on_floor(was_on_floor);
+        character.safe_margin = float_prop(tree, node_id, "safe_margin", 0.08) as f32;
+        character.platform_floor_layers =
+            u32_prop(tree, node_id, "platform_floor_layers", u32::MAX);
+        character.platform_wall_layers = u32_prop(tree, node_id, "platform_wall_layers", 0);
+        character.wall_min_slide_angle =
+            float_prop(tree, node_id, "wall_min_slide_angle", 0.261_799_4) as f32;
+        character.motion_mode = match float_prop(tree, node_id, "motion_mode", 0.0) as i64 {
+            1 => gdphysics2d::character::MotionMode::Floating,
+            _ => gdphysics2d::character::MotionMode::Grounded,
+        };
+        character.platform_on_leave =
+            match float_prop(tree, node_id, "platform_on_leave", 0.0) as i64 {
+                1 => gdphysics2d::character::PlatformOnLeave::AddUpwardVelocity,
+                2 => gdphysics2d::character::PlatformOnLeave::DoNothing,
+                _ => gdphysics2d::character::PlatformOnLeave::AddVelocity,
+            };
+        // The contact state Godot keeps as members of the node between calls.
+        character.set_contact_state(
+            was_on_floor,
+            bool_prop(tree, node_id, "is_on_wall", false),
+            bool_prop(tree, node_id, "is_on_ceiling", false),
+            vec2_prop(tree, node_id, "floor_normal", Vector2::ZERO),
+            vec2_prop(tree, node_id, "wall_normal", Vector2::ZERO),
+        );
         character.platform_velocity = stored_platform_vel;
+        character.platform_body = match tree
+            .get_node(node_id)
+            .map(|n| n.get_property("_platform_body"))
+        {
+            Some(Variant::Int(id)) if id >= 0 => Some(BodyId(id as u64)),
+            _ => None,
+        };
+        character.platform_layer = u32_prop(tree, node_id, "_platform_layer", 0);
+        character.last_step = dt;
 
         // Collect static/other bodies to collide against (exclude self).
         //
@@ -3443,13 +3511,14 @@ impl PhysicsServer {
         // them out, which is why `get_floor_normal()` had no arm to write.
         let floor_normal = character.get_floor_normal();
         let wall_normal = character.get_wall_normal();
+        let platform_body = character.platform_body;
+        let platform_layer = character.platform_layer;
 
-        // Release the immutable borrow of `self.world` before the mutable one.
         drop(obstacle_refs);
-
-        // Write position back to the physics body
-        if let Some(phys_body) = self.world.get_body_mut(body_id) {
-            phys_body.position = new_position;
+        if commit {
+            if let Some(phys_body) = self.world.get_body_mut(body_id) {
+                phys_body.position = new_position;
+            }
         }
 
         // Sync to scene tree. `new_position` is world-space (the character
@@ -3529,6 +3598,11 @@ impl PhysicsServer {
             node.set_property("is_on_floor", Variant::Bool(on_floor));
             node.set_property("is_on_wall", Variant::Bool(on_wall));
             node.set_property("is_on_ceiling", Variant::Bool(on_ceiling));
+            node.set_property(
+                "_platform_body",
+                Variant::Int(platform_body.map_or(-1, |b| b.0 as i64)),
+            );
+            node.set_property("_platform_layer", Variant::Int(platform_layer as i64));
         }
         collided
     }
@@ -3572,7 +3646,8 @@ impl PhysicsServer {
         if !kinematic || !is_character {
             return None;
         }
-        Some(self.slide_character(tree, node_id, body_id, dt))
+        // During the script phase: the server body follows at the step.
+        Some(self.slide_character(tree, node_id, body_id, dt, false))
     }
 }
 

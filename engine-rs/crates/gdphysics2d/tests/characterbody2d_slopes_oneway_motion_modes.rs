@@ -122,10 +122,13 @@ fn characterbody2d_slopes_oneway_motion_modes() {
     for _ in 0..8 {
         body.move_and_slide_delta(Vector2::new(0.0, 120.0), DT, &refs);
     }
+    // Godot: "All collisions will be reported as on_wall" (CharacterBody2D.xml,
+    // MOTION_MODE_FLOATING; `_set_collision_direction` falls through to the
+    // wall arm whenever the mode is not GROUNDED).
     assert!(
-        !body.is_on_floor() && !body.is_on_wall() && !body.is_on_ceiling(),
-        "MOTION_MODE_FLOATING privileges no up direction, so nothing may be \
-         classified as floor/wall/ceiling"
+        !body.is_on_floor() && body.is_on_wall() && !body.is_on_ceiling(),
+        "MOTION_MODE_FLOATING privileges no up direction, so a contact is a \
+         wall, never a floor or ceiling"
     );
 
     // -- (4b) platform_on_leave = DO_NOTHING drops inherited velocity --------
@@ -134,12 +137,13 @@ fn characterbody2d_slopes_oneway_motion_modes() {
     body.platform_velocity = Vector2::new(200.0, 0.0);
     let none: Vec<PhysicsBody2D> = Vec::new();
     let refs: Vec<&PhysicsBody2D> = none.iter().collect();
-    body.move_and_slide_delta(Vector2::ZERO, DT, &refs);
+    let v = body.move_and_slide_delta(Vector2::ZERO, DT, &refs);
+    // Godot still applies this call's platform motion (`move_and_slide`
+    // moves by `current_platform_velocity * delta` first); what DO_NOTHING
+    // controls is the velocity INHERITED on leaving.
     assert!(
-        body.position.x.abs() < 1e-4,
-        "platform_on_leave = DO_NOTHING must inherit no platform velocity; the \
-         body drifted to x = {}",
-        body.position.x
+        v.x.abs() < 1e-4,
+        "platform_on_leave = DO_NOTHING must inherit no platform velocity, got {v:?}"
     );
 }
 
