@@ -120,9 +120,30 @@ brief includes:
 - the bead id and the finding verbatim
 - the repro command
 - the rule from CLAUDE.md: every fix needs a test that fails without it
-- `scripts/rust_task.sh nextest run -p <crate>` with
-  `NEXTEST_TEST_THREADS<=2`, and NOT the whole workspace
-- commit on the worktree branch
+- targeted tests only: `nextest run -p <crate> --test <file>` with
+  `NEXTEST_TEST_THREADS<=2`, plus `cargo test` for the crates touched. Never
+  a multi-crate or whole-workspace nextest
+- commit once, at the end, on the worktree branch. The pre-commit scan takes
+  about 15 minutes under load.
+
+Put the rules every agent shares in ONE brief file (in the scratchpad) and
+keep each prompt to its lane. Three rounds on platformer_3d taught:
+
+- **The worktree starts on a STALE commit**, not on your branch. The first
+  step is `scripts/worktree-setup.sh --base <integration-branch>`. On a clean
+  tree, that moves the branch to the base (a hard reset is hook-blocked) and
+  links the untracked test inputs: the `upstream/godot` docs and the
+  gitignored `godot_extension_api.json`. Without them, 2-3 unrelated tests
+  are red in every worktree.
+- **Give every visual or behaviour lane the Godot reference** (step 4). An
+  agent judging "looks right" by eye will tune to the wrong target.
+- **Name the other lanes, and when you merge one that changes shared
+  semantics, message the rest.** Examples: input `just_pressed` per tick,
+  signal timing, the Basis row order. Two agents fixed the same bug twice
+  this way.
+- **An agent's "the machine was busy" fps note can hide a real regression.**
+  One merge sent every Play frame to an 870 ms path. Re-measure on the merged
+  tree with a quiet host.
 
 Tell agents that touch the same file (for example the Play render path) about
 each other. Keep tool changes surgical.
@@ -162,8 +183,12 @@ test. Fix it with one of the patterns above.
 
 ## 6. Merge, then the full suite, then the gate
 
-- Merge the worktree branches one at a time and resolve conflicts by reading
-  both sides.
+- Merge the worktree branches one at a time into an integration branch, NOT
+  the checkpoint, and resolve conflicts by reading both sides. Move the
+  checkpoint only after the full suite passes on the integration branch.
+- Check that the merge compiles: `scripts/rust_task.sh check --workspace
+  --tests --examples`. Then run the lanes' new test files TOGETHER: two
+  green branches can conflict in behaviour without a textual conflict.
 - Run the full suite once on the merged tree:
   `cargo nextest run --workspace` (via `scripts/rust_task.sh`). Grep the output
   for both `Summary` and `could not compile`, because one compile break runs
