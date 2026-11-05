@@ -653,7 +653,8 @@ impl SoftwareRenderer3D {
         let fog_inv_proj = invert_projection(&proj);
         // Decals modulate surface albedo, so they project before any fog
         // covers the result (pat-p0s82.26).
-        Self::apply_decal_pass(
+        let decal_receivers: Vec<&Instance3D> = self.instances.iter().collect();
+        Self::apply_decal_pass_masked(
             &mut pixels,
             &depth_normalized,
             w,
@@ -661,6 +662,7 @@ impl SoftwareRenderer3D {
             &self.decals,
             &fog_inv_proj,
             &viewport.camera_transform,
+            &decal_receivers,
         );
         Self::apply_fog_pass(
             &mut pixels,
@@ -1290,7 +1292,8 @@ impl SoftwareRenderer3D {
         let fog_inv_proj = invert_projection(&proj);
         // Decals modulate surface albedo, so they project before any fog
         // covers the result (pat-p0s82.26).
-        Self::apply_decal_pass(
+        let decal_receivers: Vec<&Instance3D> = self.instances.iter().collect();
+        Self::apply_decal_pass_masked(
             &mut pixels,
             &depth_normalized,
             w,
@@ -1298,6 +1301,7 @@ impl SoftwareRenderer3D {
             &self.decals,
             &fog_inv_proj,
             &viewport.camera_transform,
+            &decal_receivers,
         );
         Self::apply_fog_pass(
             &mut pixels,
@@ -1485,6 +1489,7 @@ impl SoftwareRenderer3D {
     /// surface albedo, and fog then covers the result.
     ///
     /// [`apply_fog_pass`]: Self::apply_fog_pass
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn apply_decal_pass(
         pixels: &mut [Color],
         depth: &[f32],
@@ -1493,6 +1498,44 @@ impl SoftwareRenderer3D {
         decals: &[Decal3D],
         inv_proj: &[[f32; 4]; 4],
         camera_transform: &Transform3D,
+    ) {
+        Self::apply_decal_pass_masked(
+            pixels,
+            depth,
+            w,
+            h,
+            decals,
+            inv_proj,
+            camera_transform,
+            &[],
+        );
+    }
+
+    /// [`Self::apply_decal_pass`], honouring each decal's `cull_mask` against
+    /// the `instances` drawn this frame (pat-772py).
+    ///
+    /// Godot skips a decal for any instance whose `layers` share no bit with
+    /// the decal's `cull_mask` (`scene_forward_clustered.glsl:1563`). The 3D
+    /// platformer's BlobShadow sets `cull_mask = 1048573`, every layer but 2,
+    /// and puts the Robot mesh on layer 2, so the blob lands on the floor and
+    /// never on the robot standing in its box.
+    ///
+    /// This pass is screen-space and the depth buffer does not say which
+    /// instance drew a pixel. So the excluded instances (visible, with a mesh,
+    /// on no layer of the mask) are rasterized to a depth buffer of their own,
+    /// and a pixel whose surface lies on that depth is one of theirs. A
+    /// receiving surface just behind an excluded one fails that test, because
+    /// the depth there is the receiving surface's.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn apply_decal_pass_masked(
+        pixels: &mut [Color],
+        depth: &[f32],
+        w: u32,
+        h: u32,
+        decals: &[Decal3D],
+        inv_proj: &[[f32; 4]; 4],
+        camera_transform: &Transform3D,
+        instances: &[&Instance3D],
     ) {
         if decals.is_empty() {
             return;
@@ -1669,6 +1712,37 @@ impl SoftwareRenderer3D {
             })
             .collect();
 
+        // pat-772py: per decal, the depth of the instances its `cull_mask`
+        // excludes (one buffer per distinct mask), or `None` when it excludes
+        // nothing drawn this frame.
+        let mut by_mask: Vec<(u32, Option<std::sync::Arc<Vec<f32>>>)> = Vec::new();
+        let exclusions: Vec<Option<std::sync::Arc<Vec<f32>>>> = decals
+            .iter()
+            .map(|d| {
+                if let Some((_, buf)) = by_mask.iter().find(|(m, _)| *m == d.cull_mask) {
+                    return buf.clone();
+                }
+                let excluded: Vec<&Instance3D> = instances
+                    .iter()
+                    .copied()
+                    .filter(|i| {
+                        i.visible && i.mesh.is_some() && (i.geometry.layers & d.cull_mask) == 0
+                    })
+                    .collect();
+                let buf = (!excluded.is_empty()).then(|| {
+                    std::sync::Arc::new(rasterize_screen_depth(
+                        &excluded,
+                        &view_of_world,
+                        &proj,
+                        w,
+                        h,
+                    ))
+                });
+                by_mask.push((d.cull_mask, buf.clone()));
+                buf
+            })
+            .collect();
+
         let shade_row = |y: u32, row: &mut [Color]| {
             let ndc_y = 1.0 - 2.0 * (y as f32 + 0.5) / h as f32;
             for x in ux0..=ux1 {
@@ -1708,6 +1782,20 @@ impl SoftwareRenderer3D {
                         || world_pos.z > hi.z
                     {
                         continue;
+                    }
+                    // `cull_mask` (pat-772py): this pixel's surface belongs to an
+                    // instance the decal must not project onto when it sits on
+                    // that instance's depth. Compared in VIEW space, with a
+                    // tolerance far above the two rasterizers' disagreement and
+                    // far below any gap between distinct surfaces.
+                    if let Some(ex) = &exclusions[k] {
+                        let e = ex[i];
+                        if e.is_finite() {
+                            let ez = pixel_view_position(ndc_x, ndc_y, e, inv_proj).z;
+                            if (ez - view_pos.z).abs() <= 0.02 + 0.002 * view_pos.z.abs() {
+                                continue;
+                            }
+                        }
                     }
                     // The same `inverse()` `sample` would compute, once per
                     // decal instead of once per pixel: the same bits.
@@ -2510,6 +2598,77 @@ fn sample_physical_sky(
 fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
     const K: f32 = 0.079_577_47;
     K * (1.0 - g * g) / (1.0 + g * g - 2.0 * g * cos_theta).max(1e-9).powf(1.5)
+}
+
+/// Rasterizes `instances` to a `w`x`h` buffer of the NEAREST post-divide depth
+/// (`proj` column-major, `view_of_world` the camera's inverse), `+inf` where
+/// none of them covers a pixel (pat-772py, the decal `cull_mask` test).
+///
+/// Depth is the same `clip.z / clip.w` the frame's own depth buffer holds, and
+/// it is affine across the screen, so plain barycentric interpolation is exact.
+/// Pixel centres are sampled at `x + 0.5`, as the decal pass reconstructs them.
+/// A triangle with a vertex at or behind the eye is skipped: this marks
+/// surfaces to EXCLUDE, so missing a sliver at the near plane only lets the
+/// decal through where it would otherwise have been dropped.
+fn rasterize_screen_depth(
+    instances: &[&Instance3D],
+    view_of_world: &Transform3D,
+    proj: &[[f32; 4]; 4],
+    w: u32,
+    h: u32,
+) -> Vec<f32> {
+    let mut out = vec![f32::INFINITY; (w * h) as usize];
+    let (wf, hf) = (w as f32, h as f32);
+    for inst in instances {
+        let Some(mesh) = &inst.mesh else { continue };
+        let to_view = *view_of_world * inst.transform;
+        let screen: Vec<Option<(f32, f32, f32)>> = mesh
+            .vertices
+            .iter()
+            .map(|v| {
+                let p = to_view.xform(*v);
+                let r = |r: usize| proj[0][r] * p.x + proj[1][r] * p.y + proj[2][r] * p.z + proj[3][r];
+                let cw = r(3);
+                if cw <= 1e-4 {
+                    return None;
+                }
+                let (nx, ny, nz) = (r(0) / cw, r(1) / cw, r(2) / cw);
+                Some(((nx + 1.0) * 0.5 * wf, (1.0 - ny) * 0.5 * hf, nz))
+            })
+            .collect();
+        for tri in mesh.indices.chunks_exact(3) {
+            let get = |i: u32| screen.get(i as usize).copied().flatten();
+            let (Some(a), Some(b), Some(c)) = (get(tri[0]), get(tri[1]), get(tri[2])) else {
+                continue;
+            };
+            let area = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
+            if area.abs() < 1e-9 {
+                continue;
+            }
+            let x0 = a.0.min(b.0).min(c.0).floor().max(0.0) as u32;
+            let y0 = a.1.min(b.1).min(c.1).floor().max(0.0) as u32;
+            let x1 = (a.0.max(b.0).max(c.0).ceil().min(wf) as u32).min(w);
+            let y1 = (a.1.max(b.1).max(c.1).ceil().min(hf) as u32).min(h);
+            for py in y0..y1 {
+                let fy = py as f32 + 0.5;
+                for px in x0..x1 {
+                    let fx = px as f32 + 0.5;
+                    let w0 = ((b.0 - fx) * (c.1 - fy) - (b.1 - fy) * (c.0 - fx)) / area;
+                    let w1 = ((c.0 - fx) * (a.1 - fy) - (c.1 - fy) * (a.0 - fx)) / area;
+                    let w2 = 1.0 - w0 - w1;
+                    if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                        continue;
+                    }
+                    let d = w0 * a.2 + w1 * b.2 + w2 * c.2;
+                    let slot = &mut out[(py * w + px) as usize];
+                    if d < *slot {
+                        *slot = d;
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Reconstructs a view-space position from a pixel's NDC coordinates and depth,
@@ -4978,14 +5137,15 @@ mod tests {
     #[test]
     fn decal_vertical_fade_softens_the_edges() {
         // Godot's default upper/lower_fade = 0.3. A fragment at world y=+0.5
-        // inside a half-extent-1 box maps to w = 0.75, so the upper fade gives
-        // (1 - 0.75) / 0.3 = 0.8333..., and the lower fade is saturated at 1.
+        // inside a half-extent-1 box is at box-local height y = 0.5, so Godot's
+        // upper fade is (1 - 0.5)^0.3 (an EXPONENT,
+        // `scene_forward_clustered.glsl:1572`, pat-772py).
         let mut decal = Decal3D::new();
         decal.modulate = Color::new(1.0, 1.0, 1.0, 1.0);
         let mut pixels = black_2x2();
         run_decal_pass(&mut pixels, &[0.5; 4], &[decal]);
 
-        let expected = 0.25f32 / 0.3;
+        let expected = 0.5f32.powf(0.3);
         for p in &pixels {
             assert!(
                 (p.r - expected).abs() < 1e-4,

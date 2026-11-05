@@ -250,22 +250,26 @@ impl Decal3D {
     /// `upper_fade` / `lower_fade` settings.
     ///
     /// Returns a value in `[0.0, 1.0]` where `1.0` means fully visible.
+    ///
+    /// 🔑 Godot's curve is a POWER, not a linear ramp of width `upper_fade`
+    /// (pat-772py). `scene_forward_clustered.glsl:1572`:
+    /// `fade = pow(1 - |y|, y > 0 ? upper_fade : lower_fade)`, where `y` is the
+    /// box-local height in `[-1, 1]` (`w = 0.5` is the centre). So the fade
+    /// values are EXPONENTS: the 3D platformer's BlobShadow authors
+    /// `upper_fade = 4`, which leaves `(1 - 0.33)^4 = 0.2` at the robot's head
+    /// height. The old ramp `(1 - w) / 4` capped the whole box at 0.25 instead
+    /// and fell off in the wrong shape. An exponent of 0 is no fade at all.
     pub fn vertical_fade(&self, w: f64) -> f64 {
-        let mut fade = 1.0;
-
-        // Upper fade: w near 1.0
-        if self.upper_fade > 0.0 {
-            let t = ((1.0 - w) / self.upper_fade).min(1.0);
-            fade *= t;
+        let y = (w * 2.0 - 1.0).clamp(-1.0, 1.0);
+        let exponent = if y > 0.0 {
+            self.upper_fade
+        } else {
+            self.lower_fade
+        };
+        if exponent <= 0.0 {
+            return 1.0;
         }
-
-        // Lower fade: w near 0.0
-        if self.lower_fade > 0.0 {
-            let t = (w / self.lower_fade).min(1.0);
-            fade *= t;
-        }
-
-        fade.clamp(0.0, 1.0)
+        (1.0 - y.abs()).max(0.0).powf(exponent).clamp(0.0, 1.0)
     }
 
     /// Computes the distance fade factor given the camera-to-decal distance.
@@ -624,9 +628,10 @@ mod tests {
         // At w=1.0 (top edge), upper fade should be 0
         assert!(d.vertical_fade(1.0).abs() < 1e-9);
 
-        // At w=0.25, lower fade = 0.25/0.5 = 0.5, upper is 1.0
+        // At w=0.25 the box-local height is y = -0.5, so Godot's lower fade is
+        // (1 - 0.5)^0.5 (an exponent, `scene_forward_clustered.glsl:1572`).
         let f = d.vertical_fade(0.25);
-        assert!((f - 0.5).abs() < 1e-9);
+        assert!((f - 0.5f64.sqrt()).abs() < 1e-9, "got {f}");
     }
 
     #[test]

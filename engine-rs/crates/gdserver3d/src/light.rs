@@ -499,6 +499,103 @@ pub struct Light3D {
     /// Whether PSSM splits blend across their boundaries
     /// (`directional_shadow_blend_splits`).
     pub blend_splits: bool,
+    /// The Godot settings that size and filter a DIRECTIONAL light's shadow map
+    /// once it is fitted to a camera (pat-772py). Inert for other light types.
+    pub directional_shadow: DirectionalShadowParams,
+    /// The camera a directional shadow map is fitted to, set by the renderer
+    /// for the frame it draws (pat-772py).
+    ///
+    /// `None` keeps the legacy fixed `±SHADOW_EXTENT` box around the world
+    /// origin, which is what every caller that never names a camera (unit
+    /// tests building maps by hand) still gets. With a camera the map covers
+    /// the camera's view frustum out to `directional_shadow_max_distance`, the
+    /// way Godot's `_light_instance_setup_directional_shadow` does.
+    pub shadow_camera: Option<ShadowCamera>,
+}
+
+/// The view a directional shadow map is fitted to (pat-772py).
+///
+/// Perspective only: Godot fits an orthogonal camera with its own branch, which
+/// no shipped fixture exercises.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShadowCamera {
+    /// Camera global transform; it looks along its local -Z.
+    pub transform: gdcore::math3d::Transform3D,
+    /// VERTICAL field of view, in radians.
+    pub fov_y: f32,
+    /// Viewport width / height.
+    pub aspect: f32,
+    /// Near clip plane.
+    pub near: f32,
+    /// Far clip plane.
+    pub far: f32,
+}
+
+/// Godot's directional-shadow settings that are not per-fragment light
+/// uniforms (pat-772py).
+///
+/// ⚠️ Two of these are PROJECT settings, not light properties, carried here
+/// because the shadow generator sees only the light:
+/// `rendering/lights_and_shadows/directional_shadow/size` and
+/// `.../soft_shadow_filter_quality`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DirectionalShadowParams {
+    /// `directional_shadow/size`: the atlas Godot renders the map into (default
+    /// 4096). In ORTHOGONAL mode one split owns the whole atlas; the 2- and
+    /// 4-split modes halve it on one or both axes
+    /// (`LightStorage::get_directional_light_shadow_size`).
+    pub atlas_size: u32,
+    /// `directional_shadow/soft_shadow_filter_quality`, Godot's
+    /// `RS::ShadowQuality` (0 = hard … 5 = ultra; default 2 = soft low).
+    pub soft_quality: u8,
+    /// `Light3D.shadow_blur` (default 1.0): multiplies the filter radius AND the
+    /// constant bias (`light_storage.cpp:696`, `:721`).
+    pub blur: f32,
+    /// `DirectionalLight3D.directional_shadow_pancake_size` (default 20).
+    pub pancake_size: f32,
+    /// `DirectionalLight3D.directional_shadow_mode`: 0 orthogonal, 1 two
+    /// splits, 2 four splits (Godot's default).
+    pub mode: u8,
+}
+
+impl Default for DirectionalShadowParams {
+    fn default() -> Self {
+        Self {
+            atlas_size: 4096,
+            soft_quality: 2,
+            blur: 1.0,
+            pancake_size: 20.0,
+            mode: 2,
+        }
+    }
+}
+
+impl DirectionalShadowParams {
+    /// Godot's `(soft samples, quality radius)` for [`Self::soft_quality`]
+    /// (`RendererSceneRenderRD::directional_soft_shadow_filter_set_quality`).
+    /// Zero samples is the single hardware-filtered tap of the HARD level.
+    pub fn soft_samples_and_radius(&self) -> (u32, f32) {
+        match self.soft_quality {
+            0 => (0, 1.0),
+            1 => (1, 1.5),
+            2 => (4, 2.0),
+            3 => (8, 2.0),
+            4 => (16, 3.0),
+            _ => (32, 4.0),
+        }
+    }
+
+    /// The resolution of ONE split in Godot's atlas for this mode.
+    pub fn split_size(&self) -> u32 {
+        match self.mode {
+            0 => self.atlas_size,
+            // Two splits halve the height, four halve both axes; the split's
+            // size is the larger side either way.
+            1 => self.atlas_size,
+            _ => self.atlas_size / 2,
+        }
+        .max(1)
+    }
 }
 
 /// The maximum number of lights one frame can shade with.
@@ -578,6 +675,8 @@ impl Light3D {
             shadow_split_2: 0.2,
             shadow_split_3: 0.5,
             blend_splits: false,
+            directional_shadow: DirectionalShadowParams::default(),
+            shadow_camera: None,
         }
     }
 
@@ -623,6 +722,8 @@ impl Light3D {
             shadow_split_2: 0.2,
             shadow_split_3: 0.5,
             blend_splits: false,
+            directional_shadow: DirectionalShadowParams::default(),
+            shadow_camera: None,
         }
     }
 
@@ -668,6 +769,8 @@ impl Light3D {
             shadow_split_2: 0.2,
             shadow_split_3: 0.5,
             blend_splits: false,
+            directional_shadow: DirectionalShadowParams::default(),
+            shadow_camera: None,
         }
     }
 
