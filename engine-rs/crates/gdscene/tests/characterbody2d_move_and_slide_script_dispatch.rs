@@ -93,7 +93,14 @@ fn platformer_scene(scripts: &[&str]) -> (MainLoop, Vec<NodeId>) {
     let mut ids = Vec::new();
     for (i, src) in scripts.iter().enumerate() {
         let mut body = Node::new(&format!("Player{i}"), "CharacterBody2D");
-        body.set_property("position", Variant::Vector2(Vector2::ZERO));
+        // Side by side, not stacked: two CharacterBody2Ds at the same spot
+        // OVERLAP, and Godot's `move_and_slide` recovers the mover out of its
+        // twin (`test_body_motion` step 1) — it climbed 20 px instead of
+        // falling once Patina ran Godot's motion query.
+        body.set_property(
+            "position",
+            Variant::Vector2(Vector2::new(100.0 * i as f32, 0.0)),
+        );
         let body_id = tree.add_child(main, body).unwrap();
         let mut shape = Node::new("CollisionShape", "CollisionShape2D");
         shape.set_property("radius", Variant::Float(10.0));

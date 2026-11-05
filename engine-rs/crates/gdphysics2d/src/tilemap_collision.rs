@@ -118,6 +118,120 @@ pub fn tilemap_to_physics(
     }
 }
 
+/// Godot's `TileMapLayer` physics quadrant edge, in cells
+/// (`physics_quadrant_size`, default 16).
+pub const DEFAULT_PHYSICS_QUADRANT_SIZE: i32 = 16;
+
+/// The axis-aligned rectangle a tile polygon describes, in world space, or
+/// `None` when the polygon is not one.
+fn world_rect_of(tile: &TileCollisionInfo, center: Vector2) -> Option<(f32, f32, f32, f32)> {
+    let pts: Vec<Vector2> = if tile.polygon.is_empty() {
+        return None;
+    } else {
+        tile.polygon.iter().map(|p| *p + center).collect()
+    };
+    if pts.len() != 4 {
+        return None;
+    }
+    let (mut xs, mut ys): (Vec<f32>, Vec<f32>) = pts.iter().map(|p| (p.x, p.y)).unzip();
+    xs.sort_by(f32::total_cmp);
+    xs.dedup();
+    ys.sort_by(f32::total_cmp);
+    ys.dedup();
+    if xs.len() != 2 || ys.len() != 2 {
+        return None;
+    }
+    // Every corner must be present (rules out a bow-tie of the same extents).
+    for &x in &xs {
+        for &y in &ys {
+            if !pts.iter().any(|p| p.x == x && p.y == y) {
+                return None;
+            }
+        }
+    }
+    Some((xs[0], ys[0], xs[1], ys[1]))
+}
+
+/// Generates the static bodies Godot 4.6's `TileMapLayer` builds: tiles are
+/// grouped per physics quadrant ([`DEFAULT_PHYSICS_QUADRANT_SIZE`]) and per
+/// cell ROW (`PhysicsBodyKey::y_origin`), and each group's polygons are MERGED
+/// (`Geometry2D::merge_many_polygons`) before being cut back into convex shapes
+/// (`tile_map_layer.cpp`, `_physics_update_cell`).
+///
+/// 🔑 Why it matters: with one body per tile, a box walking along a flat floor
+/// meets a polygon VERTEX at every tile seam. Within the safe margin that vertex
+/// produces its own contact pairs, so recovery and the rest pass see a slightly
+/// different floor at every seam and the walker's height jitters by a few
+/// thousandths of a pixel each 64 px — Godot's merged floor has no seams at all.
+///
+/// The merge implemented here is the case real tile sets are made of: runs of
+/// horizontally ADJACENT axis-aligned rectangles that share their top and
+/// bottom edges become one rectangle. Any other tile polygon keeps its own body,
+/// exactly as [`tilemap_to_physics`] makes it.
+pub fn tilemap_to_physics_merged(
+    world: &mut PhysicsWorld2D,
+    tiles: &[TileCollisionInfo],
+    tile_size: Vector2i,
+    tilemap_offset: Vector2,
+    quadrant_size: i32,
+) -> TileMapCollisionResult {
+    use std::collections::BTreeMap;
+    let q = quadrant_size.max(1);
+    let floor_div = |v: i32| v.div_euclid(q);
+    // (quadrant x, quadrant y, row, one_way) -> [(left, top, right, bottom)]
+    let mut groups: BTreeMap<(i32, i32, i32, bool), Vec<(f32, f32, f32, f32)>> = BTreeMap::new();
+    let mut singles: Vec<TileCollisionInfo> = Vec::new();
+    for tile in tiles {
+        let center = Vector2::new(
+            (tile.cell.x as f32 + 0.5) * tile_size.x as f32,
+            (tile.cell.y as f32 + 0.5) * tile_size.y as f32,
+        ) + tilemap_offset;
+        match world_rect_of(tile, center) {
+            Some(r) => groups
+                .entry((
+                    floor_div(tile.cell.x),
+                    floor_div(tile.cell.y),
+                    tile.cell.y,
+                    tile.one_way,
+                ))
+                .or_default()
+                .push(r),
+            None => singles.push(tile.clone()),
+        }
+    }
+
+    let mut body_ids = Vec::new();
+    for ((_, _, _, one_way), mut rects) in groups {
+        rects.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut runs: Vec<(f32, f32, f32, f32)> = Vec::new();
+        for r in rects {
+            match runs.last_mut() {
+                Some(last) if last.1 == r.1 && last.3 == r.3 && last.2 == r.0 => last.2 = r.2,
+                _ => runs.push(r),
+            }
+        }
+        for (l, t, r, b) in runs {
+            let center = Vector2::new((l + r) * 0.5, (t + b) * 0.5);
+            let (hw, hh) = ((r - l) * 0.5, (b - t) * 0.5);
+            let shape = Shape2D::convex_polygon(&[
+                Vector2::new(-hw, -hh),
+                Vector2::new(hw, -hh),
+                Vector2::new(hw, hh),
+                Vector2::new(-hw, hh),
+            ]);
+            let mut body = PhysicsBody2D::new(BodyId(0), BodyType::Static, center, shape, 0.0);
+            body.one_way_collision = one_way;
+            body_ids.push(world.add_body(body));
+        }
+    }
+    let rest = tilemap_to_physics(world, &singles, tile_size, tilemap_offset);
+    body_ids.extend(rest.body_ids);
+    TileMapCollisionResult {
+        tile_count: tiles.len(),
+        body_ids,
+    }
+}
+
 /// Convenience: generates [`TileCollisionInfo`] from a grid of tile IDs and a
 /// lookup function that returns the collision rect for a tile source ID (if any).
 pub fn collect_collision_tiles<F>(

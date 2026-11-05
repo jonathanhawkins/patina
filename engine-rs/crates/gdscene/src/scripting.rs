@@ -780,6 +780,15 @@ pub fn binding_from_event_spec(
     }
 }
 
+/// The "just pressed / just released" part of an [`InputSnapshot`].
+#[derive(Debug, Clone, Default)]
+pub struct JustState {
+    keys_pressed: HashSet<String>,
+    keys_released: HashSet<String>,
+    actions_pressed: HashSet<String>,
+    actions_released: HashSet<String>,
+}
+
 /// A snapshot of input state at a single frame, passed to scripts via
 /// [`SceneTreeAccessor`] so they can query `Input.is_action_pressed()` etc.
 #[derive(Debug, Clone, Default)]
@@ -851,6 +860,34 @@ impl InputSnapshot {
         } else {
             false
         }
+    }
+
+    /// Takes the four "just" sets out of the snapshot, leaving the held state.
+    ///
+    /// Godot reports `is_action_just_pressed` in `_physics_process` for ONE
+    /// tick only — the first after the event (`input.cpp`:
+    /// `pressed_physics_frame = physics_frames + 1`, compared with `==`). A
+    /// frame running two ticks (any project at 120 ticks/s on a 60 Hz display)
+    /// must not see the press twice: the 2D Platformer's jump applied
+    /// `velocity.y = JUMP_VELOCITY` in BOTH ticks and rose 0.146 px higher than
+    /// Godot in its first frame.
+    pub fn take_just_state(&mut self) -> JustState {
+        JustState {
+            keys_pressed: std::mem::take(&mut self.just_pressed_keys),
+            keys_released: std::mem::take(&mut self.just_released_keys),
+            actions_pressed: std::mem::take(&mut self.actions_just_pressed),
+            actions_released: std::mem::take(&mut self.actions_just_released),
+        }
+    }
+
+    /// Puts back what [`take_just_state`](Self::take_just_state) removed, so
+    /// `_process` still sees this frame's presses (Godot's process-frame
+    /// `just_pressed` is per FRAME).
+    pub fn restore_just_state(&mut self, s: JustState) {
+        self.just_pressed_keys.extend(s.keys_pressed);
+        self.just_released_keys.extend(s.keys_released);
+        self.actions_just_pressed.extend(s.actions_pressed);
+        self.actions_just_released.extend(s.actions_released);
     }
 
     /// Returns `true` if `action` became pressed this frame — see

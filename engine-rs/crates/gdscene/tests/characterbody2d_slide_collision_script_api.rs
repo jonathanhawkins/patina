@@ -41,6 +41,7 @@ var realx = -999.0
 var velx = -999.0
 var px = -999.0
 var py = -999.0
+var wall_slides = -1
 
 func _physics_process(delta):
     velocity = Vector2(200, 200)
@@ -61,6 +62,10 @@ func _physics_process(delta):
         var c1 = get_slide_collision(1)
         var n1 = c1.get_normal()
         nx1 = n1.x
+    wall_slides = 0
+    for i in range(slides):
+        if get_slide_collision(i).get_normal().x < -0.5:
+            wall_slides = wall_slides + 1
 ";
 
 /// Sweeps into the wall with `move_and_collide` and records whether it returned
@@ -141,7 +146,28 @@ fn run(src: &str, ticks: usize) -> (MainLoop, NodeId) {
 /// **The acceptance test.**
 #[test]
 fn characterbody2d_slide_collision_script_api() {
-    let (ml, id) = run(SCRIPT, 60);
+    // ⚠️ Real Godot 4.6.1 on this exact fixture (a SceneTree probe building the
+    // same floor, wall and radius-10 body) does not settle: wedged in the
+    // corner it ALTERNATES tick by tick between two states —
+    //   n = 4 slides, velocity (200, 0), real velocity (~0, -4.39), at
+    //   (39.9926, 79.9252);
+    //   n = 1 slide, velocity (0, 0) (the `floor_block_on_wall` branch zeroes
+    //   it), at (39.9926, 79.9984).
+    // The assertions below are about the first state, so step until the body
+    // is in it (it is one of any two consecutive ticks).
+    let (mut ml, id) = run(SCRIPT, 58);
+    for _ in 0..4 {
+        ml.step(1.0 / 60.0);
+        if num(&ml, id, "velx").abs() > 1.0 {
+            break;
+        }
+    }
+    assert!(
+        (num(&ml, id, "px") - 39.9926).abs() < 0.01 && (num(&ml, id, "py") - 79.9252).abs() < 0.01,
+        "Godot rests the body in the corner at (39.9926, 79.9252); Patina ({}, {})",
+        num(&ml, id, "px"),
+        num(&ml, id, "py")
+    );
 
     // The fixture only means anything if the body really is in the corner.
     // ⚠️ Reported WITH the body's final position. "on_wall was false" alone
@@ -179,12 +205,18 @@ fn characterbody2d_slide_collision_script_api() {
     // normal was wrong when the wall contact was simply the second entry.
     // Ordering is not part of Godot's contract, so the test must not depend on
     // it.
+    // Godot 4.6.1 reports this state's four slides as [(0.000089, -1),
+    // (0, -1), (-1, 0), (-1, 0)]: the FLOOR twice, then the WALL twice. So the
+    // wall is NOT among the first two — it is counted across all of them.
     let (nx0, nx1) = (num(&ml, id, "nx0"), num(&ml, id, "nx1"));
     assert!(
-        nx0 < -0.5 || nx1 < -0.5,
-        "one of the contacts must be the WALL, whose normal points back along \
-         -X; got x = {nx0} and {nx1}. Two contacts near zero would mean both \
-         were floor-like and the wall never registered as a slide collision"
+        nx0.abs() < 1e-3 && nx1.abs() < 1e-3,
+        "Godot's first two slides are the floor; got x = {nx0} and {nx1}"
+    );
+    assert_eq!(
+        num(&ml, id, "wall_slides"),
+        2.0,
+        "Godot records the wall (normal -X) as two of the four slide collisions"
     );
 
     // ⚠️ THE OTHER BUG, and the pair that proves it: the REQUESTED velocity is

@@ -2819,6 +2819,11 @@ impl SceneTree {
         self.input_snapshot.is_some()
     }
 
+    /// Mutable access to the current input snapshot, if any.
+    pub fn input_snapshot_mut(&mut self) -> Option<&mut crate::scripting::InputSnapshot> {
+        self.input_snapshot.as_mut()
+    }
+
     /// Returns a reference to the current input snapshot, if any.
     pub fn input_snapshot(&self) -> Option<&crate::scripting::InputSnapshot> {
         self.input_snapshot.as_ref()

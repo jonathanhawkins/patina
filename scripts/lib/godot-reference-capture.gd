@@ -9,11 +9,31 @@
 ##   physics_ticks_per_second=120 — then `_process`, then the render);
 ## - an input {start, end} is pressed before frame `start` steps and released
 ##   after frame `end` steps.
-## This node runs FIRST in the first physics tick of every iteration (lowest
-## priority), so at iteration f+1 it sees the complete result of frame f
-## (scripts, move_and_slide, the physics server step, `_process` and that
-## frame's render) and records it as frame f, then applies the inputs for
-## frame f+1 before any game script runs — where a real key press lands.
+## Frame f (f >= 1) is recorded at the very END of iteration f: from a
+## deferred call queued by this node's `_process`, which runs LAST (highest
+## process priority), so every script, `move_and_slide`, the physics step,
+## every `_process` and the deferred calls they queued have run. Frame 0 is
+## recorded in the first physics tick of iteration 1 (lowest physics
+## priority). Pictures are still taken in the first physics tick of the NEXT
+## iteration, which is when frame f's render is the last drawn one.
+##
+## 🔑 Inputs for frame f+1 are parsed right after frame f is recorded and NOT
+## flushed: the OS loop flushes buffered events BETWEEN iterations
+## (`os_macos.mm`: `flush_buffered_events` then `Main::iteration`), which is
+## where a real key press lands. Input marks a press as
+## `pressed_physics_frame = physics_frames + 1` ("the earliest we can react
+## to it is the next physics tick", `input.cpp`). Pressing and flushing INSIDE
+## the first tick, as this used to, made `pressed` true at once but
+## `is_action_just_pressed` fire one tick LATE — the 2D Platformer's jump
+## moved one tick instead of two in its first frame, a trace no real player
+## (and no Patina run) produces. Recording before the inputs go in also keeps
+## an `_input` handler of frame f+1 (Dodge the Creeps' Enter starting the
+## game) out of frame f's record.
+##
+## ⚠️ Inputs starting on frame 1 cannot be parsed between frames (nothing of
+## ours runs before the first iteration but `_ready`, which is before the main
+## scene's own `_ready`), so they keep the old in-tick press: for them alone
+## `is_action_just_pressed` in `_physics_process` is one tick late.
 extends Node
 
 var cfg: Dictionary = {}
@@ -28,6 +48,7 @@ var finished := false
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	process_physics_priority = -2147483000
+	process_priority = 2147483000
 	var path := ""
 	var args := OS.get_cmdline_user_args()
 	for i in range(args.size()):
@@ -57,21 +78,46 @@ func _physics_process(_delta: float) -> void:
 	if frame == last_iteration:
 		return
 	last_iteration = frame
-	_record(frame)
+	if frame == 0:
+		_record(0)
+		_inject(0)
+		Input.flush_buffered_events()
 	if shots.has(frame) and frame > 0:
 		_shoot(frame)
-	for inp in cfg["inputs"]:
-		if int(inp["end"]) == frame:
-			_key(inp, false)
 	if frame >= int(cfg["frames"]):
 		finished = true
 		_write()
 		get_tree().quit(0)
 		return
+
+
+func _process(_delta: float) -> void:
+	if finished:
+		return
+	# This iteration produces frame `get_process_frames() + 1` (the counter is
+	# bumped at the END of `Main::iteration`).
+	_end_of_frame.call_deferred(Engine.get_process_frames() + 1)
+
+
+## Records frame `done`, then queues the inputs for frame `done + 1`; the OS
+## loop flushes them before the next iteration — exactly between frames.
+func _end_of_frame(done: int) -> void:
+	if finished:
+		return
+	_record(done)
+	_inject(done)
+
+
+## Queues the key changes due between frame `done` and frame `done + 1`:
+## releases of inputs held through `done`, presses of inputs starting at
+## `done + 1`. Left buffered on purpose (see the header).
+func _inject(done: int) -> void:
 	for inp in cfg["inputs"]:
-		if int(inp["start"]) == frame + 1:
+		if int(inp["end"]) == done:
+			_key(inp, false)
+	for inp in cfg["inputs"]:
+		if int(inp["start"]) == done + 1:
 			_key(inp, true)
-	Input.flush_buffered_events()
 
 
 func _key(inp: Dictionary, down: bool) -> void:

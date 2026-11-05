@@ -82,11 +82,17 @@ command.
 - An input `{start, end}` is pressed before frame `start` steps and released
   after frame `end`, which is the MCP `play` semantics. `--keys` ms become
   frames at `--fps` (60): `wait:500,KeyW:1500` holds W for f31 to f120.
-- In Godot, the capture node runs first in the first physics tick of each
-  iteration. It records frame f-1, takes the picture of the last drawn frame,
-  then presses the inputs with `Input.parse_input_event` and
-  `flush_buffered_events`. That is where a real key press lands, so
-  `is_action_just_pressed` fires in the same frame.
+- In Godot, the capture node records frame f at the very end of iteration f
+  (a deferred call from its last-priority `_process`), then parses frame
+  f+1's key events WITHOUT flushing them: the OS loop flushes between
+  iterations, which is where a real key press lands, so
+  `is_action_just_pressed` holds for the first physics tick of frame f+1 and
+  only that one (Godot marks a press `physics_frames + 1`). Pictures are taken
+  in the first physics tick of the next iteration (the last drawn frame).
+  ⚠️ Inputs starting on frame 1 are still pressed inside the first tick, so
+  for them alone `just_pressed` lands one tick late. (Before pat-dt40j every
+  input was pressed that way and every `just_pressed` was one tick late — the
+  2D Platformer's first jump frame moved one tick instead of two.)
 - Godot runs with `--fixed-fps 60 --disable-vsync`. Every run is
   deterministic: two runs give byte-identical PNGs.
 
