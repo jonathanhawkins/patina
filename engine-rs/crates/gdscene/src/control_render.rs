@@ -1252,6 +1252,53 @@ fn string_prop(tree: &SceneTree, node_id: NodeId, key: &str) -> Option<String> {
     }
 }
 
+/// The `res://` path a texture-valued property names (pat-60d96).
+///
+/// 🔑 A `.tscn`'s `texture = ExtResource("7_uu0k4")` stays the LITERAL
+/// reference on the node; the resolved path rides beside it as the
+/// `__extres__<key>` companion (`packed_scene.rs`, pat-0q2kx.6) -- which
+/// `node2d::get_texture_path` already prefers for a Sprite2D. The control
+/// arms read the literal, so every TextureRect / TextureButton / Button icon
+/// in a real scene asked the rasterizer for a file named `ExtResource("..")`:
+/// truck_town's logo and car pictures drew nothing (Play) or the missing-
+/// texture white square (edit view).
+pub(crate) fn texture_path_prop(tree: &SceneTree, node_id: NodeId, key: &str) -> Option<String> {
+    let node = tree.get_node(node_id)?;
+    if let Variant::String(s) = node.get_property(&format!("__extres__{key}")) {
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    match node.get_property(key) {
+        Variant::String(s) if !s.is_empty() => Some(s),
+        _ => None,
+    }
+}
+
+/// A texture file's pixel size, decoded once per path and cached, for the
+/// controls whose layout depends on it (a Button's `icon`; pat-60d96).
+pub(crate) fn texture_pixel_size(path: &str) -> Option<Vector2> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    thread_local! {
+        static SIZES: RefCell<HashMap<String, Option<Vector2>>> = RefCell::new(HashMap::new());
+    }
+    if let Some(hit) = SIZES.with(|c| c.borrow().get(path).copied()) {
+        return hit;
+    }
+    let resolved = if path.starts_with("res://") || path.starts_with("user://") {
+        gdcore::resolve_path(path).ok()
+    } else {
+        Some(std::path::PathBuf::from(path))
+    };
+    let size = resolved
+        .and_then(|p| gdresource::importers::load_color_texture_linear(&p).ok())
+        .map(|(w, h, _)| Vector2::new(w as f32, h as f32))
+        .filter(|v| v.x > 0.0 && v.y > 0.0);
+    SIZES.with(|c| c.borrow_mut().insert(path.to_string(), size));
+    size
+}
+
 /// Reads a number-typed node property, if present. `Int` is accepted as well as
 /// `Float` because a script assigning `0` yields an int (pat-nzgdu.157).
 fn float_prop(tree: &SceneTree, node_id: NodeId, key: &str) -> Option<f64> {
@@ -2949,6 +2996,41 @@ fn draw_control(
                     filled: true,
                 });
             }
+            // The `icon` (pat-60d96), at its natural size inside the content
+            // margin. Godot (`Button::_notification` / `_icon_region`) aligns it
+            // by `icon_alignment` (LEFT = 0, CENTER = 1, RIGHT = 2) and
+            // `vertical_icon_alignment` (TOP = 0, CENTER = 1, BOTTOM = 2) in the
+            // stylebox's content rect; `expand_icon` stretches it to fit.
+            // truck_town's car picker is three icon-only Buttons.
+            if let Some(icon) = texture_path_prop(tree, node_id, "icon") {
+                let m = crate::control::BUTTON_CONTENT_MARGIN;
+                let content = Rect2::new(
+                    Vector2::new(rect.position.x + m, rect.position.y + m),
+                    Vector2::new((rect.size.x - 2.0 * m).max(0.0), (rect.size.y - 2.0 * m).max(0.0)),
+                );
+                let expand = bool_prop(tree, node_id, "expand_icon").unwrap_or(false);
+                let natural = texture_pixel_size(&icon).unwrap_or(content.size);
+                let size = if expand {
+                    content.size
+                } else {
+                    Vector2::new(natural.x.min(content.size.x), natural.y.min(content.size.y))
+                };
+                let x = match int_prop(tree, node_id, "icon_alignment").unwrap_or(0) {
+                    1 => content.position.x + (content.size.x - size.x) * 0.5,
+                    2 => content.position.x + content.size.x - size.x,
+                    _ => content.position.x,
+                };
+                let y = match int_prop(tree, node_id, "vertical_icon_alignment").unwrap_or(1) {
+                    0 => content.position.y,
+                    2 => content.position.y + content.size.y - size.y,
+                    _ => content.position.y + (content.size.y - size.y) * 0.5,
+                };
+                out.push(DrawCommand::DrawTextureRect {
+                    texture_path: icon,
+                    rect: Rect2::new(Vector2::new(x, y), size),
+                    modulate: Color::WHITE,
+                });
+            }
             let text = string_prop(tree, node_id, "text").unwrap_or_default();
             if !text.is_empty() {
                 // Godot resolves a Control's theme color as: local
@@ -3253,7 +3335,7 @@ fn draw_control(
             // `texture_normal` whenever the state's own texture is unset
             // (`texture_button.cpp:140-166`) — an unset `texture_pressed` keeps
             // showing the normal art rather than blanking the button mid-click.
-            let tex = |key: &str| string_prop(tree, node_id, key).filter(|p| !p.is_empty());
+            let tex = |key: &str| texture_path_prop(tree, node_id, key);
             let disabled = bool_prop(tree, node_id, "disabled").unwrap_or(false);
             let pressed = bool_prop(tree, node_id, "button_pressed").unwrap_or(false);
 
@@ -3347,7 +3429,7 @@ fn draw_control(
             let scripted = tree.scripted_resource_commands(node_id);
             if !scripted.is_empty() {
                 out.extend(scripted.iter().cloned());
-            } else if let Some(path) = string_prop(tree, node_id, "texture") {
+            } else if let Some(path) = texture_path_prop(tree, node_id, "texture") {
                 if !path.is_empty() {
                     out.push(DrawCommand::DrawTextureRect {
                         texture_path: path,
@@ -3366,7 +3448,7 @@ fn draw_control(
         // Godot's `AXIS_STRETCH_MODE_*` constants (STRETCH=0, TILE=1, TILE_FIT=2),
         // and duplicating the table is how the two drift apart.
         "NinePatchRect" => {
-            if let Some(path) = string_prop(tree, node_id, "texture") {
+            if let Some(path) = texture_path_prop(tree, node_id, "texture") {
                 if !path.is_empty() {
                     let margin = |key: &str| int_prop(tree, node_id, key).unwrap_or(0) as f32;
                     let axis = |key: &str| {
@@ -3993,7 +4075,7 @@ fn draw_control(
             };
 
             // `texture_under` is the trough and always covers the whole rect.
-            if let Some(path) = string_prop(tree, node_id, "texture_under") {
+            if let Some(path) = texture_path_prop(tree, node_id, "texture_under") {
                 out.push(DrawCommand::DrawTextureRect {
                     texture_path: path,
                     rect,
@@ -4027,7 +4109,7 @@ fn draw_control(
             } else {
                 let fill = crate::range_controls::linear_fill_rect(rect, fill_mode, ratio);
                 if fill.size.x > 0.0 && fill.size.y > 0.0 {
-                    match string_prop(tree, node_id, "texture_progress") {
+                    match texture_path_prop(tree, node_id, "texture_progress") {
                         Some(path) => out.push(DrawCommand::DrawTextureRect {
                             texture_path: path,
                             rect: fill,
@@ -4047,7 +4129,7 @@ fn draw_control(
 
             // `texture_over` is drawn last: it is the frame that sits on top of
             // the fill.
-            if let Some(path) = string_prop(tree, node_id, "texture_over") {
+            if let Some(path) = texture_path_prop(tree, node_id, "texture_over") {
                 out.push(DrawCommand::DrawTextureRect {
                     texture_path: path,
                     rect,

@@ -10018,6 +10018,15 @@ impl SceneAccess for SceneTreeAccessor {
         // (pat-mgixk.61).
         let instance =
             crate::packed_scene::instantiate_packed_scene_detached(tree, &scene, &resolve).ok()?;
+        // Godot's `scene_file_path` on the instantiated root: what a render path
+        // re-reads an inline `SubResource` from once the PackedScene is gone
+        // (`world_environment::authoring_scene_path`, pat-i4jgd).
+        if let Some(root) = tree.get_node_mut(instance) {
+            root.set_property(
+                crate::world_environment::SCENE_FILE_PATH_KEY,
+                Variant::String(path.to_string()),
+            );
+        }
         // The spawned nodes' own scripts. Without this the subtree is inert: no
         // `_ready`, no `_process`, no signal handlers — the scene spawns and then
         // does nothing, which is the half of this bug a tree-shape assertion

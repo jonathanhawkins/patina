@@ -960,8 +960,30 @@ pub fn packed_scene_from_gltf_path(path: &str) -> Option<PackedScene> {
         if let Some(clips) = scene.gltf_animations_mut() {
             apply_import_animation_settings(clips, &text);
         }
+        // `nodes/root_scale` (pat-i4jgd): truck_town's Sketchfab tree is
+        // authored in centimetres (a `tree` node scaled x100) and imported with
+        // `root_scale=0.01`. Ignoring it made every tree 100x too big: the
+        // camera sat inside a blended, double-sided canopy that hid the town.
+        let (scale, apply) = import_root_scale(&text);
+        scene.apply_gltf_root_scale(scale, apply);
     }
     Some(scene)
+}
+
+/// `[params] nodes/root_scale` and `nodes/apply_root_scale` of a scene
+/// `.import` sidecar, with Godot's defaults (1.0, true;
+/// `ResourceImporterScene::get_import_options`).
+pub fn import_root_scale(import_text: &str) -> (f32, bool) {
+    let Ok(file) = gdresource::importers::parse_import_file(import_text) else {
+        return (1.0, true);
+    };
+    let params = file.other_sections.get("params");
+    let get = |k: &str| params.and_then(|p| p.get(k)).map(|v| v.trim().to_string());
+    let scale = get("nodes/root_scale")
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(1.0);
+    let apply = get("nodes/apply_root_scale").map_or(true, |v| v != "false");
+    (scale, apply)
 }
 
 /// Applies a scene `.import` sidecar's animation settings to the clips of an
