@@ -330,7 +330,7 @@ jobs:
         run: |
           # cargo test --workspace
           WS="--workspace"
-          cargo test $WS -- node3d_ physics3d_ transform3d_ demo_3d_ representative_3d_ camera3d_ render_3d_ collision_shape_3d_ animation_player_3d_ characterbody3d_ cpu_particles3d_ crate_boundary_3d_ crate_set_3d_ hierarchy_3d_ light3d_ multimesh_instance3d_ navigation_region3d_ omnilight3d_ real_3d_demo_ rigidbody3d_ shader_material_3d_ spotlight3d_ viewport_3d viewport_3d_ directional_light_ reflection_probe_ skeleton3d_ sky_resource_ csg_ fog_volume_ environment_resource_ voxelgi_ area3d_ raycast3d_ audited_3d_ ci_3d_ comparison_tooling_3d deferred_3d_ docs_3d_ docs_phase5_initial_3d docs_phase6_3d_ docs_phase6_first_3d phase6_3d_ phase6_upstream_3d publish_3d_
+          cargo test $WS -- node3d_ physics3d_ transform3d_ demo_3d_ representative_3d_ camera3d_ render_3d_ collision_shape_3d_ animation_player_3d_ characterbody3d_ cpu_particles3d_ crate_boundary_3d_ crate_set_3d_ hierarchy_3d_ light3d_ multimesh_instance3d_ navigation_region3d_ omnilight3d_ real_3d_demo_ rigidbody3d_ shader_material_3d_ spotlight3d_ viewport_3d viewport_3d_ directional_light_ reflection_probe_ skeleton3d_ sky_resource_ csg_ fog_volume_ environment_resource_ voxelgi_ truck_town_ area3d_ raycast3d_ audited_3d_ ci_3d_ comparison_tooling_3d deferred_3d_ docs_3d_ docs_phase5_initial_3d docs_phase6_3d_ docs_phase6_first_3d phase6_3d_ phase6_upstream_3d publish_3d_
 
   # ── Rust: Platform layer compat (multi-OS) ───────────────────────────────
   rust-compat-platform:

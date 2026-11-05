@@ -108,6 +108,8 @@ const DOMAIN_3D_PREFIXES: &[&str] = &[
     "environment_resource_",
     "voxelgi_",
     "viewport_3d_",
+    // Real-game fixture tests on games/truck_town (3D: vehicles, glTF physics).
+    "truck_town_",
 ];
 
 const PLATFORM_PREFIXES: &[&str] = &[
