@@ -212,6 +212,9 @@ impl Area3D {
             if (self.collision_mask & body.collision_layer) == 0 {
                 continue;
             }
+            if !spheres_may_touch(self.position, &self.shape, body.position, &body.shape) {
+                continue;
+            }
             let cr =
                 collision::test_collision(self.position, &self.shape, body.position, &body.shape);
             if cr.colliding {
@@ -220,6 +223,37 @@ impl Area3D {
         }
         result
     }
+}
+
+/// Conservative pre-test for the area/body overlap tests below (pat-2ifdx):
+/// `false` only when the two shapes' rotation-invariant bounding spheres —
+/// centred on each shape's origin, reaching its farthest bounding-box corner —
+/// are apart, so no overlap is possible.
+///
+/// A GridMap level registers thousands of static bodies, and every monitoring
+/// area (each coin) ran a full narrow-phase test against every one of them,
+/// twice a tick. Unbounded shapes (a world boundary) are never rejected.
+fn spheres_may_touch(pos_a: Vector3, a: &Shape3D, pos_b: Vector3, b: &Shape3D) -> bool {
+    fn reach(shape: &Shape3D) -> f32 {
+        if matches!(shape, Shape3D::WorldBoundaryShape { .. }) {
+            return f32::INFINITY;
+        }
+        // The farthest corner of the local box from the shape origin.
+        let aabb = shape.bounding_aabb();
+        let lo = aabb.position;
+        let hi = aabb.position + aabb.size;
+        Vector3::new(
+            lo.x.abs().max(hi.x.abs()),
+            lo.y.abs().max(hi.y.abs()),
+            lo.z.abs().max(hi.z.abs()),
+        )
+        .length()
+    }
+    let r = reach(a) + reach(b);
+    if !r.is_finite() {
+        return true;
+    }
+    (pos_a - pos_b).length_squared() <= r * r + 1e-6
 }
 
 /// Stores 3D areas and tracks body/area overlaps across frames.
@@ -298,6 +332,9 @@ impl AreaStore3D {
                 if (area.collision_mask & body.collision_layer) == 0 {
                     continue;
                 }
+                if !spheres_may_touch(area.position, &area.shape, body.position, &body.shape) {
+                    continue;
+                }
 
                 let result = collision::test_collision(
                     area.position,
@@ -361,6 +398,19 @@ impl AreaStore3D {
             .collect();
         // The backing set is unordered; sort so a script sees a stable order.
         ids.sort_by_key(|a| a.0);
+        ids
+    }
+
+    /// The bodies the last [`detect_body_overlaps`](Self::detect_body_overlaps)
+    /// found inside `area`, in ascending id order (the world's body order).
+    pub fn overlapping_bodies(&self, area: AreaId3D) -> Vec<BodyId3D> {
+        let mut ids: Vec<BodyId3D> = self
+            .previous_body_overlaps
+            .iter()
+            .filter(|(a, _)| *a == area)
+            .map(|(_, b)| *b)
+            .collect();
+        ids.sort_by_key(|b| b.0);
         ids
     }
 

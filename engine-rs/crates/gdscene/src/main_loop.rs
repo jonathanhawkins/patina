@@ -4142,11 +4142,17 @@ impl MainLoop {
                 // 2D pass does: the sync is what carries a rigid body's velocity
                 // into the solver, so a script's write has to be on the node by
                 // then (pat-s3rrv.94).
+                // Servers bound for the callback (pat-1unro): `get_gravity()`
+                // inside `_integrate_forces` reads the 3D server, and unbound it
+                // fell back to the built-in 9.8 — so the platformer's enemies
+                // fell at 9.8 while the project (and the player) used 22.
+                self.bind_script_servers();
                 crate::integrate_forces::run_integrate_forces_3d(
                     &mut self.tree,
                     self.physics_server_3d.gravity(),
                     physics_dt as f32,
                 );
+                self.unbind_script_servers();
                 self.physics_server_3d.sync_to_physics(&self.tree);
                 self.physics_server_3d.step(physics_dt as f32);
                 self.physics_server_3d.sync_from_physics(&mut self.tree);

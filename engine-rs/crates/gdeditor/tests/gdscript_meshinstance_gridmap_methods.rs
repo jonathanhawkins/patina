@@ -262,7 +262,8 @@ fn gdscript_meshinstance_gridmap_methods() {
 
     // -- 2. 🔑 the cell reaches the 3D RENDER SNAPSHOT -------------------------
     //
-    // The wiring requirement. cell (1,0,2) at cell_size 2 → world (2, 0, 4).
+    // The wiring requirement. cell (1,0,2) at cell_size 2 → world (3, 1, 5):
+    // the cell CENTRE, as Godot's `map_to_local` (pat-2ifdx).
     let origins = item_cell_origins(ml.tree());
     assert_eq!(
         origins.len(),
@@ -273,10 +274,10 @@ fn gdscript_meshinstance_gridmap_methods() {
     );
     let origin = origins[0];
     assert!(
-        (origin.x - 2.0).abs() < 1e-4
-            && (origin.y - 0.0).abs() < 1e-4
-            && (origin.z - 4.0).abs() < 1e-4,
-        "the rendered cell must sit at cell * cell_size = (2, 0, 4), got \
+        (origin.x - 3.0).abs() < 1e-4
+            && (origin.y - 1.0).abs() < 1e-4
+            && (origin.z - 5.0).abs() < 1e-4,
+        "the rendered cell must sit at its centre (3, 1, 5), got \
          ({}, {}, {}) — a wrong position means the cell decoded to the wrong \
          coordinates, i.e. the packed triple was encoded wrong",
         origin.x,

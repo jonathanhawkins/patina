@@ -295,6 +295,18 @@ pub fn test_collision_rot(
         (CylinderShape { radius: cr, height }, Sphere { radius }) => {
             return sphere_cylinder(pos_b, *radius, pos_a, rot_a, *cr, *height);
         }
+        // Exact closest-feature solver (pat-1unro); falls through to GJK/EPA
+        // only for a hull whose face planes cannot be derived.
+        (Sphere { radius }, ConvexPolygonShape { points }) => {
+            if let Some(r) = sphere_convex(pos_a, *radius, pos_b, rot_b, points) {
+                return r.flipped();
+            }
+        }
+        (ConvexPolygonShape { points }, Sphere { radius }) => {
+            if let Some(r) = sphere_convex(pos_b, *radius, pos_a, rot_a, points) {
+                return r;
+            }
+        }
         (
             CapsuleShape {
                 radius: ra,
@@ -616,6 +628,103 @@ fn sphere_obb(
         normal: box_rot.xform(res.normal),
         ..res
     }
+}
+
+/// Sphere vs (rotated) convex hull, exactly: the hull's closest feature (face,
+/// edge or vertex) to the sphere centre, or — with the centre inside — the
+/// shallowest face. Returns the normal from the hull toward the sphere, like
+/// [`sphere_obb`]; `None` when the hull's face planes cannot be derived
+/// (degenerate or oversized point cloud), so the caller can fall back to
+/// GJK/EPA.
+///
+/// 🔑 Why not GJK/EPA (pat-1unro): EPA against a sphere's smooth support
+/// converges slowly, and at its iteration budget it reported a sphere resting
+/// 1.5 mm into the platformer's flat `floor_edge` tile as 109 mm deep along a
+/// tilted normal. Every enemy crossing from one such tile to the next was
+/// kicked 0.1 m into the air and fell back — its `linear_velocity.y` jumped to
+/// -0.6 where Godot's stays at -0.18.
+fn sphere_convex(
+    sphere_pos: Vector3,
+    radius: f32,
+    hull_pos: Vector3,
+    hull_rot: Quaternion,
+    points: &[Vector3],
+) -> Option<CollisionResult3D> {
+    let planes = crate::shape::convex_face_planes(points);
+    if planes.is_empty() {
+        return None;
+    }
+    let c = hull_rot.inverse().xform(sphere_pos - hull_pos);
+    const EPS: f32 = 1e-4;
+
+    // Centre inside: push out through the face it is closest to.
+    let (max_s, max_n) = planes
+        .iter()
+        .map(|(n, d)| (n.dot(c) - d, *n))
+        .fold((f32::NEG_INFINITY, Vector3::ZERO), |acc, x| {
+            if x.0 > acc.0 {
+                x
+            } else {
+                acc
+            }
+        });
+    if max_s <= 0.0 {
+        return Some(CollisionResult3D {
+            colliding: true,
+            normal: hull_rot.xform(max_n),
+            depth: radius - max_s,
+        });
+    }
+
+    // Centre outside: the closest point of the hull. A face's projection
+    // counts only when it lands inside the hull; edges are the point pairs
+    // sharing two face planes; vertices always count.
+    let inside = |q: Vector3| planes.iter().all(|(n, d)| n.dot(q) - d <= EPS);
+    let mut best = Vector3::ZERO;
+    let mut best_d2 = f32::INFINITY;
+    let mut offer = |q: Vector3| {
+        let d2 = (c - q).length_squared();
+        if d2 < best_d2 {
+            best_d2 = d2;
+            best = q;
+        }
+    };
+    for (n, d) in &planes {
+        let s = n.dot(c) - d;
+        if s > 0.0 {
+            let q = c - *n * s;
+            if inside(q) {
+                offer(q);
+            }
+        }
+    }
+    let on_plane = |p: Vector3, (n, d): &(Vector3, f32)| (n.dot(p) - d).abs() <= EPS;
+    for i in 0..points.len() {
+        offer(points[i]);
+        for j in (i + 1)..points.len() {
+            let shared = planes
+                .iter()
+                .filter(|pl| on_plane(points[i], pl) && on_plane(points[j], pl))
+                .count();
+            if shared >= 2 {
+                offer(closest_point_on_segment(c, points[i], points[j]));
+            }
+        }
+    }
+    let dist = best_d2.sqrt();
+    if dist >= radius {
+        return Some(CollisionResult3D::NONE);
+    }
+    let out = if dist > 1e-9 {
+        (c - best) * (1.0 / dist)
+    } else {
+        max_n
+    };
+    Some(CollisionResult3D {
+        colliding: true,
+        normal: hull_rot.xform(out),
+        depth: radius - dist,
+    })
 }
 
 /// Sphere vs (rotated) capsule. Returns the normal from the capsule toward the

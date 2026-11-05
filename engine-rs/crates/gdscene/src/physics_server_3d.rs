@@ -581,6 +581,66 @@ pub(crate) fn shape_from_node_3d(tree: &SceneTree, node_id: NodeId) -> Option<Sh
     }
 }
 
+/// Hash of everything a GridMap's static bodies are built from (pat-2ifdx).
+fn gridmap_signature(
+    node: &crate::node::Node,
+    global: &Transform3D,
+    layer: u32,
+    mask: u32,
+    friction: Option<f64>,
+    bounce: Option<f64>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    if let Variant::Dictionary(d) = node.get_property("data") {
+        if let Some(Variant::PackedInt32Array(cells)) = d.get("cells") {
+            cells.hash(&mut h);
+        }
+    }
+    // Every other property `GridMap::from_node` reads, by its debug form —
+    // enough to notice a change without decoding anything.
+    for key in [
+        "__extres__mesh_library",
+        "mesh_library",
+        "cell_size",
+        "cell_center_x",
+        "cell_center_y",
+        "cell_center_z",
+    ] {
+        format!("{:?}", node.get_property(key)).hash(&mut h);
+    }
+    for v in [global.basis.x, global.basis.y, global.basis.z, global.origin] {
+        [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()].hash(&mut h);
+    }
+    (layer, mask).hash(&mut h);
+    friction.map(f64::to_bits).hash(&mut h);
+    bounce.map(f64::to_bits).hash(&mut h);
+    h.finish()
+}
+
+/// Decodes a standalone `Shape3D` resource (a `.tres`/`.res` file, as a
+/// MeshLibrary's `item/<id>/shapes` references) into a physics shape
+/// (pat-2ifdx).
+///
+/// 🔑 Routed through [`shape_from_node_3d`] rather than a second per-class
+/// reader: the resource's class and properties are laid onto a throwaway
+/// `CollisionShape3D` exactly the way `PackedScene` flattens a `shape =
+/// SubResource(..)` (`__shape__class` + `__shape__<prop>`), so a GridMap cell's
+/// box gets the same defaults and the same convex/concave handling as a box
+/// authored in a scene.
+pub(crate) fn shape_from_resource_3d(resource: &gdresource::Resource) -> Option<Shape3D> {
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    let mut node = crate::node::Node::new("Shape", "CollisionShape3D");
+    node.set_property("shape", Variant::String("SubResource:resource".into()));
+    node.set_property("__shape__class", Variant::String(resource.class_name.clone()));
+    for (key, value) in resource.properties() {
+        node.set_property(&format!("__shape__{key}"), value.clone());
+    }
+    let id = tree.add_child(root, node).ok()?;
+    shape_from_node_3d(&tree, id)
+}
+
 /// Every collision shape under `body_id`, paired with its offset in the body's
 /// LOCAL space, in document order (pat-s3rrv.104).
 ///
@@ -714,7 +774,31 @@ pub struct PhysicsServer3D {
     /// id the body was built with, so the server hands out unique ones — the
     /// same arrangement as `next_joint_id`.
     next_soft_body_id: u64,
+    /// Static bodies built from each `GridMap` node's MeshLibrary shapes
+    /// (pat-2ifdx), keyed by the GridMap node.
+    gridmaps: HashMap<NodeId, GridMapBodies3D>,
+    /// Shape resources decoded for GridMap cells, by `res://` path. `None`
+    /// records a path that failed to load or is not a supported shape, so it
+    /// is not retried every rebuild.
+    gridmap_shape_cache: HashMap<String, Option<Shape3D>>,
     gravity: Vector3,
+}
+
+/// A `GridMap` node's registration in the physics world (pat-2ifdx).
+///
+/// Godot gives every GridMap octant a static body holding its cells' shapes
+/// (`grid_map.cpp`, `_octant_update`). Here each cell SHAPE is its own static
+/// body: the 3D world, character sweep and ray queries all test a body's
+/// primary shape at the body's own position and rotation, so one body per shape
+/// is what every consumer already handles exactly — including the orthogonal
+/// rotation of a cell — without each of them learning about compound bodies.
+struct GridMapBodies3D {
+    /// Hash of everything the bodies were built from (cells, transform,
+    /// layer/mask, library, cell size/centring). Rebuilt only when it changes,
+    /// so a script's `set_cell_item` takes effect next tick and a static level
+    /// costs nothing per tick.
+    signature: u64,
+    bodies: Vec<BodyId3D>,
 }
 
 /// A `SoftBody3D` node's registration in the physics world.
@@ -743,6 +827,8 @@ impl PhysicsServer3D {
             next_joint_id: 1,
             soft_bodies: HashMap::new(),
             next_soft_body_id: 1,
+            gridmaps: HashMap::new(),
+            gridmap_shape_cache: HashMap::new(),
             gravity: Vector3::new(0.0, -9.8, 0.0),
         }
     }
@@ -765,6 +851,8 @@ impl PhysicsServer3D {
             next_joint_id: 1,
             soft_bodies: HashMap::new(),
             next_soft_body_id: 1,
+            gridmaps: HashMap::new(),
+            gridmap_shape_cache: HashMap::new(),
             gravity,
         }
     }
@@ -847,6 +935,130 @@ impl PhysicsServer3D {
             .iter()
             .find(|&(_, &b)| b == body_id)
             .map(|(&n, _)| n)
+            // A GridMap cell's body reports the GridMap itself, as Godot's
+            // collider for a cell hit is the GridMap node.
+            .or_else(|| {
+                self.gridmaps
+                    .iter()
+                    .find(|(_, g)| g.bodies.contains(&body_id))
+                    .map(|(&n, _)| n)
+            })
+    }
+
+    /// The static bodies registered for a `GridMap` node's cells (pat-2ifdx).
+    pub fn gridmap_bodies(&self, node_id: NodeId) -> &[BodyId3D] {
+        self.gridmaps
+            .get(&node_id)
+            .map(|g| g.bodies.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Registers, rebuilds or frees the static bodies of every `GridMap` in the
+    /// tree (pat-2ifdx). Before this no physics code read a GridMap at all, so
+    /// a level built from one — the official 3D platformer's whole stage — had
+    /// no collision and the player fell straight through it.
+    ///
+    /// Godot places each item shape at `cell_xform * shape_xform`
+    /// (`_octant_update`), with `cell_xform` the cell's orthogonal orientation
+    /// at its centre, under the GridMap's own global transform. The bodies take
+    /// the GridMap's `collision_layer` / `collision_mask` and physics material.
+    fn sync_gridmaps(&mut self, tree: &SceneTree, all_nodes: &[NodeId]) {
+        let mut live: HashSet<NodeId> = HashSet::new();
+        for &nid in all_nodes {
+            let Some(node) = tree.get_node(nid) else {
+                continue;
+            };
+            if node.class_name() != "GridMap" {
+                continue;
+            }
+            live.insert(nid);
+            let global = node3d::get_global_transform(tree, nid);
+            let layer = u32_prop_3d(tree, nid, "collision_layer", 1);
+            let mask = u32_prop_3d(tree, nid, "collision_mask", 1);
+            let friction = opt_float_prop_3d(tree, nid, "__physics_material__friction");
+            let bounce = opt_float_prop_3d(tree, nid, "__physics_material__bounce");
+            // Hashed straight off the node's properties, BEFORE decoding the
+            // cells: this runs every tick, and a level is thousands of cells.
+            let signature = gridmap_signature(node, &global, layer, mask, friction, bounce);
+            if self
+                .gridmaps
+                .get(&nid)
+                .is_some_and(|g| g.signature == signature)
+            {
+                continue;
+            }
+
+            // Rebuild: free the old bodies first.
+            if let Some(old) = self.gridmaps.remove(&nid) {
+                for id in old.bodies {
+                    self.world.remove_body(id);
+                }
+            }
+            let Some(mut grid) = crate::grid_map::GridMap::from_node(tree, nid) else {
+                continue;
+            };
+            if let Some(path) = grid.mesh_library_resource.clone() {
+                if let Some(library) = crate::grid_map::MeshLibrary::load(&path) {
+                    grid.mesh_library = library;
+                }
+            }
+            let rough = truthy_prop_3d(tree, nid, "__physics_material__rough", false);
+            let absorbent = truthy_prop_3d(tree, nid, "__physics_material__absorbent", false);
+            let mut bodies = Vec::new();
+            for (local, path) in grid.collision_shapes() {
+                let shape = self
+                    .gridmap_shape_cache
+                    .entry(path.clone())
+                    .or_insert_with(|| {
+                        crate::array_mesh::read_resource_file(&path)
+                            .and_then(|r| shape_from_resource_3d(&r))
+                    })
+                    .clone();
+                let Some(shape) = shape else {
+                    continue;
+                };
+                let placed = global * local;
+                let mut body = PhysicsBody3D::new(
+                    BodyId3D(0),
+                    BodyType3D::Static,
+                    placed.origin,
+                    shape,
+                    0.0,
+                );
+                body.rotation = placed.basis.get_rotation_quaternion();
+                body.collision_layer = layer;
+                body.collision_mask = mask;
+                if let Some(f) = friction {
+                    body.friction = f as f32;
+                }
+                if let Some(b) = bounce {
+                    body.bounce = b as f32;
+                }
+                if rough {
+                    body.friction = -body.friction.abs();
+                }
+                if absorbent {
+                    body.bounce = -body.bounce.abs();
+                }
+                bodies.push(self.world.add_body(body));
+            }
+            self.gridmaps
+                .insert(nid, GridMapBodies3D { signature, bodies });
+        }
+
+        let stale: Vec<NodeId> = self
+            .gridmaps
+            .keys()
+            .filter(|n| !live.contains(n))
+            .copied()
+            .collect();
+        for nid in stale {
+            if let Some(g) = self.gridmaps.remove(&nid) {
+                for id in g.bodies {
+                    self.world.remove_body(id);
+                }
+            }
+        }
     }
 
     /// Syncs scene tree 3D body nodes into the physics world.
@@ -1075,6 +1287,7 @@ impl PhysicsServer3D {
             }
         }
 
+        self.sync_gridmaps(tree, &all_nodes);
         self.sync_areas(tree, &all_nodes);
 
         // Joints last: they resolve `node_a`/`node_b` to `BodyId3D`s, so every
@@ -2435,10 +2648,17 @@ impl PhysicsServer3D {
     /// handle on the physics server, so the physics phase leaves the answer on
     /// the node (pat-0q2kx.35).
     pub fn publish_overlapping_bodies(&self, tree: &mut SceneTree) {
-        for &area_node in self.node_to_area.keys() {
+        for (&area_node, &area_id) in &self.node_to_area {
+            // Read from the overlap set `step` just detected rather than
+            // re-testing every area against every body (pat-2ifdx): this runs
+            // straight after that detection, against the same positions, so the
+            // answer is identical — and on a GridMap level the second full
+            // area-by-body pass was most of the tick.
             let bodies: Vec<Variant> = self
-                .overlapping_body_nodes(area_node)
+                .world
+                .overlapping_bodies_detected(area_id)
                 .into_iter()
+                .filter_map(|body_id| self.node_for_body(body_id))
                 .map(|nid| Variant::ObjectId(nid.object_id()))
                 .collect();
             if let Some(node) = tree.get_node_mut(area_node) {
@@ -2622,7 +2842,14 @@ impl PhysicsServer3D {
         for (&nid, &body_id) in &self.node_to_body {
             if let Some(body) = self.world.get_body(body_id) {
                 if body.body_type == BodyType3D::Rigid {
-                    node3d::set_position(tree, nid, body.position);
+                    // 🔑 `body.position` is WORLD space (registration reads the
+                    // global origin), and `position` is the node's LOCAL one.
+                    // Writing it straight across re-applied the parent's offset:
+                    // the platformer's enemies, under an `Enemies` node at
+                    // (-16, -6, -12), were drawn at TWICE that offset while their
+                    // bodies simulated where the scene put them (pat-1unro). The
+                    // character pass already de-parents the same way.
+                    node3d::set_global_position(tree, nid, body.position);
                     // Pull the simulated orientation back so tumbling/rolling
                     // rigid bodies rotate their scene nodes too.
                     node3d::set_rotation(tree, nid, body.rotation.to_euler());

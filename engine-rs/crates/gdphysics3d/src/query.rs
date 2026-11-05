@@ -102,6 +102,12 @@ impl PhysicsRayQuery3D {
             if (self.collision_mask & body.collision_layer) == 0 {
                 continue;
             }
+            // Bounding-sphere reject before the exact test (pat-2ifdx): a
+            // GridMap level is thousands of bodies, and the convex segment test
+            // rebuilds a hull's face planes every call.
+            if !segment_may_reach(self.from, dir, max_dist, body) {
+                continue;
+            }
 
             if let Some(hit) = ray_test_body(
                 self.from,
@@ -125,6 +131,22 @@ impl PhysicsRayQuery3D {
 
         closest
     }
+}
+
+/// Whether the segment `from + dir * t`, `t` in `[0, max_dist]`, comes within
+/// the bounding sphere of `body`'s primary shape — the shape [`ray_test_body`]
+/// tests. Conservative: `false` only when no hit is possible.
+fn segment_may_reach(from: Vector3, dir: Vector3, max_dist: f32, body: &PhysicsBody3D) -> bool {
+    if matches!(body.shape, Shape3D::WorldBoundaryShape { .. }) {
+        return true;
+    }
+    let local = body.shape.bounding_aabb();
+    let half = local.size * 0.5;
+    let radius = half.length();
+    let centre = body.position + body.rotation.xform(local.position + half);
+    let t = (centre - from).dot(dir).clamp(0.0, max_dist);
+    let closest = from + dir * t;
+    (centre - closest).length_squared() <= radius * radius + 1e-6
 }
 
 /// Tests a ray against a single body, exactly, for every shape kind.

@@ -184,11 +184,12 @@ fn used_cells_resolve_to_meshes_at_world_positions() {
     let instances = grid.mesh_instances();
     assert_eq!(instances.len(), 1, "one instance per used cell");
     let (position, path) = &instances[0];
-    // cell (2,0,0) at cell_size 4.0.
+    // cell (2,0,0) at cell_size 4.0, centred on every axis as Godot's
+    // `map_to_local` is (`cell_center_*` default true) — pat-2ifdx.
     assert_eq!(
         *position,
-        Vector3::new(8.0, 0.0, 0.0),
-        "the instance sits at cell * cell_size"
+        Vector3::new(10.0, 2.0, 2.0),
+        "the instance sits at the cell centre, cell * cell_size + cell_size / 2"
     );
     assert_eq!(path, "res://meshes/cube.obj");
 }

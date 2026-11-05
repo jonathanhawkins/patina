@@ -765,6 +765,12 @@ impl PhysicsWorld3D {
         self.area_store.overlapping_areas(id)
     }
 
+    /// The bodies the last [`detect_overlaps`](Self::detect_overlaps) found
+    /// inside area `id`, in ascending body id order.
+    pub fn overlapping_bodies_detected(&self, id: AreaId3D) -> Vec<BodyId3D> {
+        self.area_store.overlapping_bodies(id)
+    }
+
     /// Returns a mutable reference to an area by ID.
     pub fn get_area_mut(&mut self, id: AreaId3D) -> Option<&mut Area3D> {
         self.area_store.get_area_mut(id)
@@ -787,9 +793,36 @@ impl PhysicsWorld3D {
         // `detect_body_overlaps` wants a map and only reads its values; the
         // bodies live in a `BTreeMap`, so clone into the expected shape — the
         // same per-step clone the 2D server does.
+        //
+        // ⚠️ Only bodies whose box reaches SOME area are cloned (pat-2ifdx). The
+        // overlap test ignores everything else anyway, and a GridMap level is
+        // thousands of static bodies — cloning each one (convex point lists and
+        // all) every step was most of a tick. Each area is bounded by a sphere
+        // around its centre, which over-estimates safely: a body admitted here
+        // still has to pass the exact test.
+        let reach: Vec<Aabb> = self
+            .area_store
+            .areas()
+            .map(|a| {
+                let local = a.shape.bounding_aabb();
+                let half = local.size * 0.5;
+                let r = (local.position + half).length() + half.length();
+                let r = if r.is_finite() { r } else { f32::MAX / 4.0 };
+                Aabb::new(a.position - Vector3::new(r, r, r), Vector3::new(2.0 * r, 2.0 * r, 2.0 * r))
+            })
+            .collect();
         let body_map: HashMap<BodyId3D, PhysicsBody3D> = self
             .bodies
             .iter()
+            .filter(|(_, body)| {
+                // Movers always pass: they are few, and a degenerate box (a
+                // separation ray is zero-width) would fail a strict test.
+                if body.body_type != BodyType3D::Static {
+                    return true;
+                }
+                let b = body.world_aabb();
+                reach.iter().any(|r| r.intersects(b))
+            })
             .map(|(&id, body)| (id, body.clone()))
             .collect();
         let body_events = self.area_store.detect_body_overlaps(&body_map);
@@ -1769,11 +1802,23 @@ impl PhysicsWorld3D {
     /// O(n^2) all-pairs scan. A real collision always implies AABB overlap, so
     /// pruning never drops a colliding pair.
     fn broadphase_pairs(&self) -> Vec<(BodyId3D, BodyId3D)> {
-        let mut entries: Vec<(BodyId3D, Aabb)> = self
+        // 🔑 Static bodies never pair with each other (pat-2ifdx): neither can
+        // move, so the pair has no response to compute, and Godot's broadphase
+        // does not report static-static contacts either. A GridMap level is
+        // thousands of touching static cells; sweeping them against each other
+        // generated tens of thousands of narrow-phase tests a tick for nothing.
+        //
+        // So the sweep below runs over the MOVERS only, and each mover is then
+        // tested against every static AABB — cheap, because a scene has few
+        // movers however large its static world is.
+        let (statics, movers): (Vec<&PhysicsBody3D>, Vec<&PhysicsBody3D>) = self
             .bodies
             .values()
-            .map(|b| (b.id, b.world_aabb()))
-            .collect();
+            .partition(|b| b.body_type == BodyType3D::Static);
+        let static_boxes: Vec<(BodyId3D, Aabb)> =
+            statics.iter().map(|b| (b.id, b.world_aabb())).collect();
+        let mut entries: Vec<(BodyId3D, Aabb)> =
+            movers.iter().map(|b| (b.id, b.world_aabb())).collect();
         entries.sort_by(|a, b| {
             a.1.position
                 .x
@@ -1795,6 +1840,18 @@ impl PhysicsWorld3D {
                         pairs.push((id_i, id_j));
                     } else {
                         pairs.push((id_j, id_i));
+                    }
+                }
+            }
+        }
+
+        for &(mover, mover_box) in &entries {
+            for &(fixed, fixed_box) in &static_boxes {
+                if mover_box.intersects(fixed_box) {
+                    if mover.0 <= fixed.0 {
+                        pairs.push((mover, fixed));
+                    } else {
+                        pairs.push((fixed, mover));
                     }
                 }
             }
