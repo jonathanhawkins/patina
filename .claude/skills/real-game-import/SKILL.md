@@ -84,6 +84,11 @@ Use the `browser-playtest` skill for anything the gate flags: fps, overlays,
 dead controls. A new game is EXPECTED to fail here. The point is to get a
 clear functional failure, not a crash. Look at the end screenshot yourself.
 
+Then tour the EDITOR on the new game — a real game exercises inspector,
+FileSystem and dock content no synthetic fixture does:
+`node scripts/editor-tour.mjs games/<game> --port <yours>` (see the
+`editor-tour` skill). Hard findings there are beads too.
+
 ## 4. One bead per ROOT CAUSE
 
 Group the findings by cause, not by symptom. Four `Enemy*` placeholders and a

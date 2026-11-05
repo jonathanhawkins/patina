@@ -59,10 +59,15 @@ input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: point
    update spinner at the end of right_menu_hb, and the collapsed main-menu
    button that replaces the whole MenuBar when
    interface/editor/collapse_main_menu is on. */
+/* The title is a BLOCK filling its spacer: as an inline span its max-width,
+   overflow and ellipsis never applied, so on a narrow window the spacer shrank
+   to 8px and the whole title ran on under the 2D/3D buttons. Godot's
+   project_title Label clips with an ellipsis instead (editor-tour finding). */
 #menu-bar .project-title {
-  color: var(--text-dim); font-size: 12px; padding: 0 10px; white-space: nowrap;
-  overflow: hidden; text-overflow: ellipsis; max-width: 40%;
+  display: block; color: var(--text-dim); font-size: 12px; padding: 0 10px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; max-width: 100%; box-sizing: border-box;
 }
+#menu-bar .menu-spacer { min-width: 8px; overflow: hidden; }
 #menu-bar .project-title .unsaved { color: var(--accent); font-weight: bold; }
 #main-menu-button-wrap { position: relative; display: none; align-items: center; }
 #main-menu-button-wrap.collapsed { display: flex; }
@@ -606,6 +611,9 @@ select.renderer-indicator option { color: var(--text); background: var(--panel);
 .color-hex { width: 70px; font-size: 11px; }
 .color-slider-group { display: flex; align-items: center; gap: 1px; }
 .color-slider-label { font-size: 9px; color: var(--text-dim); width: 8px; }
+/* The alpha field: at 50px a number input's spin buttons left room for
+   "1.0" of "1.00" (editor-tour finding). */
+.insp-value .color-slider-group input[type="number"] { width: 64px; }
 
 /* Checkbox styling */
 .bool-editor { display: flex; align-items: center; gap: 6px; }
@@ -681,9 +689,18 @@ select.renderer-indicator option { color: var(--text); background: var(--panel);
 #bottom-panel-content { order: 0; flex: 1; overflow: auto; padding: 6px 10px; font-size: 12px; }
 .bottom-content-tab { display: none; }
 .bottom-content-tab.active { display: block; }
+/* One line per tab: with too many tabs for the strip (a 1280px window), the
+   labels used to wrap to 2-3 lines and the 30px strip cut them in half. Now
+   they stay on one line and shorten with an ellipsis, and every tab stays
+   visible and clickable (editor-tour finding). */
 #bottom-panel-header {
   order: 1; display: flex; align-items: center; gap: 2px; padding: 0 4px;
   border-top: 1px solid var(--border); flex-shrink: 0; height: 30px;
+  min-width: 0;
+}
+#bottom-panel-header .bottom-tab {
+  white-space: nowrap; min-width: 0; flex: 0 1 auto; padding: 4px 8px;
+  overflow: hidden; text-overflow: ellipsis;
 }
 /* pat-0q2kx.75: tiles-editor tool row. The pressed tool is the one a pointer
    gesture will run, so it has to read as pressed. */
@@ -703,7 +720,7 @@ select.renderer-indicator option { color: var(--text); background: var(--panel);
 /* Right-side cluster of the tab strip (Godot bottom_hbox): version label, then
    the Pin + Expand buttons. Pin/Expand only show while a panel is open
    (editor_bottom_panel.cpp:122-123). */
-#bottom-strip-right { margin-left: auto; display: flex; align-items: center; gap: 6px; padding-right: 2px; }
+#bottom-strip-right { margin-left: auto; display: flex; align-items: center; gap: 6px; padding-right: 2px; flex-shrink: 0; }
 #bottom-version { font-size: 11px; color: var(--text-dim); opacity: 0.65; user-select: none; }
 .bottom-strip-btn {
   padding: 3px 7px; font-size: 12px; line-height: 1; cursor: pointer; color: var(--text-dim);
@@ -817,7 +834,9 @@ input.audio-bus-name:focus { border-color: var(--accent); }
 .abus-db-scale { display: flex; flex-direction: column; justify-content: space-between; height: 130px; font-size: 8px; color: var(--text-dim); text-align: right; line-height: 1; padding: 1px 0; }
 .abus-menu { font-size: 12px; }
 .abus-fader {
-  -webkit-appearance: slider-vertical; appearance: slider-vertical;
+  /* writing-mode alone makes the range vertical; the old
+     `appearance: slider-vertical` is deprecated and Chrome warned on every
+     editor load (editor-tour finding). */
   writing-mode: vertical-lr; direction: rtl;
   width: 20px; height: 130px; cursor: pointer; accent-color: var(--accent);
 }
@@ -6525,7 +6544,6 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       var alphaInput = document.createElement('input');
       alphaInput.type = 'number'; alphaInput.min = '0'; alphaInput.max = '1'; alphaInput.step = '0.05';
       alphaInput.value = colorArr[3] != null ? colorArr[3].toFixed(2) : '1.00';
-      alphaInput.style.width = '50px';
       alphaInput.addEventListener('change', function() {
         colorArr[3] = parseFloat(alphaInput.value) || 1;
         updateSwatch();
