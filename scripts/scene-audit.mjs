@@ -224,15 +224,15 @@ export function placeholderCandidates(tree) {
   return out;
 }
 
-/// Placeholders among a live tree's instances. `instanceOf(path)` names the
-/// scene each was instanced from (the JSON tree does not carry it; the MCP
-/// outline does), or null when unknown.
+/// Placeholders among a live tree's instances. Each names the scene it was
+/// instanced from in `instance_path`; `instanceOf(path)` is the fallback for an
+/// editor too old to send it, or null when unknown.
 export function liveTreePlaceholders(tree, expectedOf, instanceOf = () => null) {
   const out = [];
   const walk = (n) => {
     if (!n) return;
     if (n.is_instance) {
-      const res = instanceOf(n.path);
+      const res = n.instance_path || instanceOf(n.path);
       const expected = res ? expectedOf(res) : null;
       if (isPlaceholder(n, expected)) {
         out.push({ path: n.path, instance: res, expected, got: n.class, finding: `${n.path}${res ? ` <${res}>` : ''} became an empty ${n.class}${expected ? ` (its root is a ${expected})` : ''}` });
@@ -413,13 +413,21 @@ async function auditLive(port, gameDir) {
     if (!running) live.findings.push('Play did not start in the editor');
     else {
       await new Promise((r) => setTimeout(r, 1500));
-      // The whole tree from the JSON route (the MCP outline stops at a node
-      // budget), then each suspect's source scene from a one-node outline.
+      // The whole live tree from the JSON route; each instance carries its
+      // source scene in `instance_path`. Only an editor too old to send it
+      // needs each suspect's source from a one-node MCP outline.
       const rt = await get('/api/runtime/scene');
       const scene = (rt.tree?.children || []).slice(-1)[0] || null;
       live.runtime_node_count = scene ? countNodes(scene) : null;
       const sources = new Map();
-      for (const p of placeholderCandidates(rt.tree)) {
+      const named = new Set();
+      const collectNamed = (n) => {
+        if (!n) return;
+        if (n.instance_path) named.add(n.path);
+        for (const c of n.children || []) collectNamed(c);
+      };
+      collectNamed(rt.tree);
+      for (const p of placeholderCandidates(rt.tree).filter((p) => !named.has(p))) {
         const rel = scene && p.startsWith(`${scene.path}/`) ? p.slice(scene.path.length + 1) : '.';
         try { sources.set(p, parseOutline(await mcp('tree', { running: true, props: false, depth: 0, node: rel }))?.instance || null); } catch { sources.set(p, null); }
       }

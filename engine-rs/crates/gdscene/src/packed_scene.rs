@@ -2363,6 +2363,115 @@ impl PackedScene {
         self.sub_resource_props.get(id)
     }
 
+    /// A canonical text form of what this scene SAYS, independent of how the
+    /// file spelled it: one line per `[node]` (name, `type=` or none, parent,
+    /// `parent_id_path`, `unique_id`, instance path, groups, and every
+    /// authored property with `ExtResource`/`SubResource` references resolved
+    /// to the path / the sub-resource's own canonical contents), then the
+    /// `[editable]` paths and the connections.
+    ///
+    /// Two files with equal canonical forms load the same scene: resource ids,
+    /// section order of resources, property order and `load_steps` do not
+    /// matter. This is the "semantically identical" a save round trip is held
+    /// to (pat-hivyf).
+    pub fn canonical_form(&self) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::new();
+        for t in &self.templates {
+            let instance = t
+                .instance
+                .as_deref()
+                .and_then(|r| self.resolve_ext_resource_path(r))
+                .unwrap_or("");
+            let mut groups = t.groups.clone();
+            groups.sort();
+            writeln!(
+                out,
+                "[node name={:?} type={} parent={:?} parent_id_path={:?} unique_id={:?} instance={:?} groups={:?} unique_name={}]",
+                t.name,
+                if t.has_type { t.class_name.as_str() } else { "-" },
+                t.parent_path,
+                t.parent_id_path,
+                t.unique_id,
+                instance,
+                groups,
+                t.unique_name,
+            )
+            .unwrap();
+            let mut keys: Vec<&String> = t
+                .properties
+                .keys()
+                .filter(|k| !k.starts_with("__") && !k.starts_with("_instance") && k.as_str() != "_script_path")
+                .collect();
+            keys.sort();
+            for k in keys {
+                writeln!(out, "  {k} = {}", self.canonical_value(&t.properties[k], 0)).unwrap();
+            }
+        }
+        let mut editable = self.editable_instances.clone();
+        editable.sort();
+        for e in editable {
+            writeln!(out, "[editable path={e:?}]").unwrap();
+        }
+        for c in &self.connections {
+            writeln!(
+                out,
+                "[connection signal={:?} from={:?} to={:?} method={:?} flags={} binds={:?} unbinds={}]",
+                c.signal_name, c.from_path, c.to_path, c.method_name, c.flags, c.binds, c.unbinds
+            )
+            .unwrap();
+        }
+        out
+    }
+
+    /// One value of [`canonical_form`](Self::canonical_form): resource
+    /// references are replaced by what they point at.
+    fn canonical_value(&self, v: &Variant, depth: usize) -> String {
+        if depth > 32 {
+            return "<too deep>".into();
+        }
+        match v {
+            Variant::String(s) => {
+                if let Some(id) = parse_ext_resource_ref(s) {
+                    let path = self.ext_resources.get(&id).map(|e| e.path.as_str()).unwrap_or("?");
+                    return format!("Ext({path})");
+                }
+                let sub = s
+                    .strip_prefix("SubResource:")
+                    .or_else(|| s.strip_prefix("SubResource(").and_then(|i| i.strip_suffix(')')))
+                    .map(|i| i.trim().trim_matches('"'));
+                if let Some(id) = sub {
+                    let class = self.sub_resources.get(id).map(String::as_str).unwrap_or("?");
+                    let mut body = String::new();
+                    if let Some(props) = self.sub_resource_props.get(id) {
+                        let mut keys: Vec<&String> = props.keys().filter(|k| !k.starts_with("__")).collect();
+                        keys.sort();
+                        for k in keys {
+                            body.push_str(&format!("{k}={}; ", self.canonical_value(&props[k], depth + 1)));
+                        }
+                    }
+                    return format!("Sub({class}){{{body}}}");
+                }
+                format!("{s:?}")
+            }
+            Variant::Array(items) => {
+                let parts: Vec<String> =
+                    items.to_vec().iter().map(|i| self.canonical_value(i, depth + 1)).collect();
+                format!("[{}]", parts.join(", "))
+            }
+            Variant::Dictionary(d) => {
+                let mut parts: Vec<String> = d.with(|d| {
+                    d.iter()
+                        .map(|(k, v)| format!("{k:?}: {}", self.canonical_value(v, depth + 1)))
+                        .collect()
+                });
+                parts.sort();
+                format!("{{{}}}", parts.join(", "))
+            }
+            other => format!("{other:?}"),
+        }
+    }
+
     /// Instantiates the packed scene, returning the root node and a flat
     /// list of all nodes in the subtree.
     ///
@@ -2781,6 +2890,20 @@ impl PackedScene {
                                     sub_node.add_to_group(group.clone());
                                 }
                                 sub_node.set_unique_name(tmpl.unique_name);
+                                // 🔑 Remember WHICH scene this node instances,
+                                // as a placeholder does (pat-hivyf). Expanded,
+                                // the root carried no trace of its source, so
+                                // every JSON tree reported `instance_path: ""`
+                                // and the saver could not write it back as
+                                // `instance=`. Marked expanded so
+                                // `expand_instance_placeholders` and the 2D
+                                // instance preview leave it alone.
+                                sub_node.set_property("_instance", Variant::String(inst_ref.clone()));
+                                sub_node.set_property(
+                                    "_instance_path",
+                                    Variant::String(scene_path.to_string()),
+                                );
+                                sub_node.set_property(INSTANCE_EXPANDED_KEY, Variant::Bool(true));
                                 // Wire to parent.
                                 sub_node.set_parent(Some(nodes[parent_idx].id()));
                                 sub_node.set_owner(Some(root_id));
@@ -4769,6 +4892,79 @@ pub fn add_packed_scene_to_tree_from_res(
 ) -> EngineResult<crate::node::NodeId> {
     begin_subscene_session();
     add_packed_scene_to_tree_with_subscenes(tree, parent_id, scene, &load_scene_from_res)
+}
+
+/// Builds `scene` for the EDITOR: every `instance=` expanded exactly as a run
+/// expands it (glTF dispatch, `parent_id_path`, editable-children overrides),
+/// so the edited tree holds an instance's real class and nodes and the 3D view
+/// can draw its meshes. Godot's editor does the same — `SceneState::instantiate`
+/// with `GEN_EDIT_STATE_MAIN` — and tells the scene's own nodes from an
+/// instance's by OWNER: a node an instanced scene declared is owned by that
+/// instance's root ("foreign"), which the saver writes only as overrides and
+/// the scene dock hides unless the instance has Editable Children.
+///
+/// 🔑 The old edited tree was [`add_packed_scene_to_tree`]'s: each instance a
+/// childless typeless `Node`. That cannot represent an editable-children
+/// entry (`[node name="Robot" parent="Player/Skeleton/Skeleton3D"]`, whose
+/// parent only exists inside the glTF), so opening the platformer's
+/// `player.tscn` / `enemy.tscn` failed with "parent path not found"
+/// (pat-hivyf).
+///
+/// Each `[editable path=".."]` instance is flagged `_editable_children`. If the
+/// expansion itself fails, the placeholder shape is built instead, so a scene
+/// that opened before still opens.
+pub fn add_packed_scene_to_tree_for_editing(
+    tree: &mut crate::scene_tree::SceneTree,
+    parent_id: crate::node::NodeId,
+    scene: &PackedScene,
+) -> EngineResult<crate::node::NodeId> {
+    let root = match add_packed_scene_to_tree_from_res(tree, parent_id, scene) {
+        Ok(root) => root,
+        Err(e) => {
+            tracing::warn!("expanding the scene's instances failed ({e}); opening placeholders");
+            return add_packed_scene_to_tree(tree, parent_id, scene);
+        }
+    };
+    for path in scene.editable_instances() {
+        let target = if path == "." { Some(root) } else { tree.get_node_relative(root, path) };
+        if let Some(node) = target.and_then(|id| tree.get_node_mut(id)) {
+            node.set_property("_editable_children", Variant::Bool(true));
+        }
+    }
+    Ok(root)
+}
+
+/// Whether `id` was declared by an INSTANCED scene inside `scene_root`'s scene
+/// rather than by that scene itself: its owner is a node strictly inside the
+/// subtree (an instance root), not `scene_root`. Godot's
+/// `Node::get_owner() != edited_scene_root` test. A node with no owner (built
+/// in the editor) is the scene's own.
+pub fn is_foreign_node(
+    tree: &crate::scene_tree::SceneTree,
+    scene_root: crate::node::NodeId,
+    id: crate::node::NodeId,
+) -> bool {
+    if id == scene_root {
+        return false;
+    }
+    let Some(owner) = tree.get_node(id).and_then(|n| n.owner()) else {
+        return false;
+    };
+    if owner == scene_root {
+        return false;
+    }
+    // The owner must be inside this scene: an ancestor of `id` below the root.
+    let mut cursor = tree.get_node(id).and_then(|n| n.parent());
+    while let Some(p) = cursor {
+        if p == owner {
+            return true;
+        }
+        if p == scene_root {
+            return false;
+        }
+        cursor = tree.get_node(p).and_then(|n| n.parent());
+    }
+    false
 }
 
 /// Property marking an `instance=` placeholder that

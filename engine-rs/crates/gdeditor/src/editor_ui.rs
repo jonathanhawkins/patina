@@ -4256,6 +4256,9 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     var name = document.createElement('span');
     name.className = 'tree-name';
     name.textContent = node.name;
+    // A node an instanced scene declared (shown under Editable Children):
+    // Godot tints it so it reads as the instance's, not the scene's own.
+    if (node.foreign) { name.style.color = '#e0c46c'; name.title = 'Belongs to an instanced scene'; }
 
     if (searchFilter && nodeMatchesFilter(node, searchFilter)) {
       name.style.color = 'var(--accent)';
