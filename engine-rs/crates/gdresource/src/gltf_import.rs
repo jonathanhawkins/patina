@@ -333,7 +333,11 @@ fn build_document(
             // and for a generated one alike (`:1700-1712`). Without it every
             // imported model is inside-out under back-face culling. Only for
             // TRIANGLES (`mode` 4, the glTF default).
-            let triangles = prim.get("mode").and_then(|v| v.as_u64()).unwrap_or(4) == 4;
+            let mode = prim.get("mode").and_then(|v| v.as_u64()).unwrap_or(4);
+            let triangles = mode == 4;
+            // A trimesh physics shape keeps only TRIANGLES surfaces
+            // (`ImporterMesh::get_faces`), so the mode has to survive import.
+            sub.set_property("primitive_mode", Variant::Int(mode as i64));
             let mut indices: Vec<i64> =
                 if let Some(i_acc) = prim.get("indices").and_then(|v| v.as_u64()) {
                     read_index_accessor(json, &buffers, i_acc as usize)?
@@ -374,6 +378,33 @@ fn build_document(
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
+    // OMI_physics_body / OMI_physics_shape (pat-l8jg8). Godot's
+    // `GLTFDocumentExtensionPhysics::import_preflight` skips the whole
+    // extension unless the file lists it in `extensionsUsed`.
+    let physics_enabled = json
+        .get("extensionsUsed")
+        .and_then(|v| v.as_array())
+        .is_some_and(|used| {
+            used.iter()
+                .any(|e| matches!(e.as_str(), Some("OMI_physics_body" | "OMI_physics_shape")))
+        });
+    let mut physics_shape_count = 0usize;
+    if physics_enabled {
+        if let Some(shapes) = json
+            .get("extensions")
+            .and_then(|e| e.get("OMI_physics_shape"))
+            .and_then(|s| s.get("shapes"))
+            .and_then(|v| v.as_array())
+        {
+            let dicts: Vec<Variant> = shapes
+                .iter()
+                .map(|s| Variant::Dictionary(physics_shape_dict(s).into()))
+                .collect();
+            physics_shape_count = dicts.len();
+            doc.set_property("physics_shapes", Variant::Array(dicts.into()));
+        }
+    }
+
     let mut node_dicts: Vec<Variant> = Vec::with_capacity(nodes.len());
     for (ni, node) in nodes.iter().enumerate() {
         let mut d = Dictionary::new();
@@ -403,6 +434,14 @@ fn build_document(
             .and_then(|v| v.as_u64())
         {
             d.insert("light", Variant::Int(light as i64));
+        }
+        if physics_enabled {
+            if let Some(body) = node
+                .get("extensions")
+                .and_then(|e| e.get("OMI_physics_body"))
+            {
+                physics_node_entries(body, &mut d, physics_shape_count);
+            }
         }
         if let Some(children) = node.get("children").and_then(|v| v.as_array()) {
             let kids: Vec<Variant> = children
@@ -823,6 +862,141 @@ fn camera_dict(cam: &Value) -> Dictionary {
 /// Builds a dictionary entry for a KHR_lights_punctual light. Carries
 /// `type` (directional/point/spot), `color`, `intensity`, optional `range`,
 /// and spot cone angles for spot lights.
+fn json_vec3(v: Option<&Value>) -> Option<Vector3> {
+    let a = v?.as_array()?;
+    if a.len() != 3 {
+        return None;
+    }
+    Some(Vector3::new(
+        a[0].as_f64()? as f32,
+        a[1].as_f64()? as f32,
+        a[2].as_f64()? as f32,
+    ))
+}
+
+/// One `OMI_physics_shape.shapes[]` entry, as Godot's
+/// `GLTFPhysicsShape::from_dictionary` reads it: `hull` is an alias of
+/// `convex`, and the dimensions live in a sub-object named after the type
+/// (falling back to the entry itself).
+///
+/// Keys: `type`, and when present `size` (Vector3), `radius`, `height`,
+/// `is_trigger`, `mesh` (the glTF mesh index a convex/trimesh is built from).
+fn physics_shape_dict(shape: &Value) -> Dictionary {
+    let mut d = Dictionary::new();
+    let mut ty = shape
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if ty == "hull" {
+        ty = "convex".into();
+    }
+    let props = shape.get(ty.as_str()).filter(|p| p.is_object()).unwrap_or(shape);
+    if let Some(r) = props.get("radius").and_then(|v| v.as_f64()) {
+        d.insert("radius", Variant::Float(r));
+    }
+    if let Some(h) = props.get("height").and_then(|v| v.as_f64()) {
+        d.insert("height", Variant::Float(h));
+    }
+    if let Some(size) = json_vec3(props.get("size")) {
+        d.insert("size", Variant::Vector3(size));
+    }
+    if let Some(t) = props.get("isTrigger").and_then(|v| v.as_bool()) {
+        d.insert("is_trigger", Variant::Bool(t));
+    }
+    if let Some(m) = props.get("mesh").and_then(|v| v.as_i64()) {
+        d.insert("mesh", Variant::Int(m));
+    }
+    d.insert("type", Variant::String(ty));
+    d
+}
+
+/// A node's `OMI_physics_body`, in the order Godot's
+/// `GLTFDocumentExtensionPhysics::parse_node_extensions` applies it:
+///
+/// - `collider.shape` → `physics_collider_shape` (a `shapes[]` index); a
+///   `collider` with no shape marks a compound collider;
+/// - `trigger.shape` → `physics_trigger_shape`; a `trigger` with no shape
+///   makes the node a trigger BODY (`Area3D`), and `trigger.nodes` lists the
+///   compound trigger's members;
+/// - `motion` → `physics_body`, overriding that trigger body. glTF's
+///   `dynamic`/`kinematic` are stored as Godot's `rigid`/`animatable`.
+///
+/// A shape index outside `shapes[]` is `ERR_FAIL_INDEX_V` there: the parse of
+/// this node's extension stops at that point, so nothing after it (the body
+/// included) is recorded.
+fn physics_node_entries(ext: &Value, d: &mut Dictionary, shape_count: usize) {
+    if let Some(collider) = ext.get("collider") {
+        match collider.get("shape").and_then(|v| v.as_i64()) {
+            // Godot reads `shape` with a default of -1, which (and only
+            // which) means "no shape".
+            Some(s) if s != -1 => {
+                if s < 0 || s as usize >= shape_count {
+                    return;
+                }
+                d.insert("physics_collider_shape", Variant::Int(s));
+            }
+            _ => {
+                d.insert("physics_compound_collider", Variant::Bool(true));
+            }
+        }
+    }
+    if let Some(trigger) = ext.get("trigger") {
+        match trigger.get("shape").and_then(|v| v.as_i64()) {
+            // Godot reads `shape` with a default of -1, which (and only
+            // which) means "no shape".
+            Some(s) if s != -1 => {
+                if s < 0 || s as usize >= shape_count {
+                    return;
+                }
+                d.insert("physics_trigger_shape", Variant::Int(s));
+            }
+            _ => {
+                let mut body = Dictionary::new();
+                body.insert("type", Variant::String("trigger".into()));
+                d.insert("physics_body", Variant::Dictionary(body.into()));
+            }
+        }
+        if let Some(nodes) = trigger.get("nodes").and_then(|v| v.as_array()) {
+            let ids: Vec<Variant> = nodes
+                .iter()
+                .filter_map(|n| n.as_i64().map(Variant::Int))
+                .collect();
+            d.insert("physics_compound_trigger_nodes", Variant::Array(ids.into()));
+        }
+    }
+    let motion = match ext.get("motion") {
+        Some(m) => m,
+        None if ext.get("type").is_some() => ext, // the deprecated flat form
+        None => return,
+    };
+    let mut body = Dictionary::new();
+    // Godot's GLTFPhysicsBody defaults to RIGID when `type` is absent.
+    let ty = match motion.get("type").and_then(|v| v.as_str()) {
+        Some("static") => "static",
+        Some("kinematic") => "animatable",
+        Some("character") => "character",
+        Some("vehicle") => "vehicle",
+        Some("trigger") => "trigger",
+        _ => "rigid",
+    };
+    body.insert("type", Variant::String(ty.into()));
+    if let Some(m) = motion.get("mass").and_then(|v| v.as_f64()) {
+        body.insert("mass", Variant::Float(m));
+    }
+    for (json_key, key) in [
+        ("linearVelocity", "linear_velocity"),
+        ("angularVelocity", "angular_velocity"),
+        ("centerOfMass", "center_of_mass"),
+        ("inertiaDiagonal", "inertia"),
+    ] {
+        if let Some(v) = json_vec3(motion.get(json_key)) {
+            body.insert(key, Variant::Vector3(v));
+        }
+    }
+    d.insert("physics_body", Variant::Dictionary(body.into()));
+}
+
 fn light_dict(light: &Value) -> Dictionary {
     let mut d = Dictionary::new();
     let light_type = light

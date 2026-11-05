@@ -165,6 +165,24 @@ fn contact_position(
     rot_b: Quaternion,
     normal: Vector3,
 ) -> Vector3 {
+    // ⚠️ A triangle soup or heightmap has no support feature: `support_point`
+    // stands in a point one bounding radius from the SHAPE ORIGIN, which for
+    // an imported level (truck_town's road, a 100 m mesh rooted at the world
+    // origin) is tens of metres from the touch. That phantom lever arm turned
+    // every contact into a spurious torque, and a box dropped on a 6 degree
+    // road slid off instead of resting (pat-l8jg8). The contact lies on the
+    // convex partner's own support feature, so use that.
+    let surface = |s: &Shape3D| {
+        matches!(
+            s,
+            Shape3D::ConcavePolygonShape { .. } | Shape3D::HeightMapShape { .. }
+        )
+    };
+    match (surface(shape_a), surface(shape_b)) {
+        (false, true) => return support_feature(shape_a, pos_a, rot_a, normal).centre,
+        (true, false) => return support_feature(shape_b, pos_b, rot_b, normal * -1.0).centre,
+        _ => {}
+    }
     let fa = support_feature(shape_a, pos_a, rot_a, normal);
     let fb = support_feature(shape_b, pos_b, rot_b, normal * -1.0);
     let (small, large) = if fa.rank() <= fb.rank() { (&fa, &fb) } else { (&fb, &fa) };
@@ -2785,6 +2803,77 @@ mod tests {
             world.step(1.0 / 60.0);
         }
         assert_eq!(world.body_count(), 1000);
+    }
+}
+
+#[cfg(test)]
+mod concave_contact_point_tests {
+    use super::*;
+    use crate::body::BodyType3D;
+
+    /// A 200 m square ramp rooted at the world origin, tilted `tan = 0.1`
+    /// (5.7 degrees) about Z, as a two-triangle soup in Godot's clockwise
+    /// winding (front face up).
+    fn ramp() -> Shape3D {
+        let h = |x: f32| -0.1 * x;
+        let (a, b, c, d) = (
+            Vector3::new(-100.0, h(-100.0), -100.0),
+            Vector3::new(100.0, h(100.0), -100.0),
+            Vector3::new(100.0, h(100.0), 100.0),
+            Vector3::new(-100.0, h(-100.0), 100.0),
+        );
+        Shape3D::ConcavePolygonShape {
+            faces: vec![a, b, c, a, c, d],
+            backface_collision: false,
+        }
+    }
+
+    /// pat-l8jg8: a trimesh has no support feature, and the stand-in one
+    /// bounding radius from the SHAPE ORIGIN put the contact of a box resting
+    /// 30 m from that origin about 100 m away. The contact must be on the box.
+    #[test]
+    fn a_trimesh_contact_lies_on_the_convex_partner() {
+        let box_shape = Shape3D::BoxShape {
+            half_extents: Vector3::new(0.5, 0.5, 0.5),
+        };
+        let n = Vector3::new(0.1, 1.0, 0.0).normalized();
+        let at = Vector3::new(30.0, -3.0 + 0.5, 0.0);
+        let p = contact_position(
+            &box_shape,
+            at,
+            Quaternion::IDENTITY,
+            &ramp(),
+            Vector3::ZERO,
+            Quaternion::IDENTITY,
+            n * -1.0,
+        );
+        assert!((p - at).length() < 1.0, "contact {p:?} is not on the box at {at:?}");
+    }
+
+    /// The behaviour that contact point drives: a box dropped on a gentle
+    /// slope (friction 0.5 > tan 5.7 degrees) far from the mesh origin comes to
+    /// rest instead of sliding away.
+    #[test]
+    fn a_box_dropped_on_a_gentle_trimesh_slope_rests() {
+        let mut world = PhysicsWorld3D::new();
+        world.add_body(PhysicsBody3D::new(BodyId3D(1), BodyType3D::Static, Vector3::ZERO, ramp(), 0.0));
+        let start = Vector3::new(30.0, -3.0 + 1.5, 0.0);
+        let id = world.add_body(PhysicsBody3D::new(
+            BodyId3D(2),
+            BodyType3D::Rigid,
+            start,
+            Shape3D::BoxShape {
+                half_extents: Vector3::new(0.5, 0.5, 0.5),
+            },
+            1.0,
+        ));
+        for _ in 0..600 {
+            world.step(1.0 / 120.0);
+        }
+        let p = world.get_body(id).unwrap().position;
+        let drift = ((p.x - start.x).powi(2) + (p.z - start.z).powi(2)).sqrt();
+        assert!(drift < 0.5, "box slid {drift} m down a 5.7 degree slope to {p:?}");
+        assert!(p.y > -3.5, "box fell through the ramp: {p:?}");
     }
 }
 
