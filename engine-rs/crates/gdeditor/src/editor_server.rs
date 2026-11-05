@@ -315,6 +315,58 @@ pub struct MovieFrame {
     pub time: f64,
 }
 
+/// What a save of the opened scene is diffed against (pat-hivyf): the file as
+/// it was read, and the saver's output for the freshly opened tree.
+#[derive(Debug, Clone)]
+pub struct SceneSaveBaseline {
+    /// `NodeId::raw()` of the scene root the baseline was taken from.
+    pub root: u64,
+    pub original: String,
+    pub generated: String,
+}
+
+impl SceneSaveBaseline {
+    /// The baseline for `tree`'s edited scene, just opened from `original`.
+    pub fn capture(tree: &SceneTree, original: String) -> Option<Self> {
+        let root = edited_scene_root(tree)?;
+        Some(Self { root: root.raw(), generated: TscnSaver::save_tree(tree, root), original })
+    }
+
+    /// The text to write for `root`'s scene, whose saver output is now
+    /// `generated`.
+    ///
+    /// Unedited, it is the file exactly as opened. Edited, a scene holding
+    /// expanded instances is merged into the original
+    /// ([`gdscene::tscn_merge::merge_edits`]) so the instances' foreign nodes
+    /// stay out of the file and the editable-children entries keep their
+    /// `parent_id_path`/`unique_id`; any other scene is written as the saver
+    /// writes it, as before.
+    pub fn text_to_save(&self, tree: &SceneTree, root: NodeId, generated: String) -> String {
+        if self.root != root.raw() {
+            return generated;
+        }
+        if generated == self.generated {
+            return self.original.clone();
+        }
+        let mut ids = Vec::new();
+        tree.collect_subtree_top_down(root, &mut ids);
+        let has_expanded_instance = ids.iter().any(|&id| {
+            tree.get_node(id)
+                .is_some_and(|n| n.has_property(gdscene::packed_scene::INSTANCE_EXPANDED_KEY))
+        });
+        if has_expanded_instance {
+            gdscene::tscn_merge::merge_edits(&self.original, &self.generated, &generated)
+        } else {
+            generated
+        }
+    }
+}
+
+/// The edited scene's root: the first child of the tree root.
+fn edited_scene_root(tree: &SceneTree) -> Option<NodeId> {
+    tree.get_node(tree.root_id()).and_then(|r| r.children().first().copied())
+}
+
 /// Shared editor state protected by a mutex.
 pub struct EditorState {
     /// The plugin whose main screen is currently shown, if any (pat-s3rrv.66).
@@ -376,6 +428,11 @@ pub struct EditorState {
     pub run_project_settings: Option<gdcore::ProjectSettings>,
     /// Whether the scene has unsaved modifications.
     pub scene_modified: bool,
+    /// The opened scene's file text and what the saver wrote for the tree
+    /// right after opening it, so a save writes only what was EDITED
+    /// (`gdscene::tscn_merge`, pat-hivyf). Tied to the scene root it was taken
+    /// from; a different tree ignores it.
+    pub scene_save_baseline: Option<SceneSaveBaseline>,
     /// pat-m6rbm: undo-stack depth recorded at the last save/load point. The
     /// scene is considered clean when the current `undo_stack.len()` equals
     /// this value, so undoing back to the saved state clears the dirty flag
@@ -967,6 +1024,7 @@ impl EditorState {
             project_root: None,
             run_project_settings: None,
             scene_modified: false,
+            scene_save_baseline: None,
             // pat-m6rbm: fresh state has an empty undo stack, so depth 0 is the
             // clean save point.
             saved_undo_depth: 0,
@@ -4205,7 +4263,7 @@ fn parse_json_body(body: &str) -> Option<serde_json::Value> {
 }
 
 fn node_to_json_tree(tree: &SceneTree, node_id: NodeId) -> serde_json::Value {
-    node_to_json_tree_with_warnings(tree, node_id, &HashMap::new())
+    node_to_json_tree_with_warnings(tree, node_id, &HashMap::new(), None)
 }
 
 /// Same as [`node_to_json_tree`], plus each node's configuration-warning
@@ -4220,21 +4278,38 @@ fn node_to_json_tree(tree: &SceneTree, node_id: NodeId) -> serde_json::Value {
 /// `NodeId::raw()` and hands it in. Callers that have no mutable tree (the
 /// remote/runtime tree) go through the wrapper above and get an empty list,
 /// which is exactly "no warning".
+///
+/// `edited_root` is the edited scene's root for the EDIT tree, `None` for the
+/// running game's. In the edit tree an instance's own nodes are hidden unless it
+/// has Editable Children, and each node says whether it is `foreign` (declared
+/// by an instanced scene), as Godot's scene dock shows them (pat-hivyf).
 fn node_to_json_tree_with_warnings(
     tree: &SceneTree,
     node_id: NodeId,
     node_warnings: &HashMap<u64, Vec<String>>,
+    edited_root: Option<NodeId>,
 ) -> serde_json::Value {
     let node = match tree.get_node(node_id) {
         Some(n) => n,
         None => return serde_json::Value::Null,
     };
     let path = tree.node_path(node_id).unwrap_or_default();
+    // Whether the node's internal nodes are exposed for editing ("Editable
+    // Children"). Only meaningful for instanced nodes.
+    let editable_children = matches!(node.get_property("_editable_children"), Variant::Bool(true));
+    let expanded_instance = node.has_property(gdscene::packed_scene::INSTANCE_EXPANDED_KEY);
+    let hide_internals = edited_root.is_some() && expanded_instance && !editable_children;
     let children: Vec<serde_json::Value> = node
         .children()
         .iter()
-        .map(|&cid| node_to_json_tree_with_warnings(tree, cid, node_warnings))
+        .filter(|&&cid| {
+            // A node the instanced scene declared is owned by its root.
+            !(hide_internals && tree.get_node(cid).and_then(|c| c.owner()) == Some(node_id))
+        })
+        .map(|&cid| node_to_json_tree_with_warnings(tree, cid, node_warnings, edited_root))
         .collect();
+    let foreign = edited_root
+        .is_some_and(|root| gdscene::packed_scene::is_foreign_node(tree, root, node_id));
 
     // Godot's row triangle: present when the node reports at least one
     // configuration warning, and its tooltip lists them.
@@ -4250,18 +4325,20 @@ fn node_to_json_tree_with_warnings(
 
     // Detect instanced scenes: nodes with _instance_source or _instance property.
     let is_instance = !matches!(node.get_property("_instance_source"), Variant::Nil)
-        || !matches!(node.get_property("_instance"), Variant::Nil);
+        || !matches!(node.get_property("_instance"), Variant::Nil)
+        || !matches!(node.get_property("_instance_path"), Variant::Nil);
 
     // The recorded source path of an instanced scene, surfaced so the
     // scene-tree instance indicator can show where the instance came from.
-    let instance_path = match node.get_property("_instance_source") {
-        Variant::String(ref s) if !s.is_empty() => s.clone(),
-        _ => String::new(),
-    };
-
-    // Whether an instance's internal nodes are exposed for editing
-    // ("Editable Children"). Only meaningful for instanced nodes.
-    let editable_children = matches!(node.get_property("_editable_children"), Variant::Bool(true));
+    // `_instance_source` is the editor's own marker; a scene loaded from a
+    // `.tscn` (edited or running) carries `_instance_path` (pat-rbyty).
+    let instance_path = ["_instance_source", "_instance_path"]
+        .iter()
+        .find_map(|key| match node.get_property(key) {
+            Variant::String(s) if !s.is_empty() => Some(s),
+            _ => None,
+        })
+        .unwrap_or_default();
 
     // Whether the node is edit-locked: locked nodes show the lock badge and
     // cannot be picked in the viewport. Honor both the Godot-canonical
@@ -4333,6 +4410,7 @@ fn node_to_json_tree_with_warnings(
         "is_instance": is_instance,
         "instance_path": instance_path,
         "editable_children": editable_children,
+        "foreign": foreign,
         "locked": locked,
         "grouped": grouped,
         "unique_name_in_owner": unique_name_in_owner,
@@ -5096,7 +5174,9 @@ fn api_get_scene(state: &Arc<Mutex<EditorState>>, stream: &mut TcpStream) {
                 node_warnings.insert(id.raw(), warnings);
             }
         }
-        let tree_json = node_to_json_tree_with_warnings(&state.scene_tree, root_id, &node_warnings);
+        let edited_root = edited_scene_root(&state.scene_tree).or(Some(root_id));
+        let tree_json =
+            node_to_json_tree_with_warnings(&state.scene_tree, root_id, &node_warnings, edited_root);
         // Godot parity: tell the client which main-screen editor (2D/3D) fits this
         // scene so a freshly opened 3D scene lands in the spatial editor instead
         // of the 2D canvas (where the 3D camera controls don't apply).
@@ -10203,12 +10283,25 @@ fn api_save_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
         }
     }
 
-    let tscn = TscnSaver::save_tree(&state.scene_tree, save_root);
+    let generated = TscnSaver::save_tree(&state.scene_tree, save_root);
+    // 🔑 Only what was EDITED since the scene was opened is rewritten
+    // (pat-hivyf): an unedited scene saves byte-for-byte as it was opened, and
+    // a scene with instances keeps their foreign nodes out of the file.
+    let tscn = match &state.scene_save_baseline {
+        Some(baseline) => baseline.text_to_save(&state.scene_tree, save_root, generated.clone()),
+        None => generated.clone(),
+    };
 
     if let Err(e) = atomic_write(std::path::Path::new(&path), tscn.as_bytes()) {
         send_error(stream, 500, &format!("failed to write: {e}"));
         return;
     }
+    // The file now says `tscn`, and the saver says `generated` for this tree.
+    state.scene_save_baseline = Some(SceneSaveBaseline {
+        root: save_root.raw(),
+        original: tscn.clone(),
+        generated,
+    });
 
     // pat-s3rrv.66: `_save_external_data` runs AFTER the scene is written, not
     // before. The doc is explicit — "called after the editor saves the project
@@ -10465,7 +10558,7 @@ fn api_load_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
     let mut new_tree = SceneTree::new();
     let root_id = new_tree.root_id();
 
-    match add_packed_scene_to_tree(&mut new_tree, root_id, &scene) {
+    match gdscene::packed_scene::add_packed_scene_to_tree_for_editing(&mut new_tree, root_id, &scene) {
         Ok(_) => {
             // If the scene has a WorldEnvironment, preview *its* environment
             // (background, tonemap, glow, fog, ambient) like Godot; otherwise
@@ -10496,6 +10589,14 @@ fn api_load_scene(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut TcpS
             // pat-0q2kx.76: `@tool` scripts in the opened scene run in edit
             // mode, exactly as Godot does.
             sync_tool_scripts_from_scene(&mut state);
+            // Taken last, once every pass above has settled the tree, so an
+            // unedited save compares equal (pat-hivyf). A binary `.scn` was
+            // decoded to text above: not the bytes on disk, so no baseline.
+            state.scene_save_baseline = if path.ends_with(".tscn") {
+                SceneSaveBaseline::capture(&state.scene_tree, source.clone())
+            } else {
+                None
+            };
             state.selected_node = None;
             state.selected_nodes.clear();
             state.undo_stack.clear();
@@ -18261,6 +18362,48 @@ pub fn build_play_tree(
         .get_node(cloned_root)
         .map(|n| n.children().to_vec())
         .unwrap_or_default();
+    // The edited tree now holds its instances already EXPANDED (pat-hivyf), but
+    // the clone above copied only nodes, values and connections — not the
+    // AnimationPlayers, AnimationTrees and local-to-scene resources each
+    // instanced scene level attaches. Re-expanding an outermost instance INTO
+    // itself is a no-op merge for its nodes (every one is already there, and
+    // existing values win) that runs those per-level passes in the clone;
+    // nested instances are levels of it, so they keep their mark.
+    for &scene_root in &scene_roots {
+        let mut ids = Vec::new();
+        cloned.collect_subtree_top_down(scene_root, &mut ids);
+        let outermost: Vec<NodeId> = ids
+            .into_iter()
+            .filter(|&id| {
+                id != scene_root
+                    && cloned
+                        .get_node(id)
+                        .is_some_and(|n| n.has_property(gdscene::packed_scene::INSTANCE_EXPANDED_KEY))
+                    && {
+                        let mut cursor = cloned.get_node(id).and_then(|n| n.parent());
+                        let mut nested = false;
+                        while let Some(p) = cursor {
+                            if p == scene_root {
+                                break;
+                            }
+                            if cloned.get_node(p).is_some_and(|n| {
+                                n.has_property(gdscene::packed_scene::INSTANCE_EXPANDED_KEY)
+                            }) {
+                                nested = true;
+                                break;
+                            }
+                            cursor = cloned.get_node(p).and_then(|n| n.parent());
+                        }
+                        !nested
+                    }
+            })
+            .collect();
+        for id in outermost {
+            if let Some(node) = cloned.get_node_mut(id) {
+                node.remove_property(gdscene::packed_scene::INSTANCE_EXPANDED_KEY);
+            }
+        }
+    }
     for scene_root in scene_roots {
         gdscene::packed_scene::expand_instance_placeholders(
             &mut cloned,
@@ -24947,7 +25090,7 @@ fn load_tree_from_path(path: &str) -> Result<SceneTree, String> {
     let scene = PackedScene::from_tscn(&source).map_err(|e| format!("failed to parse: {e}"))?;
     let mut new_tree = SceneTree::new();
     let root_id = new_tree.root_id();
-    add_packed_scene_to_tree(&mut new_tree, root_id, &scene)
+    gdscene::packed_scene::add_packed_scene_to_tree_for_editing(&mut new_tree, root_id, &scene)
         .map_err(|e| format!("failed to instance: {e}"))?;
     Ok(new_tree)
 }
@@ -24964,6 +25107,7 @@ fn reset_to_empty_scene(s: &mut EditorState) {
     s.inspector_history_index = 0;
     s.scene_file = None;
     s.scene_modified = false;
+    s.scene_save_baseline = None;
     s.saved_undo_depth = 0;
 }
 
@@ -25071,6 +25215,9 @@ fn api_close_scene_tab(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut
         };
         reset_to_empty_scene(&mut s);
         if let Some(tree) = loaded {
+            s.scene_save_baseline = std::fs::read_to_string(&new_path)
+                .ok()
+                .and_then(|text| SceneSaveBaseline::capture(&tree, text));
             s.scene_tree = tree;
             s.scene_file = Some(new_path);
         }

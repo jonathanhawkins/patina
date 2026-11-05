@@ -503,6 +503,81 @@ fn screenshots_are_png_images_of_the_game_view() {
     }
 }
 
+/// Decodes a PNG to 8-bit RGBA bytes.
+fn png_rgba(png: &[u8]) -> (u32, u32, Vec<u8>) {
+    let tex = gdrender2d::texture::decode_png(png).expect("a decodable PNG");
+    let px = tex
+        .pixels
+        .iter()
+        .flat_map(|c| [c.r, c.g, c.b, c.a].map(|v| (v * 255.0).round() as u8))
+        .collect();
+    (tex.width, tex.height, px)
+}
+
+/// A 3D game had no frame-exact picture: `play` refused every screenshot of a
+/// scene with 3D content ("not wired into the agent interface yet"), so a
+/// Godot reference frame (pat-xggzs) had nothing to be compared with. The shot
+/// must be the Play view's frame: through the scene's Camera3D, so the red box
+/// it looks at fills the centre while the corners stay the clear colour.
+#[test]
+fn play_screenshots_a_3d_scene_through_its_camera() {
+    let server = boot(None);
+    std::fs::write(
+        server.path("box3d.tscn"),
+        r#"[gd_scene load_steps=3 format=3]
+
+[sub_resource type="StandardMaterial3D" id="mat"]
+shading_mode = 0
+albedo_color = Color(1, 0, 0, 1)
+
+[sub_resource type="BoxMesh" id="box"]
+material = SubResource("mat")
+
+[node name="World" type="Node3D"]
+
+[node name="Box" type="MeshInstance3D" parent="."]
+mesh = SubResource("box")
+
+[node name="Camera" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 3)
+current = true
+"#,
+    )
+    .unwrap();
+    let opened = tool(
+        &server,
+        "scene",
+        json!({"action": "open", "path": "res://box3d.tscn"}),
+        None,
+    );
+    assert!(!opened.error, "{}", opened.text);
+    let report = tool(
+        &server,
+        "play",
+        json!({"frames": 1, "screenshots": [1], "width": 64, "height": 48}),
+        None,
+    );
+    assert!(!report.error, "{}", report.text);
+    assert!(!report.text.contains("screenshot failed"), "{}", report.text);
+    assert_eq!(report.images.len(), 1, "{}", report.text);
+    let (w, h, px) = png_rgba(&report.images[0]);
+    assert_eq!((w, h), (64, 48));
+    let at = |x: u32, y: u32| {
+        let i = ((y * w + x) * 4) as usize;
+        [px[i], px[i + 1], px[i + 2]]
+    };
+    let centre = at(32, 24);
+    assert!(
+        centre[0] > 200 && centre[1] < 60 && centre[2] < 60,
+        "the unshaded red box should fill the centre, got {centre:?}"
+    );
+    let corner = at(1, 1);
+    assert!(
+        !(corner[0] > 200 && corner[1] < 60),
+        "the corner is the clear colour, not the box: {corner:?}"
+    );
+}
+
 #[test]
 fn keep_running_then_step_continues_the_same_run_and_edits_are_refused_meanwhile() {
     let server = boot(None);

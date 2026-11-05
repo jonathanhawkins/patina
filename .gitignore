@@ -39,6 +39,9 @@ release/
 # Godot
 .godot/
 *.import
+# Real-game fixtures keep Godot's import settings (loop modes, material
+# remaps, texture modes); Godot projects are meant to commit them.
+!games/**/*.import
 
 # Test/coverage
 coverage/

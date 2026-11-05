@@ -1383,6 +1383,7 @@ impl TscnSaver {
                     &mut out,
                     node,
                     None,
+                    false,
                     &skip_keys_for(&anims, &sframes, &tilesets, nid),
                 );
                 write_animation_player_props(&mut out, &anims, nid);
@@ -1404,10 +1405,15 @@ impl TscnSaver {
                 };
                 id_to_path.insert(nid, node_path);
 
+                // A node an INSTANCED scene declared is written as an override
+                // entry — no `type=`, no `instance=` — as Godot writes an
+                // editable child (pat-hivyf).
+                let foreign = crate::packed_scene::is_foreign_node(tree, root_id, nid);
                 write_node_section(
                     &mut out,
                     node,
                     Some(&parent_path),
+                    foreign,
                     &skip_keys_for(&anims, &sframes, &tilesets, nid),
                 );
                 write_animation_player_props(&mut out, &anims, nid);
@@ -1418,6 +1424,23 @@ impl TscnSaver {
 
         // Write connections from signal stores.
         write_connections(&mut out, tree, root_id, &node_ids, &id_to_path);
+
+        // `[editable path=".."]` for every instance whose children are exposed
+        // ("Editable Children"), after the connections as Godot writes them.
+        // Without it a re-load hid the overrides' nodes again (pat-hivyf).
+        for &nid in &node_ids {
+            if nid == root_id {
+                continue;
+            }
+            let editable = tree
+                .get_node(nid)
+                .is_some_and(|n| matches!(n.get_property("_editable_children"), Variant::Bool(true)));
+            if editable {
+                if let Some(path) = id_to_path.get(&nid) {
+                    write!(out, "\n[editable path=\"{path}\"]\n").unwrap();
+                }
+            }
+        }
 
         out
     }
@@ -1705,6 +1728,11 @@ fn is_internal_prop(key: &str) -> bool {
         || key.starts_with("__tile_occluder_")
         || key == "_instance"
         || key == "_instance_path"
+        // Editor-only instance markers: "Editable Children" is written as an
+        // `[editable path=..]` section and the dock's source label is the
+        // instance's own `instance=` (pat-hivyf), never as property lines.
+        || key == "_editable_children"
+        || key == "_instance_source"
         // Runtime marker set when a Play tree expands an `instance=`
         // placeholder (`packed_scene::expand_instance_placeholders`).
         || key == crate::packed_scene::INSTANCE_EXPANDED_KEY
@@ -1890,6 +1918,7 @@ fn write_node_section(
     out: &mut String,
     node: &crate::node::Node,
     parent_path: Option<&str>,
+    foreign: bool,
     skip_keys: &[&str],
 ) {
     out.push('\n');
@@ -1914,12 +1943,12 @@ fn write_node_section(
     // A node that instances a sub-scene is written `instance=ExtResource("id")`
     // with NO `type=` attribute, exactly as Godot does.
     let instance_attr = match node.get_property("_instance") {
-        Variant::String(s) => {
+        Variant::String(s) if !foreign => {
             parse_ext_resource_id(&s).map(|id| format!(" instance=ExtResource(\"{id}\")"))
         }
         _ => None,
     };
-    let type_attr = if instance_attr.is_some() {
+    let type_attr = if instance_attr.is_some() || foreign {
         String::new()
     } else {
         format!(" type=\"{class}\"")

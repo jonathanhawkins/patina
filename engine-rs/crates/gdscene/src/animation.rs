@@ -129,7 +129,7 @@ impl KeyFrame {
 // ---------------------------------------------------------------------------
 
 /// The type of an animation track, matching Godot's track categories.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TrackType {
     /// Animates a node property over time (position, rotation, color, etc.).
     #[default]
@@ -641,13 +641,50 @@ impl Animation {
     /// `node_path`, so callers can resolve the target node (pat-u3l8c.94).
     /// Yields `(node_path, property_path, value)` triples.
     pub fn sample_all_targeted(&self, time: f64) -> Vec<(String, String, Variant)> {
+        self.sample_all_typed(time)
+            .into_iter()
+            .map(|(node, prop, _, value)| (node, prop, value))
+            .collect()
+    }
+
+    /// Like [`sample_all_targeted`](Self::sample_all_targeted) but also reports
+    /// each track's [`TrackType`] (pat-ghw2s). Yields
+    /// `(node_path, property_path, track_type, value)`.
+    ///
+    /// ⚠️ A bone is driven by up to THREE tracks with the same
+    /// `(node_path, property_path)` — `Skeleton3D:hip` as `position_3d`,
+    /// `rotation_3d` and `scale_3d`. Only the type tells them apart, so any
+    /// consumer that pairs values with types by `(node_path, property_path)`
+    /// silently routes a position into the scale.
+    pub fn sample_all_typed(&self, time: f64) -> Vec<(String, String, TrackType, Variant)> {
         let mut results = Vec::new();
         for track in &self.tracks {
             if let Some(value) = track.sample(time) {
-                results.push((track.node_path.clone(), track.property_path.clone(), value));
+                results.push((
+                    track.node_path.clone(),
+                    track.property_path.clone(),
+                    track.track_type,
+                    value,
+                ));
             }
         }
         results
+    }
+}
+
+/// The blend CHANNEL of a track type: the part of a track's identity, beyond
+/// `(node_path, property_path)`, that decides which other tracks it blends with
+/// (pat-ghw2s).
+///
+/// The three 3D transform types are distinct channels, because a bone's
+/// position, rotation and scale tracks share one path (`Skeleton3D:hip`) —
+/// Godot keeps them as separate `loc`/`rot`/`scale` fields of one transform
+/// cache. Every other type collapses to [`TrackType::Property`], so keying on
+/// the channel changes nothing for tracks that never shared a path.
+pub fn value_channel(track_type: TrackType) -> TrackType {
+    match track_type {
+        TrackType::Position3D | TrackType::Rotation3D | TrackType::Scale3D => track_type,
+        _ => TrackType::Property,
     }
 }
 
@@ -1716,11 +1753,22 @@ impl AnimationPlayer {
     /// Returns `(node_path, property_path, value)` triples; crossfade blending
     /// matches tracks by `(node_path, property_path)`.
     pub fn get_current_values_targeted(&self) -> Vec<(String, String, Variant)> {
+        self.get_current_values_typed()
+            .into_iter()
+            .map(|(node, prop, _, value)| (node, prop, value))
+            .collect()
+    }
+
+    /// Like [`get_current_values_targeted`](Self::get_current_values_targeted)
+    /// but keeps each value's [`TrackType`] (pat-ghw2s). Crossfade blending
+    /// pairs tracks by `(node_path, property_path, value_channel(type))`, so a
+    /// bone's position is never blended against its scale.
+    pub fn get_current_values_typed(&self) -> Vec<(String, String, TrackType, Variant)> {
         let to_anim = match self.current.as_ref().and_then(|n| self.animations.get(n)) {
             Some(a) => a,
             None => return Vec::new(),
         };
-        let to_values = to_anim.sample_all_targeted(self.position);
+        let to_values = to_anim.sample_all_typed(self.position);
 
         let bs = match &self.blend_state {
             Some(bs) => bs,
@@ -1734,23 +1782,20 @@ impl AnimationPlayer {
         if factor >= 1.0 {
             return to_values;
         }
-        let from_values = from_anim.sample_all_targeted(bs.from_position);
-        let from_map: HashMap<(&str, &str), &Variant> = from_values
+        let from_values = from_anim.sample_all_typed(bs.from_position);
+        let from_map: HashMap<(&str, &str, TrackType), &Variant> = from_values
             .iter()
-            .map(|(n, p, v)| ((n.as_str(), p.as_str()), v))
+            .map(|(n, p, t, v)| ((n.as_str(), p.as_str(), value_channel(*t)), v))
             .collect();
 
         let mut result = Vec::with_capacity(to_values.len());
-        for (node, prop, to_val) in &to_values {
-            if let Some(from_val) = from_map.get(&(node.as_str(), prop.as_str())) {
-                if let Some(blended) = interpolate_variant(from_val, to_val, factor) {
-                    result.push((node.clone(), prop.clone(), blended));
-                } else {
-                    result.push((node.clone(), prop.clone(), to_val.clone()));
-                }
-            } else {
-                result.push((node.clone(), prop.clone(), to_val.clone()));
-            }
+        for (node, prop, ty, to_val) in &to_values {
+            let key = (node.as_str(), prop.as_str(), value_channel(*ty));
+            let value = from_map
+                .get(&key)
+                .and_then(|from_val| interpolate_variant(from_val, to_val, factor))
+                .unwrap_or_else(|| to_val.clone());
+            result.push((node.clone(), prop.clone(), *ty, value));
         }
         result
     }
@@ -2373,6 +2418,15 @@ pub enum GltfTrackTarget {
     },
 }
 
+/// Godot's glTF clip-name loop rule (`gltf_document.cpp:3752`): lower-cased,
+/// the name begins or ends with `loop` or `cycle` (pat-3mbf5).
+pub fn gltf_name_requests_loop(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    ["loop", "cycle"]
+        .iter()
+        .any(|w| lower.starts_with(w) || lower.ends_with(w))
+}
+
 /// [`animations_from_gltf_resource`] with each channel's target resolved by
 /// the caller, which knows the instanced hierarchy: a nested node needs its
 /// full path (not its bare name) and a joint needs its skeleton + bone.
@@ -2399,6 +2453,14 @@ pub fn animations_from_gltf_resource_targeted(
             _ => 0.0,
         };
         let mut anim = Animation::new(clip_name, length);
+        // Godot's glTF importer loops a clip whose name begins or ends with
+        // "loop" or "cycle", case-insensitively (`gltf_document.cpp`
+        // `_parse_animations`) - the only loop signal a .glb carries itself
+        // (pat-3mbf5). A `.import` sidecar can still override it:
+        // `gltf_scene::apply_import_animation_settings`.
+        if gltf_name_requests_loop(&anim.name) {
+            anim.loop_mode = LoopMode::Linear;
+        }
 
         let Some(Variant::Array(channels)) = clip.get("channels") else {
             out.push(anim);

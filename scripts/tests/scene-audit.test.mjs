@@ -181,6 +181,18 @@ test('live JSON tree: childless Node instances are the candidates; sources decid
   assert.match(found[1].finding, /<res:\/\/player\/player\.tscn> became an empty Node \(its root is a CharacterBody3D\)/);
 });
 
+test('live JSON tree: an instance names its own source in instance_path (pat-rbyty)', () => {
+  const tree = node('root', 'Window', '/root', [node('Game', 'Node3D', '/root/Game', [
+    node('Player', 'Node', '/root/Game/Player', [], { is_instance: true, instance_path: 'res://player/player.tscn' }),
+    node('Coin', 'Area3D', '/root/Game/Coin', [node('Circle', 'MeshInstance3D', '/root/Game/Coin/Circle')], { is_instance: true, instance_path: 'res://coin/coin.tscn' }),
+  ])]);
+  const roots = { 'res://player/player.tscn': 'CharacterBody3D', 'res://coin/coin.tscn': 'Area3D' };
+  // No outline lookup at all: the JSON tree alone names the failed scene.
+  const found = liveTreePlaceholders(tree, (r) => roots[r] ?? null, () => { throw new Error('outline lookup not needed'); });
+  assert.deepEqual(found.map((p) => p.path), ['/root/Game/Player']);
+  assert.match(found[0].finding, /<res:\/\/player\/player\.tscn> became an empty Node \(its root is a CharacterBody3D\)/);
+});
+
 // --- the CLI, against a fake runner ----------------------------------------
 
 function fakeGame(runnerBody) {

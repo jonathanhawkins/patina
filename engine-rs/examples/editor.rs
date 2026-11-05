@@ -29,7 +29,7 @@ use gdeditor::idle_render::ViewportRenderSignature;
 use gdrender2d::test_adapter::capture_frame;
 use gdrender2d::SoftwareRenderer;
 use gdscene::lifecycle::LifecycleManager;
-use gdscene::packed_scene::{add_packed_scene_to_tree, PackedScene};
+use gdscene::packed_scene::PackedScene;
 use gdscene::SceneTree;
 use gdserver2d::viewport::Viewport;
 use gdvariant::Variant;
@@ -112,8 +112,12 @@ fn main() {
     // Instance into a scene tree.
     let mut tree = SceneTree::new();
     let root_id = tree.root_id();
-    let scene_root = add_packed_scene_to_tree(&mut tree, root_id, &packed)
-        .unwrap_or_else(|e| panic!("Failed to instance scene: {e}"));
+    // Instances expanded as the editor's own Open does (pat-hivyf): a scene
+    // with editable children inside a glTF (the 3D platformer's player.tscn)
+    // could not be opened as placeholders at all.
+    let scene_root =
+        gdscene::packed_scene::add_packed_scene_to_tree_for_editing(&mut tree, root_id, &packed)
+            .unwrap_or_else(|e| panic!("Failed to instance scene: {e}"));
 
     // Attach demo scripts so Script mode shows real content for a selected node
     // (pat-qtmbv): Player -> player.gd, Enemy -> enemy_spawner.gd. The selection
@@ -155,6 +159,10 @@ fn main() {
     // Set up editor state with texture cache rooted at the scene file's directory.
     let mut state = EditorState::new(tree);
     state.scene_file = Some(scene_path.clone());
+    if scene_path.ends_with(".tscn") {
+        state.scene_save_baseline =
+            gdeditor::editor_server::SceneSaveBaseline::capture(&state.scene_tree, source.clone());
+    }
     state.frame_buffer = Some(initial_frame);
     // Root res:// at the current working directory so the runtime resolves
     // res:// scripts/textures the same way the editor's /api/script and

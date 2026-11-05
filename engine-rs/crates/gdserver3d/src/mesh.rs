@@ -41,6 +41,17 @@ pub struct Surface3D {
     /// Empty means "no LOD" — draw `indices` always, which is what every
     /// surface did before pat-s3rrv.205.
     pub lods: Vec<SurfaceLod>,
+    /// Per-vertex bone weights, parallel to `vertices`; empty when unrigged.
+    ///
+    /// ⚠️ Every surface of a skinned Godot mesh carries its own
+    /// `ARRAY_BONES`/`ARRAY_WEIGHTS`. Keeping influences only on the primary
+    /// surface left every other surface at its bind-space coordinates while the
+    /// first one followed the skeleton — the platformer robot's second
+    /// primitive drew at 0.3x scale and unposed, which read as a crumpled
+    /// model (pat-ghw2s).
+    pub bone_weights: Vec<[f32; 4]>,
+    /// Per-vertex bind indices (into `Skin::binds`), parallel to `vertices`.
+    pub bone_indices: Vec<[u32; 4]>,
 }
 
 /// Smoothing-group value meaning "do not smooth" — Godot's `UINT32_MAX`.
@@ -590,6 +601,13 @@ pub struct SurfaceLod {
 }
 
 impl Surface3D {
+    /// Whether this surface carries bone influences parallel to its vertices.
+    pub fn is_skinned(&self) -> bool {
+        !self.vertices.is_empty()
+            && self.bone_weights.len() == self.vertices.len()
+            && self.bone_indices.len() == self.vertices.len()
+    }
+
     /// Chooses the index buffer to draw for a given screen-space error budget.
     ///
     /// Mirrors Godot: take the **coarsest** level whose error still fits the
@@ -737,7 +755,16 @@ impl Mesh3D {
     /// skeletal skinning (both arrays present and parallel to `vertices`).
     ///
     /// A skinned mesh can be deformed with [`crate::skin::skin_mesh`].
+    ///
+    /// True when the primary surface OR any additional surface is rigged: a
+    /// mesh whose rig lives only on surface 1+ is still a skinned mesh, and
+    /// gating on the primary alone would leave those surfaces unposed.
     pub fn is_skinned(&self) -> bool {
+        self.primary_is_skinned() || self.surfaces.iter().any(Surface3D::is_skinned)
+    }
+
+    /// Whether the PRIMARY surface (the top-level arrays) is rigged.
+    pub fn primary_is_skinned(&self) -> bool {
         !self.vertices.is_empty()
             && self.bone_weights.len() == self.vertices.len()
             && self.bone_indices.len() == self.vertices.len()
@@ -1773,6 +1800,8 @@ mod tests {
             uvs: vec![[0.0, 0.0]],
             indices: vec![0],
             primitive_type: PrimitiveType::Points,
+            bone_weights: Vec::new(),
+            bone_indices: Vec::new(),
             lods: Vec::new(),
         });
         mesh.surfaces.push(Surface3D {
@@ -1781,6 +1810,8 @@ mod tests {
             uvs: vec![[1.0, 0.0]],
             indices: vec![0],
             primitive_type: PrimitiveType::Points,
+            bone_weights: Vec::new(),
+            bone_indices: Vec::new(),
             lods: Vec::new(),
         });
         assert_eq!(mesh.surface_count(), 3);

@@ -92,9 +92,10 @@ impl AnimationLeafOptions {
     /// which method keys an interval crossed, and the interval's two endpoints
     /// alone cannot tell them apart (pat-mgixk.77).
     fn backward_is_wrap(&self) -> bool {
-        // Non-custom and custom-Linear both `rem_euclid` the window; custom
-        // `None` clamps and so never steps backward at all, which makes the
-        // answer for it moot.
+        // A non-custom leaf follows its CLIP's loop mode (pat-3mbf5): Linear
+        // wraps, None clamps and never steps backward (moot). A non-custom
+        // PingPong clip's fold-back is still reported as a wrap — the leaf
+        // cannot see the clip from here; a known, narrow gap.
         !self.custom() || self.loop_mode == LoopMode::Linear
     }
 
@@ -130,15 +131,21 @@ impl AnimationLeafOptions {
     /// ([`sample_time`](Self::sample_time)), not here. Negating both would
     /// cancel out and a backward leaf would play forwards.
     ///
-    /// Without a custom timeline this is the pre-existing `rem_euclid` wrap, so
-    /// a default leaf behaves exactly as before.
-    fn advance(&self, position: f64, delta: f64, clip_length: f64) -> f64 {
+    /// Without a custom timeline the end behaviour is the CLIP's own
+    /// `loop_mode` (`clip_loop`), as Godot's `AnimationNodeAnimation::_process`
+    /// reads `anim->get_loop_mode()` when `use_custom_timeline` is off
+    /// (pat-3mbf5). Patina wrapped every such leaf unconditionally, so a
+    /// one-shot clip in a blend tree (a jump, a shot) replayed forever where
+    /// Godot holds its last frame.
+    fn advance(&self, position: f64, delta: f64, clip_length: f64, clip_loop: LoopMode) -> f64 {
         let window = self.window(clip_length).max(f64::EPSILON);
         let raw = position + delta * self.time_scale(clip_length);
-        if !self.custom() {
-            return raw.rem_euclid(window);
-        }
-        match self.loop_mode {
+        let mode = if self.custom() {
+            self.loop_mode
+        } else {
+            clip_loop
+        };
+        match mode {
             LoopMode::Linear => raw.rem_euclid(window),
             // Hold the far end: a non-looping custom timeline stops there.
             LoopMode::None => raw.clamp(0.0, window),
@@ -1450,11 +1457,8 @@ fn method_calls_crossed(
         //   `AnimationPlayer::method_calls_in_range` handles.
         //
         // ⚠️ The deciding flag comes from the LEAF, not from
-        // `Animation::loop_mode`. A default tree leaf `rem_euclid`s the clip
-        // length whatever the clip's own loop mode says
-        // (`AnimationLeafOptions::advance`), so keying this off `anim.loop_mode`
-        // would have read every wrap of a `LoopMode::None` clip as a reversal
-        // and dropped the keys in its tail.
+        // `Animation::loop_mode`: a custom timeline's own loop mode overrides
+        // the clip's (`AnimationLeafOptions::advance`).
         //
         // ⚠️ A `TimeSeek` jump backwards is indistinguishable from a wrap here
         // and will fire the tail's keys. Known and narrow: both endpoints of the
@@ -1906,10 +1910,32 @@ impl AnimationTree {
     /// [`AnimationPlayer::get_current_values_targeted`](crate::animation::AnimationPlayer::get_current_values_targeted)
     /// so a tree can drive several nodes, as Godot's mixer does.
     pub fn get_current_values_targeted(&self) -> Vec<(String, String, Variant)> {
+        self.get_current_values_typed()
+            .into_iter()
+            .map(|(node_path, prop, _, value)| (node_path, prop, value))
+            .collect()
+    }
+
+    /// [`get_current_values_targeted`](Self::get_current_values_targeted) plus
+    /// each value's blend channel (pat-ghw2s): [`TrackType::Position3D`],
+    /// [`TrackType::Rotation3D`] or [`TrackType::Scale3D`] for a 3D transform
+    /// track, [`TrackType::Property`] for everything else.
+    ///
+    /// The only way to route a bone value correctly: a bone's three tracks share
+    /// `(node_path, property_path)`, so a type looked up by that pair is
+    /// whichever track happened to be listed last.
+    ///
+    /// [`TrackType::Position3D`]: crate::animation::TrackType::Position3D
+    /// [`TrackType::Rotation3D`]: crate::animation::TrackType::Rotation3D
+    /// [`TrackType::Scale3D`]: crate::animation::TrackType::Scale3D
+    /// [`TrackType::Property`]: crate::animation::TrackType::Property
+    pub fn get_current_values_typed(
+        &self,
+    ) -> Vec<(String, String, crate::animation::TrackType, Variant)> {
         match &self.root {
             Some(root) => sample_node(root, &self.animations)
                 .into_iter()
-                .map(|((node_path, prop), value)| (node_path, prop, value))
+                .map(|((node_path, prop, channel), value)| (node_path, prop, channel, value))
                 .collect(),
             None => Vec::new(),
         }
@@ -2031,7 +2057,15 @@ pub fn advance_and_apply(
 /// track's node path relative to the mixer's `root_node` (empty or `"."` means
 /// `root_node` itself). Values blend by this whole key, so two clips only blend
 /// where they drive the same property **of the same node**.
-type TrackKey = (String, String);
+/// `(node_path, property_path, channel)`, where the channel is
+/// [`value_channel`](crate::animation::value_channel) of the track type.
+///
+/// ⚠️ The channel is not optional (pat-ghw2s). A bone's `position_3d`,
+/// `rotation_3d` and `scale_3d` tracks all address `Skeleton3D:<bone>`, so a
+/// two-part key collapsed them: `blend_value_lists` blended a position against
+/// a scale, a quaternion fell back to whichever input won, and the platformer
+/// robot rendered crumpled.
+type TrackKey = (String, String, crate::animation::TrackType);
 
 /// The parameter sources consulted while evaluating a graph: the legacy boolean
 /// condition map and the Godot-style `parameters/...` [`Variant`] map.
@@ -2306,7 +2340,7 @@ fn advance_node(
                 // `opts` carries the play direction and the custom timeline; a
                 // default leaf still wraps at the clip's own length, which is
                 // exactly what this line used to do unconditionally.
-                *position = opts.advance(*position, delta, anim.length);
+                *position = opts.advance(*position, delta, anim.length, anim.loop_mode);
             }
         }
         AnimationNode::Blend2 { a, b, .. } => {
@@ -2397,10 +2431,7 @@ fn select_auto_transition(
     params: EvalParams<'_>,
 ) -> Option<StateTransition> {
     // Whether the state we would be LEAVING plays a looping clip. Godot reads
-    // this off the `Animation` resource, not off the leaf's timeline options —
-    // and it has to, because Patina's default leaf wraps with `rem_euclid`
-    // whatever the clip's own loop mode says, so the playhead alone cannot
-    // tell a looping clip from a one-shot one.
+    // this off the `Animation` resource, not off the leaf's timeline options.
     let source_loops = sm
         .states
         .get(&sm.current)
@@ -2573,11 +2604,10 @@ fn advance_state_machine(
         }
     }
 
-    // Advance the current state's node, watching for the clip wrapping past its
-    // end so an `AtEnd` edge can fire on the next frame. A decrease in the
-    // playhead is the wrap: `AnimationNode::Animation` advances with
-    // `rem_euclid`, so a looping clip's position drops back toward zero exactly
-    // when it completes a cycle.
+    // Advance the current state's node, watching for the clip finishing a pass
+    // so an `AtEnd` edge can fire on the next frame: a looping clip's playhead
+    // drops back toward zero, a non-looping one arrives at its end and holds
+    // (`crossed_clip_end`).
     let before = sm
         .states
         .get(&sm.current)
@@ -2589,7 +2619,30 @@ fn advance_state_machine(
         .states
         .get(&sm.current)
         .and_then(|n| node_play_position(n));
-    sm.cycle_completed = matches!((before, after), (Some(b), Some(a)) if a < b);
+    let end = sm
+        .states
+        .get(&sm.current)
+        .and_then(node_clip_name)
+        .and_then(|name| library.get(name))
+        .map(|anim| anim.length);
+    sm.cycle_completed = crossed_clip_end(before, after, end);
+}
+
+/// Whether a playhead that moved from `before` to `after` this frame finished a
+/// pass of a clip `end` seconds long: it WRAPPED (a looping clip's position
+/// drops back toward zero), or it ARRIVED at the end and holds there (a clip
+/// whose `loop_mode` is none clamps — pat-3mbf5).
+///
+/// ⚠️ The arrival case is not optional. Until leaves honoured the clip's loop
+/// mode every default leaf wrapped, so "went backwards" was the only signal;
+/// a clamped clip never goes backwards, and an `AtEnd` edge out of a one-shot
+/// state would wait forever.
+fn crossed_clip_end(before: Option<f64>, after: Option<f64>, end: Option<f64>) -> bool {
+    match (before, after) {
+        (Some(b), Some(a)) if a < b => true,
+        (Some(b), Some(a)) => end.is_some_and(|end| end > 0.0 && a >= end && b < end),
+        _ => false,
+    }
 }
 
 /// Jumps every `Animation` clip beneath `node` to `time` (pat-0q2kx.53).
@@ -2668,16 +2721,34 @@ fn node_clip_position(node: &AnimationNode) -> Option<f64> {
     }
 }
 
+/// The clip [`node_clip_position`] reads its position from, by the same descent,
+/// so the transition's end check measures the clip it is watching.
+fn node_transition_clip_name(node: &AnimationNode) -> Option<&str> {
+    match node {
+        AnimationNode::Animation { name, .. } => Some(name.as_str()),
+        AnimationNode::Named { inner, .. } => node_transition_clip_name(inner),
+        AnimationNode::TimeScale { child, .. } | AnimationNode::TimeSeek { child, .. } => {
+            node_transition_clip_name(child)
+        }
+        AnimationNode::Blend2 { a, .. } => node_transition_clip_name(a),
+        AnimationNode::Blend3 { b, .. } => node_transition_clip_name(b),
+        AnimationNode::Add2 { base, .. }
+        | AnimationNode::Add3 { base, .. }
+        | AnimationNode::Sub2 { base, .. } => node_transition_clip_name(base),
+        _ => None,
+    }
+}
+
 fn advance_transition(
     t: &mut TransitionNode,
     delta: f64,
     library: &HashMap<String, Animation>,
     params: EvalParams<'_>,
 ) {
-    // ⚠️ "The clip finished" is detected by WRAP, comparing the outgoing
-    // input's position across this advance: `advance_node` wraps with
-    // `rem_euclid`, so a position that moved BACKWARDS is one that just
-    // completed a pass. Testing "is the position near the end (or near zero)"
+    // ⚠️ "The clip finished" is detected by comparing the outgoing input's
+    // position across this advance (`crossed_clip_end`): a looping clip's
+    // position moves BACKWARDS when it completes a pass, a clamped one ARRIVES
+    // at its end. Testing "is the position near the end (or near zero)"
     // instead looks true on the very first frame — a clip sitting at 0.0 has
     // not finished, it has not started — and fires the pending switch
     // immediately, which defeats the entire point of at-end.
@@ -2713,8 +2784,14 @@ fn advance_transition(
             .inputs
             .get(t.current)
             .and_then(|(_, n)| node_clip_position(n));
+        let end = t
+            .inputs
+            .get(t.current)
+            .and_then(|(_, n)| node_transition_clip_name(n))
+            .and_then(|name| library.get(name))
+            .map(|anim| anim.length);
         let wrapped = match (before, after) {
-            (Some(b), Some(a)) => a < b,
+            (Some(_), Some(_)) => crossed_clip_end(before, after, end),
             // An input with no clip under it has nothing to wait for; letting
             // the switch through beats wedging it forever.
             _ => true,
@@ -3365,9 +3442,11 @@ fn closest_triangle_on_hull(
 /// Samples every track of `anim` at `time`, keyed by `(node_path, property)` so
 /// blending pairs values per target node and the caller can resolve each one.
 fn sample_clip_targeted(anim: &Animation, time: f64) -> Vec<(TrackKey, Variant)> {
-    anim.sample_all_targeted(time)
+    anim.sample_all_typed(time)
         .into_iter()
-        .map(|(node_path, prop, value)| ((node_path, prop), value))
+        .map(|(node_path, prop, ty, value)| {
+            ((node_path, prop, crate::animation::value_channel(ty)), value)
+        })
         .collect()
 }
 
@@ -3483,7 +3562,7 @@ fn filter_value_lists(
     }
     values
         .iter()
-        .filter(|((node_path, prop), _)| {
+        .filter(|((node_path, prop, _), _)| {
             !filters.iter().any(|f| {
                 // ⚠️ Three spellings, all of which appear in practice: the node
                 // alone ("Skeleton"), the qualified track ("Skeleton:position"),

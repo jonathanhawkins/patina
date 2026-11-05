@@ -96,6 +96,7 @@ pub mod render_server_3d;
 pub mod resource_preloader;
 pub mod root_motion_view;
 pub mod scene_saver;
+pub mod tscn_merge;
 pub mod scene_tree;
 pub mod script_mesh;
 pub mod softbody_sync_3d;

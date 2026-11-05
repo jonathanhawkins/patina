@@ -585,6 +585,11 @@ fn instance_preview_items(
     let mut out = Vec::new();
     for id in tree.all_nodes_in_tree_order() {
         let Some(node) = tree.get_node(id) else { continue };
+        // An instance the edited tree already holds EXPANDED draws through its
+        // own nodes; a preview on top would draw it twice (pat-hivyf).
+        if node.has_property(gdscene::packed_scene::INSTANCE_EXPANDED_KEY) {
+            continue;
+        }
         let Variant::String(path) = node.get_property("_instance_path") else {
             continue;
         };

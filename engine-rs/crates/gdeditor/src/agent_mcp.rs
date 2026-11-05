@@ -48,8 +48,11 @@ const MAX_FRAMES_PER_CALL: u64 = 36_000;
 const MAX_SCREENSHOTS: usize = 8;
 /// Most game-log lines a `play`/`step` report quotes before summarising.
 const REPORT_LOG_LINES: usize = 200;
-/// Nodes a `tree` listing prints before eliding the rest.
+/// Nodes a `tree` listing prints before eliding the rest, unless the call
+/// passes its own `budget`.
 const TREE_NODE_BUDGET: usize = 400;
+/// The most nodes one `tree` call may ask for.
+const TREE_NODE_BUDGET_MAX: usize = 100_000;
 /// Characters of property text one tree line carries.
 const TREE_PROPS_CHARS: usize = 240;
 
@@ -446,6 +449,7 @@ fn tool_definitions() -> Vec<Value> {
             json!({"type": "object", "properties": {
                 "node": {"type": "string", "description": "Subtree to list (default: scene root)."},
                 "running": {"type": "boolean"}, "depth": {"type": "integer"},
+                "budget": {"type": "integer", "description": "Most nodes to print (default 400, max 100000). The listing ends by saying how many it omitted."},
                 "props": {"type": "boolean", "description": "Include property values (default true)."}
             }})),
         tool("inspect", "One node in detail: non-default properties, script variables with live values, groups and children. `all` adds default-valued properties.",
@@ -868,9 +872,38 @@ fn format_tree(
 }
 
 fn outline(tree: &SceneTree, root: NodeId, max_depth: usize, with_props: bool) -> String {
+    outline_with_budget(tree, root, max_depth, with_props, TREE_NODE_BUDGET)
+}
+
+/// [`outline`] printing at most `budget` nodes, then saying how many of the
+/// subtree's nodes (within `max_depth`) it left out and how to see them
+/// (pat-rbyty). A silent cut at 400 hid most of a 626-node game.
+fn outline_with_budget(
+    tree: &SceneTree,
+    root: NodeId,
+    max_depth: usize,
+    with_props: bool,
+    budget: usize,
+) -> String {
+    fn count(tree: &SceneTree, id: NodeId, depth: usize, max_depth: usize) -> usize {
+        let children = tree.get_node(id).map(|n| n.children().to_vec()).unwrap_or_default();
+        1 + if depth >= max_depth {
+            0
+        } else {
+            children.iter().map(|&c| count(tree, c, depth + 1, max_depth)).sum()
+        }
+    }
     let mut out = String::new();
-    let mut budget = TREE_NODE_BUDGET;
-    format_tree(tree, root, 0, max_depth, with_props, &mut budget, &mut out);
+    let mut remaining = budget;
+    format_tree(tree, root, 0, max_depth, with_props, &mut remaining, &mut out);
+    let printed = budget - remaining;
+    let total = count(tree, root, 0, max_depth);
+    if printed < total {
+        out.push_str(&format!(
+            "… {} of {total} nodes omitted (budget {budget}): pass a larger `budget`, or list a subtree with `node`\n",
+            total - printed
+        ));
+    }
     out
 }
 
@@ -1075,7 +1108,10 @@ fn tool_tree(ctx: &Ctx, args: &Value) -> Result<Output, String> {
         edit_scene_root(tree)
     };
     let start = resolve(tree, root, node)?;
-    Ok(Output::text(outline(tree, start, depth, with_props)))
+    let budget = arg_u64(args, "budget")
+        .map(|b| (b as usize).clamp(1, TREE_NODE_BUDGET_MAX))
+        .unwrap_or(TREE_NODE_BUDGET);
+    Ok(Output::text(outline_with_budget(tree, start, depth, with_props, budget)))
 }
 
 fn tool_inspect(ctx: &Ctx, args: &Value) -> Result<Output, String> {
@@ -1927,7 +1963,22 @@ fn render_game_png(s: &mut EditorState, width: u32, height: u32) -> Result<Vec<u
         None => &mut st.scene_tree,
     };
     if crate::scene_renderer::scene_has_3d_content(tree) {
-        return Err("3D screenshots are not wired into the agent interface yet — use api GET /api/viewport/png for the editor's last rendered frame".to_string());
+        // The Play view's own 3D entry point (pat-p3p1m), so a screenshot is
+        // the frame the editor's Game tab draws for this tree: scene camera,
+        // game environment, HUD composited over it. Without it a 3D game had
+        // no frame-exact picture at all, so nothing could be diffed against
+        // Godot's (pat-xggzs).
+        let clear = settings.default_clear_color();
+        let img = crate::play_3d::prepare_play_3d_frame(
+            tree,
+            &st.editor_viewport_3d,
+            st.runtime_camera_override,
+            clear,
+            width,
+            height,
+        )
+        .render();
+        return Ok(gdrender2d::export::encode_png_bgra(&img));
     }
     let fb = crate::viewport_2d_render::render_play_frame(
         tree,

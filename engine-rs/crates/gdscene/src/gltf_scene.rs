@@ -482,13 +482,134 @@ pub fn packed_scene_from_gltf_path(path: &str) -> Option<PackedScene> {
             Err(e) => Err(e),
         },
     };
-    match doc {
-        Ok(doc) => packed_scene_from_gltf(&doc),
+    let mut scene = match doc {
+        Ok(doc) => packed_scene_from_gltf(&doc)?,
         Err(e) => {
             tracing::error!("glTF scene '{path}' could not be imported: {e}");
-            None
+            return None;
+        }
+    };
+    // Godot imports a scene THROUGH its `.import` sidecar: per-clip settings
+    // such as `settings/loop_mode` live there, not in the .glb (pat-3mbf5).
+    if let Ok(text) = gdcore::file_access::FileAccess::read_file_string(&format!("{path}.import")) {
+        if let Some(clips) = scene.gltf_animations_mut() {
+            apply_import_animation_settings(clips, &text);
         }
     }
+    Some(scene)
+}
+
+/// Applies a scene `.import` sidecar's animation settings to the clips of an
+/// imported glTF, in Godot's order (pat-3mbf5):
+///
+/// 1. with `nodes/use_name_suffixes` (default `true`), a name hint
+///    `-loop`/`_loop`/`$loop` (also `loop_mode`, `cycle`) loops the clip and is
+///    stripped from its name (`ResourceImporterScene::_pre_fix_node`);
+/// 2. a clip listed under `_subresources` -> `"animations"` takes its
+///    `settings/loop_mode` (0 none, 1 linear, 2 ping-pong), defaulting to 0 —
+///    so an entry OVERRIDES both the glTF name rule and the hint, exactly as
+///    `_post_fix_animations` fills absent options with their defaults.
+///
+/// ⚠️ A clip with no entry keeps what the glTF importer gave it. The official
+/// demos loop `idle`/`run`/`walk` ONLY through this sidecar; their names match
+/// no rule, so a project copied without its `.import` files does not loop them
+/// in Godot either.
+pub fn apply_import_animation_settings(clips: &mut [crate::animation::Animation], import_text: &str) {
+    use crate::animation::LoopMode;
+
+    let use_name_suffixes = !import_text
+        .lines()
+        .any(|l| l.trim().replace(' ', "") == "nodes/use_name_suffixes=false");
+    if use_name_suffixes {
+        for clip in clips.iter_mut() {
+            for hint in ["loop_mode", "loop", "cycle"] {
+                if import_name_has_hint(&clip.name, hint) {
+                    clip.loop_mode = LoopMode::Linear;
+                    clip.name = import_name_strip_hint(&clip.name, hint);
+                }
+            }
+        }
+    }
+
+    let Some(Variant::Dictionary(sub)) = import_subresources(import_text) else {
+        return;
+    };
+    let Some(Variant::Dictionary(anims)) = sub.get("animations") else {
+        return;
+    };
+    for clip in clips.iter_mut() {
+        let Some(Variant::Dictionary(settings)) = anims.get(clip.name.as_str()) else {
+            continue;
+        };
+        clip.loop_mode = match settings.get("settings/loop_mode") {
+            Some(Variant::Int(1)) => LoopMode::Linear,
+            Some(Variant::Int(2)) => LoopMode::PingPong,
+            _ => LoopMode::None,
+        };
+    }
+}
+
+/// The `[params] _subresources={...}` value of a `.import` sidecar, which
+/// spans many lines and so is invisible to the line-based `.import` parser.
+fn import_subresources(import_text: &str) -> Option<Variant> {
+    let start = import_text.find("\n_subresources=")? + 1;
+    let body = &import_text[start + "_subresources=".len()..];
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut escaped = false;
+    for (i, c) in body.char_indices() {
+        if in_str {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_str = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_str = true,
+            '{' | '[' => depth += 1,
+            '}' | ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return gdresource::loader::parse_variant_value(&body[..=i]).ok();
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The importer's name with Blender's `.001`-style tail (digits, spaces,
+/// underscores) removed — `_teststr`/`_fixstr`'s first step.
+fn import_name_core(name: &str) -> &str {
+    name.trim_end_matches(|c: char| c.is_ascii_digit() || (c as u32) <= 32 || c == '_')
+}
+
+/// Godot's `_teststr(name, hint)` (`resource_importer_scene.cpp`).
+fn import_name_has_hint(name: &str, hint: &str) -> bool {
+    let core = import_name_core(name).to_lowercase();
+    core.contains(&format!("${hint}"))
+        || core.ends_with(&format!("-{hint}"))
+        || core.ends_with(&format!("_{hint}"))
+}
+
+/// Godot's `_fixstr(name, hint)`: the name with the hint removed, keeping the
+/// stripped tail.
+fn import_name_strip_hint(name: &str, hint: &str) -> String {
+    let core = import_name_core(name);
+    let end = &name[core.len()..];
+    let dollar = format!("${hint}");
+    if core.to_lowercase().contains(&dollar) {
+        return format!("{}{end}", core.replace(&dollar, ""));
+    }
+    let lower = core.to_lowercase();
+    if lower.ends_with(&format!("-{hint}")) || lower.ends_with(&format!("_{hint}")) {
+        return format!("{}{end}", &core[..core.len() - hint.len() - 1]);
+    }
+    core.to_string()
 }
 
 /// Attaches the clips of an imported glTF scene to its `AnimationPlayer` node

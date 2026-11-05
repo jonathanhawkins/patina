@@ -2200,12 +2200,27 @@ pub fn mesh3d_from_gltf_resource_for_mesh(
             .and_then(extract_index_array)
             .unwrap_or_default();
 
+        // Each primitive carries its OWN JOINTS_0/WEIGHTS_0 (pat-ghw2s); kept only
+        // when parallel to this surface's positions, the same rule as the primary.
+        let s_bone_indices = sub
+            .get_property("bone_indices")
+            .and_then(extract_bone_index_array)
+            .unwrap_or_default();
+        let s_bone_weights = sub
+            .get_property("bone_weights")
+            .and_then(extract_bone_weight_array)
+            .unwrap_or_default();
+        let s_rigged =
+            s_bone_indices.len() == s_verts.len() && s_bone_weights.len() == s_verts.len();
+
         mesh.surfaces.push(gdserver3d::mesh::Surface3D {
             vertices: s_verts,
             normals: s_normals,
             uvs: s_uvs,
             indices: s_indices,
             primitive_type: PrimitiveType::Triangles,
+            bone_weights: if s_rigged { s_bone_weights } else { Vec::new() },
+            bone_indices: if s_rigged { s_bone_indices } else { Vec::new() },
             lods: Vec::new(),
         });
     }
