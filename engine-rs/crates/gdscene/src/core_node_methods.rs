@@ -136,6 +136,8 @@ pub fn call_core_node_method(
             | "find_children"
             | "find_parent"
             | "propagate_call"
+            | "get_global_transform"
+            | "get_global_transform_with_canvas"
     ) {
         return None;
     }
@@ -162,6 +164,33 @@ pub fn call_core_node_method(
         } else {
             crate::node2d::is_visible_in_tree(tree, node_id)
         })),
+
+        // -- CanvasItem transforms (pat-b4zhq) -------------------------------
+        //
+        // `get_global_transform_with_canvas` had no arm at all, and a Control's
+        // `get_global_transform` answered Nil: the Node2D path serves it
+        // through the `global_transform` PROPERTY, which a Control does not
+        // have. The 3D platformer's virtual joystick scales its touch area by
+        // `get_global_transform_with_canvas().get_scale()`.
+        //
+        // ⚠️ `get_global_transform` is claimed only for a Control. A Node3D
+        // has its own (node3d.rs), and a Node2D keeps the path it already had.
+        "get_global_transform" => {
+            if !crate::control::node_is_control(tree, node_id) {
+                return None;
+            }
+            Some(Variant::Transform2D(
+                crate::canvas_render::canvas_item_global_transform(tree, node_id),
+            ))
+        }
+        "get_global_transform_with_canvas" => {
+            if is_3d(tree, node_id) {
+                return None;
+            }
+            Some(Variant::Transform2D(
+                crate::canvas_render::global_transform_with_canvas(tree, node_id),
+            ))
+        }
 
         // -- Viewport / Window ----------------------------------------------
         "get_viewport" => Some(node_handle(crate::viewport::get_viewport(tree, node_id))),

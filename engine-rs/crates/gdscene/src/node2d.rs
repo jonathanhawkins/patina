@@ -181,6 +181,11 @@ pub fn get_global_transform(tree: &SceneTree, node_id: NodeId) -> Transform2D {
             break;
         }
         match tree.get_node(current).and_then(|n| n.parent()) {
+            // A `SubViewport` is its own canvas: what sits in it is placed in
+            // the sub-viewport's coordinates, never offset by the container
+            // that displays it (pat-8mb8y). Godot's `get_parent_item()` is
+            // null there because a Viewport is not a CanvasItem.
+            Some(parent_id) if crate::behavioral_2d::is_sub_viewport(tree, parent_id) => break,
             Some(parent_id) => current = parent_id,
             None => break,
         }

@@ -170,6 +170,40 @@ pub type ScriptStore = HashMap<NodeId, Box<dyn ScriptInstance>>;
 /// A script that fails to read or parse is skipped rather than fatal: one bad
 /// script in a spawned scene must not take the whole spawn down, matching how
 /// the autoload path treats it.
+/// Copies the subtree at `source` into the arena as a DETACHED subtree and
+/// returns the copy's root (`Node.duplicate`, pat-b4zhq). Every node keeps its
+/// name, class and properties; `groups` copies group membership too. `None`
+/// when `source` is unknown.
+fn duplicate_node_detached(tree: &mut SceneTree, source: NodeId, groups: bool) -> Option<NodeId> {
+    let copy_one = |tree: &SceneTree, id: NodeId| -> Option<(crate::node::Node, Vec<NodeId>)> {
+        let original = tree.get_node(id)?;
+        let mut clone = crate::node::Node::new(original.name(), original.class_name());
+        for (key, value) in original.properties() {
+            clone.set_property(key, value.clone());
+        }
+        clone.set_unique_name(original.is_unique_name());
+        if groups {
+            for group in original.groups() {
+                clone.add_to_group(group.clone());
+            }
+        }
+        Some((clone, original.children().to_vec()))
+    };
+    let (root_clone, children) = copy_one(tree, source)?;
+    let root = tree.insert_detached(root_clone);
+    let mut stack: Vec<(NodeId, NodeId)> = children.into_iter().rev().map(|c| (c, root)).collect();
+    while let Some((old, new_parent)) = stack.pop() {
+        let Some((clone, grandchildren)) = copy_one(tree, old) else {
+            continue;
+        };
+        let Ok(new_id) = tree.add_child(new_parent, clone) else {
+            continue;
+        };
+        stack.extend(grandchildren.into_iter().rev().map(|c| (c, new_id)));
+    }
+    Some(root)
+}
+
 pub fn attach_subtree_scripts_from_res(tree: &mut SceneTree, subtree_root: NodeId) -> usize {
     // Ids first: the attach loop mutates the tree, so no borrow may be held.
     let mut ids = Vec::new();
@@ -1705,6 +1739,18 @@ const PHYS_QUERY_TAG: u64 = 0xA6_00_0000_0000_0000;
 const WORLD_2D_HANDLE: u64 = PHYS_QUERY_TAG | 0x01;
 /// `World2D.direct_space_state`'s value.
 const SPACE_STATE_2D_HANDLE: u64 = PHYS_QUERY_TAG | 0x02;
+/// Top byte of a SubViewport's `World2D` handle (pat-8mb8y); the low bits are
+/// the raw id of the viewport that owns the world. Distinct from
+/// `PHYS_QUERY_TAG` so the handle never enters the physics-query routing.
+const VIEWPORT_WORLD_2D_TAG: u64 = 0x2A00_0000_0000_0000;
+
+fn viewport_world_2d_handle(owner_raw: u64) -> u64 {
+    VIEWPORT_WORLD_2D_TAG | owner_raw
+}
+
+fn is_viewport_world_2d_handle(raw: u64) -> bool {
+    raw & 0xFF00_0000_0000_0000 == VIEWPORT_WORLD_2D_TAG
+}
 /// Builds a `PhysicsShapeQuery3D` from a script's
 /// `PhysicsShapeQueryParameters3D` resource (pat-s3rrv.107).
 ///
@@ -2709,7 +2755,33 @@ impl SceneAccess for SceneTreeAccessor {
             }
             return Variant::Nil;
         }
+        // A SubViewport's World2D handle (pat-8mb8y): physics is one world, so
+        // its space state is the same singleton `get_world_2d()` hands out.
+        if is_viewport_world_2d_handle(node) {
+            return match prop {
+                "direct_space_state" => {
+                    Variant::ObjectId(ObjectId::from_raw(SPACE_STATE_2D_HANDLE))
+                }
+                _ => Variant::Nil,
+            };
+        }
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+        // `SubViewport.world_2d` (pat-8mb8y): a handle naming the viewport whose
+        // World2D this one draws — its own unless a script shared another's.
+        // `viewport_2.world_2d = viewport_1.world_2d` is how Godot's split
+        // screen puts one level in two views.
+        if prop == "world_2d" && crate::behavioral_2d::is_sub_viewport(self.tree(), nid) {
+            let owner = match self
+                .tree()
+                .get_node(nid)
+                .map(|n| n.get_property(crate::canvas_render::WORLD_2D_OWNER_PROP))
+            {
+                Some(Variant::Int(0)) => return Variant::ObjectId(ObjectId::from_raw(WORLD_2D_HANDLE)),
+                Some(Variant::Int(raw)) if raw > 0 => raw as u64,
+                _ => node,
+            };
+            return Variant::ObjectId(ObjectId::from_raw(viewport_world_2d_handle(owner)));
+        }
         // `Control.layout_mode` is computed from the parent on every read
         // (control.cpp:938) — see `control::layout_mode`.
         if prop == "layout_mode" && crate::control::node_is_control(self.tree(), nid) {
@@ -2814,6 +2886,34 @@ impl SceneAccess for SceneTreeAccessor {
     }
 
     fn set_node_property(&mut self, node: u64, prop: &str, value: Variant) {
+        // `viewport_2.world_2d = viewport_1.world_2d` (pat-8mb8y). Recorded as
+        // the OWNER of the shared world, which the Play frame reads to draw
+        // Viewport1's level in Viewport2 too. The root's `get_world_2d()`
+        // singleton means the root window's world (owner 0).
+        {
+            let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+            if prop == "world_2d" && crate::behavioral_2d::is_sub_viewport(self.tree(), nid) {
+                let owner = match &value {
+                    Variant::ObjectId(h) if is_viewport_world_2d_handle(h.raw()) => {
+                        Some(h.raw() & !VIEWPORT_WORLD_2D_TAG)
+                    }
+                    Variant::ObjectId(h) if h.raw() == WORLD_2D_HANDLE => Some(0),
+                    _ => None,
+                };
+                if let (Some(owner), Some(n)) = (owner, self.tree_mut().get_node_mut(nid)) {
+                    if owner == node {
+                        // Its own world again.
+                        n.remove_property(crate::canvas_render::WORLD_2D_OWNER_PROP);
+                    } else {
+                        n.set_property(
+                            crate::canvas_render::WORLD_2D_OWNER_PROP,
+                            Variant::Int(owner as i64),
+                        );
+                    }
+                }
+                return;
+            }
+        }
         // `get_tree().paused = true` — the pause-menu idiom (pat-mgixk.59).
         // Before the node resolution below: the handle names no node, so the
         // write would land on nothing and the tree would keep running.
@@ -2853,6 +2953,10 @@ impl SceneAccess for SceneTreeAccessor {
                             .iter()
                             .filter_map(|v| match v {
                                 Variant::ObjectId(id) => Some(id.raw()),
+                                // `CollisionObject2D.get_rid()` (pat-b4zhq):
+                                // the RID carries the node's object id, so it
+                                // lands in the same NODE-id list.
+                                Variant::Rid(rid) => Some(rid.id()),
                                 _ => None,
                             })
                             .collect(),
@@ -3873,6 +3977,31 @@ impl SceneAccess for SceneTreeAccessor {
                 SceneAccess::add_child(self, node, child);
                 Some(Variant::Nil)
             }
+            // `Node.duplicate(flags = 15)` (pat-b4zhq). Godot returns a copy of
+            // the subtree that is NOT in the tree — the caller `add_child`s it,
+            // as the 3D platformer's `stage.gd` does with its sun under
+            // Compatibility. There was no arm, so the call raised "registered in
+            // ClassDB but not implemented" and the rest of `_ready` never ran.
+            //
+            // Built detached (`insert_detached` + `add_child` under a detached
+            // parent runs no lifecycle) so the copy enters the tree, and gets
+            // `_ready`, only when the script parents it. Properties are copied
+            // verbatim; DUPLICATE_GROUPS (2) copies groups and DUPLICATE_SCRIPTS
+            // (4) gives each copy a fresh instance of its script from
+            // `_script_path`. DUPLICATE_SIGNALS is not carried: connections
+            // live on the tree, keyed by the node, and a detached copy has none
+            // to inherit until it is added.
+            "duplicate" => {
+                let flags = match args.first() {
+                    Some(Variant::Int(f)) => *f,
+                    _ => 15,
+                };
+                let copy = duplicate_node_detached(self.tree_mut(), nid, flags & 2 != 0)?;
+                if flags & 4 != 0 {
+                    attach_subtree_scripts_from_res(self.tree_mut(), copy);
+                }
+                Some(Variant::ObjectId(copy.object_id()))
+            }
             "remove_child" => {
                 let Some(child) = args.first().and_then(variant_object_raw) else {
                     return Some(Variant::Nil);
@@ -4466,11 +4595,14 @@ impl SceneAccess for SceneTreeAccessor {
             // A body's server RID is opaque in Godot; here it is the node's own
             // object id, which is stable before the body is first synced and
             // which `intersect_ray` resolves back to the body.
+            //
+            // `CollisionObject2D.get_rid()` (pat-b4zhq) answers the same way:
+            // the 2D ray and shape queries' `exclude` resolve a `Rid` entry
+            // back to the node exactly as they resolve the node object itself.
             "get_rid"
-                if self
-                    .tree()
-                    .get_node(nid)
-                    .is_some_and(|n| n.is_class("CollisionObject3D")) =>
+                if self.tree().get_node(nid).is_some_and(|n| {
+                    n.is_class("CollisionObject3D") || n.is_class("CollisionObject2D")
+                }) =>
             {
                 Some(Variant::Rid(gdcore::id::Rid::from_raw(node)))
             }
@@ -5254,6 +5386,51 @@ impl SceneAccess for SceneTreeAccessor {
             // `clear_current` needs no promotion step: with no node flagged, the
             // bridge falls back to `first_node_of_class`, which is what Godot's
             // `_make_next_current` arrives at.
+            // `Camera2D.make_current()` / `clear_current()` / `is_current()`
+            // (pat-8mb8y). Registered in ClassDB with no arm, so the split-screen
+            // scene's `player_2.camera.make_current()` raised. Current-ness is per
+            // VIEWPORT (`behavioral_2d::current_camera2d_in`): `make_current`
+            // enables the camera and stamps it so it beats every other claimant
+            // of its viewport; it does not touch cameras of other viewports.
+            "make_current" | "clear_current" | "is_current"
+                if self
+                    .tree()
+                    .get_node(nid)
+                    .is_some_and(|n| n.class_name() == "Camera2D") =>
+            {
+                use crate::behavioral_2d::{camera2d_viewport, current_camera2d_in};
+                match method {
+                    "make_current" => {
+                        thread_local! {
+                            static STAMP: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+                        }
+                        let stamp = STAMP.with(|s| {
+                            s.set(s.get() + 1);
+                            s.get()
+                        });
+                        if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                            n.set_property("enabled", Variant::Bool(true));
+                            n.set_property(
+                                crate::behavioral_2d::CAMERA2D_CURRENT_STAMP,
+                                Variant::Int(stamp),
+                            );
+                        }
+                    }
+                    "clear_current" => {
+                        if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                            n.remove_property(crate::behavioral_2d::CAMERA2D_CURRENT_STAMP);
+                            n.set_property("enabled", Variant::Bool(false));
+                        }
+                    }
+                    _ => {
+                        let vp = camera2d_viewport(self.tree(), nid);
+                        return Some(Variant::Bool(
+                            current_camera2d_in(self.tree(), vp) == Some(nid),
+                        ));
+                    }
+                }
+                Some(Variant::Nil)
+            }
             "make_current" | "clear_current" | "is_current"
                 if self.tree().get_node(nid).is_some_and(|n| {
                     n.class_name() == "AudioListener2D" || n.class_name() == "AudioListener3D"

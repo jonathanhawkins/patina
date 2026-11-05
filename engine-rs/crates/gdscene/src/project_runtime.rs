@@ -95,6 +95,13 @@ pub fn apply_project_settings(main_loop: &mut MainLoop, settings: &ProjectSettin
 pub fn seed_script_visible_settings(settings: &ProjectSettings, project_root: &Path) {
     gdplatform::os::set_project_name(settings.project_name());
     seed_script_settings_for_this_thread(settings, project_root);
+    // A fresh boot (the editor's Play) starts from the project's renderer
+    // settings: a previous run's `directional_soft_shadow_filter_set_quality`
+    // must not outlive it in a long-lived editor process (pat-b4zhq).
+    //
+    // ⚠️ Here, not in the per-thread seed above: the editor seeds each frame
+    // thread lazily, mid-run, which would wipe a script's call.
+    gdcore::project_settings::set_directional_soft_shadow_quality_override(None);
     // The tick rate specifically, because `Engine.physics_ticks_per_second`
     // reads a process-wide atomic that defaults to 60 rather than consulting
     // the settings store `seed_script_settings_for_this_thread` just filled.

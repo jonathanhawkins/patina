@@ -1490,7 +1490,8 @@ pub fn clone_scene_tree(source: &SceneTree) -> SceneTree {
         // The `%Name` flag is a Node field, not a property, so the loop above
         // never copied it: every `@onready var x = %Name` read null in Play
         // while the runner resolved it (truck_town's car_select.gd `_ready`
-        // died on `%CarContainer`).
+        // died on `%CarContainer`, and the split-screen scene's `%Player2`,
+        // pat-8mb8y).
         new_node.set_unique_name(src_node.is_unique_name());
         let new_id = match dest.add_child(dest_parent, new_node) {
             Ok(id) => id,

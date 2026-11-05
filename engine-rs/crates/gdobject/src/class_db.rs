@@ -2696,6 +2696,21 @@ pub fn register_3d_classes() {
     register_class(
         ClassRegistration::new("DirectionalLight3D")
             .parent("Light3D")
+            // `ShadowMode` and `SkyMode` (doc/classes/DirectionalLight3D.xml,
+            // pat-b4zhq). The 3D platformer's `stage.gd` writes
+            // `sky_mode = DirectionalLight3D.SKY_MODE_SKY_ONLY`.
+            .enumeration(
+                EnumInfo::new("ShadowMode")
+                    .constant("SHADOW_ORTHOGONAL", 0)
+                    .constant("SHADOW_PARALLEL_2_SPLITS", 1)
+                    .constant("SHADOW_PARALLEL_4_SPLITS", 2),
+            )
+            .enumeration(
+                EnumInfo::new("SkyMode")
+                    .constant("SKY_MODE_LIGHT_AND_SKY", 0)
+                    .constant("SKY_MODE_LIGHT_ONLY", 1)
+                    .constant("SKY_MODE_SKY_ONLY", 2),
+            )
             .property(
                 PropertyInfo::new("directional_shadow_mode", Variant::Int(2))
                     .with_accessors("get_shadow_mode", "set_shadow_mode"),
@@ -2800,6 +2815,9 @@ pub fn register_3d_classes() {
             .signal(SignalInfo::new("mouse_exited"))
             .parent("Node3D")
             .abstract_class()
+            // Answered in scripting.rs (pat-v3co1); registered so `has_method`
+            // agrees with the dispatch (pat-b4zhq).
+            .method(MethodInfo::new("get_rid", 0).const_method())
             .property(
                 PropertyInfo::new("collision_layer", Variant::Int(1))
                     .with_accessors("get_collision_layer", "set_collision_layer"),
@@ -14372,6 +14390,9 @@ pub fn register_2d_classes() {
                 .method(MethodInfo::new("show", 0))
                 .method(MethodInfo::new("hide", 0))
                 .method(MethodInfo::new("is_visible_in_tree", 0).const_method())
+                // Answered in core_node_methods.rs (pat-b4zhq).
+                .method(MethodInfo::new("get_global_transform", 0).const_method())
+                .method(MethodInfo::new("get_global_transform_with_canvas", 0).const_method())
                 .method(MethodInfo::new("queue_redraw", 0))
                 .method(MethodInfo::new("is_queued_for_redraw", 0))
                 .method(MethodInfo::new("draw_rect", 4))
@@ -20702,6 +20723,9 @@ pub fn register_2d_classes() {
                 .signal(SignalInfo::new("mouse_shape_exited").arg("shape_idx"))
                 .parent("Node2D")
                 .abstract_class()
+                // `get_rid` answers the node's object id as a RID
+                // (scripting.rs, pat-b4zhq). Registered so `has_method` agrees.
+                .method(MethodInfo::new("get_rid", 0).const_method())
                 .property(
                     PropertyInfo::new("collision_layer", Variant::Int(1))
                         .with_accessors("get_collision_layer", "set_collision_layer"),
@@ -30725,7 +30749,20 @@ pub fn register_core_object_classes() {
     register_class(
         ClassRegistration::new("RenderingServer")
             .parent("Object")
-            .abstract_class(),
+            .abstract_class()
+            // `RenderingServer.ShadowQuality` (doc/classes/RenderingServer.xml),
+            // the argument of `directional_soft_shadow_filter_set_quality` and
+            // `positional_soft_shadow_filter_set_quality` (pat-b4zhq).
+            .enumeration(
+                EnumInfo::new("ShadowQuality")
+                    .constant("SHADOW_QUALITY_HARD", 0)
+                    .constant("SHADOW_QUALITY_SOFT_VERY_LOW", 1)
+                    .constant("SHADOW_QUALITY_SOFT_LOW", 2)
+                    .constant("SHADOW_QUALITY_SOFT_MEDIUM", 3)
+                    .constant("SHADOW_QUALITY_SOFT_HIGH", 4)
+                    .constant("SHADOW_QUALITY_SOFT_ULTRA", 5)
+                    .constant("SHADOW_QUALITY_MAX", 6),
+            ),
     );
     register_class(ClassRegistration::new("ResourceLoader").parent("Object"));
     register_class(ClassRegistration::new("ResourceSaver").parent("Object"));

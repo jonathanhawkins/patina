@@ -1678,6 +1678,35 @@ fn parse_godot_value(raw: &str) -> SettingsValue {
 }
 
 // ---------------------------------------------------------------------------
+// RenderingServer runtime overrides (pat-b4zhq)
+// ---------------------------------------------------------------------------
+
+/// `RenderingServer.directional_soft_shadow_filter_set_quality(quality)` as
+/// last called by a script, or -1 when no script has called it.
+///
+/// Godot's call reconfigures the renderer directly and does NOT write the
+/// `.../directional_shadow/soft_shadow_filter_quality` project setting, so it
+/// lives beside the settings rather than in them: the renderer reads the
+/// project value and lets this win. Process-global because the script that
+/// calls it and the renderer that reads it run on different threads.
+static DIRECTIONAL_SOFT_SHADOW_QUALITY: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(-1);
+
+/// Records (or with `None` clears) the runtime directional soft-shadow quality,
+/// Godot's `RS::ShadowQuality` (0 = hard … 5 = ultra). Out-of-range values are
+/// clamped into the enum, as Godot's `ERR_FAIL_INDEX` would refuse them.
+pub fn set_directional_soft_shadow_quality_override(quality: Option<i64>) {
+    let raw = quality.map_or(-1, |q| q.clamp(0, 5));
+    DIRECTIONAL_SOFT_SHADOW_QUALITY.store(raw, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The runtime directional soft-shadow quality a script set, if any.
+pub fn directional_soft_shadow_quality_override() -> Option<i64> {
+    let raw = DIRECTIONAL_SOFT_SHADOW_QUALITY.load(std::sync::atomic::Ordering::Relaxed);
+    (raw >= 0).then_some(raw)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
