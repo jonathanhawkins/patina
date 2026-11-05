@@ -1927,6 +1927,7 @@ fn upload_custom_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     img: &gdserver3d::material::TextureImage,
+    source_color: bool,
 ) -> wgpu::Texture {
     let (w, h) = (img.width.max(1), img.height.max(1));
     let mut bytes = Vec::with_capacity((w * h * 4) as usize);
@@ -1953,7 +1954,10 @@ fn upload_custom_texture(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
+        // pat-3u1wu: a `source_color` sampler is sRGB-DECODED on sampling in
+        // Godot (`texture_srgb`), so its texels must reach `texture()` linear;
+        // every other sampler returns the texel as stored.
+        format: custom_texture_format(source_color),
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
@@ -1977,6 +1981,17 @@ fn upload_custom_texture(
         },
     );
     texture
+}
+
+/// The texture format a custom shader's `sampler2D` is uploaded in
+/// (pat-3u1wu): sRGB for a `source_color` sampler, so the hardware decodes it
+/// the way Godot binds such a texture, raw otherwise.
+pub fn custom_texture_format(source_color: bool) -> wgpu::TextureFormat {
+    if source_color {
+        wgpu::TextureFormat::Rgba8UnormSrgb
+    } else {
+        wgpu::TextureFormat::Rgba8Unorm
+    }
 }
 
 /// Uploads a [`TextureImage`] as an RGBA8 texture for `BaseMaterial3D`
@@ -2023,6 +2038,11 @@ fn upload_material_texture(
             }
         }
     }
+    // pat-3u1wu: a full mip chain, as Godot's importer generates for a texture
+    // used in 3D (`mipmaps/generate=true`). The `*_WITH_MIPMAPS` filters read
+    // it; the plain NEAREST/LINEAR samplers clamp to level 0, so a material
+    // that asks for no mipmaps still sees exactly the base image.
+    let levels = material_mip_chain(w, h, bytes);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("material-texture"),
         size: wgpu::Extent3d {
@@ -2030,33 +2050,69 @@ fn upload_material_texture(
             height: h,
             depth_or_array_layers: 1,
         },
-        mip_level_count: 1,
+        mip_level_count: levels.len() as u32,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &bytes,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(w * 4),
-            rows_per_image: Some(h),
-        },
-        wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-    );
+    for (level, (lw, lh, data)) in levels.iter().enumerate() {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: level as u32,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(lw * 4),
+                rows_per_image: Some(*lh),
+            },
+            wgpu::Extent3d {
+                width: *lw,
+                height: *lh,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
     texture
+}
+
+/// The mip chain of a tightly packed RGBA8 image, level 0 first, down to 1x1
+/// (pat-3u1wu). Each level is a 2x2 box filter of the one above, the filter
+/// Godot's `Image::generate_mipmaps` uses for 8-bit formats; an odd edge
+/// repeats its last texel.
+pub fn material_mip_chain(w: u32, h: u32, base: Vec<u8>) -> Vec<(u32, u32, Vec<u8>)> {
+    let mut levels = vec![(w, h, base)];
+    loop {
+        let (pw, ph, prev) = levels.last().expect("level 0 pushed");
+        let (pw, ph) = (*pw, *ph);
+        if pw == 1 && ph == 1 {
+            break;
+        }
+        let (nw, nh) = ((pw / 2).max(1), (ph / 2).max(1));
+        let mut next = Vec::with_capacity((nw * nh * 4) as usize);
+        for y in 0..nh {
+            for x in 0..nw {
+                let xs = [(2 * x).min(pw - 1), (2 * x + 1).min(pw - 1)];
+                let ys = [(2 * y).min(ph - 1), (2 * y + 1).min(ph - 1)];
+                for ch in 0..4 {
+                    let mut sum = 0u32;
+                    for &sy in &ys {
+                        for &sx in &xs {
+                            sum += prev[((sy * pw + sx) * 4 + ch) as usize] as u32;
+                        }
+                    }
+                    next.push(((sum + 2) / 4) as u8);
+                }
+            }
+        }
+        levels.push((nw, nh, next));
+    }
+    levels
 }
 
 /// Texture format for `BaseMaterial3D` **colour** maps (albedo, and emission
@@ -2177,16 +2233,111 @@ fn material_slot_views(
 /// default is repeat, and `TextureImage::sample_bilinear` wraps
 /// (`wrap_index`), so clamping here would disagree with the software path for
 /// any UV outside 0..1.
-fn material_sampler(device: &wgpu::Device) -> wgpu::Sampler {
-    device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("material-texture-sampler"),
-        address_mode_u: wgpu::AddressMode::Repeat,
-        address_mode_v: wgpu::AddressMode::Repeat,
-        address_mode_w: wgpu::AddressMode::Repeat,
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        ..Default::default()
+fn material_sampler(device: &wgpu::Device, key: MaterialSamplerKey) -> wgpu::Sampler {
+    let desc = material_sampler_descriptor(key);
+    device.create_sampler(&desc)
+}
+
+/// Which `BaseMaterial3D` sampler a draw needs (pat-3u1wu): the filter and
+/// repeat flags of its material, the only two inputs Godot's sampler choice
+/// for a material map depends on (`material_storage.cpp`,
+/// `sampler_rd_configure_custom`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct MaterialSamplerKey {
+    /// The material's `texture_filter`.
+    pub filter: gdserver3d::material::TextureFilter,
+    /// The material's `texture_repeat`; `false` clamps to the edge.
+    pub clamp: bool,
+}
+
+impl MaterialSamplerKey {
+    /// The key for `material`'s maps.
+    pub fn of(material: &Material3D) -> Self {
+        Self {
+            filter: material.texture_filter,
+            clamp: !material.texture_repeat,
+        }
+    }
+
+    /// A dense index for the renderer's sampler cache.
+    fn index(self) -> usize {
+        let f = match self.filter {
+            gdserver3d::material::TextureFilter::Nearest => 0,
+            gdserver3d::material::TextureFilter::Linear => 1,
+            gdserver3d::material::TextureFilter::NearestWithMipmaps => 2,
+            gdserver3d::material::TextureFilter::LinearWithMipmaps => 3,
+            gdserver3d::material::TextureFilter::NearestWithMipmapsAnisotropic => 4,
+            gdserver3d::material::TextureFilter::LinearWithMipmapsAnisotropic => 5,
+        };
+        f * 2 + usize::from(self.clamp)
+    }
+}
+
+/// Number of distinct [`MaterialSamplerKey`]s.
+const MATERIAL_SAMPLER_KINDS: usize = 12;
+
+/// Every [`MaterialSamplerKey`], in [`MaterialSamplerKey::index`] order.
+fn material_sampler_keys() -> impl Iterator<Item = MaterialSamplerKey> {
+    use gdserver3d::material::TextureFilter as F;
+    let keys: Vec<MaterialSamplerKey> = [
+        F::Nearest,
+        F::Linear,
+        F::NearestWithMipmaps,
+        F::LinearWithMipmaps,
+        F::NearestWithMipmapsAnisotropic,
+        F::LinearWithMipmapsAnisotropic,
+    ]
+    .into_iter()
+    .flat_map(|filter| {
+        [false, true]
+            .into_iter()
+            .map(move |clamp| MaterialSamplerKey { filter, clamp })
     })
+    .collect();
+    debug_assert_eq!(keys.len(), MATERIAL_SAMPLER_KINDS);
+    debug_assert!(keys.iter().enumerate().all(|(i, k)| k.index() == i));
+    keys.into_iter()
+}
+
+/// The sampler descriptor Godot's renderer configures for `key`
+/// (pat-3u1wu), transcribed from `material_storage.cpp:2460-2510`:
+///
+/// * the NEAREST family is nearest for BOTH mag and min — not just
+///   magnification — with a LINEAR mip filter (`use_nearest_mipmap_filter`
+///   defaults to false);
+/// * the non-mipmap modes read the base level only (`lod_max_clamp = 0`);
+/// * `texture_repeat = false` is CLAMP, not mirror.
+///
+/// Anisotropy is not configured: wgpu only allows it when all three filters
+/// are linear, and it changes pixels only at grazing angles.
+pub fn material_sampler_descriptor(key: MaterialSamplerKey) -> wgpu::SamplerDescriptor<'static> {
+    let filter = if key.filter.is_nearest() {
+        wgpu::FilterMode::Nearest
+    } else {
+        wgpu::FilterMode::Linear
+    };
+    let address = if key.clamp {
+        wgpu::AddressMode::ClampToEdge
+    } else {
+        wgpu::AddressMode::Repeat
+    };
+    let mips = key.filter.uses_mipmaps();
+    wgpu::SamplerDescriptor {
+        label: Some("material-texture-sampler"),
+        address_mode_u: address,
+        address_mode_v: address,
+        address_mode_w: address,
+        mag_filter: filter,
+        min_filter: filter,
+        mipmap_filter: if mips {
+            wgpu::MipmapFilterMode::Linear
+        } else {
+            wgpu::MipmapFilterMode::Nearest
+        },
+        lod_min_clamp: 0.0,
+        lod_max_clamp: if mips { 32.0 } else { 0.0 },
+        ..Default::default()
+    }
 }
 
 /// How many `sampler2D` uniforms a custom spatial shader can bind
@@ -3394,6 +3545,9 @@ struct GpuDrawEntry<'a> {
     metallic_texture: Option<std::sync::Arc<gdserver3d::material::TextureImage>>,
     /// See [`Self::roughness_texture`].
     emission_texture: Option<std::sync::Arc<gdserver3d::material::TextureImage>>,
+    /// The material's `texture_filter` / `texture_repeat` (pat-3u1wu): which
+    /// sampler this draw's maps are read with.
+    sampler: MaterialSamplerKey,
 }
 
 /// Resolves an albedo colour for a shader material, matching the software path's
@@ -3496,6 +3650,7 @@ fn instance_draw_entries<'a>(inst: &'a Instance3D, surfaces: &'a [Mesh3D]) -> Ve
                     roughness_texture: roughness_texture.clone(),
                     metallic_texture: metallic_texture.clone(),
                     emission_texture: emission_texture.clone(),
+                    sampler: MaterialSamplerKey::of(&base),
                 });
             }
         }
@@ -3519,6 +3674,7 @@ fn instance_draw_entries<'a>(inst: &'a Instance3D, surfaces: &'a [Mesh3D]) -> Ve
             roughness_texture,
             metallic_texture,
             emission_texture,
+            sampler: MaterialSamplerKey::of(&base),
         });
         // pat-zwvgw: the mesh's ADDITIONAL surfaces, each with its own
         // material — `surface_materials[i]` pairs with `surfaces[i]`, falling
@@ -3567,6 +3723,7 @@ fn instance_draw_entries<'a>(inst: &'a Instance3D, surfaces: &'a [Mesh3D]) -> Ve
                 roughness_texture: tex(&m.roughness_texture),
                 metallic_texture: tex(&m.metallic_texture),
                 emission_texture: tex(&m.emission_texture),
+                sampler: MaterialSamplerKey::of(&m),
             });
         }
     }
@@ -3683,8 +3840,9 @@ pub struct GpuRenderer3D {
     material_tex_cache: HashMap<(usize, wgpu::TextureFormat), CachedMaterialTexture>,
     /// The 1x1 white stand-ins for an empty slot, one per format.
     white_tex_cache: HashMap<wgpu::TextureFormat, (wgpu::Texture, wgpu::TextureView)>,
-    /// The material sampler, created once.
-    material_sampler_cache: Option<wgpu::Sampler>,
+    /// One material sampler per [`MaterialSamplerKey`], created once
+    /// (pat-3u1wu: was a single bilinear sampler for every material).
+    material_sampler_cache: Vec<wgpu::Sampler>,
     /// This frame's mesh-address -> `mesh_gpu_cache` key, filled by
     /// `prime_editor_draw_caches` so the draw loop hashes nothing.
     editor_frame_mesh_keys: HashMap<usize, u64>,
@@ -3861,7 +4019,7 @@ struct GpuDrawCall {
     /// Images for this draw's `sampler2D` uniforms, in `custom_sampler_fields`
     /// order — slot N here is slot N in the emitted WGSL. Shorter than the
     /// layout's slot count when the shader declares fewer; the rest bind a dummy.
-    custom_textures: Vec<std::sync::Arc<gdserver3d::material::TextureImage>>,
+    custom_textures: Vec<(std::sync::Arc<gdserver3d::material::TextureImage>, bool)>,
     /// When `Some`, a complete transpiled WGSL module for this draw's spatial
     /// shader material whose `fragment()` body is evaluated per-fragment (e.g. a
     /// UV-driven ALBEDO). The render pass builds a per-material pipeline from it
@@ -3883,6 +4041,8 @@ struct GpuDrawCall {
     metallic_texture: Option<std::sync::Arc<gdserver3d::material::TextureImage>>,
     /// See [`Self::roughness_texture`].
     emission_texture: Option<std::sync::Arc<gdserver3d::material::TextureImage>>,
+    /// The material's sampler (pat-3u1wu).
+    sampler: MaterialSamplerKey,
 }
 
 /// Max distinct meshes cached before the whole cache is dropped, bounding memory
@@ -4051,7 +4211,7 @@ impl GpuRenderer3D {
             sky_panorama: None,
             material_tex_cache: HashMap::new(),
             white_tex_cache: HashMap::new(),
-            material_sampler_cache: None,
+            material_sampler_cache: Vec::new(),
             editor_frame_mesh_keys: HashMap::new(),
             editor_mesh_uploads: 0,
             editor_texture_uploads: 0,
@@ -4119,8 +4279,10 @@ impl GpuRenderer3D {
         // Evict maps only the cache still references: their material is gone.
         self.material_tex_cache
             .retain(|_, c| std::sync::Arc::strong_count(&c.image) > 1);
-        if self.material_sampler_cache.is_none() {
-            self.material_sampler_cache = Some(material_sampler(&self.ctx.device));
+        if self.material_sampler_cache.is_empty() {
+            self.material_sampler_cache = material_sampler_keys()
+                .map(|k| material_sampler(&self.ctx.device, k))
+                .collect();
         }
         for format in [MATERIAL_COLOR_FORMAT, MATERIAL_RAW_FORMAT] {
             if !self.white_tex_cache.contains_key(&format) {
@@ -4427,7 +4589,7 @@ impl GpuRenderer3D {
                     .take(CUSTOM_SAMPLER_SLOTS as usize)
                 {
                     match mat.get_texture(&u.name) {
-                        Some(img) => images.push(img.clone()),
+                        Some(img) => images.push((img.clone(), u.is_source_color())),
                         // Stop at the first unbound sampler: pushing nothing
                         // would shift every later image onto the wrong slot.
                         None => break,
@@ -4440,7 +4602,10 @@ impl GpuRenderer3D {
                 .as_ref()
                 .map(|(_, v, _)| v.clone())
                 .unwrap_or_default();
-            let custom_texture_images: Vec<std::sync::Arc<gdserver3d::material::TextureImage>> =
+            let custom_texture_images: Vec<(
+                std::sync::Arc<gdserver3d::material::TextureImage>,
+                bool,
+            )> =
                 custom_shader
                     .as_ref()
                     .map(|(_, _, t)| t.clone())
@@ -4478,6 +4643,7 @@ impl GpuRenderer3D {
                     roughness_texture: entry.roughness_texture.clone(),
                     metallic_texture: entry.metallic_texture.clone(),
                     emission_texture: entry.emission_texture.clone(),
+                    sampler: entry.sampler,
                 });
             }
         }
@@ -4745,6 +4911,11 @@ impl GpuRenderer3D {
             pipeline: &'a wgpu::RenderPipeline,
             maps: CachedSlotViews<'a>,
             mesh: &'a CachedMeshBuffers,
+            sampler: MaterialSamplerKey,
+            /// This draw's block in `model_bytes`, fixed before sorting.
+            uniform_index: usize,
+            /// Camera distance when the draw blends, `None` when opaque.
+            blend_depth: Option<f32>,
         }
         let clip_planes = ClipPlanes::from_view_proj(&mul_mat4(&projection_matrix, &view_matrix));
         let mut draws: Vec<EditorDraw<'_>> = Vec::new();
@@ -4957,11 +5128,36 @@ impl GpuRenderer3D {
                         metallic: slot(&entry.metallic_texture, MATERIAL_RAW_FORMAT),
                         emission: slot(&entry.emission_texture, MATERIAL_COLOR_FORMAT),
                     };
-                    draws.push(EditorDraw { pipeline: chosen, maps, mesh: cached_mesh });
+                    let blends = crate::render_modes::is_transparent(entry.transparency)
+                        || additive.is_some();
+                    draws.push(EditorDraw {
+                        pipeline: chosen,
+                        maps,
+                        mesh: cached_mesh,
+                        sampler: entry.sampler,
+                        uniform_index: draws.len(),
+                        blend_depth: blends.then(|| {
+                            viewport
+                                .camera_transform
+                                .origin
+                                .distance_to(entry.transform.origin)
+                        }),
+                    });
                 }
             }
 
             draw_count = draws.len();
+            // pat-wyei2: opaque first in creation order, then blended draws
+            // FARTHEST first, as Godot's transparent pass sorts them. Without
+            // it the platformer's coin counter — a Label3D with four darker
+            // "Parallax" Label3D children stacked just behind it — composited
+            // its children OVER itself, since they are created after it.
+            draws.sort_by(|a, b| match (a.blend_depth, b.blend_depth) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (Some(da), Some(db)) => db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal),
+            });
             // One buffer for every draw's model block, bound at its offset.
             let model_buf = (!draws.is_empty()).then(|| {
                 create_buffer_init(
@@ -4972,13 +5168,13 @@ impl GpuRenderer3D {
                     wgpu::BufferUsages::UNIFORM,
                 )
             });
-            let albedo_sampler = self
-                .material_sampler_cache
-                .as_ref()
-                .expect("prime_editor_draw_caches ran above");
-            for (i, draw) in draws.iter().enumerate() {
+            let samplers = &self.material_sampler_cache;
+            for draw in draws.iter() {
+                let i = draw.uniform_index;
                 let model_buf = model_buf.as_ref().expect("non-empty draws");
                 let maps = &draw.maps;
+                // pat-3u1wu: the sampler THIS material asks for.
+                let albedo_sampler = &samplers[draw.sampler.index()];
                 pass.set_pipeline(draw.pipeline);
                 let model_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("editor-model-bind-group"),
@@ -5639,11 +5835,12 @@ impl GpuRenderer3D {
                             1,
                             vec![gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0)],
                         ),
+                        false,
                     );
                     let uploaded: Vec<wgpu::Texture> = call
                         .custom_textures
                         .iter()
-                        .map(|img| upload_custom_texture(device, queue, img))
+                        .map(|(img, srgb)| upload_custom_texture(device, queue, img, *srgb))
                         .collect();
                     let views: Vec<wgpu::TextureView> = (0..CUSTOM_SAMPLER_SLOTS)
                         .map(|slot| match uploaded.get(slot as usize) {
@@ -5728,7 +5925,7 @@ impl GpuRenderer3D {
                     call.metallic_texture.as_deref(),
                     call.emission_texture.as_deref(),
                 );
-                let albedo_sampler = material_sampler(device);
+                let albedo_sampler = material_sampler(device, call.sampler);
                 let model_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("model-bind-group"),
                     layout: &pipeline.model_layout,
@@ -6139,6 +6336,43 @@ impl RenderingServer3D for GpuRenderer3D {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// pat-3u1wu: the mip chain halves down to 1x1 and box-averages.
+    #[test]
+    fn material_mip_chain_halves_to_one_texel_and_averages() {
+        // 4x2: left half black, right half white.
+        let mut base = Vec::new();
+        for _y in 0..2 {
+            for x in 0..4 {
+                let v = if x < 2 { 0u8 } else { 255u8 };
+                base.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let levels = material_mip_chain(4, 2, base);
+        let dims: Vec<(u32, u32)> = levels.iter().map(|(w, h, _)| (*w, *h)).collect();
+        assert_eq!(dims, vec![(4, 2), (2, 1), (1, 1)]);
+        assert_eq!(&levels[1].2[..], &[0, 0, 0, 255, 255, 255, 255, 255]);
+        // The last level averages black and white.
+        assert_eq!(levels[2].2[0], 128);
+        assert_eq!(material_mip_chain(1, 1, vec![9, 9, 9, 9]).len(), 1);
+    }
+
+    /// pat-3u1wu: every sampler key has its own cache slot.
+    #[test]
+    fn material_sampler_keys_are_dense_and_distinct() {
+        let keys: Vec<MaterialSamplerKey> = material_sampler_keys().collect();
+        assert_eq!(keys.len(), MATERIAL_SAMPLER_KINDS);
+        for (i, k) in keys.iter().enumerate() {
+            assert_eq!(k.index(), i);
+        }
+        let plain = material_sampler_descriptor(MaterialSamplerKey {
+            filter: gdserver3d::material::TextureFilter::Nearest,
+            clamp: false,
+        });
+        assert_eq!(plain.mag_filter, wgpu::FilterMode::Nearest);
+        // No-mipmap modes read the base level only.
+        assert_eq!(plain.lod_max_clamp, 0.0);
+    }
 
     #[test]
     fn shader_source_compiles() {

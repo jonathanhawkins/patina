@@ -311,6 +311,20 @@ pub fn parse_shader_hint(hint: &str) -> Option<ShaderHint> {
 }
 
 impl ShaderUniform3D {
+    /// Whether ANY of this uniform's comma-separated hints is `source_color`
+    /// (or the legacy `hint_color`), pat-3u1wu.
+    ///
+    /// ⚠️ [`Self::parsed_hint`] reads the hint string as ONE hint, so a sampler
+    /// declared `: filter_linear, source_color, hint_default_black` — the usual
+    /// way a colour texture is declared — parsed to `None` and was treated as
+    /// raw data.
+    pub fn is_source_color(&self) -> bool {
+        self.hint.as_deref().is_some_and(|h| {
+            h.split(',')
+                .any(|t| matches!(t.trim(), "source_color" | "hint_color"))
+        })
+    }
+
     /// Parses this uniform's raw `hint` into a structured [`ShaderHint`], or
     /// `None` when there is no hint or it is unrecognized.
     pub fn parsed_hint(&self) -> Option<ShaderHint> {

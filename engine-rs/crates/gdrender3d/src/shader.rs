@@ -180,6 +180,20 @@ pub struct MaterialTextures {
     pub metallic: Option<Arc<TextureImage>>,
     /// Emission map; decoded texel multiplies the flat emission.
     pub emission: Option<Arc<TextureImage>>,
+    /// Sample every map NEAREST instead of bilinear: the material's
+    /// `texture_filter` is one of Godot's NEAREST modes (pat-3u1wu).
+    pub nearest: bool,
+}
+
+impl MaterialTextures {
+    /// One texel lookup with this draw's filter.
+    fn sample(&self, map: &TextureImage, u: f32, v: f32) -> Color {
+        if self.nearest {
+            map.sample_nearest(u, v)
+        } else {
+            map.sample_bilinear(u, v)
+        }
+    }
 }
 
 /// Per-fragment material values after sampling any bound textures at a UV.
@@ -215,7 +229,7 @@ impl ShaderUniforms {
 
         let mut albedo = self.albedo;
         if let Some(map) = &t.albedo {
-            let texel = map.sample_bilinear(u, v).srgb_to_linear();
+            let texel = t.sample(map, u, v).srgb_to_linear();
             albedo = Color::new(
                 albedo.r * texel.r,
                 albedo.g * texel.g,
@@ -226,7 +240,7 @@ impl ShaderUniforms {
 
         let mut emission = self.emission;
         if let Some(map) = &t.emission {
-            let texel = map.sample_bilinear(u, v).srgb_to_linear();
+            let texel = t.sample(map, u, v).srgb_to_linear();
             emission = Color::new(
                 emission.r * texel.r,
                 emission.g * texel.g,
@@ -238,18 +252,18 @@ impl ShaderUniforms {
         let mut roughness = self.roughness;
         if let Some(map) = &t.roughness {
             // Godot samples roughness from the green channel by default.
-            roughness *= map.sample_bilinear(u, v).g;
+            roughness *= t.sample(map, u, v).g;
         }
 
         let mut metallic = self.metallic;
         if let Some(map) = &t.metallic {
             // Godot samples metallic from the blue channel by default.
-            metallic *= map.sample_bilinear(u, v).b;
+            metallic *= t.sample(map, u, v).b;
         }
 
         let normal = match &t.normal {
             Some(map) => {
-                let texel = map.sample_bilinear(u, v);
+                let texel = t.sample(map, u, v);
                 apply_normal_map(world_normal, texel, t.normal_scale)
             }
             None => world_normal,
@@ -1111,6 +1125,49 @@ pub fn linearize_source_color_uniforms(
     out
 }
 
+/// `textures` with every image bound to a `source_color` `sampler2D` decoded
+/// sRGB -> linear (pat-3u1wu), which is what Godot's `texture()` returns for
+/// such a sampler; other samplers keep their texels as stored.
+///
+/// Memoized by image identity: this runs per instance per frame, and decoding
+/// a texture each time would cost a full pass over its texels.
+pub fn linearize_source_color_textures(
+    compiled: &gdserver3d::CompiledShader3D,
+    textures: &std::collections::HashMap<String, Arc<TextureImage>>,
+) -> std::collections::HashMap<String, Arc<TextureImage>> {
+    use std::sync::{Mutex, OnceLock};
+    type Cache = std::collections::HashMap<usize, (Arc<TextureImage>, Arc<TextureImage>)>;
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+    let mut out = textures.clone();
+    for u in &compiled.uniforms {
+        if u.uniform_type != gdserver3d::shader::UniformType::Sampler2D || !u.is_source_color() {
+            continue;
+        }
+        let Some(src) = textures.get(&u.name) else {
+            continue;
+        };
+        let key = Arc::as_ptr(src) as usize;
+        let cache = CACHE.get_or_init(|| Mutex::new(Cache::new()));
+        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        // Drop entries whose source image nobody else holds any more.
+        guard.retain(|_, (orig, _)| Arc::strong_count(orig) > 1);
+        let linear = match guard.get(&key) {
+            Some((orig, lin)) if Arc::ptr_eq(orig, src) => lin.clone(),
+            _ => {
+                let lin = Arc::new(TextureImage {
+                    width: src.width,
+                    height: src.height,
+                    pixels: src.pixels.iter().map(|c| c.srgb_to_linear()).collect(),
+                });
+                guard.insert(key, (src.clone(), lin.clone()));
+                lin
+            }
+        };
+        out.insert(u.name.clone(), linear);
+    }
+    out
+}
+
 impl CustomFragmentShader {
     /// Creates a custom fragment shader from a `ShaderMaterial3D`.
     ///
@@ -1129,6 +1186,7 @@ impl CustomFragmentShader {
         };
         let fragment_body = compiled.fragment_body.clone();
         let parameters = linearize_source_color_uniforms(&compiled, &material.parameters);
+        let textures = Arc::new(linearize_source_color_textures(&compiled, &material.textures));
         Self {
             compiled,
             parameters,
@@ -1138,7 +1196,7 @@ impl CustomFragmentShader {
             // always hit the missing-binding placeholder and custom-shader
             // texturing was reachable only from this file's own tests — the
             // engine had a sampler with nothing ever bound to it.
-            textures: Arc::new(material.textures.clone()),
+            textures,
             time: 0.0,
         }
     }

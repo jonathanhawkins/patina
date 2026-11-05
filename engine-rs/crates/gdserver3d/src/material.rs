@@ -123,6 +123,61 @@ impl Default for ShadingMode {
     }
 }
 
+/// Godot `BaseMaterial3D.TextureFilter` (pat-3u1wu).
+///
+/// Ordinals from `doc/classes/BaseMaterial3D.xml`; the default is
+/// `TEXTURE_FILTER_LINEAR_WITH_MIPMAPS` (3). What each mode samples with is in
+/// `material_storage.cpp` (`sampler_rd_configure_custom`): the NEAREST family
+/// uses nearest mag AND min filtering with a LINEAR mip filter, so a pixel-art
+/// texture stays blocky up close and does not alias far away.
+///
+/// ⚠️ Patina's renderers used one bilinear sampler for every material, so an
+/// authored `texture_filter = 4` (the 3D platformer's `tile_material.tres`)
+/// came out blurred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TextureFilter {
+    /// `TEXTURE_FILTER_NEAREST` (0).
+    Nearest,
+    /// `TEXTURE_FILTER_LINEAR` (1).
+    Linear,
+    /// `TEXTURE_FILTER_NEAREST_WITH_MIPMAPS` (2).
+    NearestWithMipmaps,
+    /// `TEXTURE_FILTER_LINEAR_WITH_MIPMAPS` (3), the default.
+    #[default]
+    LinearWithMipmaps,
+    /// `TEXTURE_FILTER_NEAREST_WITH_MIPMAPS_ANISOTROPIC` (4).
+    NearestWithMipmapsAnisotropic,
+    /// `TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC` (5).
+    LinearWithMipmapsAnisotropic,
+}
+
+impl TextureFilter {
+    /// Maps Godot's integer enum; unknown values fall back to the default.
+    pub fn from_godot_int(value: i64) -> Self {
+        match value {
+            0 => Self::Nearest,
+            1 => Self::Linear,
+            2 => Self::NearestWithMipmaps,
+            4 => Self::NearestWithMipmapsAnisotropic,
+            5 => Self::LinearWithMipmapsAnisotropic,
+            _ => Self::LinearWithMipmaps,
+        }
+    }
+
+    /// Whether texels are magnified/minified with NEAREST filtering.
+    pub fn is_nearest(self) -> bool {
+        matches!(
+            self,
+            Self::Nearest | Self::NearestWithMipmaps | Self::NearestWithMipmapsAnisotropic
+        )
+    }
+
+    /// Whether the sampler reads mip levels below the base one.
+    pub fn uses_mipmaps(self) -> bool {
+        !matches!(self, Self::Nearest | Self::Linear)
+    }
+}
+
 /// Godot `BaseMaterial3D.Transparency` (pat-s3rrv.30).
 ///
 /// These three enums live here, beside `StandardMaterial3D`, rather than in
@@ -326,6 +381,10 @@ pub struct Material3D {
     ///
     /// [`emission`]: Material3D::emission
     pub emission_texture: Option<Arc<TextureImage>>,
+    /// Godot `texture_filter` for every map of this material (pat-3u1wu).
+    pub texture_filter: TextureFilter,
+    /// Godot `texture_repeat` (default true): `false` clamps UVs to the edge.
+    pub texture_repeat: bool,
 }
 
 impl Default for Material3D {
@@ -349,6 +408,8 @@ impl Default for Material3D {
             roughness_texture: None,
             metallic_texture: None,
             emission_texture: None,
+            texture_filter: TextureFilter::LinearWithMipmaps,
+            texture_repeat: true,
         }
     }
 }
@@ -491,6 +552,10 @@ pub struct StandardMaterial3D {
     /// Godot `no_depth_test` — a FLAG in Godot (`set_flag`/`get_flag`), not a
     /// mode, so its `.tscn` key is a plain bool (pat-s3rrv.30).
     pub no_depth_test: bool,
+    /// Godot `texture_filter` (pat-3u1wu); default LINEAR_WITH_MIPMAPS.
+    pub texture_filter: TextureFilter,
+    /// Godot `texture_repeat` (pat-3u1wu); default true.
+    pub texture_repeat: bool,
 }
 
 impl Default for StandardMaterial3D {
@@ -519,6 +584,8 @@ impl Default for StandardMaterial3D {
             alpha_scissor_threshold: 0.5,
             cull_mode: CullMode::Back,
             depth_draw_mode: DepthDrawMode::OpaqueOnly,
+            texture_filter: TextureFilter::LinearWithMipmaps,
+            texture_repeat: true,
         }
     }
 }
@@ -545,6 +612,8 @@ impl StandardMaterial3D {
             depth_draw_mode: self.depth_draw_mode,
             blend_mode: self.blend_mode,
             no_depth_test: self.no_depth_test,
+            texture_filter: self.texture_filter,
+            texture_repeat: self.texture_repeat,
             ..Material3D::default()
         }
     }
@@ -663,6 +732,17 @@ impl StandardMaterial3D {
                         mat.no_depth_test = *b;
                     }
                 }
+                // pat-3u1wu: both producers, as the render modes above.
+                "texture_filter" => {
+                    if let Variant::Int(v) = value {
+                        mat.texture_filter = TextureFilter::from_godot_int(*v);
+                    }
+                }
+                "texture_repeat" => {
+                    if let Variant::Bool(b) = value {
+                        mat.texture_repeat = *b;
+                    }
+                }
                 _ => {} // Ignore unknown properties.
             }
         }
@@ -681,6 +761,40 @@ impl StandardMaterial3D {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// pat-3u1wu: Godot's `BaseMaterial3D.TextureFilter` ordinals, and the
+    /// `.tres` producer reads `texture_filter` / `texture_repeat`
+    /// (`tile_material.tres`: 4 and false).
+    #[test]
+    fn texture_filter_ordinals_and_the_tres_producer() {
+        use TextureFilter as F;
+        let all = [
+            (0, F::Nearest, true, false),
+            (1, F::Linear, false, false),
+            (2, F::NearestWithMipmaps, true, true),
+            (3, F::LinearWithMipmaps, false, true),
+            (4, F::NearestWithMipmapsAnisotropic, true, true),
+            (5, F::LinearWithMipmapsAnisotropic, false, true),
+        ];
+        for (i, f, nearest, mips) in all {
+            assert_eq!(F::from_godot_int(i), f);
+            assert_eq!(f.is_nearest(), nearest, "{f:?}");
+            assert_eq!(f.uses_mipmaps(), mips, "{f:?}");
+        }
+        assert_eq!(F::default(), F::LinearWithMipmaps);
+        let props: std::collections::HashMap<String, Variant> = [
+            ("texture_filter".to_string(), Variant::Int(4)),
+            ("texture_repeat".to_string(), Variant::Bool(false)),
+        ]
+        .into_iter()
+        .collect();
+        let m = StandardMaterial3D::from_properties(props.iter()).to_material3d();
+        assert_eq!(m.texture_filter, F::NearestWithMipmapsAnisotropic);
+        assert!(!m.texture_repeat);
+        let d = StandardMaterial3D::default().to_material3d();
+        assert_eq!(d.texture_filter, F::LinearWithMipmaps);
+        assert!(d.texture_repeat);
+    }
 
     /// 🔑 Every documented Godot transparency mode maps to something that is
     /// actually transparent.
