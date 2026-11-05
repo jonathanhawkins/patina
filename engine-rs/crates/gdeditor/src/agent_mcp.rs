@@ -48,8 +48,11 @@ const MAX_FRAMES_PER_CALL: u64 = 36_000;
 const MAX_SCREENSHOTS: usize = 8;
 /// Most game-log lines a `play`/`step` report quotes before summarising.
 const REPORT_LOG_LINES: usize = 200;
-/// Nodes a `tree` listing prints before eliding the rest.
+/// Nodes a `tree` listing prints before eliding the rest, unless the call
+/// passes its own `budget`.
 const TREE_NODE_BUDGET: usize = 400;
+/// The most nodes one `tree` call may ask for.
+const TREE_NODE_BUDGET_MAX: usize = 100_000;
 /// Characters of property text one tree line carries.
 const TREE_PROPS_CHARS: usize = 240;
 
@@ -446,6 +449,7 @@ fn tool_definitions() -> Vec<Value> {
             json!({"type": "object", "properties": {
                 "node": {"type": "string", "description": "Subtree to list (default: scene root)."},
                 "running": {"type": "boolean"}, "depth": {"type": "integer"},
+                "budget": {"type": "integer", "description": "Most nodes to print (default 400, max 100000). The listing ends by saying how many it omitted."},
                 "props": {"type": "boolean", "description": "Include property values (default true)."}
             }})),
         tool("inspect", "One node in detail: non-default properties, script variables with live values, groups and children. `all` adds default-valued properties.",
@@ -868,9 +872,38 @@ fn format_tree(
 }
 
 fn outline(tree: &SceneTree, root: NodeId, max_depth: usize, with_props: bool) -> String {
+    outline_with_budget(tree, root, max_depth, with_props, TREE_NODE_BUDGET)
+}
+
+/// [`outline`] printing at most `budget` nodes, then saying how many of the
+/// subtree's nodes (within `max_depth`) it left out and how to see them
+/// (pat-rbyty). A silent cut at 400 hid most of a 626-node game.
+fn outline_with_budget(
+    tree: &SceneTree,
+    root: NodeId,
+    max_depth: usize,
+    with_props: bool,
+    budget: usize,
+) -> String {
+    fn count(tree: &SceneTree, id: NodeId, depth: usize, max_depth: usize) -> usize {
+        let children = tree.get_node(id).map(|n| n.children().to_vec()).unwrap_or_default();
+        1 + if depth >= max_depth {
+            0
+        } else {
+            children.iter().map(|&c| count(tree, c, depth + 1, max_depth)).sum()
+        }
+    }
     let mut out = String::new();
-    let mut budget = TREE_NODE_BUDGET;
-    format_tree(tree, root, 0, max_depth, with_props, &mut budget, &mut out);
+    let mut remaining = budget;
+    format_tree(tree, root, 0, max_depth, with_props, &mut remaining, &mut out);
+    let printed = budget - remaining;
+    let total = count(tree, root, 0, max_depth);
+    if printed < total {
+        out.push_str(&format!(
+            "… {} of {total} nodes omitted (budget {budget}): pass a larger `budget`, or list a subtree with `node`\n",
+            total - printed
+        ));
+    }
     out
 }
 
@@ -1075,7 +1108,10 @@ fn tool_tree(ctx: &Ctx, args: &Value) -> Result<Output, String> {
         edit_scene_root(tree)
     };
     let start = resolve(tree, root, node)?;
-    Ok(Output::text(outline(tree, start, depth, with_props)))
+    let budget = arg_u64(args, "budget")
+        .map(|b| (b as usize).clamp(1, TREE_NODE_BUDGET_MAX))
+        .unwrap_or(TREE_NODE_BUDGET);
+    Ok(Output::text(outline_with_budget(tree, start, depth, with_props, budget)))
 }
 
 fn tool_inspect(ctx: &Ctx, args: &Value) -> Result<Output, String> {
