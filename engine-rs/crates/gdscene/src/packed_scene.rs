@@ -4057,10 +4057,9 @@ fn flatten_tile_set_into(
 }
 
 fn read_scene_file(path: &str) -> Option<PackedScene> {
-    let text = match gdcore::file_access::read_from_packs(path) {
-        Some(bytes) => String::from_utf8(bytes).ok()?,
-        None => std::fs::read_to_string(gdcore::resolve_path(path).ok()?).ok()?,
-    };
+    // Text `.tscn` or binary `.scn` (pat-33wmr): a `read_to_string` here made
+    // every `instance=` of a binary scene come up as an empty `Node`.
+    let text = crate::binary_scene::read_scene_source(path)?;
     PackedScene::from_tscn(&text).ok()
 }
 

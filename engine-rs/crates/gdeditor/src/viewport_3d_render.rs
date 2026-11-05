@@ -409,11 +409,10 @@ fn gridmap_items(tree: &SceneTree, nid: gdscene::NodeId, base: &Render3DItem) ->
         return Vec::new();
     };
     if let Some(path) = grid.mesh_library_resource.clone() {
-        let on_disk = path.strip_prefix("res://").unwrap_or(&path);
-        if let Ok(source) = std::fs::read_to_string(on_disk) {
-            if let Ok(Some(library)) = gdscene::grid_map::MeshLibrary::from_tres(&source) {
-                grid.mesh_library = library;
-            }
+        // Either format (pat-33wmr); the items' meshes are `.res` ArrayMeshes
+        // that `mesh_for_primitive` now decodes.
+        if let Some(library) = gdscene::grid_map::MeshLibrary::load(&path) {
+            grid.mesh_library = library;
         }
     }
     grid.mesh_instances_oriented()
@@ -774,6 +773,12 @@ fn mesh_from_file(path: &str) -> Option<Mesh3D> {
     if lowered.ends_with(".glb") || lowered.ends_with(".gltf") {
         let resource = gdresource::gltf_import::import_gltf(std::path::Path::new(on_disk)).ok()?;
         return gdscene::render_server_3d::mesh3d_from_gltf_resource(&resource);
+    }
+
+    // pat-33wmr: a saved ArrayMesh — every GridMap tile of a real Godot
+    // MeshLibrary is one — used to fall through to the placeholder box.
+    if gdscene::array_mesh::is_mesh_resource_path(path) {
+        return gdscene::array_mesh::load_array_mesh_file(path);
     }
 
     if !lowered.ends_with(".obj") {

@@ -511,10 +511,20 @@ impl EngineBootstrap {
         })?;
 
         if let Some(scene_path) = &self.config.main_scene {
-            let source = std::fs::read_to_string(scene_path).map_err(|e| BootError {
-                phase: BootPhase::MainScene,
-                message: format!("failed to read scene '{}': {}", scene_path.display(), e),
-            })?;
+            // Text `.tscn` or binary `.scn` (pat-33wmr).
+            let source = std::fs::read(scene_path)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| {
+                    gdscene::binary_scene::scene_source_from_bytes(
+                        &bytes,
+                        &scene_path.to_string_lossy(),
+                    )
+                    .map_err(|e| e.to_string())
+                })
+                .map_err(|e| BootError {
+                    phase: BootPhase::MainScene,
+                    message: format!("failed to read scene '{}': {}", scene_path.display(), e),
+                })?;
 
             let packed_scene = PackedScene::from_tscn(&source).map_err(|e| BootError {
                 phase: BootPhase::MainScene,

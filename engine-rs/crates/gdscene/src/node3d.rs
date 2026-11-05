@@ -752,7 +752,22 @@ pub fn get_mesh_path(tree: &SceneTree, node_id: NodeId) -> Option<String> {
     tree.get_node(node_id)
         .and_then(|n| match n.get_property("__viewport_mesh__") {
             Variant::String(s) => Some(s),
+            // `mesh = ExtResource("id")`: the raw property is the reference
+            // LITERAL, which no loader can open; `packed_scene` parks the
+            // file's path in the `__extres__mesh` companion. Without this an
+            // ArrayMesh `.res`/`.tres` on a MeshInstance3D could never load
+            // (pat-33wmr). Only while `mesh` still IS that reference: a
+            // script that reassigns `mesh` must not be shadowed by the stale
+            // companion.
             _ => match n.get_property("mesh") {
+                Variant::String(s)
+                    if s.starts_with("ExtResource(") || s.starts_with("ExtResource:") =>
+                {
+                    match n.get_property("__extres__mesh") {
+                        Variant::String(path) => Some(path),
+                        _ => Some(s),
+                    }
+                }
                 Variant::String(s) => Some(s),
                 _ => None,
             },

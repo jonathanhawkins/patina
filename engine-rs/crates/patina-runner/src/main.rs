@@ -764,8 +764,13 @@ fn main() {
     // already registered.
     gdobject::class_db::register_all_classes();
 
-    // Read and parse the .tscn file.
-    let source = match fs::read_to_string(&args.scene_path) {
+    // Read and parse the scene file: text `.tscn` or binary `.scn`
+    // (pat-33wmr — a binary scene used to die here with "stream did not
+    // contain valid UTF-8").
+    let source = match fs::read(&args.scene_path).map_err(|e| e.to_string()).and_then(|bytes| {
+        gdscene::binary_scene::scene_source_from_bytes(&bytes, &args.scene_path)
+            .map_err(|e| e.to_string())
+    }) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Error reading '{}': {e}", args.scene_path);

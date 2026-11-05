@@ -59,8 +59,21 @@ impl MeshLibrary {
     /// Returns `Ok(None)` when the resource is not a `MeshLibrary`.
     pub fn from_tres(source: &str) -> EngineResult<Option<MeshLibrary>> {
         let resource = gdresource::TresLoader::new().parse_str(source, "res://meshlibrary.tres")?;
+        Ok(Self::from_resource(&resource))
+    }
+
+    /// Loads a MeshLibrary file in either format — text `.tres` or binary
+    /// `.res` (pat-33wmr) — from a `res://` or filesystem path. `None` when
+    /// it cannot be read or is not a `MeshLibrary`.
+    pub fn load(path: &str) -> Option<MeshLibrary> {
+        let resource = crate::array_mesh::read_resource_file(path)?;
+        Self::from_resource(&resource)
+    }
+
+    /// [`from_tres`](Self::from_tres) for an already-loaded resource.
+    pub fn from_resource(resource: &gdresource::Resource) -> Option<MeshLibrary> {
         if resource.class_name != "MeshLibrary" {
-            return Ok(None);
+            return None;
         }
 
         // Collect both fields before building items: `properties()` iterates a
@@ -99,7 +112,7 @@ impl MeshLibrary {
             let name = names.get(&id).cloned().unwrap_or_default();
             library.set_item(id, name, mesh_path);
         }
-        Ok(Some(library))
+        Some(library)
     }
 
     pub fn item_count(&self) -> usize {

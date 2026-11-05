@@ -23,6 +23,7 @@
 pub mod bit_map;
 pub mod block_compression;
 pub mod cache;
+pub mod compressed;
 pub mod config_file;
 pub mod ctex;
 pub mod dpi_texture;
@@ -71,7 +72,8 @@ pub use project::{
     AutoloadEntry, GodotProjectFile, InputMapEntry, ProjectConfig, ProjectLoader, ShaderGlobal,
 };
 pub use res_loader::{
-    is_res_binary, load_res_binary, parse_res_header, ResBinaryHeader, RES_MAGIC,
+    is_binary_resource, is_res_binary, load_res_binary, load_resource_bytes, parse_res_header,
+    ResBinaryHeader, RES_MAGIC,
 };
 pub use resource::{ExtResource, Resource};
 pub use saver::{ResourceSaver, TresSaver};

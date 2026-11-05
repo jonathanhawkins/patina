@@ -134,7 +134,9 @@ pub fn parse_res_header(data: &[u8]) -> EngineResult<ResBinaryHeader> {
 /// The `PackedByteArray`/`PackedInt32Array`/… family decodes into the matching
 /// [`Variant`] packed types (pat-nzgdu.82).
 ///
-/// Returns an [`EngineError::Unsupported`] for compressed (`RSCC`), big-endian,
+/// A compressed (`RSCC`) file is inflated first (pat-33wmr).
+///
+/// Returns an [`EngineError::Unsupported`] for big-endian,
 /// newer-than-6 format, and the three variant types that are live bindings
 /// rather than data (InputEvent, Callable, Signal). The integer vectors,
 /// `Rect2i`, `Vector4`/`Vector4i`, `Projection` and `PackedVector4Array` decode
@@ -143,15 +145,34 @@ pub fn parse_res_header(data: &[u8]) -> EngineResult<ResBinaryHeader> {
 /// All reads are bounds-checked, so truncated or corrupt input yields an
 /// [`EngineError::Parse`] rather than a panic.
 pub fn load_res_binary(data: &[u8], path: &str) -> EngineResult<Arc<Resource>> {
+    // An `RSCC` file is an `RSRC` file behind Godot's block compressor
+    // (`FileAccessCompressed`); inflate it and parse what it wraps. Every
+    // binary `.scn` the editor saves is written this way (pat-33wmr).
+    //
+    // ⚠️ The compressed stream does NOT repeat the `RSRC` magic: the saver
+    // writes it only for an uncompressed file (`resource_format_binary.cpp`
+    // `if (!(p_flags & FLAG_COMPRESS))`), so the inflated bytes start at the
+    // endianness word, and every internal-resource offset is relative to THAT
+    // stream. Re-prefixing the magic lets one parser serve both forms, at the
+    // cost of shifting those offsets by its 4 bytes.
+    if crate::compressed::is_compressed_resource(data) {
+        let inflated = crate::compressed::decompress_rscc(data)
+            .map_err(|e| prefix_error(e, &format!("compressed binary resource {path}")))?;
+        let mut framed = Vec::with_capacity(inflated.len() + RES_MAGIC.len());
+        framed.extend_from_slice(RES_MAGIC);
+        framed.extend_from_slice(&inflated);
+        return parse_res_binary(&framed, path, RES_MAGIC.len() as u64);
+    }
+    parse_res_binary(data, path, 0)
+}
+
+/// Parses an `RSRC` resource; `offset_bias` is added to every stored
+/// internal-resource offset (non-zero only for an inflated `RSCC` stream).
+fn parse_res_binary(data: &[u8], path: &str, offset_bias: u64) -> EngineResult<Arc<Resource>> {
     let mut cur = Cursor::new(data);
 
     // -- Magic --
     let magic = cur.take(4)?;
-    if magic == RES_MAGIC_COMPRESSED {
-        return Err(EngineError::Unsupported(format!(
-            "compressed binary resource (RSCC) is not supported: {path}"
-        )));
-    }
     if magic != RES_MAGIC {
         return Err(EngineError::Parse(format!(
             "invalid binary resource magic: expected RSRC, got {magic:?} ({path})"
@@ -182,7 +203,7 @@ pub fn load_res_binary(data: &[u8], path: &str) -> EngineResult<Arc<Resource>> {
     let real_is_double = flags & FORMAT_FLAG_REAL_T_IS_DOUBLE != 0;
 
     // The uid field is always present (read whether or not the UID flag is set).
-    let _uid = cur.u64()?;
+    let file_uid = cur.u64()? as i64;
 
     if flags & FORMAT_FLAG_HAS_SCRIPT_CLASS != 0 {
         let _script_class = read_unicode_string(&mut cur)?;
@@ -249,7 +270,11 @@ pub fn load_res_binary(data: &[u8], path: &str) -> EngineResult<Arc<Resource>> {
 
     let mut resources: Vec<Resource> = Vec::with_capacity(internal_offsets.len());
     for &offset in &internal_offsets {
-        reader.cur.seek(offset)?;
+        reader
+            .cur
+            .seek(offset.checked_add(offset_bias).ok_or_else(|| {
+                EngineError::Parse(format!("binary resource offset overflow: {path}"))
+            })?)?;
         let res_type = read_unicode_string(&mut reader.cur)?;
         let prop_count = reader.cur.u32()?;
         let mut res = Resource::new(res_type);
@@ -272,6 +297,9 @@ pub fn load_res_binary(data: &[u8], path: &str) -> EngineResult<Arc<Resource>> {
         .pop()
         .ok_or_else(|| EngineError::Parse(format!("binary resource has no resources: {path}")))?;
     main.path = path.to_string();
+    if using_uids && file_uid >= 0 {
+        main.uid = gdcore::ResourceUid::new(file_uid);
+    }
     if main.class_name.is_empty() {
         main.class_name = type_name;
     }
@@ -283,6 +311,37 @@ pub fn load_res_binary(data: &[u8], path: &str) -> EngineResult<Arc<Resource>> {
     }
 
     Ok(Arc::new(main))
+}
+
+/// Whether `data` is a Godot binary resource in either on-disk form: plain
+/// (`RSRC`) or block-compressed (`RSCC`).
+pub fn is_binary_resource(data: &[u8]) -> bool {
+    is_res_binary(data) || crate::compressed::is_compressed_resource(data)
+}
+
+/// Loads a resource file's bytes in whichever format they are in: a binary
+/// resource (`RSRC`/`RSCC`, the `.res`/`.scn` family) or the text `.tres`
+/// format. Godot picks the loader by sniffing the file, not by extension, so
+/// a `.res` that happens to be text still loads.
+pub fn load_resource_bytes(data: &[u8], path: &str) -> EngineResult<Arc<Resource>> {
+    if is_binary_resource(data) {
+        return load_res_binary(data, path);
+    }
+    let text = std::str::from_utf8(data).map_err(|e| {
+        EngineError::Parse(format!(
+            "{path} is neither a binary resource nor UTF-8 text: {e}"
+        ))
+    })?;
+    crate::loader::TresLoader::new().parse_str(text, path)
+}
+
+/// Keeps an error's kind while naming the file it came from.
+fn prefix_error(e: EngineError, what: &str) -> EngineError {
+    match e {
+        EngineError::Unsupported(m) => EngineError::Unsupported(format!("{what}: {m}")),
+        EngineError::Parse(m) => EngineError::Parse(format!("{what}: {m}")),
+        other => other,
+    }
 }
 
 /// Reads a little-endian `u32` from a 4-byte slice.
@@ -299,7 +358,8 @@ fn read_u32_be(bytes: &[u8]) -> u32 {
 // Binary resource format constants (resource_format_binary.cpp / .h)
 // ---------------------------------------------------------------------------
 
-/// Magic for a zstd-compressed binary resource (unsupported here).
+/// Magic for a block-compressed binary resource (see [`crate::compressed`]).
+#[cfg(test)]
 const RES_MAGIC_COMPRESSED: &[u8; 4] = b"RSCC";
 
 /// Highest binary `FORMAT_VERSION` this loader accepts.
@@ -338,9 +398,14 @@ const V_PACKED_BYTE_ARRAY: u32 = 31;
 const V_PACKED_INT32_ARRAY: u32 = 32;
 const V_PACKED_FLOAT32_ARRAY: u32 = 33;
 const V_PACKED_STRING_ARRAY: u32 = 34;
-const V_PACKED_VECTOR2_ARRAY: u32 = 35;
-const V_PACKED_VECTOR3_ARRAY: u32 = 36;
-const V_PACKED_COLOR_ARRAY: u32 = 37;
+// ⚠️ 35/36/37 are Vector3/Color/Vector2 — NOT the Variant::Type order
+// (Vector2, Vector3, Color). This table had them in Variant order, so every
+// real `PackedVector3Array` (a ConvexPolygonShape3D's hull) was read as a
+// PackedVector2Array and then a garbage length, failing the whole file
+// (pat-33wmr; `resource_format_binary.cpp:71-73`).
+const V_PACKED_VECTOR3_ARRAY: u32 = 35;
+const V_PACKED_COLOR_ARRAY: u32 = 36;
+const V_PACKED_VECTOR2_ARRAY: u32 = 37;
 const V_INT64: u32 = 40;
 const V_DOUBLE: u32 = 41;
 const V_STRING_NAME: u32 = 44;
@@ -446,7 +511,18 @@ fn read_unicode_string(cur: &mut Cursor) -> EngineResult<String> {
         return Ok(String::new());
     }
     let bytes = cur.take(len)?;
-    Ok(String::from_utf8_lossy(bytes).into_owned())
+    Ok(utf8_without_terminator(bytes))
+}
+
+/// Decodes a stored string, dropping the NUL terminator Godot writes.
+///
+/// ⚠️ `save_unicode_string` stores `utf8().length() + 1` bytes — the length
+/// INCLUDES a trailing `\0`. Kept, it made every type name compare unequal
+/// (`"ArrayMesh\0" != "ArrayMesh"`), so no class-keyed consumer could
+/// recognise a resource loaded from a real Godot file (pat-33wmr).
+fn utf8_without_terminator(bytes: &[u8]) -> String {
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -478,7 +554,7 @@ impl BinaryResourceReader<'_> {
                 return Ok(String::new());
             }
             let bytes = self.cur.take(len)?;
-            return Ok(String::from_utf8_lossy(bytes).into_owned());
+            return Ok(utf8_without_terminator(bytes));
         }
         self.string_map
             .get(id as usize)
@@ -1063,7 +1139,7 @@ mod tests {
     }
 
     #[test]
-    fn load_res_binary_compressed_unsupported() {
+    fn load_res_binary_compressed_truncated_header_errors() {
         let mut data = RES_MAGIC_COMPRESSED.to_vec();
         data.extend_from_slice(&[0u8; 8]);
         let err = load_res_binary(&data, "res://c.res")
@@ -1786,5 +1862,108 @@ mod binary_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("out of range"), "got: {err}");
+    }
+
+    // -- Real files from the official 3D platformer demo (pat-33wmr) --
+
+    fn platformer_3d(rel: &str) -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../games/platformer_3d")
+            .join(rel);
+        std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    }
+
+    /// The level itself: `grid_map.scn` is RSCC (zstd) on disk. It used to be
+    /// rejected as "compressed binary resource (RSCC) is not supported".
+    #[test]
+    fn real_rscc_scene_loads_as_a_packed_scene_with_its_bundle() {
+        let data = platformer_3d("stage/grid_map.scn");
+        assert_eq!(&data[..4], b"RSCC");
+        assert!(is_binary_resource(&data));
+        assert!(!is_res_binary(&data), "RSCC is not the plain RSRC magic");
+
+        let res = load_res_binary(&data, "res://stage/grid_map.scn").expect("RSCC scene loads");
+        assert_eq!(res.class_name, "PackedScene");
+        let Some(Variant::Dictionary(bundle)) = res.get_property("_bundled") else {
+            panic!("PackedScene has no _bundled dictionary");
+        };
+        let Some(Variant::PackedStringArray(names)) = bundle.get("names") else {
+            panic!("bundle has no names");
+        };
+        assert_eq!(names[0], "GridMap");
+        assert!(names.iter().any(|n| n == "mesh_library"));
+        assert_eq!(bundle.get("node_count"), Some(Variant::Int(1)));
+
+        // The MeshLibrary is the scene's one external resource.
+        let ext: Vec<_> = res.ext_resources.values().collect();
+        assert_eq!(ext.len(), 1);
+        assert_eq!(ext[0].path, "res://stage/tiles.tres");
+        assert_eq!(ext[0].resource_type, "MeshLibrary");
+
+        // The cell data rides in the variants array: a {"cells": PackedInt32Array}
+        // whose length is a whole number of (x/y, z, item) triples.
+        let Some(Variant::Array(variants)) = bundle.get("variants") else {
+            panic!("bundle has no variants");
+        };
+        let cells = variants
+            .to_vec()
+            .into_iter()
+            .find_map(|v| match v {
+                Variant::Dictionary(d) => match d.get("cells") {
+                    Some(Variant::PackedInt32Array(c)) => Some(c),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("a cells array in the variants");
+        assert!(cells.len() > 300, "only {} cell words", cells.len());
+        assert_eq!(cells.len() % 3, 0);
+    }
+
+    /// A binary `ArrayMesh` `.res` carries its geometry as `_surfaces`.
+    #[test]
+    fn real_binary_array_mesh_res_loads_its_surface() {
+        let data = platformer_3d("stage/meshes/floor.res");
+        let res = load_resource_bytes(&data, "res://stage/meshes/floor.res").unwrap();
+        assert_eq!(res.class_name, "ArrayMesh");
+        let Some(Variant::Array(surfaces)) = res.get_property("_surfaces") else {
+            panic!("ArrayMesh has no _surfaces");
+        };
+        let surface = match &surfaces.to_vec()[0] {
+            Variant::Dictionary(d) => d.clone(),
+            other => panic!("surface is {other:?}"),
+        };
+        assert_eq!(surface.get("vertex_count"), Some(Variant::Int(4)));
+        assert_eq!(surface.get("index_count"), Some(Variant::Int(6)));
+        assert!(matches!(surface.get("vertex_data"), Some(Variant::PackedByteArray(b)) if b.len() == 80));
+        // The material is the external tile_material.tres.
+        assert_eq!(
+            res.ext_resources.get("0").map(|e| e.path.as_str()),
+            Some("res://stage/tile_material.tres")
+        );
+    }
+
+    /// A binary collision shape `.res` (ConvexPolygonShape3D) keeps its hull.
+    #[test]
+    fn real_binary_convex_shape_res_loads_its_points() {
+        let data = platformer_3d("stage/collision/corner.res");
+        let res = load_resource_bytes(&data, "res://stage/collision/corner.res").unwrap();
+        assert_eq!(res.class_name, "ConvexPolygonShape3D");
+        let Some(Variant::PackedVector3Array(points)) = res.get_property("points") else {
+            panic!("no points: {:?}", res.get_property("points"));
+        };
+        assert_eq!(points.len(), 10);
+        assert!(points.iter().all(|p| p.x.abs() <= 1.0 && p.y.abs() <= 1.0 && p.z.abs() <= 1.0));
+    }
+
+    /// The same entry point still loads a text `.tres` (sniffed, not by
+    /// extension), so callers can route every resource file through it.
+    #[test]
+    fn load_resource_bytes_falls_back_to_the_text_format() {
+        let data = platformer_3d("stage/collision/box.tres");
+        let res = load_resource_bytes(&data, "res://stage/collision/box.tres").unwrap();
+        assert_eq!(res.class_name, "BoxShape3D");
+        let err = load_resource_bytes(&[0xff, 0xfe, 0x00, 0x01], "res://x.res").unwrap_err();
+        assert!(err.to_string().contains("neither"), "{err}");
     }
 }
