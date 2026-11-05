@@ -61,6 +61,11 @@ impl DepthBuffer {
         &self.data
     }
 
+    /// Mutable raw depth samples, row-major like [`Self::as_slice`].
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [f32] {
+        &mut self.data
+    }
+
     /// Consumes the buffer and returns normalized depth values.
     ///
     /// Pixels that were never written (`f32::MAX`) are mapped to `1.0`.

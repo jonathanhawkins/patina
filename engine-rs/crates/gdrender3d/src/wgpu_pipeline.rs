@@ -3514,6 +3514,75 @@ fn pack_lights_with_shadows<'a>(
 /// Generates omni cubemaps for the shadow-casting point lights and packs the
 /// `Some` results as `(light id, cubemap)` in light order — the layout
 /// [`pack_lights_from_maps`] and the omni face array share (pat-g4i60).
+/// [`pack_omni_cubemaps`] with each light's cubemap reused while neither the
+/// light nor any caster within its range changed. `casters`, `keys` and
+/// `mesh_hashes` are parallel (one caster key and mesh fingerprint per
+/// caster). Returns the packed cubemaps, and whether any differs from the
+/// previous call's (so the GPU array needs uploading again).
+fn omni_cubemaps_cached(
+    lights: &[Light3D],
+    casters: &[&Instance3D],
+    keys: &[u64],
+    mesh_hashes: &[Option<u64>],
+    cache: &mut HashMap<u64, (u64, gdserver3d::light::ShadowCubemap)>,
+    aabbs: &mut HashMap<u64, Option<gdcore::math3d::Aabb>>,
+) -> (Vec<(u64, gdserver3d::light::ShadowCubemap)>, bool) {
+    use std::hash::Hasher;
+    let mut out = Vec::new();
+    let mut changed = false;
+    let mut seen = Vec::new();
+    if aabbs.len() > MESH_CACHE_CAP {
+        aabbs.clear();
+    }
+    for l in lights {
+        let casts = l.shadow_enabled
+            && l.light_type == LightType::Point
+            && matches!(
+                l.omni_shadow_mode,
+                gdserver3d::light::OmniShadowMode::DualParaboloid
+                    | gdserver3d::light::OmniShadowMode::Cube
+            );
+        if !casts {
+            continue;
+        }
+        let mut in_range: Vec<&Instance3D> = Vec::new();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        h.write_u64(l.id.0);
+        for v in [l.position.x, l.position.y, l.position.z, l.range] {
+            h.write_u32(v.to_bits());
+        }
+        h.write_u32(l.shadow_caster_mask);
+        for (i, inst) in casters.iter().enumerate() {
+            let aabb = match (mesh_hashes.get(i).copied().flatten(), inst.mesh.as_ref()) {
+                (Some(mh), Some(m)) => *aabbs.entry(mh).or_insert_with(|| m.aabb()),
+                (None, Some(m)) => m.aabb(),
+                (_, None) => None,
+            };
+            if crate::shadow_map::omni_caster_in_range(l, inst, aabb) {
+                in_range.push(inst);
+                h.write_u64(keys.get(i).copied().unwrap_or(0));
+            }
+        }
+        let key = h.finish();
+        seen.push(l.id.0);
+        let hit = cache.get(&l.id.0).filter(|(k, _)| *k == key).map(|(_, c)| c.clone());
+        let cube = match hit {
+            Some(c) => c,
+            None => {
+                changed = true;
+                let c = crate::shadow_map::generate_omni_shadow_cubemap_refs(l, &in_range);
+                cache.insert(l.id.0, (key, c.clone()));
+                c
+            }
+        };
+        out.push((l.id.0, cube));
+    }
+    let before = cache.len();
+    cache.retain(|id, _| seen.contains(id));
+    changed |= cache.len() != before;
+    (out, changed)
+}
+
 fn pack_omni_cubemaps(
     lights: &[Light3D],
     instances: &[Instance3D],
@@ -3642,6 +3711,76 @@ fn combine_shadow_key(light_sig: u64, any_shadow: bool, caster_keys: &[u64]) -> 
 
 /// Uploads one or more CPU shadow maps as an `R32Float` 2D array texture.
 /// Empty atlas is a 1×1×1 sentinel layer of `f32::MAX` (fully lit).
+/// Rewrites the `dirty` texel rectangles of each map (layer) in a shadow
+/// array [`upload_shadow_depth_array`] built for maps of the same sizes.
+/// Returns how many texels it wrote. Overlapping rectangles are merged into
+/// one when they overlap or touch, so a texel is rarely written twice.
+fn write_shadow_rects(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    maps: &[crate::shadow_map::ShadowMap],
+    dirty: &[Vec<crate::shadow_map::TexelRect>],
+) -> u64 {
+    let mut written = 0u64;
+    let mut rows: Vec<f32> = Vec::new();
+    for (layer, (sm, rects)) in maps.iter().zip(dirty).enumerate() {
+        let (mw, mh) = sm.depth.dimensions();
+        let src = sm.depth.as_slice();
+        for &(x0, y0, x1, y1) in &merge_rects(rects) {
+            let (x1, y1) = (x1.min(mw.saturating_sub(1)), y1.min(mh.saturating_sub(1)));
+            if x0 > x1 || y0 > y1 {
+                continue;
+            }
+            let (rw, rh) = (x1 - x0 + 1, y1 - y0 + 1);
+            rows.clear();
+            for y in y0..=y1 {
+                let start = (y * mw + x0) as usize;
+                rows.extend_from_slice(&src[start..start + rw as usize]);
+            }
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: x0, y: y0, z: layer as u32 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(&rows),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(rw * 4),
+                    rows_per_image: Some(rh),
+                },
+                wgpu::Extent3d { width: rw, height: rh, depth_or_array_layers: 1 },
+            );
+            written += rw as u64 * rh as u64;
+        }
+    }
+    written
+}
+
+/// `rects` with every pair that overlaps or touches replaced by its bounding
+/// rectangle, until no two do.
+fn merge_rects(rects: &[crate::shadow_map::TexelRect]) -> Vec<crate::shadow_map::TexelRect> {
+    let mut out: Vec<crate::shadow_map::TexelRect> = rects.to_vec();
+    loop {
+        let mut merged = false;
+        'outer: for i in 0..out.len() {
+            for j in i + 1..out.len() {
+                let (a, b) = (out[i], out[j]);
+                if a.0 <= b.2 + 1 && b.0 <= a.2 + 1 && a.1 <= b.3 + 1 && b.1 <= a.3 + 1 {
+                    out[i] = (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3));
+                    out.swap_remove(j);
+                    merged = true;
+                    break 'outer;
+                }
+            }
+        }
+        if !merged {
+            return out;
+        }
+    }
+}
+
 fn upload_shadow_depth_array(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -4675,6 +4814,15 @@ pub struct GpuRenderer3D {
     /// How many times the shadow atlas was (re)built. Instrumentation for the
     /// cache-reuse tests; also a useful perf probe.
     shadow_atlas_rebuilds: u64,
+    /// Shadow texels written to the GPU so far (full and partial uploads).
+    shadow_upload_texels: u64,
+    /// Per omni light, its last cubemap and the key it was rendered for (see
+    /// `omni_cubemaps_cached`).
+    omni_cube_cache: HashMap<u64, (u64, gdserver3d::light::ShadowCubemap)>,
+    /// Mesh fingerprint -> local bounds, for the omni range test.
+    omni_aabb_cache: HashMap<u64, Option<gdcore::math3d::Aabb>>,
+    /// Shadow rebuilds that had to render an omni cubemap again.
+    omni_cube_builds: u64,
     /// The static shadow casters, rasterized once and reused while the moving
     /// ones are redrawn each frame (pat-414k3).
     shadow_casters: crate::shadow_map::ShadowCasterCache,
@@ -5066,6 +5214,10 @@ impl GpuRenderer3D {
             surface_meshes: HashMap::new(),
             shadow_atlas_cache: None,
             shadow_atlas_rebuilds: 0,
+            shadow_upload_texels: 0,
+            omni_cube_cache: HashMap::new(),
+            omni_aabb_cache: HashMap::new(),
+            omni_cube_builds: 0,
             shadow_casters: Default::default(),
             probe_cube_cache: None,
             sky_panorama: None,
@@ -5118,6 +5270,19 @@ impl GpuRenderer3D {
     /// only when a light or occluder actually changes (pat-2be0q).
     pub fn shadow_atlas_rebuilds(&self) -> u64 {
         self.shadow_atlas_rebuilds
+    }
+
+    /// Shadow-map texels uploaded to the GPU so far. A rebuild where only a
+    /// few casters moved over an unchanged base uploads just their texel
+    /// rectangles, not the whole atlas.
+    pub fn shadow_upload_texels(&self) -> u64 {
+        self.shadow_upload_texels
+    }
+
+    /// Shadow rebuilds that rendered an omni light's cubemap again. A caster
+    /// moving outside every omni light's range renders none.
+    pub fn omni_cube_builds(&self) -> u64 {
+        self.omni_cube_builds
     }
 
     /// `(meshes, material maps)` uploaded by the editor color path so far
@@ -5374,6 +5539,7 @@ impl GpuRenderer3D {
         let mut ordered: Vec<(&u64, &Instance3D)> = self.instances.iter().collect();
         ordered.sort_unstable_by_key(|(id, _)| **id);
         let (light_sig, any_shadow) = shadow_light_signature(&self.lights);
+        let mut mesh_hashes: Vec<Option<u64>> = Vec::new();
         let caster_keys: Vec<u64> = if any_shadow {
             ordered
                 .iter()
@@ -5383,6 +5549,7 @@ impl GpuRenderer3D {
                             .and_then(|k| k.get(&(m as *const Mesh3D as usize)).copied())
                             .unwrap_or_else(|| mesh_content_hash(m))
                     });
+                    mesh_hashes.push(mesh_hash);
                     shadow_caster_key_with(inst, mesh_hash)
                 })
                 .collect()
@@ -5399,38 +5566,88 @@ impl GpuRenderer3D {
             } else {
                 Vec::new()
             };
-            let maps = crate::shadow_map::generate_shadow_maps_incremental(
+            // The last maps go back to the generator to be patched in place
+            // (it checks they are its own); their sizes are kept for the
+            // partial-upload test below.
+            let prev_dims: Vec<(u32, u32)> = self
+                .shadow_atlas_cache
+                .as_ref()
+                .map(|c| c.maps.iter().map(|m| m.depth.dimensions()).collect())
+                .unwrap_or_default();
+            let previous = self
+                .shadow_atlas_cache
+                .as_mut()
+                .map(|c| std::mem::take(&mut c.maps))
+                .unwrap_or_default();
+            let maps = crate::shadow_map::generate_shadow_maps_incremental_reusing(
                 &self.lights,
                 &casters,
                 &caster_keys,
                 light_sig,
                 &mut self.shadow_casters,
+                previous,
             );
             // The omni cubemaps still take owned instances; clone them only
             // when a point light actually casts.
-            let omni_casts = self
-                .lights
-                .iter()
-                .any(|l| l.shadow_enabled && l.light_type == LightType::Point);
-            let instance_list: Vec<Instance3D> = if omni_casts {
-                ordered.iter().map(|(_, inst)| (*inst).clone()).collect()
-            } else {
-                Vec::new()
+            // 🔑 Each omni cubemap is cached on what it can see: the light,
+            // and the casters within its range (a caster wholly beyond the
+            // range draws nothing into it). truck_town's street lamps were
+            // re-rasterized — six faces over the whole town each — on every
+            // frame the car moved anywhere.
+            let (omni, omni_changed) = omni_cubemaps_cached(
+                &self.lights,
+                &casters,
+                &caster_keys,
+                &mesh_hashes,
+                &mut self.omni_cube_cache,
+                &mut self.omni_aabb_cache,
+            );
+            self.omni_cube_builds += omni_changed as u64;
+            // 🔑 Over an unchanged base only the casters drawn on top of it
+            // can change texels, so a frame where the coins spin rewrites
+            // their rectangles in the texture already bound instead of
+            // re-creating and re-uploading the whole 2048² f32 atlas (16 MB)
+            // every frame. The texels are the same either way.
+            let partial = match (&self.shadow_atlas_cache, &self.shadow_casters.last_dirty) {
+                (Some(_), Some(dirty)) => {
+                    dirty.len() == maps.len()
+                        && prev_dims.len() == maps.len()
+                        && prev_dims.iter().zip(&maps).all(|(a, b)| *a == b.depth.dimensions())
+                }
+                _ => false,
             };
-            let omni = pack_omni_cubemaps(&self.lights, &instance_list);
-            let (texture, view) =
-                upload_shadow_depth_array(&self.ctx.device, &self.ctx.queue, &maps);
-            let (omni_texture, omni_view) =
-                upload_omni_shadow_array(&self.ctx.device, &self.ctx.queue, &omni);
-            self.shadow_atlas_cache = Some(ShadowAtlasCache {
-                key,
-                maps,
-                _texture: texture,
-                view,
-                omni,
-                _omni_texture: omni_texture,
-                omni_view,
-            });
+            if partial {
+                let dirty = self.shadow_casters.last_dirty.as_ref().expect("checked above");
+                let cache = self.shadow_atlas_cache.as_mut().expect("checked above");
+                self.shadow_upload_texels +=
+                    write_shadow_rects(&self.ctx.queue, &cache._texture, &maps, dirty);
+                cache.key = key;
+                cache.maps = maps;
+                if omni_changed {
+                    let (omni_texture, omni_view) =
+                        upload_omni_shadow_array(&self.ctx.device, &self.ctx.queue, &omni);
+                    cache.omni = omni;
+                    cache._omni_texture = omni_texture;
+                    cache.omni_view = omni_view;
+                }
+            } else {
+                let (texture, view) =
+                    upload_shadow_depth_array(&self.ctx.device, &self.ctx.queue, &maps);
+                let size = texture.size();
+                self.shadow_upload_texels +=
+                    size.width as u64 * size.height as u64 * size.depth_or_array_layers as u64;
+                let (omni_texture, omni_view) =
+                    upload_omni_shadow_array(&self.ctx.device, &self.ctx.queue, &omni);
+                self.shadow_atlas_cache = Some(ShadowAtlasCache {
+                    key,
+                    maps,
+                    _texture: texture,
+                    view,
+                    omni,
+                    _omni_texture: omni_texture,
+                    omni_view,
+                });
+            }
             self.shadow_atlas_rebuilds += 1;
         }
         let cache = self.shadow_atlas_cache.as_ref().expect("just ensured");
@@ -6319,6 +6536,22 @@ impl GpuRenderer3D {
             None
         };
         queue.submit(std::iter::once(encoder.finish()));
+        // The decals' depth-independent work (their screen rectangles and the
+        // raster of the instances a `cull_mask` excludes) runs HERE, while the
+        // GPU renders the frame just submitted, instead of after the readback
+        // with the GPU idle. Same inputs, same plan.
+        let fx_inv_proj = invert_projection(&projection_matrix);
+        let decal_plan = depth_readback_buf.as_ref().and_then(|_| {
+            let decal_receivers: Vec<&Instance3D> = self.instances.values().collect();
+            crate::renderer::DecalPlan::new(
+                w,
+                h,
+                &self.decals,
+                &fx_inv_proj,
+                &viewport.camera_transform,
+                &decal_receivers,
+            )
+        });
         // pat-9gjpr: the caches moved out before the pass come back.
         self.editor_pipe_cache = pipe_cache;
         self.editor_pipe_modules = pipe_modules;
@@ -6413,18 +6646,9 @@ impl GpuRenderer3D {
             drop(depth_mapped);
             depth_buf.unmap();
 
-            let fx_inv_proj = invert_projection(&projection_matrix);
-            let decal_receivers: Vec<&Instance3D> = self.instances.values().collect();
-            crate::renderer::SoftwareRenderer3D::apply_decal_pass_masked(
-                &mut pixels,
-                &depth,
-                w,
-                h,
-                &self.decals,
-                &fx_inv_proj,
-                &viewport.camera_transform,
-                &decal_receivers,
-            );
+            if let Some(plan) = &decal_plan {
+                plan.apply(&mut pixels, &depth, &self.decals, &fx_inv_proj, &viewport.camera_transform);
+            }
             // Environment fog covers the decal-modulated surface, in the
             // software renderer's order (decal -> fog -> fog volumes), and with
             // the same suns for its sun scatter (pat-p3p1m).
@@ -6470,7 +6694,9 @@ impl GpuRenderer3D {
             crate::postprocess::apply_ssao_env(&mut pixels, &depth, w, h, env);
         }
 
-        crate::postprocess::apply_camera_post(&mut pixels, w, h, env);
+        // Only packed to bytes below, so the byte variant (same bytes, no
+        // per-channel sRGB `powf` where it applies).
+        crate::postprocess::apply_camera_post_for_bytes(&mut pixels, w, h, env);
 
         let mut data = vec![0u8; w as usize * h as usize * 4];
         par_rows(&mut data, w as usize * 4, |row, out| {

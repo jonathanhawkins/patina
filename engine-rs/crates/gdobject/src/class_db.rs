@@ -450,15 +450,42 @@ impl ClassRegistration {
 /// module-level functions [`register_class`], [`get_class_info`], etc.
 #[derive(Debug)]
 struct ClassDB {
-    classes: HashMap<String, ClassInfo>,
+    /// Keyed by class name with [`NameHasher`], not SipHash: class lookups run
+    /// for every node of every Play frame (`is_class` per node per collector),
+    /// and hashing the name was most of their cost. Nothing may depend on this
+    /// map's iteration order (SipHash's was random per process already).
+    classes: HashMap<String, ClassInfo, std::hash::BuildHasherDefault<NameHasher>>,
     by_id: HashMap<ClassId, String>,
     next_id: u32,
+}
+
+/// FNV-1a over the bytes written: fast for the short class names ClassDB is
+/// keyed by. Not DoS-resistant, which a class registry does not need.
+#[derive(Debug, Clone, Copy)]
+struct NameHasher(u64);
+
+impl Default for NameHasher {
+    fn default() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+}
+
+impl std::hash::Hasher for NameHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 ^= *b as u64;
+            self.0 = self.0.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
 }
 
 impl ClassDB {
     fn new() -> Self {
         Self {
-            classes: HashMap::new(),
+            classes: HashMap::default(),
             by_id: HashMap::new(),
             next_id: 1,
         }
@@ -599,9 +626,40 @@ impl ClassDB {
         chain
     }
 
+    /// The same walk as [`Self::inheritance_chain`], without building it: this
+    /// runs for every node of every 3D Play frame, and allocating one `String`
+    /// per ancestor per call was a third of `prepare_play_3d_frame`.
     fn is_parent_class(&self, child: &str, parent: &str) -> bool {
-        let chain = self.inheritance_chain(child);
-        chain.iter().any(|c| c == parent)
+        let mut current = child;
+        while let Some(info) = self.classes.get(current) {
+            if current == parent {
+                return true;
+            }
+            if info.parent_class.is_empty() {
+                break;
+            }
+            current = &info.parent_class;
+        }
+        false
+    }
+
+    /// Bit `i` set when `child` is `parents[i]` or inherits it: one walk up
+    /// the chain for several [`Self::is_parent_class`] questions.
+    fn parent_class_mask(&self, child: &str, parents: &[&str]) -> u64 {
+        let mut mask = 0u64;
+        let mut current = child;
+        while let Some(info) = self.classes.get(current) {
+            for (i, p) in parents.iter().enumerate().take(64) {
+                if current == *p {
+                    mask |= 1 << i;
+                }
+            }
+            if info.parent_class.is_empty() {
+                break;
+            }
+            current = &info.parent_class;
+        }
+        mask
     }
 
     /// Checks whether `method_name` is registered on `class_name` or any
@@ -1074,6 +1132,16 @@ pub fn is_parent_class(child: &str, parent: &str) -> bool {
         .lock()
         .expect("ClassDB lock poisoned")
         .is_parent_class(child, parent)
+}
+
+/// [`is_parent_class`] for several parents at once, with one lock and one
+/// walk up `child`'s chain: bit `i` of the result is
+/// `is_parent_class(child, parents[i])`. At most 64 parents are tested.
+pub fn parent_class_mask(child: &str, parents: &[&str]) -> u64 {
+    global_db()
+        .lock()
+        .expect("ClassDB lock poisoned")
+        .parent_class_mask(child, parents)
 }
 
 /// Creates a new `GenericObject` instance from a registered class name.
@@ -35077,6 +35145,27 @@ mod tests {
         let _g = setup();
         register_class(ClassRegistration::new("TestSelf"));
         assert!(is_parent_class("TestSelf", "TestSelf"));
+    }
+
+    /// `parent_class_mask` answers exactly what `is_parent_class` answers for
+    /// each parent, in one walk (the Play frame's per-node collector uses it).
+    #[test]
+    fn parent_class_mask_agrees_with_is_parent_class() {
+        let _g = setup();
+        register_3d_classes();
+        let parents = ["Node3D", "Decal", "VisualInstance3D", "Node", "Control", "NoSuchClass"];
+        for child in ["Decal", "MeshInstance3D", "Node3D", "ReflectionProbe", "Label", "NoSuchClass"] {
+            let mask = parent_class_mask(child, &parents);
+            for (i, p) in parents.iter().enumerate() {
+                assert_eq!(
+                    mask & (1 << i) != 0,
+                    is_parent_class(child, p),
+                    "{child} vs {p}: mask {mask:#b}"
+                );
+            }
+        }
+        assert_eq!(parent_class_mask("Decal", &["Decal", "Node3D"]), 0b11);
+        assert_eq!(parent_class_mask("NoSuchClass", &["NoSuchClass"]), 0, "an unregistered class has no chain");
     }
 
     /// pat-rzs4o: NavigationAgent2D/3D must be registered for scene load / create dialog.

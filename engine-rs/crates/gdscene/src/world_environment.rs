@@ -99,6 +99,43 @@ fn scene_environment_path(tree: &SceneTree, camera: Option<NodeId>) -> String {
 /// not it was authored. Without the filter every project would name an
 /// environment at `""`.
 fn project_setting_string(key: &str) -> String {
+    // 🔑 Memoized on the file's resolved path, length and mtime: the Play
+    // frame asks for the default environment on EVERY frame, and reading and
+    // parsing project.godot each time was a visible slice of it. A changed or
+    // re-pointed file (another project) misses and is read afresh.
+    type Stamp = (Option<std::path::PathBuf>, Option<(u64, std::time::SystemTime)>);
+    thread_local! {
+        static MEMO: std::cell::RefCell<Vec<(String, Stamp, String)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+    let resolved = gdcore::file_access::resolve_path("res://project.godot").ok();
+    let meta = resolved
+        .as_ref()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| Some((m.len(), m.modified().ok()?)));
+    let stamp: Stamp = (resolved, meta);
+    if stamp.1.is_some() {
+        if let Some(hit) = MEMO.with(|m| {
+            m.borrow()
+                .iter()
+                .find(|(k, s, _)| k == key && *s == stamp)
+                .map(|(_, _, v)| v.clone())
+        }) {
+            return hit;
+        }
+    }
+    let value = project_setting_string_uncached(key);
+    if stamp.1.is_some() {
+        MEMO.with(|m| {
+            let mut m = m.borrow_mut();
+            m.retain(|(k, _, _)| k != key);
+            m.push((key.to_string(), stamp, value.clone()));
+        });
+    }
+    value
+}
+
+fn project_setting_string_uncached(key: &str) -> String {
     let Ok(text) = FileAccess::read_file_string("res://project.godot") else {
         return String::new();
     };
