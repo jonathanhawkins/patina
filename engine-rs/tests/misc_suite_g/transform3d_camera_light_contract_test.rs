@@ -205,8 +205,11 @@ fn looking_at_forward_axis_points_at_target() {
         .translated(Vector3::new(0.0, 0.0, 0.0))
         .looking_at(Vector3::new(0.0, 0.0, 10.0), Vector3::new(0.0, 1.0, 0.0));
 
-    // Forward (Z column of basis) should point toward target
-    let forward = t.basis.z.normalized();
+    // Godot's forward is -Z: `looking_at` turns the node so -basis.z points
+    // at the target (Transform3D docs; `Basis::looking_at`, `v_z = -target`).
+    // This test used to read +Z as forward, the same mirror the engine had
+    // until pat-1unro, which flipped the platformer enemies' heading each tick.
+    let forward = -t.basis.z.normalized();
     let expected = Vector3::new(0.0, 0.0, 1.0);
     assert!(
         approx_vec3(forward, expected),
