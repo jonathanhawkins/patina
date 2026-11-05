@@ -573,16 +573,6 @@ pub struct ScriptOutput {
     pub errors: Vec<String>,
 }
 
-/// The per-frame "just" input sets, set aside while later physics ticks of a
-/// frame run (see [`SceneTree::take_just_input`]).
-#[derive(Debug, Default)]
-pub struct JustInput {
-    keys_pressed: std::collections::HashSet<String>,
-    keys_released: std::collections::HashSet<String>,
-    actions_pressed: std::collections::HashSet<String>,
-    actions_released: std::collections::HashSet<String>,
-}
-
 pub struct SceneTree {
     /// Arena storage: every node in the tree lives here.
     /// FxHash, not std's SipHash: `get_node` is the single hottest lookup
@@ -2829,32 +2819,14 @@ impl SceneTree {
         self.input_snapshot.is_some()
     }
 
+    /// Mutable access to the current input snapshot, if any.
+    pub fn input_snapshot_mut(&mut self) -> Option<&mut crate::scripting::InputSnapshot> {
+        self.input_snapshot.as_mut()
+    }
+
     /// Returns a reference to the current input snapshot, if any.
     pub fn input_snapshot(&self) -> Option<&crate::scripting::InputSnapshot> {
         self.input_snapshot.as_ref()
-    }
-
-    /// Removes the snapshot's "just" pressed/released sets, leaving the held
-    /// state, so later physics ticks of the same frame read them false as in
-    /// Godot (pat-d4ghb). `None` when there is no snapshot.
-    pub fn take_just_input(&mut self) -> Option<JustInput> {
-        let s = self.input_snapshot.as_mut()?;
-        Some(JustInput {
-            keys_pressed: std::mem::take(&mut s.just_pressed_keys),
-            keys_released: std::mem::take(&mut s.just_released_keys),
-            actions_pressed: std::mem::take(&mut s.actions_just_pressed),
-            actions_released: std::mem::take(&mut s.actions_just_released),
-        })
-    }
-
-    /// Puts back what [`take_just_input`](Self::take_just_input) removed.
-    pub fn restore_just_input(&mut self, just: JustInput) {
-        if let Some(s) = self.input_snapshot.as_mut() {
-            s.just_pressed_keys = just.keys_pressed;
-            s.just_released_keys = just.keys_released;
-            s.actions_just_pressed = just.actions_pressed;
-            s.actions_just_released = just.actions_released;
-        }
     }
 
     // -- script-issued Input mutations (pat-0q2kx.24) ------------------------

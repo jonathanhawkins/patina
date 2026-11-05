@@ -1,0 +1,217 @@
+{
+  "_doc": "Godot-parity baselines for node scripts/playtest-gate.mjs --godot. Lower is better. Re-record ONLY as a person or the coordinator: node scripts/playtest-gate.mjs --godot-only --update-godot-baselines",
+  "games": {
+    "dodge_the_creeps": {
+      "scenario_key": "7e09d6176af7888a",
+      "godot_version": "4.6.1.stable.official.14d19694e",
+      "recorded": "2026-11-05",
+      "commit": "371fb43",
+      "traces": {
+        "/root/Main/Player:position": {
+          "compared": 319,
+          "first_divergence": 1,
+          "max_error": 510,
+          "max_error_frame": 170
+        }
+      },
+      "images": {
+        "f18": {
+          "mismatch_pct": 8.781,
+          "mean_delta": 14.361,
+          "coarse_mismatch_pct": 9.63
+        },
+        "f168": {
+          "mismatch_pct": 9.075,
+          "mean_delta": 13.159,
+          "coarse_mismatch_pct": 9.87
+        },
+        "f258": {
+          "mismatch_pct": 12.199,
+          "mean_delta": 15.601,
+          "coarse_mismatch_pct": 12.611
+        },
+        "f318": {
+          "mismatch_pct": 15.519,
+          "mean_delta": 19.672,
+          "coarse_mismatch_pct": 15.444
+        }
+      }
+    },
+    "platformer": {
+      "scenario_key": "eab60a154d4a7143",
+      "godot_version": "4.6.1.stable.official.14d19694e",
+      "recorded": "2026-11-05",
+      "commit": "371fb43",
+      "traces": {
+        "/root/Game/Level/Player:position": {
+          "compared": 301,
+          "first_divergence": 1,
+          "max_error": 276.359,
+          "max_error_frame": 281
+        }
+      },
+      "images": {
+        "f60": {
+          "mismatch_pct": 46.401,
+          "mean_delta": 90.778,
+          "coarse_mismatch_pct": 49.5
+        },
+        "f150": {
+          "mismatch_pct": 57.85,
+          "mean_delta": 116.279,
+          "coarse_mismatch_pct": 61.85
+        },
+        "f168": {
+          "mismatch_pct": 58.987,
+          "mean_delta": 118.389,
+          "coarse_mismatch_pct": 63.367
+        },
+        "f210": {
+          "mismatch_pct": 59.221,
+          "mean_delta": 118.414,
+          "coarse_mismatch_pct": 63.4
+        },
+        "f300": {
+          "mismatch_pct": 57.442,
+          "mean_delta": 112.968,
+          "coarse_mismatch_pct": 59
+        }
+      }
+    },
+    "platformer_3d": {
+      "scenario_key": "f2736ee492903c6f",
+      "godot_version": "4.6.1.stable.official.14d19694e",
+      "recorded": "2026-11-05",
+      "commit": "371fb43",
+      "traces": {
+        "/root/Game/Player:position": {
+          "compared": 349,
+          "first_divergence": 5,
+          "max_error": 8.7046,
+          "max_error_frame": 348
+        }
+      },
+      "images": {
+        "f90": {
+          "mismatch_pct": 17.266,
+          "mean_delta": 32.014,
+          "coarse_mismatch_pct": 11.205
+        },
+        "f180": {
+          "mismatch_pct": 8.396,
+          "mean_delta": 28.762,
+          "coarse_mismatch_pct": 3.549
+        },
+        "f240": {
+          "mismatch_pct": 42.55,
+          "mean_delta": 43.179,
+          "coarse_mismatch_pct": 38.855
+        },
+        "f300": {
+          "mismatch_pct": 48.476,
+          "mean_delta": 46.864,
+          "coarse_mismatch_pct": 46.708
+        },
+        "f318": {
+          "mismatch_pct": 43.428,
+          "mean_delta": 49.78,
+          "coarse_mismatch_pct": 40.604
+        },
+        "f348": {
+          "mismatch_pct": 43.189,
+          "mean_delta": 40.732,
+          "coarse_mismatch_pct": 41.135
+        }
+      }
+    },
+    "pong": {
+      "scenario_key": "8048329905e3a83f",
+      "godot_version": "4.6.1.stable.official.14d19694e",
+      "recorded": "2026-11-05",
+      "commit": "371fb43",
+      "traces": {
+        "/root/Pong/Left:position": {
+          "compared": 229,
+          "first_divergence": null,
+          "max_error": 0,
+          "max_error_frame": 52
+        },
+        "/root/Pong/Right:position": {
+          "compared": 229,
+          "first_divergence": null,
+          "max_error": 0,
+          "max_error_frame": 0
+        },
+        "/root/Pong/Ball:position": {
+          "compared": 229,
+          "first_divergence": 186,
+          "max_error": 1.6905,
+          "max_error_frame": 228
+        }
+      },
+      "images": {
+        "f48": {
+          "mismatch_pct": 0,
+          "mean_delta": 1.409,
+          "coarse_mismatch_pct": 0
+        },
+        "f108": {
+          "mismatch_pct": 0,
+          "mean_delta": 1.409,
+          "coarse_mismatch_pct": 0
+        },
+        "f168": {
+          "mismatch_pct": 0,
+          "mean_delta": 1.409,
+          "coarse_mismatch_pct": 0
+        },
+        "f228": {
+          "mismatch_pct": 0.013,
+          "mean_delta": 1.456,
+          "coarse_mismatch_pct": 0.05
+        }
+      }
+    },
+    "spark_keeper": {
+      "scenario_key": "f86827054863d476",
+      "godot_version": "4.6.1.stable.official.14d19694e",
+      "recorded": "2026-11-05",
+      "commit": "371fb43",
+      "traces": {
+        "/root/Main/Player:position": {
+          "compared": 235,
+          "first_divergence": null,
+          "max_error": 0,
+          "max_error_frame": 179
+        }
+      },
+      "images": {
+        "f48": {
+          "mismatch_pct": 6.412,
+          "mean_delta": 14.387,
+          "coarse_mismatch_pct": 9.583
+        },
+        "f66": {
+          "mismatch_pct": 1.563,
+          "mean_delta": 7.112,
+          "coarse_mismatch_pct": 1.833
+        },
+        "f114": {
+          "mismatch_pct": 1.571,
+          "mean_delta": 8.445,
+          "coarse_mismatch_pct": 1.861
+        },
+        "f174": {
+          "mismatch_pct": 1.76,
+          "mean_delta": 8.613,
+          "coarse_mismatch_pct": 2.056
+        },
+        "f234": {
+          "mismatch_pct": 1.93,
+          "mean_delta": 5.787,
+          "coarse_mismatch_pct": 2.194
+        }
+      }
+    }
+  }
+}

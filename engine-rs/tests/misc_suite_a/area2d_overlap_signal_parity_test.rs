@@ -19,6 +19,16 @@ use gdvariant::Variant;
 
 const DT: f64 = 1.0 / 60.0;
 
+/// One physics step AND the delivery of its signals.
+///
+/// Godot emits a step's overlap signals at the START of the next tick
+/// (`Main::iteration`: `flush_queries()` before `physics_process`), so the
+/// `body_entered` a step detects is observable after the following one.
+fn step(ml: &mut MainLoop) {
+    ml.step(DT);
+    ml.step(DT);
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -76,7 +86,7 @@ fn body_entered_fires_through_mainloop() {
 
     let mut ml = MainLoop::new(tree);
     ml.register_physics_bodies();
-    ml.step(DT);
+    step(&mut ml);
 
     assert_eq!(
         count.load(Ordering::SeqCst),
@@ -119,7 +129,7 @@ fn body_exited_fires_through_mainloop() {
     ml.register_physics_bodies();
 
     // Step 1 — body enters
-    ml.step(DT);
+    step(&mut ml);
     assert_eq!(entered.load(Ordering::SeqCst), 1, "entered after step 1");
     assert_eq!(exited.load(Ordering::SeqCst), 0, "no exit yet");
 
@@ -130,7 +140,7 @@ fn body_exited_fires_through_mainloop() {
         .set_property("position", Variant::Vector2(Vector2::new(500.0, 0.0)));
 
     // Step 2 — body exits
-    ml.step(DT);
+    step(&mut ml);
     assert_eq!(
         exited.load(Ordering::SeqCst),
         1,
@@ -162,7 +172,7 @@ fn no_duplicate_signals_while_inside() {
 
     // Run 10 frames with body staying inside
     for _ in 0..10 {
-        ml.step(DT);
+        step(&mut ml);
     }
 
     assert_eq!(
@@ -206,7 +216,7 @@ fn reentry_fires_body_entered_again() {
     ml.register_physics_bodies();
 
     // Step 1 — enter
-    ml.step(DT);
+    step(&mut ml);
     assert_eq!(entered.load(Ordering::SeqCst), 1);
 
     // Move out
@@ -214,7 +224,7 @@ fn reentry_fires_body_entered_again() {
         .get_node_mut(body_id)
         .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(500.0, 0.0)));
-    ml.step(DT);
+    step(&mut ml);
     assert_eq!(exited.load(Ordering::SeqCst), 1);
 
     // Move back in
@@ -222,7 +232,7 @@ fn reentry_fires_body_entered_again() {
         .get_node_mut(body_id)
         .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(5.0, 0.0)));
-    ml.step(DT);
+    step(&mut ml);
     assert_eq!(
         entered.load(Ordering::SeqCst),
         2,
@@ -253,7 +263,7 @@ fn signal_carries_body_object_id() {
 
     let mut ml = MainLoop::new(tree);
     ml.register_physics_bodies();
-    ml.step(DT);
+    step(&mut ml);
 
     let args = received.lock().unwrap();
     assert_eq!(args.len(), 1, "body_entered should pass one argument");
@@ -291,7 +301,7 @@ fn monitoring_false_suppresses_signals() {
 
     let mut ml = MainLoop::new(tree);
     ml.register_physics_bodies();
-    ml.step(DT);
+    step(&mut ml);
 
     assert_eq!(
         count.load(Ordering::SeqCst),
@@ -340,7 +350,7 @@ fn layer_mask_mismatch_suppresses_signals() {
 
     let mut ml = MainLoop::new(tree);
     ml.register_physics_bodies();
-    ml.step(DT);
+    step(&mut ml);
 
     assert_eq!(
         count.load(Ordering::SeqCst),
@@ -392,7 +402,7 @@ fn multiple_bodies_trigger_separate_signals() {
 
     let mut ml = MainLoop::new(tree);
     ml.register_physics_bodies();
-    ml.step(DT);
+    step(&mut ml);
 
     assert_eq!(
         count.load(Ordering::SeqCst),
@@ -438,14 +448,14 @@ fn body_moving_in_via_velocity() {
     ml.register_physics_bodies();
 
     // No signal on first step (body still far away)
-    ml.step(DT);
+    step(&mut ml);
     let first_frame_entered = entered.load(Ordering::SeqCst);
 
     // Run enough frames for the body to reach the area (100 px / (200 px/s) = 0.5s = 30 frames)
     // but the shapes overlap earlier due to radii (5 + 20 = 25 px margin)
     // so (100 - 25) / 200 = 0.375s = ~23 frames.  Run 60 frames to be safe.
     for _ in 1..60 {
-        ml.step(DT);
+        step(&mut ml);
     }
 
     let total_entered = entered.load(Ordering::SeqCst);
@@ -507,7 +517,7 @@ fn body_enters_multiple_areas() {
 
     let mut ml = MainLoop::new(tree);
     ml.register_physics_bodies();
-    ml.step(DT);
+    step(&mut ml);
 
     for (i, count) in counts.iter().enumerate() {
         assert_eq!(
@@ -579,7 +589,7 @@ fn simultaneous_enter_and_exit() {
     ml.register_physics_bodies();
 
     // Step 1 — body A enters
-    ml.step(DT);
+    step(&mut ml);
     assert_eq!(entered.load(Ordering::SeqCst), 1, "A enters");
     assert_eq!(exited.load(Ordering::SeqCst), 0);
 
@@ -593,7 +603,7 @@ fn simultaneous_enter_and_exit() {
         .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(5.0, 0.0)));
 
-    ml.step(DT);
+    step(&mut ml);
     assert_eq!(
         entered.load(Ordering::SeqCst),
         2,
@@ -640,7 +650,7 @@ fn area_moves_away_triggers_exit() {
     ml.register_physics_bodies();
 
     // Step 1 — body is inside the area
-    ml.step(DT);
+    step(&mut ml);
     assert_eq!(entered.load(Ordering::SeqCst), 1);
 
     // Move the area far away
@@ -649,7 +659,7 @@ fn area_moves_away_triggers_exit() {
         .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(500.0, 0.0)));
 
-    ml.step(DT);
+    step(&mut ml);
     assert_eq!(
         exited.load(Ordering::SeqCst),
         1,
@@ -681,7 +691,7 @@ fn monitoring_toggled_at_runtime() {
     ml.register_physics_bodies();
 
     // Step 1 — body is outside
-    ml.step(DT);
+    step(&mut ml);
     assert_eq!(entered.load(Ordering::SeqCst), 0);
 
     // Disable monitoring, then move body inside
@@ -694,7 +704,7 @@ fn monitoring_toggled_at_runtime() {
         .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(5.0, 0.0)));
 
-    ml.step(DT);
+    step(&mut ml);
     assert_eq!(
         entered.load(Ordering::SeqCst),
         0,
@@ -707,7 +717,7 @@ fn monitoring_toggled_at_runtime() {
         .unwrap()
         .set_property("monitoring", Variant::Bool(true));
 
-    ml.step(DT);
+    step(&mut ml);
     assert_eq!(
         entered.load(Ordering::SeqCst),
         1,
@@ -740,13 +750,13 @@ fn exit_signal_carries_body_object_id() {
     ml.register_physics_bodies();
 
     // Enter
-    ml.step(DT);
+    step(&mut ml);
     // Exit
     ml.tree_mut()
         .get_node_mut(body_id)
         .unwrap()
         .set_property("position", Variant::Vector2(Vector2::new(500.0, 0.0)));
-    ml.step(DT);
+    step(&mut ml);
 
     let args = exit_args.lock().unwrap();
     assert_eq!(args.len(), 1, "body_exited should pass one argument");

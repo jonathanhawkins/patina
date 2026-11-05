@@ -3665,6 +3665,17 @@ impl MainLoop {
         // second "and also register the defaults" call to forget.
         self.project_input_map = Some(map.clone());
         self.input_state.set_input_map(map);
+        // 🔑 Publish the binding mirror NOW, not at the end of the next step.
+        // The input phase (`push_input` -> `dispatch_shortcuts`) runs BEFORE
+        // the end-of-step refresh, so on the first frame an `InputEventAction`
+        // shortcut saw no bindings at all: Dodge the Creeps' Start button
+        // (shortcut = action `start_game`, bound to Enter) ignored an Enter
+        // pressed on frame 1, and the player stayed hidden at (0, 0) where
+        // Godot starts it at (240, 450).
+        self.tree
+            .set_input_map_mirror(self.input_state.input_map_action_event_counts());
+        self.tree
+            .set_input_map_binding_mirror(self.input_state.input_map_action_bindings());
     }
 
     /// Applies the `Input` mutations scripts queued this frame to the engine
@@ -4115,14 +4126,33 @@ impl MainLoop {
         let simulate = !paused;
         self.physics_accumulator += delta_secs;
         let mut physics_steps = 0u32;
-        let mut stashed_just_input: Option<crate::scene_tree::JustInput> = None;
         // `Engine.is_in_physics_frame()` is true for the whole fixed-step
         // section, so a script called from `_physics_process` can tell which
         // callback it is running in (pat-0q2kx.121).
         gdscript_interop::set_engine_in_physics_frame(true);
+        let mut physics_just_state: Option<crate::scripting::JustState> = None;
         while self.physics_accumulator >= physics_dt
             && physics_steps < self.max_physics_steps_per_frame
         {
+            // -- flush_queries --
+            // 🔑 Godot emits the overlap and contact signals of a physics
+            // step at the START of the next tick: `Main::iteration` runs
+            // `physics_server_2d->sync(); physics_server_2d->flush_queries();`
+            // and only then `physics_process` and `step`. Emitting them right
+            // after the step, as Patina did, ran every `area_entered` /
+            // `body_entered` handler one tick EARLY: Pong's ball, which moves in
+            // `_process`, was reset on frame 186 where Godot resets it on 187.
+            if simulate {
+                // body_entered / body_exited on Area2D nodes.
+                self.physics_server.process_overlap_signals(&mut self.tree);
+                // area_entered / area_exited between Area2D nodes (pat-u3l8c.51).
+                self.physics_server
+                    .process_area_overlap_signals(&mut self.tree);
+                // body_entered / body_exited on contact-monitoring RigidBody2D
+                // nodes (contact_monitor + max_contacts_reported).
+                self.physics_server
+                    .process_body_contact_signals(&mut self.tree);
+            }
             // -- registration pass (pat-0q2kx.201) --
             // The 2D solver phase now runs at the END of the tick, after the
             // script phase, so `sync_to_physics` — which is what adds a newly
@@ -4138,11 +4168,8 @@ impl MainLoop {
             if simulate {
                 self.physics_server.sync_registrations(&self.tree);
 
-                // 3D physics: sync -> step -> sync (pat-u3l8c.1).
-                // `_integrate_forces` runs before the sync for the same reason the
-                // 2D pass does: the sync is what carries a rigid body's velocity
-                // into the solver, so a script's write has to be on the node by
-                // then (pat-s3rrv.94).
+                // 3D physics: sync -> step -> sync -> _integrate_forces
+                // (pat-u3l8c.1, reordered by pat-d4ghb — see below).
                 // Servers bound for the callback (pat-1unro): `get_gravity()`
                 // inside `_integrate_forces` reads the 3D server, and unbound it
                 // fell back to the built-in 9.8 — so the platformer's enemies
@@ -4296,6 +4323,13 @@ impl MainLoop {
             self.tree
                 .set_script_audio_server(self.audio_bridge.server_mut());
             self.tree.process_physics_frame_with_scripts(physics_dt);
+            // Physics `just_pressed` lasts one tick (see `take_just_state`):
+            // the frame's later ticks see only the held state.
+            if physics_steps == 0 {
+                if let Some(snap) = self.tree.input_snapshot_mut() {
+                    physics_just_state = Some(snap.take_just_state());
+                }
+            }
             self.tree.clear_script_audio_server();
             self.tree.clear_script_physics_server();
             self.tree.clear_script_physics_server_3d();
@@ -4345,18 +4379,9 @@ impl MainLoop {
                 self.physics_server.step_physics(physics_dt as f32);
                 self.physics_server.sync_from_physics(&mut self.tree);
 
-                // Emit body_entered / body_exited signals on Area2D nodes.
-                self.physics_server.process_overlap_signals(&mut self.tree);
-
-                // Emit area_entered / area_exited signals between overlapping Area2D
-                // nodes (pat-u3l8c.51).
-                self.physics_server
-                    .process_area_overlap_signals(&mut self.tree);
-
-                // Emit body_entered / body_exited signals on contact-monitoring
-                // RigidBody2D nodes (contact_monitor + max_contacts_reported).
-                self.physics_server
-                    .process_body_contact_signals(&mut self.tree);
+                // ⚠️ The overlap / contact SIGNALS of this step are emitted at
+                // the START of the next tick (see `flush_queries` above), not
+                // here.
 
                 // Publish this step's contacts for `_integrate_forces(state)` to
                 // report (pat-s3rrv.94).
@@ -4429,18 +4454,6 @@ impl MainLoop {
             self.physics_accumulator -= physics_dt;
             self.physics_time += physics_dt;
             physics_steps += 1;
-            // Godot answers `is_action_just_pressed/released` in a physics
-            // callback for ONE physics tick, the first after the event
-            // (`Input::is_action_just_released` compares the action's
-            // `released_physics_frame` with the current physics frame). With
-            // several ticks per frame (the 3D platformer runs 2) every later
-            // tick of this frame must read them false; they are handed back
-            // after the loop for `_process`, whose answer is per process frame
-            // (pat-d4ghb: `vertical_velocity *= 0.7` on jump release ran twice,
-            // so the jump was cut to 0.49).
-            if physics_steps == 1 {
-                stashed_just_input = self.tree.take_just_input();
-            }
             self.physics_tick_counter += 1;
             // Publish inside the loop so a script running in `_physics_process`
             // reads the tick it is currently in, not last frame's count.
@@ -4451,8 +4464,10 @@ impl MainLoop {
             );
         }
         gdscript_interop::set_engine_in_physics_frame(false);
-        if let Some(just) = stashed_just_input.take() {
-            self.tree.restore_just_input(just);
+        if let Some(just) = physics_just_state.take() {
+            if let Some(snap) = self.tree.input_snapshot_mut() {
+                snap.restore_just_state(just);
+            }
         }
 
         // -- interpolation publish (pat-0q2kx.219) --
@@ -7704,6 +7719,9 @@ mod tests {
 
         let mut ml = MainLoop::new(tree);
         ml.register_physics_bodies();
+        // Two ticks: Godot emits a step's overlap signals at the start of the
+        // NEXT tick (`flush_queries` before `physics_process`).
+        ml.step(1.0 / 60.0);
         ml.step(1.0 / 60.0);
 
         assert_eq!(

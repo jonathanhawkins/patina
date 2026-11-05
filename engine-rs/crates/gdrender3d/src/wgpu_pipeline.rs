@@ -221,7 +221,17 @@ struct LightData {
     // is still 160 bytes and every offset below the matrix is untouched.
     directional_shadow_max_distance: f32,
     directional_shadow_fade_start: f32,
-    _specular_pad2: f32,
+    // This light's map size over the shadow atlas layer size: maps of different
+    // sizes share one array texture, each in its layer's top-left corner
+    // (pat-772py). The last of `specular`'s pads.
+    shadow_uv_scale: f32,
+    // pat-772py: Godot's directional filter, a NEW 16-byte row (160 -> 176).
+    // `shadow_pcf_radius < 0` keeps the legacy single nearest compare (spot
+    // maps and an unfitted directional one).
+    shadow_depth_bias: f32,
+    shadow_texel_world: f32,
+    shadow_pcf_radius: f32,
+    shadow_pcf_taps: u32,
 };
 
 struct LightArray {
@@ -519,10 +529,95 @@ fn omni_shadow_factor(light: LightData, world_pos: vec3<f32>, normal: vec3<f32>)
     return 1.0;
 }
 
-fn directional_shadow_factor(light: LightData, world_pos: vec3<f32>, normal: vec3<f32>) -> f32 {
+// Godot's `quick_hash` (`scene_forward_lights_inc.glsl`): the per-pixel
+// rotation of the PCF disk, so the tap pattern becomes fine noise instead of
+// banding.
+fn shadow_quick_hash(pos: vec2<f32>) -> f32 {
+    let magic = vec3<f32>(0.06711056, 0.00583715, 52.9829189);
+    return fract(magic.z * fract(dot(pos, magic.xy)));
+}
+
+// One bilinear depth-compare tap at `p`, in texels of this light's map: the
+// `sampler2DShadow` + linear filter Godot samples with, done by hand on the
+// R32Float atlas. Returns the LIT fraction. Texels outside the map are lit.
+fn shadow_tap_bilinear(layer: i32, p: vec2<f32>, size: f32, depth: f32) -> f32 {
+    let q = p - vec2<f32>(0.5);
+    let base = floor(q);
+    let f = q - base;
+    let b = vec2<i32>(base);
+    var lit: array<f32, 4>;
+    for (var k = 0; k < 4; k = k + 1) {
+        let t = b + vec2<i32>(k & 1, k >> 1u);
+        var v = 1.0;
+        if (t.x >= 0 && t.y >= 0 && f32(t.x) < size && f32(t.y) < size) {
+            let stored = textureLoad(shadow_depth, t, layer, 0).r;
+            if (stored < SHADOW_EMPTY && depth > stored) {
+                v = 0.0;
+            }
+        }
+        lit[k] = v;
+    }
+    return mix(mix(lit[0], lit[1], f.x), mix(lit[2], lit[3], f.x), f.y);
+}
+
+// pat-772py: a camera-fitted directional map is sampled the way Godot's
+// forward renderer samples it (`scene_forward_clustered.glsl:2285-2430`):
+//
+// - `BIAS_FUNC`'s normal offset: the GEOMETRY normal times
+//   `1 - max(0, dot(L, -n))`, times `shadow_normal_bias * texel`, with its
+//   component along the light ray removed;
+// - the constant bias, already folded to this map's normalized depth on the CPU;
+// - `sample_directional_pcf_shadow`: `taps` bilinear compares on a Vogel disk
+//   rotated per pixel by `quick_hash(gl_FragCoord)`, or ONE bilinear compare at
+//   the HARD level.
+fn fitted_directional_shadow(light: LightData, world_pos: vec3<f32>, geo_normal: vec3<f32>, frag_xy: vec2<f32>) -> f32 {
+    let l = light.direction;
+    var nb = geo_normal * (1.0 - max(0.0, dot(l, -geo_normal)))
+        * light.shadow_normal_bias * light.shadow_texel_world;
+    nb = nb - l * dot(l, nb);
+    let clip = light.shadow_view_proj * vec4<f32>(world_pos + nb, 1.0);
+    if (clip.w <= 0.0) {
+        return 1.0;
+    }
+    let ndc = clip.xyz / clip.w;
+    let u = (ndc.x + 1.0) * 0.5;
+    let v = (1.0 - ndc.y) * 0.5;
+    if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) {
+        return 1.0; // Outside shadow map = lit.
+    }
+    let size = f32(textureDimensions(shadow_depth).x) * light.shadow_uv_scale;
+    let p = vec2<f32>(u, v) * size;
+    let depth = ndc.z - light.shadow_depth_bias;
+    let layer = light.shadow_map_index;
+    var lit = 0.0;
+    if (light.shadow_pcf_taps == 0u) {
+        lit = shadow_tap_bilinear(layer, p, size, depth);
+    } else {
+        let r = shadow_quick_hash(frag_xy) * 6.28318530718;
+        let sr = sin(r);
+        let cr = cos(r);
+        let n = f32(light.shadow_pcf_taps);
+        for (var i = 0u; i < light.shadow_pcf_taps; i = i + 1u) {
+            // Godot's `get_vogel_disk`: r = sqrt(i + 0.5) / sqrt(n), theta = 2.4 i.
+            let kr = sqrt(f32(i) + 0.5) / sqrt(n);
+            let kt = f32(i) * 2.4;
+            let k = vec2<f32>(cos(kt) * kr, sin(kt) * kr);
+            // GLSL `mat2(vec2(cr, -sr), vec2(sr, cr)) * k`.
+            let rk = vec2<f32>(cr * k.x + sr * k.y, -sr * k.x + cr * k.y);
+            lit = lit + shadow_tap_bilinear(layer, p + rk * light.shadow_pcf_radius, size, depth);
+        }
+        lit = lit / n;
+    }
+    return 1.0 - (1.0 - lit) * clamp(light.shadow_opacity, 0.0, 1.0);
+}
+
+fn directional_shadow_factor(light: LightData, world_pos: vec3<f32>, normal: vec3<f32>, geo_normal: vec3<f32>, frag_xy: vec2<f32>) -> f32 {
     // kind 0 = directional, 2 = spot (both use the 2D depth map).
     if (light.shadow_enabled == 0u || (light.kind != 0u && light.kind != 2u) || light.shadow_map_index < 0) {
         return 1.0;
+    }
+    if (light.kind == 0u && light.shadow_pcf_radius >= 0.0) {
+        return fitted_directional_shadow(light, world_pos, geo_normal, frag_xy);
     }
     let biased = world_pos + shadow_normal_offset(light, world_pos, normal);
     let clip = light.shadow_view_proj * vec4<f32>(biased, 1.0);
@@ -541,10 +636,12 @@ fn directional_shadow_factor(light: LightData, world_pos: vec3<f32>, normal: vec
         return 1.0; // Outside shadow map = lit.
     }
 
-    let dims = textureDimensions(shadow_depth);
-    let tx = i32(u * f32(dims.x));
-    let ty = i32(v * f32(dims.y));
-    if (tx < 0 || ty < 0 || tx >= i32(dims.x) || ty >= i32(dims.y)) {
+    // `shadow_uv_scale`: this map fills only the top-left of its atlas layer
+    // when a larger map shares the array (pat-772py).
+    let dims = vec2<f32>(textureDimensions(shadow_depth)) * light.shadow_uv_scale;
+    let tx = i32(u * dims.x);
+    let ty = i32(v * dims.y);
+    if (tx < 0 || ty < 0 || f32(tx) >= dims.x || f32(ty) >= dims.y) {
         return 1.0;
     }
     let layer = light.shadow_map_index;
@@ -741,7 +838,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let n_dot_l = max(dot(normal, light_dir), 0.0);
         // Each factor is 1.0 for light kinds it doesn't handle, so the
         // product applies whichever map (2D or cubemap) this light carries.
-        let raw_shadow = directional_shadow_factor(light, in.world_position, normal)
+        let raw_shadow = directional_shadow_factor(light, in.world_position, normal, geo_normal, in.clip_position.xy)
             * omni_shadow_factor(light, in.world_position, normal);
         let shadow = directional_shadow_fade(light, in.world_position, raw_shadow);
         let contrib = n_dot_l * intensity * shadow;
@@ -1346,10 +1443,21 @@ pub struct GpuLightData {
     /// 0.999 clamp is applied in the shader, matching the software path and
     /// Godot itself — the authored value must round-trip.
     pub directional_shadow_fade_start: f32,
-    /// The last of the three pads. ⚠️ Still must be a bare `f32`: see the note
-    /// on `specular` above for why a `vec3`/array pad breaks the two layouts
-    /// apart.
-    pub _specular_pad2: f32,
+    /// This light's shadow map size over the atlas layer size (pat-772py):
+    /// maps of different sizes share one array texture, each in the top-left
+    /// of its layer. Was the last of `specular`'s three pads.
+    pub shadow_uv_scale: f32,
+    /// pat-772py: a NEW 16-byte row (160 -> 176 bytes). The constant bias in
+    /// this map's normalized depth (Godot's formula, see
+    /// `shadow_map::ShadowFilter`).
+    pub shadow_depth_bias: f32,
+    /// World size of one texel of this light's map.
+    pub shadow_texel_world: f32,
+    /// PCF radius in texels of this light's map; NEGATIVE selects the legacy
+    /// single nearest compare.
+    pub shadow_pcf_radius: f32,
+    /// Vogel-disk taps (0 = one bilinear tap).
+    pub shadow_pcf_taps: u32,
 }
 
 /// Light array uniform (bind group 2). Fixed-size array of 16 lights.
@@ -1927,6 +2035,7 @@ fn upload_custom_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     img: &gdserver3d::material::TextureImage,
+    source_color: bool,
 ) -> wgpu::Texture {
     let (w, h) = (img.width.max(1), img.height.max(1));
     let mut bytes = Vec::with_capacity((w * h * 4) as usize);
@@ -1953,7 +2062,10 @@ fn upload_custom_texture(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
+        // pat-3u1wu: a `source_color` sampler is sRGB-DECODED on sampling in
+        // Godot (`texture_srgb`), so its texels must reach `texture()` linear;
+        // every other sampler returns the texel as stored.
+        format: custom_texture_format(source_color),
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
@@ -1977,6 +2089,17 @@ fn upload_custom_texture(
         },
     );
     texture
+}
+
+/// The texture format a custom shader's `sampler2D` is uploaded in
+/// (pat-3u1wu): sRGB for a `source_color` sampler, so the hardware decodes it
+/// the way Godot binds such a texture, raw otherwise.
+pub fn custom_texture_format(source_color: bool) -> wgpu::TextureFormat {
+    if source_color {
+        wgpu::TextureFormat::Rgba8UnormSrgb
+    } else {
+        wgpu::TextureFormat::Rgba8Unorm
+    }
 }
 
 /// Uploads a [`TextureImage`] as an RGBA8 texture for `BaseMaterial3D`
@@ -2023,6 +2146,11 @@ fn upload_material_texture(
             }
         }
     }
+    // pat-3u1wu: a full mip chain, as Godot's importer generates for a texture
+    // used in 3D (`mipmaps/generate=true`). The `*_WITH_MIPMAPS` filters read
+    // it; the plain NEAREST/LINEAR samplers clamp to level 0, so a material
+    // that asks for no mipmaps still sees exactly the base image.
+    let levels = material_mip_chain(w, h, bytes);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("material-texture"),
         size: wgpu::Extent3d {
@@ -2030,33 +2158,69 @@ fn upload_material_texture(
             height: h,
             depth_or_array_layers: 1,
         },
-        mip_level_count: 1,
+        mip_level_count: levels.len() as u32,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        &bytes,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(w * 4),
-            rows_per_image: Some(h),
-        },
-        wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-    );
+    for (level, (lw, lh, data)) in levels.iter().enumerate() {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: level as u32,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(lw * 4),
+                rows_per_image: Some(*lh),
+            },
+            wgpu::Extent3d {
+                width: *lw,
+                height: *lh,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
     texture
+}
+
+/// The mip chain of a tightly packed RGBA8 image, level 0 first, down to 1x1
+/// (pat-3u1wu). Each level is a 2x2 box filter of the one above, the filter
+/// Godot's `Image::generate_mipmaps` uses for 8-bit formats; an odd edge
+/// repeats its last texel.
+pub fn material_mip_chain(w: u32, h: u32, base: Vec<u8>) -> Vec<(u32, u32, Vec<u8>)> {
+    let mut levels = vec![(w, h, base)];
+    loop {
+        let (pw, ph, prev) = levels.last().expect("level 0 pushed");
+        let (pw, ph) = (*pw, *ph);
+        if pw == 1 && ph == 1 {
+            break;
+        }
+        let (nw, nh) = ((pw / 2).max(1), (ph / 2).max(1));
+        let mut next = Vec::with_capacity((nw * nh * 4) as usize);
+        for y in 0..nh {
+            for x in 0..nw {
+                let xs = [(2 * x).min(pw - 1), (2 * x + 1).min(pw - 1)];
+                let ys = [(2 * y).min(ph - 1), (2 * y + 1).min(ph - 1)];
+                for ch in 0..4 {
+                    let mut sum = 0u32;
+                    for &sy in &ys {
+                        for &sx in &xs {
+                            sum += prev[((sy * pw + sx) * 4 + ch) as usize] as u32;
+                        }
+                    }
+                    next.push(((sum + 2) / 4) as u8);
+                }
+            }
+        }
+        levels.push((nw, nh, next));
+    }
+    levels
 }
 
 /// Texture format for `BaseMaterial3D` **colour** maps (albedo, and emission
@@ -2177,16 +2341,111 @@ fn material_slot_views(
 /// default is repeat, and `TextureImage::sample_bilinear` wraps
 /// (`wrap_index`), so clamping here would disagree with the software path for
 /// any UV outside 0..1.
-fn material_sampler(device: &wgpu::Device) -> wgpu::Sampler {
-    device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("material-texture-sampler"),
-        address_mode_u: wgpu::AddressMode::Repeat,
-        address_mode_v: wgpu::AddressMode::Repeat,
-        address_mode_w: wgpu::AddressMode::Repeat,
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        ..Default::default()
+fn material_sampler(device: &wgpu::Device, key: MaterialSamplerKey) -> wgpu::Sampler {
+    let desc = material_sampler_descriptor(key);
+    device.create_sampler(&desc)
+}
+
+/// Which `BaseMaterial3D` sampler a draw needs (pat-3u1wu): the filter and
+/// repeat flags of its material, the only two inputs Godot's sampler choice
+/// for a material map depends on (`material_storage.cpp`,
+/// `sampler_rd_configure_custom`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct MaterialSamplerKey {
+    /// The material's `texture_filter`.
+    pub filter: gdserver3d::material::TextureFilter,
+    /// The material's `texture_repeat`; `false` clamps to the edge.
+    pub clamp: bool,
+}
+
+impl MaterialSamplerKey {
+    /// The key for `material`'s maps.
+    pub fn of(material: &Material3D) -> Self {
+        Self {
+            filter: material.texture_filter,
+            clamp: !material.texture_repeat,
+        }
+    }
+
+    /// A dense index for the renderer's sampler cache.
+    fn index(self) -> usize {
+        let f = match self.filter {
+            gdserver3d::material::TextureFilter::Nearest => 0,
+            gdserver3d::material::TextureFilter::Linear => 1,
+            gdserver3d::material::TextureFilter::NearestWithMipmaps => 2,
+            gdserver3d::material::TextureFilter::LinearWithMipmaps => 3,
+            gdserver3d::material::TextureFilter::NearestWithMipmapsAnisotropic => 4,
+            gdserver3d::material::TextureFilter::LinearWithMipmapsAnisotropic => 5,
+        };
+        f * 2 + usize::from(self.clamp)
+    }
+}
+
+/// Number of distinct [`MaterialSamplerKey`]s.
+const MATERIAL_SAMPLER_KINDS: usize = 12;
+
+/// Every [`MaterialSamplerKey`], in [`MaterialSamplerKey::index`] order.
+fn material_sampler_keys() -> impl Iterator<Item = MaterialSamplerKey> {
+    use gdserver3d::material::TextureFilter as F;
+    let keys: Vec<MaterialSamplerKey> = [
+        F::Nearest,
+        F::Linear,
+        F::NearestWithMipmaps,
+        F::LinearWithMipmaps,
+        F::NearestWithMipmapsAnisotropic,
+        F::LinearWithMipmapsAnisotropic,
+    ]
+    .into_iter()
+    .flat_map(|filter| {
+        [false, true]
+            .into_iter()
+            .map(move |clamp| MaterialSamplerKey { filter, clamp })
     })
+    .collect();
+    debug_assert_eq!(keys.len(), MATERIAL_SAMPLER_KINDS);
+    debug_assert!(keys.iter().enumerate().all(|(i, k)| k.index() == i));
+    keys.into_iter()
+}
+
+/// The sampler descriptor Godot's renderer configures for `key`
+/// (pat-3u1wu), transcribed from `material_storage.cpp:2460-2510`:
+///
+/// * the NEAREST family is nearest for BOTH mag and min — not just
+///   magnification — with a LINEAR mip filter (`use_nearest_mipmap_filter`
+///   defaults to false);
+/// * the non-mipmap modes read the base level only (`lod_max_clamp = 0`);
+/// * `texture_repeat = false` is CLAMP, not mirror.
+///
+/// Anisotropy is not configured: wgpu only allows it when all three filters
+/// are linear, and it changes pixels only at grazing angles.
+pub fn material_sampler_descriptor(key: MaterialSamplerKey) -> wgpu::SamplerDescriptor<'static> {
+    let filter = if key.filter.is_nearest() {
+        wgpu::FilterMode::Nearest
+    } else {
+        wgpu::FilterMode::Linear
+    };
+    let address = if key.clamp {
+        wgpu::AddressMode::ClampToEdge
+    } else {
+        wgpu::AddressMode::Repeat
+    };
+    let mips = key.filter.uses_mipmaps();
+    wgpu::SamplerDescriptor {
+        label: Some("material-texture-sampler"),
+        address_mode_u: address,
+        address_mode_v: address,
+        address_mode_w: address,
+        mag_filter: filter,
+        min_filter: filter,
+        mipmap_filter: if mips {
+            wgpu::MipmapFilterMode::Linear
+        } else {
+            wgpu::MipmapFilterMode::Nearest
+        },
+        lod_min_clamp: 0.0,
+        lod_max_clamp: if mips { 32.0 } else { 0.0 },
+        ..Default::default()
+    }
 }
 
 /// How many `sampler2D` uniforms a custom spatial shader can bind
@@ -2539,7 +2798,11 @@ fn empty_gpu_light() -> GpuLightData {
         // keep it consistent with the light that later fills the slot.
         directional_shadow_max_distance: 100.0,
         directional_shadow_fade_start: 0.8,
-        _specular_pad2: 0.0,
+        shadow_uv_scale: 1.0,
+        shadow_depth_bias: 0.0,
+        shadow_texel_world: 0.0,
+        shadow_pcf_radius: -1.0,
+        shadow_pcf_taps: 0,
     }
 }
 
@@ -2622,7 +2885,11 @@ fn light_to_gpu(light: &Light3D, camera: Vector3) -> GpuLightData {
         specular: light.specular,
         directional_shadow_max_distance: light.directional_shadow_max_distance,
         directional_shadow_fade_start: light.directional_shadow_fade_start,
-        _specular_pad2: 0.0,
+        shadow_uv_scale: 1.0,
+        shadow_depth_bias: 0.0,
+        shadow_texel_world: 0.0,
+        shadow_pcf_radius: -1.0,
+        shadow_pcf_taps: 0,
     }
 }
 
@@ -2638,6 +2905,9 @@ fn pack_lights_from_maps(
     let mut light_data = LightArrayData {
         lights: [empty_gpu_light(); gdserver3d::light::MAX_SCENE_LIGHTS],
     };
+    // Every map sits in the top-left of an atlas layer this big (see
+    // `upload_shadow_depth_array`).
+    let atlas_size = maps.iter().map(|m| m.size).max().unwrap_or(1).max(1);
     for (i, light) in lights
         .iter()
         .enumerate()
@@ -2655,6 +2925,13 @@ fn pack_lights_from_maps(
             {
                 gpu.shadow_view_proj = mul_mat4(&sm.proj_matrix, &sm.view_matrix);
                 gpu.shadow_map_index = layer as i32;
+                gpu.shadow_uv_scale = sm.size as f32 / atlas_size as f32;
+                if let Some(f) = sm.filter {
+                    gpu.shadow_depth_bias = f.depth_bias;
+                    gpu.shadow_texel_world = f.texel_world;
+                    gpu.shadow_pcf_radius = f.radius_texels.max(0.0);
+                    gpu.shadow_pcf_taps = f.taps;
+                }
             }
         }
         // Point lights index into the omni face array instead: base layer =
@@ -2754,6 +3031,18 @@ fn shadow_light_signature(lights: &[Light3D]) -> (u64, bool) {
         ] {
             h.write_u32(f.to_bits());
         }
+        // A camera-fitted directional map moves with the camera (pat-772py):
+        // its frame is part of what the map depends on. Snapped, so this only
+        // changes every few world units of camera travel.
+        if casts && l.light_type == LightType::Directional && l.shadow_camera.is_some() {
+            let frame = crate::shadow_map::directional_shadow_frame(l);
+            h.write_u32(frame.size);
+            for col in frame.view.iter().chain(frame.proj.iter()) {
+                for v in col {
+                    h.write_u32(v.to_bits());
+                }
+            }
+        }
     }
     (h.finish(), any_shadow)
 }
@@ -2815,20 +3104,28 @@ fn upload_shadow_depth_array(
         bytes.extend_from_slice(&f32::MAX.to_le_bytes());
         (1, 1, 1, bytes)
     } else {
-        let (dw, dh) = maps[0].depth.dimensions();
-        let mut bytes = Vec::with_capacity(maps.len() * (dw * dh) as usize * 4);
-        for sm in maps {
-            // Every layer must match the array texture's dimensions — a
-            // mismatched map would silently shear all following layers.
-            debug_assert_eq!(
-                sm.depth.dimensions(),
-                (dw, dh),
-                "shadow maps in one atlas must share dimensions"
-            );
-            for &d in sm.depth.as_slice() {
-                bytes.extend_from_slice(&d.to_le_bytes());
+        // Maps of different sizes share the array (pat-772py: a camera-fitted
+        // directional map is larger than a spot map). Each goes in the
+        // top-left of a layer as big as the largest, the rest of the layer is
+        // the empty sentinel, and `shadow_uv_scale` tells the shader how much
+        // of the layer is its map.
+        let dw = maps.iter().map(|m| m.depth.dimensions().0).max().unwrap_or(1);
+        let dh = maps.iter().map(|m| m.depth.dimensions().1).max().unwrap_or(1);
+        // Row copies, not per-texel pushes: a fitted map is 2048² texels and
+        // this runs whenever a caster moves.
+        let (dwu, dhu) = (dw as usize, dh as usize);
+        let mut texels = vec![f32::MAX; maps.len() * dwu * dhu];
+        for (layer, sm) in maps.iter().enumerate() {
+            let (mw, mh) = sm.depth.dimensions();
+            let (mw, mh) = (mw as usize, mh as usize);
+            let src = sm.depth.as_slice();
+            let base = layer * dwu * dhu;
+            for y in 0..mh {
+                texels[base + y * dwu..base + y * dwu + mw]
+                    .copy_from_slice(&src[y * mw..(y + 1) * mw]);
             }
         }
+        let bytes: Vec<u8> = bytemuck::cast_slice(&texels).to_vec();
         (dw, dh, maps.len() as u32, bytes)
     };
 
@@ -3394,6 +3691,9 @@ struct GpuDrawEntry<'a> {
     metallic_texture: Option<std::sync::Arc<gdserver3d::material::TextureImage>>,
     /// See [`Self::roughness_texture`].
     emission_texture: Option<std::sync::Arc<gdserver3d::material::TextureImage>>,
+    /// The material's `texture_filter` / `texture_repeat` (pat-3u1wu): which
+    /// sampler this draw's maps are read with.
+    sampler: MaterialSamplerKey,
 }
 
 /// Resolves an albedo colour for a shader material, matching the software path's
@@ -3496,6 +3796,7 @@ fn instance_draw_entries<'a>(inst: &'a Instance3D, surfaces: &'a [Mesh3D]) -> Ve
                     roughness_texture: roughness_texture.clone(),
                     metallic_texture: metallic_texture.clone(),
                     emission_texture: emission_texture.clone(),
+                    sampler: MaterialSamplerKey::of(&base),
                 });
             }
         }
@@ -3519,6 +3820,7 @@ fn instance_draw_entries<'a>(inst: &'a Instance3D, surfaces: &'a [Mesh3D]) -> Ve
             roughness_texture,
             metallic_texture,
             emission_texture,
+            sampler: MaterialSamplerKey::of(&base),
         });
         // pat-zwvgw: the mesh's ADDITIONAL surfaces, each with its own
         // material — `surface_materials[i]` pairs with `surfaces[i]`, falling
@@ -3567,6 +3869,7 @@ fn instance_draw_entries<'a>(inst: &'a Instance3D, surfaces: &'a [Mesh3D]) -> Ve
                 roughness_texture: tex(&m.roughness_texture),
                 metallic_texture: tex(&m.metallic_texture),
                 emission_texture: tex(&m.emission_texture),
+                sampler: MaterialSamplerKey::of(&m),
             });
         }
     }
@@ -3683,8 +3986,9 @@ pub struct GpuRenderer3D {
     material_tex_cache: HashMap<(usize, wgpu::TextureFormat), CachedMaterialTexture>,
     /// The 1x1 white stand-ins for an empty slot, one per format.
     white_tex_cache: HashMap<wgpu::TextureFormat, (wgpu::Texture, wgpu::TextureView)>,
-    /// The material sampler, created once.
-    material_sampler_cache: Option<wgpu::Sampler>,
+    /// One material sampler per [`MaterialSamplerKey`], created once
+    /// (pat-3u1wu: was a single bilinear sampler for every material).
+    material_sampler_cache: Vec<wgpu::Sampler>,
     /// This frame's mesh-address -> `mesh_gpu_cache` key, filled by
     /// `prime_editor_draw_caches` so the draw loop hashes nothing.
     editor_frame_mesh_keys: HashMap<usize, u64>,
@@ -3861,7 +4165,7 @@ struct GpuDrawCall {
     /// Images for this draw's `sampler2D` uniforms, in `custom_sampler_fields`
     /// order — slot N here is slot N in the emitted WGSL. Shorter than the
     /// layout's slot count when the shader declares fewer; the rest bind a dummy.
-    custom_textures: Vec<std::sync::Arc<gdserver3d::material::TextureImage>>,
+    custom_textures: Vec<(std::sync::Arc<gdserver3d::material::TextureImage>, bool)>,
     /// When `Some`, a complete transpiled WGSL module for this draw's spatial
     /// shader material whose `fragment()` body is evaluated per-fragment (e.g. a
     /// UV-driven ALBEDO). The render pass builds a per-material pipeline from it
@@ -3883,6 +4187,8 @@ struct GpuDrawCall {
     metallic_texture: Option<std::sync::Arc<gdserver3d::material::TextureImage>>,
     /// See [`Self::roughness_texture`].
     emission_texture: Option<std::sync::Arc<gdserver3d::material::TextureImage>>,
+    /// The material's sampler (pat-3u1wu).
+    sampler: MaterialSamplerKey,
 }
 
 /// Max distinct meshes cached before the whole cache is dropped, bounding memory
@@ -4051,7 +4357,7 @@ impl GpuRenderer3D {
             sky_panorama: None,
             material_tex_cache: HashMap::new(),
             white_tex_cache: HashMap::new(),
-            material_sampler_cache: None,
+            material_sampler_cache: Vec::new(),
             editor_frame_mesh_keys: HashMap::new(),
             editor_mesh_uploads: 0,
             editor_texture_uploads: 0,
@@ -4119,8 +4425,10 @@ impl GpuRenderer3D {
         // Evict maps only the cache still references: their material is gone.
         self.material_tex_cache
             .retain(|_, c| std::sync::Arc::strong_count(&c.image) > 1);
-        if self.material_sampler_cache.is_none() {
-            self.material_sampler_cache = Some(material_sampler(&self.ctx.device));
+        if self.material_sampler_cache.is_empty() {
+            self.material_sampler_cache = material_sampler_keys()
+                .map(|k| material_sampler(&self.ctx.device, k))
+                .collect();
         }
         for format in [MATERIAL_COLOR_FORMAT, MATERIAL_RAW_FORMAT] {
             if !self.white_tex_cache.contains_key(&format) {
@@ -4287,8 +4595,26 @@ impl GpuRenderer3D {
         }
     }
 
-    fn ensure_shadow_atlas(&mut self, camera: Vector3) -> LightArrayData {
-        self.ensure_shadow_atlas_with(camera, None)
+    fn ensure_shadow_atlas(&mut self, viewport: &Viewport3D) -> LightArrayData {
+        self.ensure_shadow_atlas_with(viewport, None)
+    }
+
+    /// Hands every directional light the camera its shadow map is fitted to
+    /// (pat-772py), as Godot fits the map to the frustum of the camera being
+    /// drawn.
+    fn fit_directional_shadows_to(&mut self, viewport: &Viewport3D) {
+        let camera = gdserver3d::light::ShadowCamera {
+            transform: viewport.camera_transform,
+            fov_y: viewport.fov,
+            aspect: viewport.aspect(),
+            near: viewport.near,
+            far: viewport.far,
+        };
+        for l in self.lights.iter_mut() {
+            if l.light_type == LightType::Directional {
+                l.shadow_camera = Some(camera);
+            }
+        }
     }
 
     /// [`Self::ensure_shadow_atlas`], looking each instance's mesh fingerprint
@@ -4299,9 +4625,11 @@ impl GpuRenderer3D {
     /// can belong to a different mesh by now.
     fn ensure_shadow_atlas_with(
         &mut self,
-        camera: Vector3,
+        viewport: &Viewport3D,
         mesh_keys: Option<&HashMap<usize, u64>>,
     ) -> LightArrayData {
+        self.fit_directional_shadows_to(viewport);
+        let camera = viewport.camera_transform.origin;
         // In id order, so the key and the caster list are the same every frame
         // for the same scene.
         let mut ordered: Vec<(&u64, &Instance3D)> = self.instances.iter().collect();
@@ -4427,7 +4755,7 @@ impl GpuRenderer3D {
                     .take(CUSTOM_SAMPLER_SLOTS as usize)
                 {
                     match mat.get_texture(&u.name) {
-                        Some(img) => images.push(img.clone()),
+                        Some(img) => images.push((img.clone(), u.is_source_color())),
                         // Stop at the first unbound sampler: pushing nothing
                         // would shift every later image onto the wrong slot.
                         None => break,
@@ -4440,7 +4768,10 @@ impl GpuRenderer3D {
                 .as_ref()
                 .map(|(_, v, _)| v.clone())
                 .unwrap_or_default();
-            let custom_texture_images: Vec<std::sync::Arc<gdserver3d::material::TextureImage>> =
+            let custom_texture_images: Vec<(
+                std::sync::Arc<gdserver3d::material::TextureImage>,
+                bool,
+            )> =
                 custom_shader
                     .as_ref()
                     .map(|(_, _, t)| t.clone())
@@ -4478,6 +4809,7 @@ impl GpuRenderer3D {
                     roughness_texture: entry.roughness_texture.clone(),
                     metallic_texture: entry.metallic_texture.clone(),
                     emission_texture: entry.emission_texture.clone(),
+                    sampler: entry.sampler,
                 });
             }
         }
@@ -4613,7 +4945,7 @@ impl GpuRenderer3D {
         self.prime_editor_draw_caches();
         let mesh_keys = std::mem::take(&mut self.editor_frame_mesh_keys);
         let light_data =
-            self.ensure_shadow_atlas_with(viewport.camera_transform.origin, Some(&mesh_keys));
+            self.ensure_shadow_atlas_with(viewport, Some(&mesh_keys));
         self.editor_frame_mesh_keys = mesh_keys;
         self.ensure_probe_cubes();
         self.ensure_sky_panorama(viewport.environment.as_ref());
@@ -4745,6 +5077,11 @@ impl GpuRenderer3D {
             pipeline: &'a wgpu::RenderPipeline,
             maps: CachedSlotViews<'a>,
             mesh: &'a CachedMeshBuffers,
+            sampler: MaterialSamplerKey,
+            /// This draw's block in `model_bytes`, fixed before sorting.
+            uniform_index: usize,
+            /// Camera distance when the draw blends, `None` when opaque.
+            blend_depth: Option<f32>,
         }
         let clip_planes = ClipPlanes::from_view_proj(&mul_mat4(&projection_matrix, &view_matrix));
         let mut draws: Vec<EditorDraw<'_>> = Vec::new();
@@ -4957,11 +5294,36 @@ impl GpuRenderer3D {
                         metallic: slot(&entry.metallic_texture, MATERIAL_RAW_FORMAT),
                         emission: slot(&entry.emission_texture, MATERIAL_COLOR_FORMAT),
                     };
-                    draws.push(EditorDraw { pipeline: chosen, maps, mesh: cached_mesh });
+                    let blends = crate::render_modes::is_transparent(entry.transparency)
+                        || additive.is_some();
+                    draws.push(EditorDraw {
+                        pipeline: chosen,
+                        maps,
+                        mesh: cached_mesh,
+                        sampler: entry.sampler,
+                        uniform_index: draws.len(),
+                        blend_depth: blends.then(|| {
+                            viewport
+                                .camera_transform
+                                .origin
+                                .distance_to(entry.transform.origin)
+                        }),
+                    });
                 }
             }
 
             draw_count = draws.len();
+            // pat-wyei2: opaque first in creation order, then blended draws
+            // FARTHEST first, as Godot's transparent pass sorts them. Without
+            // it the platformer's coin counter — a Label3D with four darker
+            // "Parallax" Label3D children stacked just behind it — composited
+            // its children OVER itself, since they are created after it.
+            draws.sort_by(|a, b| match (a.blend_depth, b.blend_depth) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (Some(da), Some(db)) => db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal),
+            });
             // One buffer for every draw's model block, bound at its offset.
             let model_buf = (!draws.is_empty()).then(|| {
                 create_buffer_init(
@@ -4972,13 +5334,13 @@ impl GpuRenderer3D {
                     wgpu::BufferUsages::UNIFORM,
                 )
             });
-            let albedo_sampler = self
-                .material_sampler_cache
-                .as_ref()
-                .expect("prime_editor_draw_caches ran above");
-            for (i, draw) in draws.iter().enumerate() {
+            let samplers = &self.material_sampler_cache;
+            for draw in draws.iter() {
+                let i = draw.uniform_index;
                 let model_buf = model_buf.as_ref().expect("non-empty draws");
                 let maps = &draw.maps;
+                // pat-3u1wu: the sampler THIS material asks for.
+                let albedo_sampler = &samplers[draw.sampler.index()];
                 pass.set_pipeline(draw.pipeline);
                 let model_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("editor-model-bind-group"),
@@ -5187,7 +5549,8 @@ impl GpuRenderer3D {
             depth_buf.unmap();
 
             let fx_inv_proj = invert_projection(&projection_matrix);
-            crate::renderer::SoftwareRenderer3D::apply_decal_pass(
+            let decal_receivers: Vec<&Instance3D> = self.instances.values().collect();
+            crate::renderer::SoftwareRenderer3D::apply_decal_pass_masked(
                 &mut pixels,
                 &depth,
                 w,
@@ -5195,6 +5558,7 @@ impl GpuRenderer3D {
                 &self.decals,
                 &fx_inv_proj,
                 &viewport.camera_transform,
+                &decal_receivers,
             );
             // Environment fog covers the decal-modulated surface, in the
             // software renderer's order (decal -> fog -> fog volumes), and with
@@ -5360,7 +5724,7 @@ impl GpuRenderer3D {
         let draw_calls = self.build_draw_calls();
         // Shadow atlas + light uniforms (pat-32edz / pat-2be0q): cached across
         // frames, regenerated only when the shadow-relevant state changes.
-        let light_data = self.ensure_shadow_atlas(viewport.camera_transform.origin);
+        let light_data = self.ensure_shadow_atlas(viewport);
         self.ensure_probe_cubes();
         self.ensure_sky_panorama(viewport.environment.as_ref());
 
@@ -5639,11 +6003,12 @@ impl GpuRenderer3D {
                             1,
                             vec![gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0)],
                         ),
+                        false,
                     );
                     let uploaded: Vec<wgpu::Texture> = call
                         .custom_textures
                         .iter()
-                        .map(|img| upload_custom_texture(device, queue, img))
+                        .map(|(img, srgb)| upload_custom_texture(device, queue, img, *srgb))
                         .collect();
                     let views: Vec<wgpu::TextureView> = (0..CUSTOM_SAMPLER_SLOTS)
                         .map(|slot| match uploaded.get(slot as usize) {
@@ -5728,7 +6093,7 @@ impl GpuRenderer3D {
                     call.metallic_texture.as_deref(),
                     call.emission_texture.as_deref(),
                 );
-                let albedo_sampler = material_sampler(device);
+                let albedo_sampler = material_sampler(device, call.sampler);
                 let model_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("model-bind-group"),
                     layout: &pipeline.model_layout,
@@ -5912,7 +6277,8 @@ impl GpuRenderer3D {
         // Both passes are the software implementations, called directly rather
         // than reimplemented — one copy of the projection math means the two
         // backends cannot drift apart.
-        crate::renderer::SoftwareRenderer3D::apply_decal_pass(
+        let decal_receivers: Vec<&Instance3D> = self.instances.values().collect();
+        crate::renderer::SoftwareRenderer3D::apply_decal_pass_masked(
             &mut pixels,
             &depth,
             w,
@@ -5920,6 +6286,7 @@ impl GpuRenderer3D {
             &self.decals,
             &fog_inv_proj,
             &viewport.camera_transform,
+            &decal_receivers,
         );
         crate::renderer::SoftwareRenderer3D::apply_fog_pass(
             &mut pixels,
@@ -6140,6 +6507,43 @@ impl RenderingServer3D for GpuRenderer3D {
 mod tests {
     use super::*;
 
+    /// pat-3u1wu: the mip chain halves down to 1x1 and box-averages.
+    #[test]
+    fn material_mip_chain_halves_to_one_texel_and_averages() {
+        // 4x2: left half black, right half white.
+        let mut base = Vec::new();
+        for _y in 0..2 {
+            for x in 0..4 {
+                let v = if x < 2 { 0u8 } else { 255u8 };
+                base.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let levels = material_mip_chain(4, 2, base);
+        let dims: Vec<(u32, u32)> = levels.iter().map(|(w, h, _)| (*w, *h)).collect();
+        assert_eq!(dims, vec![(4, 2), (2, 1), (1, 1)]);
+        assert_eq!(&levels[1].2[..], &[0, 0, 0, 255, 255, 255, 255, 255]);
+        // The last level averages black and white.
+        assert_eq!(levels[2].2[0], 128);
+        assert_eq!(material_mip_chain(1, 1, vec![9, 9, 9, 9]).len(), 1);
+    }
+
+    /// pat-3u1wu: every sampler key has its own cache slot.
+    #[test]
+    fn material_sampler_keys_are_dense_and_distinct() {
+        let keys: Vec<MaterialSamplerKey> = material_sampler_keys().collect();
+        assert_eq!(keys.len(), MATERIAL_SAMPLER_KINDS);
+        for (i, k) in keys.iter().enumerate() {
+            assert_eq!(k.index(), i);
+        }
+        let plain = material_sampler_descriptor(MaterialSamplerKey {
+            filter: gdserver3d::material::TextureFilter::Nearest,
+            clamp: false,
+        });
+        assert_eq!(plain.mag_filter, wgpu::FilterMode::Nearest);
+        // No-mipmap modes read the base level only.
+        assert_eq!(plain.lod_max_clamp, 0.0);
+    }
+
     #[test]
     fn shader_source_compiles() {
         // Validate that the WGSL source parses without errors.
@@ -6188,8 +6592,8 @@ mod tests {
         // it and a stale size here stays invisible; anyone growing
         // `GpuLightData` must update THIS assertion, `light_data_size` and
         // `light_array_size` below, and the byte-level layout tests.
-        assert_eq!(std::mem::size_of::<GpuLightData>(), 160);
-        assert_eq!(std::mem::size_of::<LightArrayData>(), 160 * 16);
+        assert_eq!(std::mem::size_of::<GpuLightData>(), 176); // pat-772py row
+        assert_eq!(std::mem::size_of::<LightArrayData>(), 176 * 16);
     }
 
     #[test]
@@ -6463,13 +6867,13 @@ mod tests {
     fn light_data_size() {
         // Base 64 + shadow row 16 + shadow_view_proj mat4 (64) + specular
         // row 16 = 160 (pat-32edz, grown twice by pat-s3rrv.90).
-        assert_eq!(std::mem::size_of::<GpuLightData>(), 160);
+        assert_eq!(std::mem::size_of::<GpuLightData>(), 176); // pat-772py row
     }
 
     #[test]
     fn light_array_size() {
-        // 16 * 160 = 2560 bytes.
-        assert_eq!(std::mem::size_of::<LightArrayData>(), 2560);
+        // 16 * 176 = 2816 bytes (pat-772py added a row).
+        assert_eq!(std::mem::size_of::<LightArrayData>(), 2816);
     }
 
     #[test]
@@ -6611,7 +7015,8 @@ mod tests {
 
         assert_eq!(
             std::mem::size_of::<GpuLightData>(),
-            160,
+            // 176 since pat-772py's shadow-filter row.
+            176,
             "the uniform ARRAY stride must stay a multiple of 16"
         );
         assert_eq!(std::mem::size_of::<GpuLightData>() % 16, 0);
@@ -6634,6 +7039,37 @@ mod tests {
     /// ⚠️ Asserting the struct field alone would pass against a uniform that is
     /// uploaded and never read, which is the failure mode this whole bead is
     /// about.
+    /// pat-772py: the shadow-filter fields sit where WGSL reads them. WGSL
+    /// `LightData` puts `shadow_uv_scale` in `specular`'s last pad (offset
+    /// 156) and the new row at 160..176.
+    #[test]
+    fn shadow_filter_gpu_row_matches_the_wgsl_struct() {
+        let mut gpu = light_to_gpu(&Light3D::directional(Light3DId(1)), Vector3::ZERO);
+        gpu.shadow_uv_scale = 0.125;
+        gpu.shadow_depth_bias = 0.25;
+        gpu.shadow_texel_world = 0.5;
+        gpu.shadow_pcf_radius = 0.75;
+        gpu.shadow_pcf_taps = 8;
+        let bytes = bytemuck::bytes_of(&gpu);
+        let f = |o: usize| f32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
+        assert_eq!(f(156), 0.125);
+        assert_eq!(f(160), 0.25);
+        assert_eq!(f(164), 0.5);
+        assert_eq!(f(168), 0.75);
+        assert_eq!(u32::from_le_bytes(bytes[172..176].try_into().unwrap()), 8);
+        for field in [
+            "shadow_uv_scale: f32",
+            "shadow_depth_bias: f32",
+            "shadow_texel_world: f32",
+            "shadow_pcf_radius: f32",
+            "shadow_pcf_taps: u32",
+        ] {
+            assert!(SHADER_3D_WGSL.contains(field), "WGSL LightData lacks {field}");
+        }
+        // A light with no fitted map keeps the legacy nearest compare.
+        assert!(empty_gpu_light().shadow_pcf_radius < 0.0);
+    }
+
     #[test]
     fn shadow_opacity_gpu_reaches_both_shader_branches() {
         assert!(
@@ -6642,8 +7078,9 @@ mod tests {
         );
         assert_eq!(
             SHADER_3D_WGSL.matches("light.shadow_opacity").count(),
-            2,
-            "both omni_shadow_factor and directional_shadow_factor must use it"
+            3,
+            "omni_shadow_factor, directional_shadow_factor and the camera-fitted \
+             directional branch (pat-772py) must all use it"
         );
         // The old unconditional `return 0.0;` inside a shadow test is what this
         // replaces; a stray one left behind would mean one branch still ignores
@@ -6853,7 +7290,8 @@ mod tests {
         let bytes = bytemuck::bytes_of(&gpu);
         assert_eq!(
             std::mem::size_of::<GpuLightData>(),
-            160,
+            // 176 since pat-772py's shadow-filter row.
+            176,
             "reusing a reserved pad must NOT move any offset below; the size \
              grew only later, when light_specular added a row after the matrix"
         );
@@ -7004,7 +7442,8 @@ mod tests {
 
         assert_eq!(
             std::mem::size_of::<GpuLightData>(),
-            160,
+            // 176 since pat-772py's shadow-filter row.
+            176,
             "offsets below the matrix unchanged; 160 since light_specular's row"
         );
         assert_eq!(
@@ -7079,7 +7518,8 @@ mod tests {
 
         assert_eq!(
             std::mem::size_of::<GpuLightData>(),
-            160,
+            // 176 since pat-772py's shadow-filter row.
+            176,
             "offsets below the matrix unchanged; 160 since light_specular's row"
         );
         assert_eq!(
@@ -7118,7 +7558,8 @@ mod tests {
 
         assert_eq!(
             std::mem::size_of::<GpuLightData>(),
-            160,
+            // 176 since pat-772py's shadow-filter row.
+            176,
             "specular's row grows the struct from 144 to 160"
         );
         assert_eq!(
@@ -7143,10 +7584,14 @@ mod tests {
         // four bytes are still pad. Left as a byte assertion rather than
         // deleted: a stale non-zero tail is exactly what a future field
         // forgetting its initializer would look like.
+        //
+        // pat-772py spent that last pad on `shadow_uv_scale`, whose neutral
+        // value is 1.0 (the map fills its whole atlas layer), so the tail is
+        // now an explicit 1.0 rather than zero.
         assert_eq!(
             &bytes[156..160],
-            &[0u8; 4],
-            "the one remaining pad slot must be an explicit zero"
+            &1.0f32.to_le_bytes(),
+            "the last of specular's pads is shadow_uv_scale, explicitly 1.0"
         );
     }
 
@@ -7251,7 +7696,8 @@ mod tests {
 
         assert_eq!(
             std::mem::size_of::<GpuLightData>(),
-            160,
+            // 176 since pat-772py's shadow-filter row.
+            176,
             "reusing specular's reserved pads must NOT grow the struct"
         );
         assert_eq!(

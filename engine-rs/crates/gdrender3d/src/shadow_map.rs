@@ -40,6 +40,28 @@ pub struct ShadowMap {
     pub proj_matrix: [[f32; 4]; 4],
     /// Shadow map resolution.
     pub size: u32,
+    /// Godot's filter for a camera-fitted directional map (pat-772py), or
+    /// `None` for the legacy fixed-box maps, which keep their old single
+    /// nearest-texel compare.
+    pub filter: Option<ShadowFilter>,
+}
+
+/// How a camera-fitted directional map is compared (pat-772py), all derived
+/// the way Godot derives them in `light_storage.cpp:696-724`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShadowFilter {
+    /// Constant bias, already in NORMALIZED depth of this map:
+    /// `shadow_bias / 100 * z_range * blur * quality_radius`, then times
+    /// `2 / z_range` for the `[-1, 1]` orthographic depth this map stores.
+    pub depth_bias: f32,
+    /// World size of one texel of THIS map (what `shadow_normal_bias` scales).
+    pub texel_world: f32,
+    /// PCF radius in texels of this map. Godot's radius is
+    /// `blur * quality_radius` texels of ITS atlas; converted through world
+    /// units so the penumbra is as wide as Godot's at any resolution here.
+    pub radius_texels: f32,
+    /// Vogel-disk taps (0 = one bilinear tap, Godot's HARD level).
+    pub taps: u32,
 }
 
 impl ShadowMap {
@@ -292,11 +314,20 @@ pub fn generate_shadow_maps_incremental(
             l.shadow_enabled && matches!(l.light_type, LightType::Directional | LightType::Spot)
         })
         .collect();
-    let matrices = |l: &Light3D| match l.light_type {
-        LightType::Spot => (spot_light_view_matrix(l), spot_light_proj_matrix(l)),
-        _ => (directional_light_view_matrix(l), directional_light_proj_matrix()),
-    };
-    let size = SHADOW_MAP_SIZE;
+    // One frame per casting light: a camera-fitted directional map is larger
+    // than a spot map (pat-772py).
+    let frames: Vec<DirectionalShadowFrame> = casting
+        .iter()
+        .map(|l| match l.light_type {
+            LightType::Spot => DirectionalShadowFrame {
+                view: spot_light_view_matrix(l),
+                proj: spot_light_proj_matrix(l),
+                size: SHADOW_MAP_SIZE,
+                filter: None,
+            },
+            _ => directional_shadow_frame(l),
+        })
+        .collect();
 
     let mut available: HashMap<u64, u32> = HashMap::new();
     for k in keys {
@@ -342,16 +373,16 @@ pub fn generate_shadow_maps_incremental(
             .collect();
         cache.base = casting
             .iter()
-            .map(|l| {
-                let (view, proj) = matrices(l);
-                let mut depth = DepthBuffer::new(size, size);
+            .zip(&frames)
+            .map(|(l, f)| {
+                let mut depth = DepthBuffer::new(f.size, f.size);
                 rasterize_instance_refs_into_shadow(
                     stable.iter().map(|i| instances[*i]),
                     l.shadow_caster_mask,
-                    &view,
-                    &proj,
+                    &f.view,
+                    &f.proj,
                     &mut depth,
-                    size,
+                    f.size,
                 );
                 depth
             })
@@ -370,23 +401,24 @@ pub fn generate_shadow_maps_incremental(
     casting
         .iter()
         .zip(&cache.base)
-        .map(|(l, base)| {
-            let (view_matrix, proj_matrix) = matrices(l);
+        .zip(&frames)
+        .map(|((l, base), f)| {
             let mut depth = base.clone();
             rasterize_instance_refs_into_shadow(
                 rest.iter().copied(),
                 l.shadow_caster_mask,
-                &view_matrix,
-                &proj_matrix,
+                &f.view,
+                &f.proj,
                 &mut depth,
-                size,
+                f.size,
             );
             ShadowMap {
                 light_id: l.id,
                 depth,
-                view_matrix,
-                proj_matrix,
-                size,
+                view_matrix: f.view,
+                proj_matrix: f.proj,
+                size: f.size,
+                filter: f.filter,
             }
         })
         .collect()
@@ -454,6 +486,7 @@ fn generate_spot_shadow_map(light: &Light3D, instances: &[Instance3D]) -> Shadow
         view_matrix,
         proj_matrix,
         size,
+        filter: None,
     }
 }
 
@@ -749,24 +782,180 @@ fn rasterize_cubemap_face_triangle(
 
 /// Generates a single shadow map for a directional light.
 fn generate_directional_shadow_map(light: &Light3D, instances: &[Instance3D]) -> ShadowMap {
-    let size = SHADOW_MAP_SIZE;
+    let frame = directional_shadow_frame(light);
+    let size = frame.size;
     let mut depth_buf = DepthBuffer::new(size, size);
-    let view_matrix = directional_light_view_matrix(light);
-    let proj_matrix = directional_light_proj_matrix();
     rasterize_instances_into_shadow(
         instances,
         light.shadow_caster_mask,
-        &view_matrix,
-        &proj_matrix,
+        &frame.view,
+        &frame.proj,
         &mut depth_buf,
         size,
     );
     ShadowMap {
         light_id: light.id,
         depth: depth_buf,
-        view_matrix,
-        proj_matrix,
+        view_matrix: frame.view,
+        proj_matrix: frame.proj,
         size,
+        filter: frame.filter,
+    }
+}
+
+/// Upper bound on the resolution of a camera-fitted directional map
+/// (pat-772py).
+///
+/// Godot renders the map on the GPU at `directional_shadow/size` (8192 in the
+/// 3D platformer). This one is rasterized on the CPU and uploaded, so it is
+/// capped. The PCF radius is converted through WORLD units
+/// ([`ShadowFilter::radius_texels`]), so the penumbra keeps Godot's width and
+/// only detail finer than one texel here is lost.
+pub const DIRECTIONAL_FIT_MAX_SIZE: u32 = 2048;
+
+/// The light-space frame a directional or spot shadow map is rasterized and
+/// sampled in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DirectionalShadowFrame {
+    /// World -> light view matrix (column-major).
+    pub view: [[f32; 4]; 4],
+    /// Projection (column-major).
+    pub proj: [[f32; 4]; 4],
+    /// Map resolution.
+    pub size: u32,
+    /// `Some` for a camera-fitted map; `None` for the legacy fixed box.
+    pub filter: Option<ShadowFilter>,
+}
+
+/// The frame for a directional light: fitted to [`Light3D::shadow_camera`]
+/// when one is set, else the legacy `±SHADOW_EXTENT` box at the origin.
+///
+/// The fit is Godot's ORTHOGONAL-mode `_light_instance_setup_directional_shadow`
+/// (`renderer_scene_cull.cpp:2134`). The camera frustum slice from `near` to
+/// `min(far, directional_shadow_max_distance)` is bounded by a sphere around the
+/// mean of its 8 corners, grown by one texel per side. The map spans that
+/// sphere across the light's X/Y axes, and along Z from `radius` behind the
+/// centre to `radius + pancake_size` toward the light.
+///
+/// 🔑 Two deliberate departures, both affecting resolution only:
+///
+/// - The 2- and 4-split modes get ONE map over the whole range (there are no
+///   cascades here), so their near shadows are coarser than Godot's.
+/// - The sphere centre is snapped to a grid of `radius / 8`, not Godot's
+///   `4 * radius / size`, and the half-extent grows by half a step to keep the
+///   frustum covered. Godot snaps to stop jaggies crawling. This snaps so the
+///   map's static casters stay valid for many frames, because the incremental
+///   generator reuses them only while the frame is unchanged (pat-414k3).
+pub fn directional_shadow_frame(light: &Light3D) -> DirectionalShadowFrame {
+    let Some(cam) = light.shadow_camera else {
+        return DirectionalShadowFrame {
+            view: directional_light_view_matrix(light),
+            proj: directional_light_proj_matrix(),
+            size: SHADOW_MAP_SIZE,
+            filter: None,
+        };
+    };
+    let params = light.directional_shadow;
+
+    let mut max_distance = cam.far;
+    if light.directional_shadow_max_distance > 0.0 {
+        max_distance = max_distance.min(light.directional_shadow_max_distance);
+    }
+    let max_distance = max_distance.max(cam.near + 0.001);
+    let min_distance = cam.near.min(max_distance);
+
+    // The frustum slice's corners. Camera3D looks down its local -Z and the
+    // fov is vertical (the caller has already resolved KEEP_WIDTH).
+    let tan_half = (cam.fov_y * 0.5).tan();
+    let mut corners = [Vector3::ZERO; 8];
+    let mut k = 0;
+    for d in [min_distance, max_distance] {
+        for sy in [-1.0f32, 1.0] {
+            for sx in [-1.0f32, 1.0] {
+                let local = Vector3::new(sx * d * tan_half * cam.aspect, sy * d * tan_half, -d);
+                corners[k] = cam.transform.xform(local);
+                k += 1;
+            }
+        }
+    }
+    let mut center = Vector3::ZERO;
+    for c in &corners {
+        center = center + *c;
+    }
+    center = center * (1.0 / 8.0);
+    let mut radius = 0.0f32;
+    for c in &corners {
+        radius = radius.max((*c - center).length());
+    }
+    // Godot: "add a texel by each side", at ITS split size.
+    let godot_size = params.split_size() as f32;
+    if godot_size > 2.0 {
+        radius *= godot_size / (godot_size - 2.0);
+    }
+    let radius = radius.max(1e-3);
+
+    // The light basis, as `directional_light_view_matrix` builds it. Only the
+    // rotation about the light ray differs from Godot's (which uses the node's
+    // own X/Y), and a sphere fit does not depend on it.
+    let dir = light.direction.normalized();
+    let up_candidate = if dir.y.abs() > 0.99 {
+        Vector3::new(0.0, 0.0, 1.0)
+    } else {
+        Vector3::new(0.0, 1.0, 0.0)
+    };
+    let right = up_candidate.cross(dir).normalized();
+    let up = dir.cross(right).normalized();
+    let z_vec = dir * -1.0; // points TOWARD the light, Godot's z_vec
+
+    let step = radius / 8.0;
+    let snap = |v: f32| (v / step).round() * step;
+    let cx = snap(right.dot(center));
+    let cy = snap(up.dot(center));
+    let cz = snap(z_vec.dot(center));
+    let half = radius + step * 0.5;
+    let pancake = params.pancake_size.max(0.0);
+    let z_max = cz + half + pancake;
+    let z_min = cz - half;
+    let z_range = (z_max - z_min).max(1e-3);
+
+    let light_transform = Transform3D {
+        basis: Basis {
+            x: right,
+            y: up,
+            z: z_vec,
+        },
+        origin: right * cx + up * cy + z_vec * z_max,
+    };
+    let view = transform_to_matrix(&light_transform.inverse());
+    let proj = orthographic_projection_matrix(-half, half, -half, half, 0.0, z_range);
+
+    let size = params.split_size().min(DIRECTIONAL_FIT_MAX_SIZE).max(16);
+    let texel_world = 2.0 * half / size as f32;
+
+    // Godot's own numbers for the filter and bias (`light_storage.cpp:696`,
+    // `:721-723`; `renderer_scene_cull.cpp:2365-2367`). `soft_shadow_scale` is
+    // `shadow_blur`, times the quality radius for PCF (no angular size).
+    let (samples, quality_radius) = params.soft_samples_and_radius();
+    let soft_scale = if light.angular_distance > 0.0 {
+        params.blur
+    } else {
+        params.blur * quality_radius
+    };
+    let godot_texel = radius * 2.0 / godot_size;
+    let godot_z_range = 2.0 * radius + pancake;
+    let bias_world = light.shadow_bias / 100.0 * godot_z_range * soft_scale;
+    let filter = ShadowFilter {
+        depth_bias: bias_world * 2.0 / z_range,
+        texel_world,
+        radius_texels: soft_scale * godot_texel / texel_world,
+        taps: samples,
+    };
+
+    DirectionalShadowFrame {
+        view,
+        proj,
+        size,
+        filter: Some(filter),
     }
 }
 
@@ -1000,6 +1189,7 @@ mod tests {
             depth: crate::depth_buffer::DepthBuffer::new(4, 4),
             view_matrix: identity(),
             proj_matrix: identity(),
+            filter: None,
         };
         // Occluder depth 0 across the whole map: any sampled texel shadows a
         // fragment at depth > bias.
@@ -1213,6 +1403,7 @@ mod tests {
             depth: crate::depth_buffer::DepthBuffer::new(4, 4),
             view_matrix: identity(),
             proj_matrix: identity(),
+            filter: None,
         };
         // An occluder at depth 0 everywhere; the fragment sits just behind it by
         // a margin that straddles the two biases below.
@@ -1252,6 +1443,7 @@ mod tests {
             depth: crate::depth_buffer::DepthBuffer::new(4, 4),
             view_matrix: identity(),
             proj_matrix: identity(),
+            filter: None,
         };
         map.depth.clear(0.0);
         // Straddle SHADOW_BIAS (0.005) from both sides.
@@ -1615,6 +1807,7 @@ pub fn generate_directional_cascades(
                     view_matrix,
                     proj_matrix,
                     size,
+                    filter: None,
                 },
             }
         })
@@ -1783,5 +1976,128 @@ mod cascade_tests {
             far_shadow > 0.5,
             "far caster must shadow its receiver, got {far_shadow}"
         );
+    }
+}
+
+/// pat-772py: the camera-fitted directional frame.
+#[cfg(test)]
+mod fitted_frame_tests {
+    use super::*;
+    use gdserver3d::light::{DirectionalShadowParams, ShadowCamera};
+
+    /// The 3D platformer's sun and camera settings (`stage.tscn`,
+    /// `player.tscn`, `project.godot`), with the camera placed at `at`.
+    fn platformer_sun(at: Vector3) -> Light3D {
+        let mut l = Light3D::directional(Light3DId(1));
+        l.shadow_enabled = true;
+        l.direction = Vector3::new(-0.198, -0.643, 0.740).normalized();
+        l.shadow_bias = 0.02;
+        l.directional_shadow_max_distance = 55.0;
+        l.directional_shadow = DirectionalShadowParams {
+            atlas_size: 8192,
+            soft_quality: 3,
+            blur: 1.5,
+            pancake_size: 20.0,
+            mode: 0,
+        };
+        l.shadow_camera = Some(ShadowCamera {
+            transform: Transform3D {
+                basis: Basis::IDENTITY,
+                origin: at,
+            },
+            fov_y: 74f32.to_radians(),
+            aspect: 1152.0 / 648.0,
+            near: 0.1,
+            far: 4000.0,
+        });
+        l
+    }
+
+    fn project(frame: &DirectionalShadowFrame, p: Vector3) -> (f32, f32, f32) {
+        let v = mat4_mul_point(&frame.view, p);
+        let c = mat4_mul_point4(&frame.proj, v);
+        (c[0] / c[3], c[1] / c[3], c[2] / c[3])
+    }
+
+    #[test]
+    fn the_whole_frustum_to_max_distance_lands_inside_the_map() {
+        let at = Vector3::new(140.0, 3.0, -75.0);
+        let light = platformer_sun(at);
+        let frame = directional_shadow_frame(&light);
+        let cam = light.shadow_camera.unwrap();
+        let t = (cam.fov_y * 0.5).tan();
+        for d in [0.1f32, 20.0, 55.0] {
+            for (sx, sy) in [
+                (-1.0, -1.0),
+                (1.0, -1.0),
+                (-1.0, 1.0),
+                (1.0, 1.0),
+                (0.0, 0.0),
+            ] {
+                let p = cam
+                    .transform
+                    .xform(Vector3::new(sx * d * t * cam.aspect, sy * d * t, -d));
+                let (x, y, z) = project(&frame, p);
+                assert!(
+                    x.abs() <= 1.0 && y.abs() <= 1.0 && z.abs() <= 1.0,
+                    "frustum point at distance {d} ({sx}, {sy}) falls outside the map: \
+                     ndc ({x}, {y}, {z}). The legacy box only reached |x|, |z| <= 20."
+                );
+            }
+        }
+        assert_eq!(frame.size, DIRECTIONAL_FIT_MAX_SIZE);
+    }
+
+    #[test]
+    fn the_filter_and_bias_are_godots() {
+        let light = platformer_sun(Vector3::ZERO);
+        let frame = directional_shadow_frame(&light);
+        let f = frame.filter.expect("fitted");
+        // soft_shadow_filter_quality 3 = SOFT_MEDIUM: 8 taps at quality radius
+        // 2, so Godot's `soft_shadow_scale` = blur 1.5 * 2 = 3.
+        assert_eq!(f.taps, 8);
+        // Recover the sphere radius and depth range from the matrices:
+        // proj[0][0] = 1 / half, half = radius * (1 + 1/16) (half a radius/8
+        // snap step), proj[2][2] = -2 / z_range.
+        let half = 1.0 / frame.proj[0][0];
+        let radius = half / (1.0 + 1.0 / 16.0);
+        let z_range = -2.0 / frame.proj[2][2];
+        // Godot: bias = shadow_bias / 100 * (2 * radius + pancake) * scale, in
+        // world units (`light_storage.cpp:721`, `renderer_scene_cull.cpp:2366`).
+        let godot_bias_world = 0.02 / 100.0 * (2.0 * radius + 20.0) * 3.0;
+        let ours_world = f.depth_bias * z_range / 2.0;
+        assert!(
+            (ours_world - godot_bias_world).abs() < 1e-4,
+            "bias {ours_world} world units, Godot's formula gives {godot_bias_world}"
+        );
+        // Godot's PCF radius: 3 texels of ITS 8192 map, i.e. 3 * 2r / 8192
+        // world units, converted to our texels.
+        let godot_radius_world = 3.0 * 2.0 * radius / 8192.0;
+        assert!(
+            (f.radius_texels * f.texel_world - godot_radius_world).abs() < 1e-4,
+            "PCF radius {} world, Godot {godot_radius_world}",
+            f.radius_texels * f.texel_world
+        );
+    }
+
+    #[test]
+    fn a_small_camera_move_keeps_the_frame_so_static_casters_are_reused() {
+        let a = directional_shadow_frame(&platformer_sun(Vector3::new(10.0, 0.0, 0.0)));
+        let b = directional_shadow_frame(&platformer_sun(Vector3::new(10.3, 0.0, 0.1)));
+        assert_eq!(
+            a, b,
+            "the centre snaps to radius/8, so a 0.3-unit step keeps the frame"
+        );
+    }
+
+    #[test]
+    fn without_a_camera_the_legacy_box_is_unchanged() {
+        let mut light = platformer_sun(Vector3::ZERO);
+        light.shadow_camera = None;
+        let f = directional_shadow_frame(&light);
+        assert_eq!(f.size, SHADOW_MAP_SIZE);
+        assert_eq!(f.filter, None);
+        assert_eq!(f.view, directional_light_view_matrix(&light));
+        assert_eq!(f.proj, directional_light_proj_matrix());
     }
 }

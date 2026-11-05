@@ -32,6 +32,8 @@ pub mod area2d;
 pub mod body;
 pub mod ccd;
 pub mod character;
+pub mod godot_motion;
+pub mod godot_sat;
 pub mod collision;
 pub mod contact_monitor;
 pub mod joint;

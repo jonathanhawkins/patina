@@ -648,18 +648,26 @@ pub fn process_camera2d_scroll(tree: &mut SceneTree, dt: f32) {
     let viewport = tree.root_window().visible_size();
     let config = node2d::camera2d_config_from_node(tree, cam);
 
-    let target =
-        node2d::get_global_transform(tree, cam).origin + node2d::get_camera_offset(tree, cam);
+    // 🔑 `offset` is added AFTER the limits, not to the target: Godot clamps
+    // `screen_rect` to the limits and only then does
+    // `screen_rect.position += offset` (camera_2d.cpp:253). The 2D Platformer's
+    // camera (offset (0, 50), limit_bottom 690) shows 50 px more below its
+    // bottom limit than a clamp of `target + offset` would allow.
+    // The published centre is the SCREEN centre (offset included), so the
+    // scroll state it carries is that minus the offset.
+    let offset = node2d::get_camera_offset(tree, cam);
+    let target = node2d::get_global_transform(tree, cam).origin;
     let previous = match tree
         .get_node(cam)
         .map(|n| n.get_property(CAMERA2D_SCROLL_CENTER))
     {
-        Some(Variant::Vector2(v)) => Some(v),
+        Some(Variant::Vector2(v)) => Some(v - offset),
         _ => None,
     };
     // No published centre yet => this camera's first frame: snap.
     let current = previous.unwrap_or(target);
-    let center = node2d::compute_camera2d_position(&config, current, target, viewport, dt);
+    let center =
+        node2d::compute_camera2d_position(&config, current, target, viewport, dt) + offset;
 
     let target_rotation = node2d::get_global_rotation(tree, cam);
     let previous_rotation = match tree

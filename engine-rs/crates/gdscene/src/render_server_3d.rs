@@ -2994,6 +2994,17 @@ pub fn sync_light_properties(node: &crate::node::Node, light: &mut Light3D) {
     if let Variant::Bool(b) = node.get_property("directional_shadow_blend_splits") {
         light.blend_splits = b;
     }
+    // pat-772py: what sizes and filters a camera-fitted directional map.
+    // `shadow_blur` scales Godot's PCF radius AND its constant bias.
+    if let Some(v) = num("shadow_blur") {
+        light.directional_shadow.blur = v;
+    }
+    if let Some(v) = num("directional_shadow_pancake_size") {
+        light.directional_shadow.pancake_size = v;
+    }
+    if let Variant::Int(m) = node.get_property("directional_shadow_mode") {
+        light.directional_shadow.mode = m.clamp(0, 2) as u8;
+    }
 }
 
 fn extract_vector3_array(v: &gdvariant::Variant) -> Option<Vec<Vector3>> {
@@ -3209,6 +3220,13 @@ pub fn standard_material_from_props(props: &HashMap<String, Variant>) -> Standar
         // Godot's `no_depth_test` is a FLAG, so it arrives as a plain bool
         // rather than an enum ordinal (pat-s3rrv.30).
         no_depth_test: flag("no_depth_test"),
+        // pat-3u1wu: never read, so `texture_filter = 4` (nearest) on the 3D
+        // platformer's tiles sampled bilinear and came out blurred.
+        texture_filter: match props.get("texture_filter") {
+            Some(Variant::Int(v)) => gdserver3d::material::TextureFilter::from_godot_int(*v),
+            _ => gdserver3d::material::TextureFilter::LinearWithMipmaps,
+        },
+        texture_repeat: !matches!(props.get("texture_repeat"), Some(Variant::Bool(false))),
     }
 }
 
@@ -5079,6 +5097,25 @@ mod standard_material_props_tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.clone()))
             .collect()
+    }
+
+    /// pat-3u1wu: `texture_filter` / `texture_repeat` reach the material, with
+    /// Godot's defaults (LINEAR_WITH_MIPMAPS, repeat) when unauthored.
+    #[test]
+    fn texture_filter_and_repeat_are_read() {
+        use gdserver3d::material::TextureFilter;
+        let d = standard_material_from_props(&bag(&[]));
+        assert_eq!(d.texture_filter, TextureFilter::LinearWithMipmaps);
+        assert!(d.texture_repeat);
+        let m = standard_material_from_props(&bag(&[
+            ("texture_filter", Variant::Int(4)),
+            ("texture_repeat", Variant::Bool(false)),
+        ]));
+        assert_eq!(m.texture_filter, TextureFilter::NearestWithMipmapsAnisotropic);
+        assert!(!m.texture_repeat);
+        let r = m.to_material3d();
+        assert_eq!(r.texture_filter, TextureFilter::NearestWithMipmapsAnisotropic);
+        assert!(!r.texture_repeat);
     }
 
     /// An empty bag yields Godot's documented defaults — notably roughness 1.0,

@@ -82,11 +82,17 @@ command.
 - An input `{start, end}` is pressed before frame `start` steps and released
   after frame `end`, which is the MCP `play` semantics. `--keys` ms become
   frames at `--fps` (60): `wait:500,KeyW:1500` holds W for f31 to f120.
-- In Godot, the capture node runs first in the first physics tick of each
-  iteration. It records frame f-1, takes the picture of the last drawn frame,
-  then presses the inputs with `Input.parse_input_event` and
-  `flush_buffered_events`. That is where a real key press lands, so
-  `is_action_just_pressed` fires in the same frame.
+- In Godot, the capture node records frame f at the very end of iteration f
+  (a deferred call from its last-priority `_process`), then parses frame
+  f+1's key events WITHOUT flushing them: the OS loop flushes between
+  iterations, which is where a real key press lands, so
+  `is_action_just_pressed` holds for the first physics tick of frame f+1 and
+  only that one (Godot marks a press `physics_frames + 1`). Pictures are taken
+  in the first physics tick of the next iteration (the last drawn frame).
+  ⚠️ Inputs starting on frame 1 are still pressed inside the first tick, so
+  for them alone `just_pressed` lands one tick late. (Before pat-dt40j every
+  input was pressed that way and every `just_pressed` was one tick late — the
+  2D Platformer's first jump frame moved one tick instead of two.)
 - Godot runs with `--fixed-fps 60 --disable-vsync`. Every run is
   deterministic: two runs give byte-identical PNGs.
 
@@ -103,6 +109,33 @@ command.
   `meta.errors` and kept whole in `godot.log`.
 - With physics interpolation on (both platformers), a picture can trail its
   property by up to one physics tick. The tool prints a note.
+
+## The standing gate: parity can only improve
+
+`node scripts/playtest-gate.mjs --godot-only --games <g> --port-base <P>`
+(or `--godot` alongside the browser playtest) runs compare-to-godot for each
+game with its playtest.json keys and watches, and scores it: per property the
+first divergence frame and max error, per shot frame the mismatch % and mean
+RGB delta. Each score is compared with `scripts/godot-parity-baselines.json`.
+Worse beyond the noise margin (`DEFAULT_MARGINS` in
+`scripts/lib/godot-parity.mjs`; a game may override them under `margins`) is a
+functional failure. Better is reported as `improved`. A baseline recorded
+under another scenario or Godot version reads `stale` and is not compared.
+
+- Output: `.playtest-gate/parity.md` (`node scripts/parity-report.mjs`
+  rebuilds it), the full compare in `.playtest-gate/parity/<g>/`.
+- The Godot capture is cached in `.playtest-gate/godot-cache/<g>/<key>/`. The
+  key hashes the game files (minus hidden `.godot/` and `.editor/`), the resolved scenario, `godot
+  --version` and the capture tool, so a second run only plays Patina.
+  `--godot-cache DIR` shares one cache between worktrees.
+- 3D captures need the real off-screen window (above). Run the gate from a
+  logged-in macOS session, never `--headless`.
+- `--update-godot-baselines` is for a person or the coordinator, after
+  merging. Agents never run it: re-recording hides the regression it would
+  have caught. An improvement you made is re-recorded by the coordinator.
+- A frame where NEITHER engine has the watched node (a title screen before
+  the scene change) counts as a match; one side missing is infinite.
+- Tests: `node --test scripts/tests/godot-parity.test.mjs`.
 
 ## Pitfalls
 
