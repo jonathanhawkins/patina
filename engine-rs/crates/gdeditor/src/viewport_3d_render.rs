@@ -148,7 +148,28 @@ impl Viewport3D {
     pub fn build_render_list(&self, tree: &SceneTree) -> Vec<Render3DItem> {
         // One cache for the whole list: several meshes commonly share a texture,
         // and without this each would decode the same PNG again.
-        let mut material_textures = gdscene::render_server_3d::MaterialTextureCache::new();
+        //
+        // 🔑 Kept across FRAMES too (pat-p3p1m): a fresh cache per call meant
+        // every material texture was decoded from disk on every editor and
+        // Play frame, under the editor-state lock. `drop_stale` re-decodes a
+        // texture whose file changed. Stable `Arc`s are also what lets the GPU
+        // renderer keep its uploads (it keys them by `Arc` identity).
+        thread_local! {
+            static MATERIAL_TEXTURES: std::cell::RefCell<gdscene::render_server_3d::MaterialTextureCache> =
+                std::cell::RefCell::new(gdscene::render_server_3d::MaterialTextureCache::new());
+        }
+        MATERIAL_TEXTURES.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.drop_stale();
+            self.build_render_list_with(tree, &mut cache)
+        })
+    }
+
+    fn build_render_list_with(
+        &self,
+        tree: &SceneTree,
+        material_textures: &mut gdscene::render_server_3d::MaterialTextureCache,
+    ) -> Vec<Render3DItem> {
         self.collect_scene_content(tree)
             .into_iter()
             .filter(|r| r.visible)
@@ -169,7 +190,7 @@ impl Viewport3D {
                 let material = gdscene::render_server_3d::material3d_for_node(
                     tree,
                     nid,
-                    &mut material_textures,
+                    material_textures,
                 );
                 // Same reason as `material`: read the GeometryInstance3D block
                 // while the tree is still in scope (pat-nzgdu.76).
@@ -201,7 +222,7 @@ impl Viewport3D {
                 // shared between a StandardMaterial3D and a shader uniform
                 // decodes once.
                 if let Some(mat) = shader_material.as_mut() {
-                    gdscene::render_server_3d::bind_shader_textures(mat, &mut material_textures);
+                    gdscene::render_server_3d::bind_shader_textures(mat, material_textures);
                 }
                 // `surface_material_override/N`, resolved here for the same
                 // reason — and through the SAME `surface_materials_for_node`
@@ -211,7 +232,7 @@ impl Viewport3D {
                 let surface_materials = gdscene::render_server_3d::surface_materials_for_node(
                     tree,
                     nid,
-                    &mut material_textures,
+                    material_textures,
                 );
                 // 🔑 MultiMeshInstance3D expands into one draw per VISIBLE
                 // instance (pat-mgixk.50).
@@ -332,7 +353,7 @@ impl Viewport3D {
                 let (generated_mesh, material) = match crate::sprite3d_render::billboard_geometry(
                     tree,
                     nid,
-                    &mut material_textures,
+                    material_textures,
                 ) {
                     Some((mesh, sprite_material)) => (Some(mesh), Some(sprite_material)),
                     // Deformed geometry outranks CSG here only because a node
@@ -3020,9 +3041,10 @@ pub fn game_camera_for_play(tree: &SceneTree, camera_override: bool) -> Option<N
 /// Renders the running scene the way the *game* sees it: from the scene's current
 /// `Camera3D`, with no editor furniture (pat-0q2kx.30).
 ///
-/// Returns `None` when the scene has no `Camera3D`, so the caller can fall back to
-/// the editor viewport rather than show a black frame — the same thing Godot does
-/// when a scene has no camera.
+/// Returns `None` when the scene has no `Camera3D`. ⚠️ Godot then draws NO 3D at
+/// all — the view is the project's clear colour — so a caller must not fall back
+/// to the editor viewport here (pat-p3p1m: that fallback put the editor grid and
+/// gizmos into the Play view). See [`crate::play_3d`].
 ///
 /// Four differences from [`render_editor_3d_frame`], all of them the point of the
 /// bead: the view comes from the scene camera rather than the editor's orbit
@@ -3154,6 +3176,88 @@ pub fn render_editor_3d_frame_with_compositor(
     render_editor_3d_frame_from_inputs(viewport, &inputs)
 }
 
+/// `inputs`' reflection probes with their cubemaps captured, for the GPU path
+/// (pat-p3p1m).
+///
+/// The capture is the software renderer's own `capture_reflection_probes`, run
+/// on a throwaway software scene built exactly like the software frame, so both
+/// backends reflect the same cubemap. Godot's `update_mode` decides reuse: an
+/// `Once` probe keeps its first capture for as long as the probe itself is
+/// unchanged (a thread-local cache keyed by the uncaptured probe), an `Always`
+/// probe is re-captured every frame.
+#[cfg(feature = "gpu-render")]
+fn captured_reflection_probes(
+    viewport: &Viewport3D,
+    inputs: &Editor3DRenderInputs,
+) -> Vec<ReflectionProbe> {
+    use std::cell::RefCell;
+    use std::sync::Arc;
+    thread_local! {
+        static CAPTURES: RefCell<Vec<(ReflectionProbe, Arc<gdserver3d::reflection_probe::ReflectionCubemap>)>> =
+            const { RefCell::new(Vec::new()) };
+    }
+    let mut probes: Vec<ReflectionProbe> = inputs.env_effects.reflection_probes.clone();
+    CAPTURES.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        let mut pending = false;
+        for probe in probes.iter_mut() {
+            let mut key = probe.clone();
+            key.captured = None;
+            let hit = (probe.update_mode == ReflectionProbeUpdateMode::Once)
+                .then(|| cache.iter().find(|(k, _)| *k == key).map(|(_, c)| c.clone()))
+                .flatten();
+            match hit {
+                Some(cube) => probe.captured = Some(cube),
+                None => pending = true,
+            }
+        }
+        if !pending {
+            return;
+        }
+        let mut sw = SoftwareRenderer3D::new();
+        let mut fx = inputs.env_effects.clone();
+        fx.reflection_probes = probes.clone();
+        populate_editor_scene_3d(&mut sw, viewport, &inputs.items, &fx, None);
+        setup_editor_lighting_3d(&mut sw, viewport, &inputs.scene_lights);
+        let mut rv = editor_render_viewport(viewport, viewport.width.max(1), viewport.height.max(1));
+        rv.environment = Some(editor_render_environment(viewport));
+        sw.capture_reflection_probes(&rv, REFLECTION_PROBE_CAPTURE_RESOLUTION);
+        for probe in probes.iter_mut() {
+            let Some(done) = sw.reflection_probes().iter().find(|p| p.id == probe.id) else {
+                continue;
+            };
+            if let Some(cube) = done.captured.clone() {
+                if probe.captured.is_none() && probe.update_mode == ReflectionProbeUpdateMode::Once {
+                    let mut key = probe.clone();
+                    key.captured = None;
+                    cache.retain(|(k, _)| k.id != key.id);
+                    // Bounded: a probe that keeps changing replaces its own
+                    // entry rather than accumulating.
+                    cache.push((key, cube.clone()));
+                }
+                probe.captured = Some(cube);
+            }
+        }
+    });
+    probes
+}
+
+thread_local! {
+    static SOFTWARE_FALLBACK_FRAMES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn note_software_fallback() {
+    SOFTWARE_FALLBACK_FRAMES.with(|c| c.set(c.get() + 1));
+}
+
+/// How many frames [`render_editor_3d_frame_gpu`] rendered on the SOFTWARE
+/// reference path on this thread (no GPU adapter, or a feature the WGSL path
+/// cannot draw). Perf instrumentation (pat-p3p1m): a scene that silently falls
+/// back runs ~10x slower in the Play view, and nothing else shows it.
+pub fn software_fallback_frames() -> u64 {
+    SOFTWARE_FALLBACK_FRAMES.with(|c| c.get())
+}
+
 /// GPU-accelerated twin of [`render_editor_3d_frame`] (pat-ism62 follow-through).
 ///
 /// Rasterizes the scene meshes on the GPU via a **persistent** [`GpuRenderer3D`]
@@ -3204,42 +3308,25 @@ pub fn render_editor_3d_frame_gpu(
     let width = viewport.width.max(1);
     let height = viewport.height.max(1);
 
-    // Fog is applied per-fragment in the software renderer's linear pass (it
-    // needs a depth buffer, which the GPU editor path doesn't read back). Same
-    // for a procedural sky's `sky_cover` texture (the WGSL sky pass is
-    // procedural-only, no texture bind). Both are off by default, so the GPU
-    // fast path stays the norm; when either is set, render on the software
-    // reference path so the result is correct.
-    let render_env = editor_render_environment(viewport);
     // Any sky feature that needs a texture the WGSL sky pass can't bind: a
     // procedural `sky_cover` or a physical `night_sky`. Render those on the
     // software reference path.
+    //
+    // 🔑 Environment FOG and ReflectionProbes used to route here too, and that
+    // is what made 3D Play slow (pat-p3p1m): the official 3D platformer demo
+    // authors both, so every Play frame ran the software rasterizer (~80 ms at
+    // 995x807). The GPU path now applies the same `apply_fog_pass` on its
+    // read-back depth, and shades probe ambient + captured probe reflections in
+    // WGSL (`probe_sample`), with the cubemaps captured below by the software
+    // renderer — once per `Once` probe, cached across frames.
+    let render_env = editor_render_environment(viewport);
     let sky_needs_software = match render_env.sky.as_ref().map(|s| &s.material) {
         Some(gdserver3d::sky::SkyMaterial::Procedural(m)) => m.sky_cover.is_some(),
         Some(gdserver3d::sky::SkyMaterial::Physical(m)) => m.night_sky.is_some(),
         _ => false,
     };
-    // pat-mgixk.52: reflection probes contribute an ambient term the software
-    // path shades (`renderer.rs:1128` -> `sample_probes_at`) and the wgpu
-    // pipeline does not. Both renderers RECEIVE them — `populate_editor_scene_3d`
-    // calls `add_reflection_probe` + `update_reflection_probe` for each
-    // (`:2398`) — but on the GPU side those only fill storage and a query
-    // accessor (`wgpu_pipeline.rs:4891`); nothing reads them back during
-    // shading. So a scene with a probe silently lost its contribution in the
-    // default editor and Play viewport.
-    //
-    // The bead allows routing to software rather than porting probe shading
-    // into the WGSL, which is what this does.
-    //
-    // ⚠️ Gated on PRESENCE, not on `ambient_mode != Disabled`. A narrower test
-    // would be tighter today, but it would couple this condition to exactly
-    // what the software path currently does with a probe — and probe SPECULAR
-    // is the obvious next thing to land there, at which point a mode-based gate
-    // would start dropping contributions again, silently. Conservative costs a
-    // software frame for a scene that has probes at all; wrong costs every
-    // pixel of every probe-lit surface.
-    let probes_need_software = !inputs.env_effects.reflection_probes.is_empty();
-    if render_env.fog_enabled || sky_needs_software || probes_need_software {
+    if sky_needs_software {
+        note_software_fallback();
         return framebuffer_to_bgra(&render_editor_3d_frame_from_inputs(viewport, inputs));
     }
 
@@ -3259,7 +3346,10 @@ pub fn render_editor_3d_frame_gpu(
             GpuSlot::Ready(r) => r,
             // No GPU adapter → software reference path, converted to bytes (the
             // software path doesn't touch this thread-local, so the borrow is fine).
-            _ => return framebuffer_to_bgra(&render_editor_3d_frame_from_inputs(viewport, inputs)),
+            _ => {
+                note_software_fallback();
+                return framebuffer_to_bgra(&render_editor_3d_frame_from_inputs(viewport, inputs));
+            }
         };
 
         // The persistent renderer accumulates instances/lights across calls, so
@@ -3269,11 +3359,23 @@ pub fn render_editor_3d_frame_gpu(
         // lock (the caller snapshotted `inputs` under it), so `/api` handlers stay
         // responsive during the render.
         renderer.reset_scene();
+        // Probe cubemaps come from the software capture pass (the GPU
+        // pipeline has no cubemap render of its own); `Once` probes reuse
+        // their first capture (pat-p3p1m).
+        let captured_effects;
+        let env_effects = if inputs.env_effects.reflection_probes.is_empty() {
+            &inputs.env_effects
+        } else {
+            let mut fx = inputs.env_effects.clone();
+            fx.reflection_probes = captured_reflection_probes(viewport, inputs);
+            captured_effects = fx;
+            &captured_effects
+        };
         let overlays = populate_editor_scene_3d(
             &mut *renderer,
             viewport,
             &inputs.items,
-            &inputs.env_effects,
+            env_effects,
             inputs.root_motion_grid,
         );
         setup_editor_lighting_3d(&mut *renderer, viewport, &inputs.scene_lights);
@@ -3301,6 +3403,7 @@ pub fn render_editor_3d_frame_gpu(
     viewport: &Viewport3D,
     inputs: &Editor3DRenderInputs,
 ) -> Bgra8Image {
+    note_software_fallback();
     framebuffer_to_bgra(&render_editor_3d_frame_from_inputs(viewport, inputs))
 }
 

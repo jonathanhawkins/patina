@@ -1374,11 +1374,15 @@ impl SoftwareRenderer3D {
         if !env.fog_enabled {
             return;
         }
-        for y in 0..h {
+        // Per pixel and independent, so a large frame runs on several threads
+        // (pat-p3p1m); identical code per pixel, so identical output.
+        let _ = h;
+        let w_us = w.max(1) as usize;
+        let shade = |i: usize, px: &mut Color| {
+            let (x, y) = ((i % w_us) as u32, (i / w_us) as u32);
             let ndc_y = 1.0 - 2.0 * (y as f32 + 0.5) / h as f32;
-            for x in 0..w {
+            {
                 let ndc_x = 2.0 * (x as f32 + 0.5) / w as f32 - 1.0;
-                let i = (y * w + x) as usize;
                 let d = depth[i];
 
                 // World-space view direction through this pixel (for scatter,
@@ -1408,11 +1412,11 @@ impl SoftwareRenderer3D {
                         suns,
                         sky_in_view,
                     );
-                    pixels[i] = Color::new(
-                        lerp(pixels[i].r, fog_color.r, amount),
-                        lerp(pixels[i].g, fog_color.g, amount),
-                        lerp(pixels[i].b, fog_color.b, amount),
-                        pixels[i].a,
+                    *px = Color::new(
+                        lerp(px.r, fog_color.r, amount),
+                        lerp(px.g, fog_color.g, amount),
+                        lerp(px.b, fog_color.b, amount),
+                        px.a,
                     );
                 } else if env.fog_sky_affect > 0.0
                     && env.background_mode == gdserver3d::environment::BackgroundMode::Sky
@@ -1425,15 +1429,16 @@ impl SoftwareRenderer3D {
                     // colour background toward the fog colour.
                     let (fog_color, _) = fog_process(env, 1.0, 0.0, &view_dir_world, suns, None);
                     let a = env.fog_sky_affect;
-                    pixels[i] = Color::new(
-                        lerp(pixels[i].r, fog_color.r, a),
-                        lerp(pixels[i].g, fog_color.g, a),
-                        lerp(pixels[i].b, fog_color.b, a),
-                        pixels[i].a,
+                    *px = Color::new(
+                        lerp(px.r, fog_color.r, a),
+                        lerp(px.g, fog_color.g, a),
+                        lerp(px.b, fog_color.b, a),
+                        px.a,
                     );
                 }
             }
-        }
+        };
+        crate::postprocess::for_each_pixel_parallel(pixels, &shade);
     }
 
     /// Projects decals onto a linear HDR frame in place (pat-p0s82.26).

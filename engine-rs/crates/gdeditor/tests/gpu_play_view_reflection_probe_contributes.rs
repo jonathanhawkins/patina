@@ -10,8 +10,11 @@
 //! probe-lit surface rendered through `render_editor_3d_frame_gpu` came back
 //! with the probe silently dropped.
 //!
-//! The bead allows "route to software when probes exist" instead of porting
-//! probe shading into the WGSL, and that is what this pins.
+//! The bead allowed "route to software when probes exist" instead of porting
+//! probe shading into the WGSL. pat-p3p1m replaced that routing (it made every
+//! probe-lit Play frame software-rasterized) with probe ambient + reflections
+//! shaded in WGSL, so this now pins the GPU shading against the software
+//! reference rather than the routing.
 //!
 //! # Why the assertion is a RATIO of two deltas, not a pixel comparison
 //!
@@ -235,7 +238,7 @@ fn gpu_play_view_reflection_probe_contributes() {
     assert!(
         delta_backend < delta_probe / 4.0,
         "with a ReflectionProbe in the scene, `render_editor_3d_frame_gpu` must \
-         agree with the software reference (it routes there): backend delta \
+         agree with the software reference: backend delta \
          {delta_backend} against the probe's own delta {delta_probe}. A backend \
          delta of the same order means the GPU path is still shading without \
          the probe."

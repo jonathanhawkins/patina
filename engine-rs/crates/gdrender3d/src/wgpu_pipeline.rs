@@ -90,6 +90,25 @@ struct ModelUniforms {
     has_normal_map: u32,
     normal_scale: f32,
     _model_pad2: u32,
+    // ── ReflectionProbe covering this draw (pat-p3p1m) ──────────────────
+    // Appended AFTER the original 128 bytes so no existing offset moves. The
+    // probe is chosen per INSTANCE at its world origin, exactly as the software
+    // renderer does (`renderer.rs`: `sample_probes_at` / `probe_reflection_at`
+    // at `entry.transform.origin`).
+    // Summed probe ambient (`sample_probes_at`), added to the camera ambient.
+    probe_ambient: vec4<f32>,
+    // xyz = influence box min, w = intensity.
+    probe_box_min: vec4<f32>,
+    // xyz = influence box max, w = blend_distance.
+    probe_box_max: vec4<f32>,
+    // xyz = capture origin, w = box_projection (1.0 = on).
+    probe_origin: vec4<f32>,
+    // Base layer of the probe's six faces in `probe_cubes`, PLUS ONE; 0 = this
+    // draw has no captured probe (so a zeroed uniform means "none").
+    probe_layer: u32,
+    probe_resolution: u32,
+    _probe_pad0: u32,
+    _probe_pad1: u32,
 };
 @group(1) @binding(0)
 var<uniform> model: ModelUniforms;
@@ -221,6 +240,86 @@ var shadow_depth: texture_2d_array<f32>;
 // (LightData.shadow_map_index = the light's base layer, i.e. its +X face).
 @group(2) @binding(2)
 var omni_shadow_depth: texture_2d_array<f32>;
+
+// pat-p3p1m: captured ReflectionProbe cubemaps — 6 consecutive layers per
+// probe in `CubeFace` order (+X,-X,+Y,-Y,+Z,-Z), linear HDR colour. Read with
+// `textureLoad` (nearest texel), matching `ReflectionCubemap::sample_direction`.
+@group(2) @binding(3)
+var probe_cubes: texture_2d_array<f32>;
+
+// Port of `gdserver3d::box_projection::axis_exit`; 3e38 stands in for +inf.
+fn probe_axis_exit(p: f32, r: f32, lo: f32, hi: f32) -> f32 {
+    if (abs(r) < 1e-9) {
+        return 3.0e38;
+    }
+    return max((hi - p) / r, (lo - p) / r);
+}
+
+// Port of `ProbeReflection::sample` (box projection, nearest-texel cubemap
+// lookup, intensity * blend weight).
+fn probe_sample(world_pos: vec3<f32>, reflection: vec3<f32>) -> vec3<f32> {
+    let box_min = model.probe_box_min.xyz;
+    let box_max = model.probe_box_max.xyz;
+    var dir = reflection;
+    if (model.probe_origin.w > 0.5 && length(reflection) >= 1e-9) {
+        let ex = probe_axis_exit(world_pos.x, reflection.x, box_min.x, box_max.x);
+        let ey = probe_axis_exit(world_pos.y, reflection.y, box_min.y, box_max.y);
+        let ez = probe_axis_exit(world_pos.z, reflection.z, box_min.z, box_max.z);
+        let dist = min(ex, min(ey, ez));
+        if (dist >= 1.0e38 || dist <= 0.0) {
+            dir = normalize(reflection);
+        } else {
+            dir = normalize(world_pos + reflection * dist - model.probe_origin.xyz);
+        }
+    }
+    let a = abs(dir);
+    if (a.x + a.y + a.z <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    var face = 0;
+    var sc = 0.0;
+    var tc = 0.0;
+    var ma = 1.0;
+    if (a.x >= a.y && a.x >= a.z) {
+        ma = a.x;
+        if (dir.x > 0.0) { face = 0; sc = -dir.z; tc = -dir.y; }
+        else { face = 1; sc = dir.z; tc = -dir.y; }
+    } else if (a.y >= a.z) {
+        ma = a.y;
+        if (dir.y > 0.0) { face = 2; sc = dir.x; tc = dir.z; }
+        else { face = 3; sc = dir.x; tc = -dir.z; }
+    } else {
+        ma = a.z;
+        if (dir.z > 0.0) { face = 4; sc = dir.x; tc = -dir.y; }
+        else { face = 5; sc = -dir.x; tc = -dir.y; }
+    }
+    let res = i32(model.probe_resolution);
+    let u = 0.5 * (sc / ma + 1.0);
+    let v = 0.5 * (tc / ma + 1.0);
+    let x = min(i32(clamp(u, 0.0, 1.0) * f32(res)), res - 1);
+    let y = min(i32(clamp(v, 0.0, 1.0) * f32(res)), res - 1);
+    let layer = i32(model.probe_layer) - 1 + face;
+    let c = textureLoad(probe_cubes, vec2<i32>(x, y), layer, 0).rgb;
+
+    // `ReflectionProbe::blend_weight`.
+    var blend = 1.0;
+    let bd = model.probe_box_max.w;
+    if (bd > 0.0) {
+        let center = (box_min + box_max) * 0.5;
+        let extents = (box_max - box_min) * 0.5;
+        let local = world_pos - center;
+        for (var i = 0; i < 3; i = i + 1) {
+            let e = extents[i];
+            let band = min(bd, e);
+            if (band > 0.0) {
+                let axis = (abs(local[i]) - e + band) / band;
+                blend = blend * clamp(1.0 - axis, 0.0, 1.0);
+            }
+        }
+        blend = blend * blend;
+    }
+    return c * (model.probe_box_min.w * blend);
+}
 
 // ── Vertex stage ────────────────────────────────────────────────────
 
@@ -587,11 +686,42 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let normal_texel = textureSample(base_normal_map, base_material_sampler, in.uv);
     let mapped_normal = apply_normal_map(geo_normal, normal_texel, model.normal_scale);
     let normal = select(geo_normal, mapped_normal, model.has_normal_map != 0u);
-    var color = vec3<f32>(
-        camera.ambient.r * albedo_tex.r,
-        camera.ambient.g * albedo_tex.g,
-        camera.ambient.b * albedo_tex.b,
+    // Probe ambient is per INSTANCE and adds to the environment ambient, as
+    // in the software `entry_ambient` (pat-p3p1m). Zero without a probe.
+    let ambient = camera.ambient.rgb + model.probe_ambient.rgb;
+    let probe_roughness = clamp(model.roughness * roughness_map, 0.0, 1.0);
+    let probe_metallic = clamp(model.metallic * metallic_map, 0.0, 1.0);
+    // Ambient is DIFFUSE light, so in PBR (mode 2) a metal takes none of it:
+    // Godot multiplies it by albedo and then by `1.0 - metallic`, which is what
+    // the software `pbr_shade` does (`albedo_lin`). The GPU used the raw
+    // albedo, leaving a full ambient under every metal (pat-p3p1m: a probe
+    // mirror read ~half as red as the software reference). Lambert (mode 1)
+    // keeps the raw albedo here, as the software Lambert shader does.
+    let ambient_albedo = select(
+        albedo_tex.rgb,
+        albedo_tex.rgb * (1.0 - probe_metallic),
+        model.shading_mode == 2u,
     );
+    var color = ambient * ambient_albedo;
+
+    // Image-based specular from a captured ReflectionProbe — the software
+    // shaders' block, term for term (`shader.rs`, pat-s3rrv.206). Only a
+    // smooth surface (`sharpness > 0`) takes it, so a default rough material
+    // is unchanged. Lambert (mode 1) trades its diffuse for the reflection by
+    // `keep` (metals have no diffuse); PBR (mode 2) adds it to the ambient.
+    let probe_sharpness = 1.0 - probe_roughness;
+    var probe_env = vec3<f32>(0.0);
+    let has_probe = model.probe_layer != 0u && probe_sharpness > 0.0;
+    if (has_probe) {
+        let v = normalize(camera.camera_position - in.world_position);
+        let n_dot_v = max(dot(normal, v), 1e-4);
+        let reflection = normal * (2.0 * n_dot_v) - v;
+        let f0 = mix(vec3<f32>(0.04), albedo_tex.rgb, probe_metallic);
+        probe_env = probe_sample(in.world_position, reflection) * f0 * probe_sharpness;
+        if (model.shading_mode == 2u) {
+            color += probe_env;
+        }
+    }
 
     let num_lights = min(model.num_lights, 16u);
     for (var i = 0u; i < num_lights; i = i + 1u) {
@@ -673,6 +803,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                 * f
                 * (d * vis * n_dot_l * intensity * shadow * light.specular * specular_type_scale);
         }
+    }
+
+    if (has_probe && model.shading_mode == 1u) {
+        let keep = 1.0 - probe_metallic * probe_sharpness;
+        color = color * keep + probe_env;
     }
 
     // Scene-referred linear HDR: no clamp (tonemapping clamps at the end).
@@ -956,6 +1091,171 @@ pub struct ModelUniformData {
     /// bytes and no existing offset moved (`layers` stays at 112, which
     /// `cull_mask_gpu_*` pins).
     pub _model_pad: u32,
+    /// Summed ReflectionProbe ambient at the instance origin (linear RGB),
+    /// added to the camera ambient (pat-p3p1m). Appended after the original
+    /// 128 bytes so no earlier offset moves.
+    pub probe_ambient: [f32; 4],
+    /// The covering probe's influence box min (xyz) and `intensity` (w).
+    pub probe_box_min: [f32; 4],
+    /// The covering probe's influence box max (xyz) and `blend_distance` (w).
+    pub probe_box_max: [f32; 4],
+    /// The covering probe's capture origin (xyz) and `box_projection` (w, 1/0).
+    pub probe_origin: [f32; 4],
+    /// Base layer of the probe's faces in the probe cube array PLUS ONE; `0`
+    /// means no captured probe covers this draw (so a zeroed struct is "none").
+    pub probe_layer: u32,
+    /// Edge length of each probe cubemap face, in texels.
+    pub probe_resolution: u32,
+    /// Padding to a multiple of 16 bytes.
+    pub _probe_pad0: u32,
+    /// Padding to a multiple of 16 bytes.
+    pub _probe_pad1: u32,
+}
+
+/// The captured reflection probes uploaded for one frame (pat-p3p1m): a
+/// `Rgba32Float` 2D array, six consecutive layers per probe in `CubeFace`
+/// order, plus each probe's base layer (+1; 0 = not uploaded).
+struct ProbeCubeArray {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    /// Parallel to the renderer's `reflection_probes`.
+    layer_plus_one: Vec<u32>,
+    resolution: u32,
+    /// The `Arc` identities of the uploaded captures: the cache key.
+    key: Vec<usize>,
+}
+
+fn probe_cube_key(probes: &[ReflectionProbe]) -> Vec<usize> {
+    probes
+        .iter()
+        .map(|p| {
+            p.captured
+                .as_ref()
+                .map_or(0, |c| std::sync::Arc::as_ptr(c) as usize)
+        })
+        .collect()
+}
+
+/// Uploads every captured probe cubemap. Probes without a capture (or whose
+/// resolution differs from the first capture's) are left out and draw without
+/// a reflection, exactly like an uncaptured probe on the software path.
+fn upload_probe_cube_array(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    probes: &[ReflectionProbe],
+) -> ProbeCubeArray {
+    let resolution = probes
+        .iter()
+        .find_map(|p| p.captured.as_ref().map(|c| c.resolution))
+        .unwrap_or(1)
+        .max(1);
+    let mut layer_plus_one = Vec::with_capacity(probes.len());
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut layers = 0u32;
+    for p in probes {
+        match p.captured.as_ref() {
+            Some(c) if c.resolution == resolution => {
+                layer_plus_one.push(layers + 1);
+                for face in c.faces.iter() {
+                    for texel in face.iter() {
+                        for v in [texel.r, texel.g, texel.b, texel.a] {
+                            bytes.extend_from_slice(&v.to_le_bytes());
+                        }
+                    }
+                }
+                layers += 6;
+            }
+            _ => layer_plus_one.push(0),
+        }
+    }
+    let side = if layers == 0 {
+        bytes = vec![0u8; 16];
+        layers = 1;
+        1
+    } else {
+        resolution
+    };
+    let size = wgpu::Extent3d {
+        width: side,
+        height: side,
+        depth_or_array_layers: layers,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("probe-cube-array"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(side * 16),
+            rows_per_image: Some(side),
+        },
+        size,
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        label: Some("probe-cube-array-view"),
+        format: Some(wgpu::TextureFormat::Rgba32Float),
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        aspect: wgpu::TextureAspect::All,
+        base_mip_level: 0,
+        mip_level_count: Some(1),
+        base_array_layer: 0,
+        array_layer_count: Some(layers),
+        usage: None,
+    });
+    ProbeCubeArray {
+        _texture: texture,
+        view,
+        layer_plus_one,
+        resolution,
+        key: probe_cube_key(probes),
+    }
+}
+
+/// Fills a draw's probe fields from the probe covering `origin`: the same
+/// per-instance point query the software renderer makes (`sample_probes_at`
+/// for ambient, the first CAPTURED containing probe for the reflection).
+fn apply_probe_fields(
+    model: &mut ModelUniformData,
+    probes: &[ReflectionProbe],
+    cubes: &ProbeCubeArray,
+    origin: Vector3,
+) {
+    if probes.is_empty() {
+        return;
+    }
+    let amb = sample_probes_at(probes, origin);
+    model.probe_ambient = [amb.r, amb.g, amb.b, 0.0];
+    let found = probes
+        .iter()
+        .enumerate()
+        .find(|(_, p)| p.contains_point(origin) && p.captured.is_some());
+    if let Some((i, p)) = found {
+        let layer = cubes.layer_plus_one.get(i).copied().unwrap_or(0);
+        if layer == 0 {
+            return;
+        }
+        let (bmin, bmax) = p.world_aabb_min_max();
+        let o = p.capture_origin();
+        model.probe_box_min = [bmin.x, bmin.y, bmin.z, p.intensity];
+        model.probe_box_max = [bmax.x, bmax.y, bmax.z, p.blend_distance];
+        model.probe_origin = [o.x, o.y, o.z, if p.box_projection { 1.0 } else { 0.0 }];
+        model.probe_layer = layer;
+        model.probe_resolution = cubes.resolution;
+    }
 }
 
 /// Single light data for the GPU.
@@ -1337,6 +1637,18 @@ impl RenderPipeline3D {
                 // (128² faces vs the 256² directional/spot maps).
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // pat-p3p1m: captured ReflectionProbe cubemaps (Rgba32Float,
+                // 6 layers per probe).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: false },
@@ -1784,6 +2096,16 @@ struct MaterialSlotViews {
     /// the bind group that samples them, the way the custom-sampler path holds
     /// its own uploads.
     _uploaded: [wgpu::Texture; 5],
+}
+
+/// The five material slots of one editor draw, borrowed from the renderer's
+/// texture caches (pat-p3p1m).
+struct CachedSlotViews<'a> {
+    albedo: &'a wgpu::TextureView,
+    normal: &'a wgpu::TextureView,
+    roughness: &'a wgpu::TextureView,
+    metallic: &'a wgpu::TextureView,
+    emission: &'a wgpu::TextureView,
 }
 
 /// Builds all five material texture slots for one draw (pat-mgixk.52).
@@ -2568,6 +2890,7 @@ fn create_light_bind_group(
     light_data: &LightArrayData,
     shadow_view: &wgpu::TextureView,
     omni_view: &wgpu::TextureView,
+    probe_view: &wgpu::TextureView,
     label: &str,
 ) -> (wgpu::BindGroup, wgpu::Buffer) {
     let light_buf = create_buffer_init(
@@ -2592,6 +2915,10 @@ fn create_light_bind_group(
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: wgpu::BindingResource::TextureView(omni_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(probe_view),
             },
         ],
     });
@@ -2618,7 +2945,8 @@ fn f16_to_f32(bits: u16) -> f32 {
     match exp {
         0 => {
             // Subnormal or zero: value = frac / 2^10 * 2^(-14).
-            sign_f * (frac as f32) * 2.0f32.powi(-24)
+            // 2^-24, exactly.
+            sign_f * (frac as f32) * (1.0 / 16_777_216.0)
         }
         0x1f => {
             // Inf/NaN — clamp to a finite large value so downstream math is safe.
@@ -2629,8 +2957,13 @@ fn f16_to_f32(bits: u16) -> f32 {
             }
         }
         _ => {
-            // Normalized: value = (1 + frac/2^10) * 2^(exp-15).
-            sign_f * (1.0 + (frac as f32) / 1024.0) * 2.0f32.powi(exp as i32 - 15)
+            // Normalized: value = (1 + frac/2^10) * 2^(exp-15), built directly
+            // as f32 bits (rebias the exponent, widen the mantissa). Exactly the
+            // same value as the float formula — every half is representable in
+            // f32 — without a `powi` per channel, which was ~8% of a 3D Play
+            // frame (pat-p3p1m).
+            let bits32 = ((sign as u32) << 31) | ((exp as u32 + 112) << 23) | ((frac as u32) << 13);
+            f32::from_bits(bits32)
         }
     }
 }
@@ -3126,6 +3459,34 @@ pub struct GpuRenderer3D {
     /// How many times the shadow atlas was (re)built. Instrumentation for the
     /// cache-reuse tests; also a useful perf probe.
     shadow_atlas_rebuilds: u64,
+    /// The uploaded reflection-probe cubemaps (pat-p3p1m), rebuilt only when a
+    /// probe's capture changes (keyed by the captures' `Arc` identities), so a
+    /// `Once` probe uploads once.
+    probe_cube_cache: Option<ProbeCubeArray>,
+    /// Uploaded `BaseMaterial3D` maps for the editor path, keyed by the
+    /// `TextureImage`'s `Arc` identity and the slot's format (pat-p3p1m). The
+    /// editor path used to upload EVERY map of EVERY draw on EVERY frame.
+    /// Each entry holds an `Arc` clone so the identity cannot be reused while
+    /// cached; entries nobody else references any more are evicted per frame.
+    material_tex_cache: HashMap<(usize, wgpu::TextureFormat), CachedMaterialTexture>,
+    /// The 1x1 white stand-ins for an empty slot, one per format.
+    white_tex_cache: HashMap<wgpu::TextureFormat, (wgpu::Texture, wgpu::TextureView)>,
+    /// The material sampler, created once.
+    material_sampler_cache: Option<wgpu::Sampler>,
+    /// This frame's mesh-address -> `mesh_gpu_cache` key, filled by
+    /// `prime_editor_draw_caches` so the draw loop hashes nothing.
+    editor_frame_mesh_keys: HashMap<usize, u64>,
+    /// How many mesh / material-map uploads the editor path has made.
+    /// Instrumentation for the reuse tests (pat-p3p1m).
+    editor_mesh_uploads: u64,
+    editor_texture_uploads: u64,
+}
+
+/// One uploaded material map (see `GpuRenderer3D::material_tex_cache`).
+struct CachedMaterialTexture {
+    image: std::sync::Arc<gdserver3d::material::TextureImage>,
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
 }
 
 /// Cached shadow state for [`GpuRenderer3D::shadow_atlas_cache`].
@@ -3366,6 +3727,13 @@ impl GpuRenderer3D {
             mesh_gpu_cache: HashMap::new(),
             shadow_atlas_cache: None,
             shadow_atlas_rebuilds: 0,
+            probe_cube_cache: None,
+            material_tex_cache: HashMap::new(),
+            white_tex_cache: HashMap::new(),
+            material_sampler_cache: None,
+            editor_frame_mesh_keys: HashMap::new(),
+            editor_mesh_uploads: 0,
+            editor_texture_uploads: 0,
         })
     }
 
@@ -3396,6 +3764,13 @@ impl GpuRenderer3D {
         self.shadow_atlas_rebuilds
     }
 
+    /// `(meshes, material maps)` uploaded by the editor color path so far
+    /// (pat-p3p1m). A static scene re-rendered frame after frame uploads each
+    /// mesh and each map once.
+    pub fn editor_upload_counts(&self) -> (u64, u64) {
+        (self.editor_mesh_uploads, self.editor_texture_uploads)
+    }
+
     /// Ensures `shadow_atlas_cache` matches the current shadow-relevant scene
     /// state and returns this frame's light uniforms (pat-2be0q). On a cache
     /// hit — the common case for a static scene — no instance is cloned, no
@@ -3403,6 +3778,111 @@ impl GpuRenderer3D {
     /// uniform packing runs. Call with `&mut self` before the render pass
     /// takes its immutable device/target borrows; read the atlas view from
     /// `shadow_atlas_cache` afterwards.
+    /// Uploads, once, every mesh and material map this frame's editor draws
+    /// need, so the draw loop only looks them up (pat-p3p1m). Before this the
+    /// editor path built a vertex buffer, an index buffer, five textures and a
+    /// sampler for every draw of every frame.
+    fn prime_editor_draw_caches(&mut self) {
+        if self.mesh_gpu_cache.len() > MESH_CACHE_CAP {
+            self.mesh_gpu_cache.clear();
+        }
+        // Evict maps only the cache still references: their material is gone.
+        self.material_tex_cache
+            .retain(|_, c| std::sync::Arc::strong_count(&c.image) > 1);
+        if self.material_sampler_cache.is_none() {
+            self.material_sampler_cache = Some(material_sampler(&self.ctx.device));
+        }
+        for format in [MATERIAL_COLOR_FORMAT, MATERIAL_RAW_FORMAT] {
+            if !self.white_tex_cache.contains_key(&format) {
+                let t = white_material_texture(&self.ctx.device, &self.ctx.queue, format);
+                let v = t.create_view(&wgpu::TextureViewDescriptor::default());
+                self.white_tex_cache.insert(format, (t, v));
+            }
+        }
+        self.editor_frame_mesh_keys.clear();
+        let mut mesh_uploads: Vec<(u64, Mesh3D)> = Vec::new();
+        let mut tex_uploads: Vec<(
+            (usize, wgpu::TextureFormat),
+            std::sync::Arc<gdserver3d::material::TextureImage>,
+        )> = Vec::new();
+        for inst in self.instances.values() {
+            if !inst.visible {
+                continue;
+            }
+            for entry in instance_draw_entries(inst) {
+                let addr = entry.mesh as *const Mesh3D as usize;
+                if !self.editor_frame_mesh_keys.contains_key(&addr) {
+                    let key = mesh_content_hash(entry.mesh);
+                    self.editor_frame_mesh_keys.insert(addr, key);
+                    if !self.mesh_gpu_cache.contains_key(&key)
+                        && !mesh_uploads.iter().any(|(k, _)| *k == key)
+                    {
+                        mesh_uploads.push((key, entry.mesh.clone()));
+                    }
+                }
+                for (img, format) in [
+                    (&entry.albedo_texture, MATERIAL_COLOR_FORMAT),
+                    (&entry.normal_texture, MATERIAL_RAW_FORMAT),
+                    (&entry.roughness_texture, MATERIAL_RAW_FORMAT),
+                    (&entry.metallic_texture, MATERIAL_RAW_FORMAT),
+                    (&entry.emission_texture, MATERIAL_COLOR_FORMAT),
+                ] {
+                    if let Some(img) = img {
+                        let key = (std::sync::Arc::as_ptr(img) as usize, format);
+                        if !self.material_tex_cache.contains_key(&key)
+                            && !tex_uploads.iter().any(|(k, _)| *k == key)
+                        {
+                            tex_uploads.push((key, img.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        for (key, mesh) in mesh_uploads {
+            let vertices = mesh_to_gpu_vertices(&mesh);
+            if vertices.is_empty() {
+                continue;
+            }
+            let vertex_buf = create_buffer_init(
+                &self.ctx.device,
+                &self.ctx.queue,
+                "editor-cached-vertex",
+                bytemuck::cast_slice(&vertices),
+                wgpu::BufferUsages::VERTEX,
+            );
+            let index_buf = create_buffer_init(
+                &self.ctx.device,
+                &self.ctx.queue,
+                "editor-cached-index",
+                bytemuck::cast_slice(&mesh.indices),
+                wgpu::BufferUsages::INDEX,
+            );
+            self.mesh_gpu_cache.insert(
+                key,
+                CachedMeshBuffers { vertex_buf, index_buf, index_count: mesh.indices.len() as u32 },
+            );
+            self.editor_mesh_uploads += 1;
+        }
+        for (key, image) in tex_uploads {
+            self.editor_texture_uploads += 1;
+            let texture = upload_material_texture(&self.ctx.device, &self.ctx.queue, &image, key.1);
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.material_tex_cache
+                .insert(key, CachedMaterialTexture { image, _texture: texture, view });
+        }
+    }
+
+    /// Uploads the probe cubemaps unless the cached upload already holds
+    /// exactly these captures (pat-p3p1m).
+    fn ensure_probe_cubes(&mut self) {
+        let key = probe_cube_key(&self.reflection_probes);
+        if self.probe_cube_cache.as_ref().map(|c| &c.key) != Some(&key) {
+            let cubes =
+                upload_probe_cube_array(&self.ctx.device, &self.ctx.queue, &self.reflection_probes);
+            self.probe_cube_cache = Some(cubes);
+        }
+    }
+
     fn ensure_shadow_atlas(&mut self, camera: Vector3) -> LightArrayData {
         let key = shadow_state_key(&self.lights, self.instances.values());
         if self.shadow_atlas_cache.as_ref().map(|c| c.key) != Some(key) {
@@ -3645,6 +4125,8 @@ impl GpuRenderer3D {
         // `&mut self`, so it runs before the immutable borrows below; a
         // static scene reuses the cached maps + texture untouched.
         let light_data = self.ensure_shadow_atlas(viewport.camera_transform.origin);
+        self.ensure_probe_cubes();
+        self.prime_editor_draw_caches();
 
         let device = &self.ctx.device;
         let queue = &self.ctx.queue;
@@ -3734,6 +4216,10 @@ impl GpuRenderer3D {
             .shadow_atlas_cache
             .as_ref()
             .expect("ensure_shadow_atlas ran above");
+        let probe_cubes = self
+            .probe_cube_cache
+            .as_ref()
+            .expect("ensure_probe_cubes ran above");
         let (light_bg, _light_buf) = create_light_bind_group(
             device,
             queue,
@@ -3741,6 +4227,7 @@ impl GpuRenderer3D {
             &light_data,
             &atlas.view,
             &atlas.omni_view,
+            &probe_cubes.view,
             "editor-light-bind-group",
         );
 
@@ -3824,10 +4311,16 @@ impl GpuRenderer3D {
                 // Expand multimesh + shader material into concrete draws (matching
                 // the software renderer), instead of drawing only a single mesh.
                 for entry in instance_draw_entries(inst) {
-                    let vertices = mesh_to_gpu_vertices(entry.mesh);
-                    if vertices.is_empty() {
+                    // Geometry uploaded once by `prime_editor_draw_caches`; a
+                    // mesh with no vertices was never cached and draws nothing,
+                    // as before.
+                    let cached_mesh = self
+                        .editor_frame_mesh_keys
+                        .get(&(entry.mesh as *const Mesh3D as usize))
+                        .and_then(|k| self.mesh_gpu_cache.get(k));
+                    let Some(cached_mesh) = cached_mesh else {
                         continue;
-                    }
+                    };
                     // pat-s3rrv.30: AlphaScissor. Same helper the software
                     // rasterizer uses, so both backends make the identical
                     // decision from the identical enum.
@@ -3858,20 +4351,6 @@ impl GpuRenderer3D {
                         .map(|(_, _, p)| p)
                         .unwrap_or(&pipeline.pipeline);
                     pass.set_pipeline(chosen);
-                    let vertex_buf = create_buffer_init(
-                        device,
-                        queue,
-                        "editor-vertex",
-                        bytemuck::cast_slice(&vertices),
-                        wgpu::BufferUsages::VERTEX,
-                    );
-                    let index_buf = create_buffer_init(
-                        device,
-                        queue,
-                        "editor-index",
-                        bytemuck::cast_slice(&entry.mesh.indices),
-                        wgpu::BufferUsages::INDEX,
-                    );
                     // Material colors are sRGB authoring values; upload them in
                     // linear so the WGSL shades in linear (the HDR target + camera
                     // post-process encode back to sRGB), matching the software path.
@@ -3894,7 +4373,17 @@ impl GpuRenderer3D {
                         has_normal_map: u32::from(entry.normal_texture.is_some()),
                         normal_scale: entry.normal_scale,
                         _model_pad: 0,
+                        ..bytemuck::Zeroable::zeroed()
                     };
+                    let mut model_data = model_data;
+                    // Probes are resolved per draw at its origin, like the
+                    // software renderer's `entry.transform.origin` (pat-p3p1m).
+                    apply_probe_fields(
+                        &mut model_data,
+                        &self.reflection_probes,
+                        probe_cubes,
+                        entry.transform.origin,
+                    );
                     let model_buf = create_buffer_init(
                         device,
                         queue,
@@ -3908,16 +4397,31 @@ impl GpuRenderer3D {
                     // multiplicative identity for albedo/roughness/metallic/emission,
                     // which is what keeps an untextured draw bit-identical to before, and
                     // for the normal slot `has_normal_map` decides whether it is read.
-                    let maps = material_slot_views(
-                        device,
-                        queue,
-                        entry.albedo_texture.as_deref(),
-                        entry.normal_texture.as_deref(),
-                        entry.roughness_texture.as_deref(),
-                        entry.metallic_texture.as_deref(),
-                        entry.emission_texture.as_deref(),
-                    );
-                    let albedo_sampler = material_sampler(device);
+                    // Uploaded once by `prime_editor_draw_caches`.
+                    let slot = |img: &Option<
+                        std::sync::Arc<gdserver3d::material::TextureImage>,
+                    >,
+                                format: wgpu::TextureFormat|
+                     -> &wgpu::TextureView {
+                        img.as_ref()
+                            .and_then(|i| {
+                                self.material_tex_cache
+                                    .get(&(std::sync::Arc::as_ptr(i) as usize, format))
+                            })
+                            .map(|c| &c.view)
+                            .unwrap_or_else(|| &self.white_tex_cache[&format].1)
+                    };
+                    let maps = CachedSlotViews {
+                        albedo: slot(&entry.albedo_texture, MATERIAL_COLOR_FORMAT),
+                        normal: slot(&entry.normal_texture, MATERIAL_RAW_FORMAT),
+                        roughness: slot(&entry.roughness_texture, MATERIAL_RAW_FORMAT),
+                        metallic: slot(&entry.metallic_texture, MATERIAL_RAW_FORMAT),
+                        emission: slot(&entry.emission_texture, MATERIAL_COLOR_FORMAT),
+                    };
+                    let albedo_sampler = self
+                        .material_sampler_cache
+                        .as_ref()
+                        .expect("prime_editor_draw_caches ran above");
                     let model_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("editor-model-bind-group"),
                         layout: &pipeline.model_layout,
@@ -3953,9 +4457,12 @@ impl GpuRenderer3D {
                         ],
                     });
                     pass.set_bind_group(1, &model_bg, &[]);
-                    pass.set_vertex_buffer(0, vertex_buf.slice(..));
-                    pass.set_index_buffer(index_buf.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..entry.mesh.indices.len() as u32, 0, 0..1);
+                    pass.set_vertex_buffer(0, cached_mesh.vertex_buf.slice(..));
+                    pass.set_index_buffer(
+                        cached_mesh.index_buf.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    pass.draw_indexed(0..cached_mesh.index_count, 0, 0..1);
                 }
             }
         }
@@ -3991,12 +4498,15 @@ impl GpuRenderer3D {
         // Some(depth_readback_buf)` below (pat-mgixk.52). The condition mirrors
         // `apply_ssao_env`'s own early-out so a scene whose SSAO is disabled or
         // zero-intensity still pays nothing for the readback.
+        // pat-p3p1m: environment FOG needs it too. The editor/Play entry point
+        // used to route every fogged scene to the software renderer, because
+        // this path never applied `apply_fog_pass` — a fogged game (the 3D
+        // platformer demo) rendered at ~80 ms a frame on the CPU.
         let wants_depth = !self.decals.is_empty()
             || !self.fog_volumes.is_empty()
-            || viewport
-                .environment
-                .as_ref()
-                .map_or(false, |e| e.ssao_enabled && e.ssao_intensity > 0.0);
+            || viewport.environment.as_ref().map_or(false, |e| {
+                (e.ssao_enabled && e.ssao_intensity > 0.0) || e.fog_enabled
+            });
         let depth_align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let depth_padded_row = (w * 4 + depth_align - 1) / depth_align * depth_align;
         let depth_readback_buf = if wants_depth {
@@ -4118,6 +4628,19 @@ impl GpuRenderer3D {
                 &self.decals,
                 &fx_inv_proj,
                 &viewport.camera_transform,
+            );
+            // Environment fog covers the decal-modulated surface, in the
+            // software renderer's order (decal -> fog -> fog volumes), and with
+            // the same suns for its sun scatter (pat-p3p1m).
+            crate::renderer::SoftwareRenderer3D::apply_fog_pass(
+                &mut pixels,
+                &depth,
+                w,
+                h,
+                env,
+                &fx_inv_proj,
+                &viewport.camera_transform,
+                &crate::renderer::sky_suns_from_lights(&self.lights),
             );
             crate::renderer::SoftwareRenderer3D::apply_voxel_gi_pass(
                 &mut pixels,
@@ -4249,6 +4772,7 @@ impl GpuRenderer3D {
         // Shadow atlas + light uniforms (pat-32edz / pat-2be0q): cached across
         // frames, regenerated only when the shadow-relevant state changes.
         let light_data = self.ensure_shadow_atlas(viewport.camera_transform.origin);
+        self.ensure_probe_cubes();
 
         let device = &self.ctx.device;
         let queue = &self.ctx.queue;
@@ -4377,6 +4901,10 @@ impl GpuRenderer3D {
             .shadow_atlas_cache
             .as_ref()
             .expect("ensure_shadow_atlas ran above");
+        let probe_cubes = self
+            .probe_cube_cache
+            .as_ref()
+            .expect("ensure_probe_cubes ran above");
         let (light_bg, _light_buf) = create_light_bind_group(
             device,
             queue,
@@ -4384,6 +4912,7 @@ impl GpuRenderer3D {
             &light_data,
             &atlas.view,
             &atlas.omni_view,
+            &probe_cubes.view,
             "light-bind-group",
         );
         let num_lights = self.lights.len().min(gdserver3d::light::MAX_SCENE_LIGHTS) as u32;
@@ -4552,7 +5081,15 @@ impl GpuRenderer3D {
                     has_normal_map: u32::from(call.normal_texture.is_some()),
                     normal_scale: call.normal_scale,
                     _model_pad: 0,
+                    ..bytemuck::Zeroable::zeroed()
                 };
+                let mut model_data = model_data;
+                apply_probe_fields(
+                    &mut model_data,
+                    &self.reflection_probes,
+                    probe_cubes,
+                    call.transform.origin,
+                );
                 let model_buf = create_buffer_init(
                     device,
                     queue,
@@ -5265,12 +5802,33 @@ mod tests {
         assert_eq!(std::mem::size_of::<CameraUniformData>(), 160);
     }
 
+    /// pat-p3p1m: the bit-built half decode is the float formula, exactly,
+    /// for every finite half.
+    #[test]
+    fn f16_decode_matches_the_float_formula_for_every_finite_half() {
+        for bits in 0u16..=u16::MAX {
+            let exp = (bits >> 10) & 0x1f;
+            if exp == 0x1f {
+                continue;
+            }
+            let sign_f = if bits >> 15 == 1 { -1.0f32 } else { 1.0f32 };
+            let frac = (bits & 0x3ff) as f32;
+            let want = if exp == 0 {
+                sign_f * frac * 2.0f32.powi(-24)
+            } else {
+                sign_f * (1.0 + frac / 1024.0) * 2.0f32.powi(exp as i32 - 15)
+            };
+            assert_eq!(f16_to_f32(bits).to_bits(), want.to_bits(), "half {bits:#06x}");
+        }
+    }
+
     #[test]
     fn model_uniform_size() {
         // mat4x4 (64) + 2*vec4 (32) + 2*f32 (8) + 2*u32 (8) + layers u32 (4)
         // + 3*u32 pad (12) = 128 bytes. Was 112 before `layers` (pat-s3rrv.90);
         // the pad keeps the struct a multiple of 16 for the uniform stride.
-        assert_eq!(std::mem::size_of::<ModelUniformData>(), 128);
+        // + the pat-p3p1m probe block (4 vec4 + 4 u32 = 80) = 208.
+        assert_eq!(std::mem::size_of::<ModelUniformData>(), 208);
     }
 
     #[test]
@@ -5682,7 +6240,7 @@ mod tests {
             0,
             "the model uniform must stay a multiple of 16"
         );
-        assert_eq!(std::mem::size_of::<ModelUniformData>(), 128);
+        assert_eq!(std::mem::size_of::<ModelUniformData>(), 208);
         let model = ModelUniformData {
             model_matrix: identity_mat4(),
             albedo: [0.0; 4],
@@ -5695,6 +6253,7 @@ mod tests {
             has_normal_map: 0,
             normal_scale: 1.0,
             _model_pad: 0,
+            ..bytemuck::Zeroable::zeroed()
         };
         assert_eq!(
             &bytemuck::bytes_of(&model)[112..116],

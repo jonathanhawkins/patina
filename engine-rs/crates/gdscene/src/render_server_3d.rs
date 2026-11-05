@@ -2998,7 +2998,14 @@ pub fn standard_material_from_props(props: &HashMap<String, Variant>) -> Standar
 #[derive(Debug, Default)]
 pub struct MaterialTextureCache {
     entries: HashMap<String, Option<Arc<TextureImage>>>,
+    /// Where each path resolved to and that file's mtime when it was loaded,
+    /// so a cache kept across frames can drop what changed on disk (or what a
+    /// project switch re-pointed) via [`Self::drop_stale`] (pat-p3p1m).
+    stamps: HashMap<String, TextureStamp>,
 }
+
+/// The resolved file and its modification time (either may be absent).
+type TextureStamp = (Option<std::path::PathBuf>, Option<std::time::SystemTime>);
 
 impl MaterialTextureCache {
     /// A cache with no entries.
@@ -3028,7 +3035,43 @@ impl MaterialTextureCache {
         }
         let loaded = Self::load(res_path);
         self.entries.insert(res_path.to_string(), loaded.clone());
+        self.stamps.insert(res_path.to_string(), Self::stamp(res_path));
         loaded
+    }
+
+    /// Forgets every entry whose file now resolves elsewhere or was modified
+    /// since it was loaded, so the next lookup decodes it afresh.
+    ///
+    /// For a cache that outlives one frame (the editor/Play render list keeps
+    /// one per thread, pat-p3p1m: it used to build a new cache per frame and so
+    /// re-decode every material texture on every frame). One `stat` per path.
+    pub fn drop_stale(&mut self) {
+        let stamps = &mut self.stamps;
+        self.entries.retain(|path, _| {
+            let now = Self::stamp(path);
+            let fresh = stamps.get(path) == Some(&now);
+            if !fresh {
+                stamps.remove(path);
+            }
+            fresh
+        });
+    }
+
+    fn resolve(res_path: &str) -> Option<std::path::PathBuf> {
+        if res_path.starts_with("res://") || res_path.starts_with("user://") {
+            gdcore::resolve_path(res_path).ok()
+        } else {
+            Some(std::path::PathBuf::from(res_path))
+        }
+    }
+
+    fn stamp(res_path: &str) -> TextureStamp {
+        let resolved = Self::resolve(res_path);
+        let mtime = resolved
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok());
+        (resolved, mtime)
     }
 
     fn load(res_path: &str) -> Option<Arc<TextureImage>> {
@@ -3115,11 +3158,15 @@ pub fn material_props_from_node(
 ) -> Option<HashMap<String, Variant>> {
     const PREFIX: &str = "__material__";
     let node = tree.get_node(node_id)?;
+    // Unsorted on purpose (pat-p3p1m): the keys land in a HashMap, so order is
+    // irrelevant, and `get_property_list` SORTS every property name of the
+    // node — run for every mesh node on every editor/Play frame, that sort was
+    // the largest cost of building the 3D render list.
     let keys: Vec<String> = node
-        .get_property_list()
-        .into_iter()
+        .properties()
+        .map(|(k, _)| k)
         .filter(|k| k.starts_with(PREFIX))
-        .map(String::from)
+        .cloned()
         .collect();
     if keys.is_empty() {
         return None;
@@ -3251,7 +3298,8 @@ pub fn surface_materials_for_node(
     // Group the flattened keys by surface index first: a material is built from
     // a whole property bag, not key by key.
     let mut bags: HashMap<usize, HashMap<String, Variant>> = HashMap::new();
-    for key in node.get_property_list() {
+    // Unsorted (pat-p3p1m): grouped into HashMaps below, so order is irrelevant.
+    for key in node.properties().map(|(k, _)| k.as_str()) {
         let Some(rest) = key.strip_prefix(PREFIX) else {
             continue;
         };
