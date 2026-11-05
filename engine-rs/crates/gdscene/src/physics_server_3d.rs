@@ -827,6 +827,11 @@ pub struct PhysicsServer3D {
     /// records a path that failed to load or is not a supported shape, so it
     /// is not retried every rebuild.
     gridmap_shape_cache: HashMap<String, Option<Shape3D>>,
+    /// Which GridMap OCTANT each GridMap cell body belongs to (pat-kiuul).
+    /// Godot gives an octant ONE body; Patina gives every cell its own, so a
+    /// character's Jolt contact query groups them back by this key (its
+    /// internal-edge removal runs per body). Rebuilt with the GridMap bodies.
+    compound_groups: std::sync::Arc<HashMap<BodyId3D, u64>>,
     gravity: Vector3,
     /// Bodies registered by the sync of the CURRENT physics tick, cleared by
     /// [`begin_physics_tick`](Self::begin_physics_tick) (pat-d4ghb).
@@ -871,6 +876,17 @@ struct GridMapBodies3D {
     /// costs nothing per tick.
     signature: u64,
     bodies: Vec<BodyId3D>,
+    /// Octant key per body, parallel to `bodies` (pat-kiuul).
+    groups: Vec<u64>,
+}
+
+/// One key per (GridMap node, octant) — Godot's one body per octant.
+fn octant_group_key(nid: NodeId, octant: [i32; 3]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    nid.hash(&mut h);
+    octant.hash(&mut h);
+    h.finish()
 }
 
 /// A `SoftBody3D` node's registration in the physics world.
@@ -905,6 +921,7 @@ impl PhysicsServer3D {
             next_soft_body_id: 1,
             gridmaps: HashMap::new(),
             gridmap_shape_cache: HashMap::new(),
+            compound_groups: std::sync::Arc::new(HashMap::new()),
             gravity: Vector3::new(0.0, -9.8, 0.0),
             fresh_bodies: HashSet::new(),
             held_this_step: HashSet::new(),
@@ -938,6 +955,7 @@ impl PhysicsServer3D {
             next_soft_body_id: 1,
             gridmaps: HashMap::new(),
             gridmap_shape_cache: HashMap::new(),
+            compound_groups: std::sync::Arc::new(HashMap::new()),
             gravity,
             fresh_bodies: HashSet::new(),
             held_this_step: HashSet::new(),
@@ -1104,6 +1122,11 @@ impl PhysicsServer3D {
             })
     }
 
+    /// GridMap cell body -> octant key (pat-kiuul); see `compound_groups`.
+    pub fn compound_groups(&self) -> std::sync::Arc<HashMap<BodyId3D, u64>> {
+        self.compound_groups.clone()
+    }
+
     /// The static bodies registered for a `GridMap` node's cells (pat-2ifdx).
     pub fn gridmap_bodies(&self, node_id: NodeId) -> &[BodyId3D] {
         self.gridmaps
@@ -1123,6 +1146,7 @@ impl PhysicsServer3D {
     /// the GridMap's `collision_layer` / `collision_mask` and physics material.
     fn sync_gridmaps(&mut self, tree: &SceneTree, all_nodes: &[NodeId]) {
         let mut live: HashSet<NodeId> = HashSet::new();
+        let mut changed = false;
         for &nid in all_nodes {
             let Some(node) = tree.get_node(nid) else {
                 continue;
@@ -1148,6 +1172,7 @@ impl PhysicsServer3D {
             }
 
             // Rebuild: free the old bodies first.
+            changed = true;
             if let Some(old) = self.gridmaps.remove(&nid) {
                 for id in old.bodies {
                     self.world.remove_body(id);
@@ -1164,7 +1189,9 @@ impl PhysicsServer3D {
             let rough = truthy_prop_3d(tree, nid, "__physics_material__rough", false);
             let absorbent = truthy_prop_3d(tree, nid, "__physics_material__absorbent", false);
             let mut bodies = Vec::new();
-            for (local, path) in grid.collision_shapes() {
+            let mut groups = Vec::new();
+            let octant_size = u32_prop_3d(tree, nid, "cell_octant_size", 8) as i32;
+            for (local, path, octant) in grid.collision_shapes_by_octant(octant_size) {
                 let shape = self
                     .gridmap_shape_cache
                     .entry(path.clone())
@@ -1200,9 +1227,16 @@ impl PhysicsServer3D {
                     body.bounce = -body.bounce.abs();
                 }
                 bodies.push(self.world.add_body(body));
+                groups.push(octant_group_key(nid, octant));
             }
-            self.gridmaps
-                .insert(nid, GridMapBodies3D { signature, bodies });
+            self.gridmaps.insert(
+                nid,
+                GridMapBodies3D {
+                    signature,
+                    bodies,
+                    groups,
+                },
+            );
         }
 
         let stale: Vec<NodeId> = self
@@ -1212,11 +1246,21 @@ impl PhysicsServer3D {
             .copied()
             .collect();
         for nid in stale {
+            changed = true;
             if let Some(g) = self.gridmaps.remove(&nid) {
                 for id in g.bodies {
                     self.world.remove_body(id);
                 }
             }
+        }
+        if changed {
+            let mut map = HashMap::new();
+            for g in self.gridmaps.values() {
+                for (id, group) in g.bodies.iter().zip(&g.groups) {
+                    map.insert(*id, *group);
+                }
+            }
+            self.compound_groups = std::sync::Arc::new(map);
         }
     }
 

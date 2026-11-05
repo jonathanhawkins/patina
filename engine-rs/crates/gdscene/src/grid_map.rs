@@ -408,6 +408,23 @@ impl GridMap {
     /// Sorted by cell so the order — and so the physics body ids built from
     /// it — is deterministic despite the cell `HashMap`.
     pub fn collision_shapes(&self) -> Vec<(Transform3D, String)> {
+        self.collision_shapes_by_octant(8)
+            .into_iter()
+            .map(|(xform, path, _)| (xform, path))
+            .collect()
+    }
+
+    /// [`Self::collision_shapes`] with each shape's OCTANT: Godot builds ONE
+    /// static body per octant of `octant_size` cells (`GridMap::_octant_update`,
+    /// keyed as in `set_cell_item`), so a Jolt contact query sees a whole
+    /// octant's cells as one body (pat-kiuul).
+    pub fn collision_shapes_by_octant(
+        &self,
+        octant_size: i32,
+    ) -> Vec<(Transform3D, String, [i32; 3])> {
+        let size = octant_size.max(1);
+        // `grid_map.cpp`: `x > 0 ? x / size : (x - (size - 1)) / size`.
+        let key = |v: i32| if v > 0 { v / size } else { (v - (size - 1)) / size };
         let mut cells: Vec<(&GridCell, &i32)> = self.cells.iter().collect();
         cells.sort_by_key(|(c, _)| (c.x, c.y, c.z));
         let mut out = Vec::new();
@@ -416,8 +433,9 @@ impl GridMap {
                 continue;
             };
             let xform = self.cell_transform(*cell);
+            let octant = [key(cell.x), key(cell.y), key(cell.z)];
             for (path, shape_xform) in &item.shapes {
-                out.push((xform * *shape_xform, path.clone()));
+                out.push((xform * *shape_xform, path.clone(), octant));
             }
         }
         out
@@ -1065,6 +1083,30 @@ mod tests {
         // Godot's map_to_local: x = 1 * 2 + 1 (cell_center_x), the cell's
         // CENTRE (pat-2ifdx).
         assert!((inst[0].0.x - 3.0).abs() < 1e-5);
+    }
+
+    /// pat-kiuul: Godot's octant key (`grid_map.cpp`, `set_cell_item`):
+    /// `x > 0 ? x / size : (x - (size - 1)) / size` with C's truncating
+    /// division, i.e. a floor division — cell -1 is in octant -1, not 0.
+    #[test]
+    fn collision_shapes_carry_godots_octant_key() {
+        let mut g = GridMap::new();
+        g.mesh_library.set_item(0, "box", "res://box.tres");
+        g.mesh_library
+            .items
+            .get_mut(&0)
+            .unwrap()
+            .shapes
+            .push(("res://box_shape.tres".into(), Transform3D::IDENTITY));
+        for x in [-9, -8, -1, 0, 7, 8] {
+            g.set_cell_item(GridCell { x, y: 0, z: 0 }, 0);
+        }
+        let keys: Vec<i32> = g
+            .collision_shapes_by_octant(8)
+            .iter()
+            .map(|(_, _, o)| o[0])
+            .collect();
+        assert_eq!(keys, vec![-2, -1, -1, 0, 0, 1]);
     }
 
     #[test]
