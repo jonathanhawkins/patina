@@ -60,6 +60,9 @@ export function mcpPlayArgs(sc) {
     screenshots: sc.shots.slice(0, 8),
     width: sc.size[0],
     height: sc.size[1],
+    // The seed the Godot reference was pinned to (pat-y2ylj): with Patina's
+    // Godot-exact PCG32, both engines then draw the same random numbers.
+    seed: sc.seed,
   };
 }
 
@@ -220,7 +223,7 @@ async function main() {
     ref = runGodotReference(gameDir, { ...opts, out: path.join(outDir, 'godot') });
   }
   const m = ref.trace.meta;
-  const sc = resolveScenario(gameDir, { scene: m.scene, keys: m.keys, watch: m.watches.map((w) => w.id), frames: m.frames, size: m.size, shots: m.shots, fps: m.fps });
+  const sc = resolveScenario(gameDir, { scene: m.scene, keys: m.keys, watch: m.watches.map((w) => w.id), frames: m.frames, size: m.size, shots: m.shots, fps: m.fps, seed: m.seed });
 
   const patina = await runPatina(sc, port, path.join(outDir, 'patina'));
   const godotTrace = traceFromGodot(ref.trace, sc.watches);

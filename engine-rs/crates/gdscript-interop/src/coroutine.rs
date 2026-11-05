@@ -16,6 +16,16 @@ use gdvariant::{Dictionary, Variant};
 
 use crate::parser::{Expr, Stmt};
 
+/// The await-signal name `await RenderingServer.frame_post_draw` parks on
+/// (pat-9s7yp). The main loop emits it once a frame has been drawn — at the
+/// boundary before the next frame, where Godot's `RenderingServer::draw`
+/// emits `frame_post_draw`. Not a valid identifier, so no script signal can
+/// collide with it.
+pub const FRAME_POST_DRAW_SIGNAL: &str = "RenderingServer::frame_post_draw";
+/// Same for `frame_pre_draw` (emitted by Godot just before drawing, which is
+/// also after the frame's process phase and deferred calls).
+pub const FRAME_PRE_DRAW_SIGNAL: &str = "RenderingServer::frame_pre_draw";
+
 /// What a suspended coroutine is waiting for.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AwaitTarget {

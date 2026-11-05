@@ -2594,6 +2594,39 @@ impl SceneTree {
         }
     }
 
+    /// Delivers `RenderingServer.frame_pre_draw` then `frame_post_draw` to
+    /// every script's parked awaits (pat-9s7yp) — the end of a drawn frame.
+    /// Called by [`MainLoop::step`](crate::MainLoop::step) at the boundary
+    /// before the next frame; see there for why that is Godot's resume point.
+    pub fn emit_frame_draw_signals(&mut self) {
+        let node_ids: Vec<NodeId> = self.scripts.keys().copied().collect();
+        for node_id in node_ids {
+            let Some(mut script) = self.scripts.remove(&node_id) else {
+                continue;
+            };
+            // SAFETY: same invariant as `process_script_coroutines_unscaled` —
+            // the accessor lives only for this call and is cleared before the
+            // script goes back into the arena.
+            let accessor = unsafe { crate::scripting::SceneTreeAccessor::new(self as *mut SceneTree) };
+            script.set_scene_access(Box::new(accessor), node_id.raw());
+            script.notify_await_signal(gdscript_interop::coroutine::FRAME_PRE_DRAW_SIGNAL, &[]);
+            script.notify_await_signal(gdscript_interop::coroutine::FRAME_POST_DRAW_SIGNAL, &[]);
+            script.clear_scene_access();
+            self.record_coroutine_errors(node_id, &mut *script);
+            let prop_values: Vec<(String, Variant)> = script
+                .list_properties()
+                .into_iter()
+                .filter_map(|info| script.get_property(&info.name).map(|v| (info.name, v)))
+                .collect();
+            if let Some(node) = self.nodes.get_mut(&node_id) {
+                for (name, val) in prop_values {
+                    node.set_property(&name, val);
+                }
+            }
+            self.scripts.insert(node_id, script);
+        }
+    }
+
     /// Advances all `Timer` nodes in the tree (Godot `Timer`, idle process
     /// callback) (pat-u3l8c.3).
     ///
@@ -9319,6 +9352,8 @@ impl SceneTree {
     /// parent yet. Call [`add_child`](Self::add_child) to place it in the
     /// hierarchy.
     pub fn create_node(&mut self, class_name: &str, name: &str) -> NodeId {
+        // The global random draws Godot's constructor makes (pat-y2ylj).
+        crate::construction_randomness::on_construct(class_name);
         let mut node = Node::new(name, class_name);
         // Seed the property bag with the class's registered ClassDB defaults,
         // walked base→derived up the inheritance chain, so a freshly created

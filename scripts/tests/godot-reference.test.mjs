@@ -12,7 +12,10 @@ import {
   parseMcpProbes, traceFromGodot, alignTraces, diffTrace, imageDiff, makeImage,
   resizeImage, encodePng, decodePng, sideBySide, verdict, heatColour,
 } from '../lib/godot-reference-lib.mjs';
-import { patchProjectGodot, projectSetting, parseGodotVersion, resPath } from '../godot-reference.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { patchProjectGodot, projectSetting, parseGodotVersion, resPath, pinRandomnessInScript, resolveScenario, DEFAULT_SEED } from '../godot-reference.mjs';
 import { mcpPlayArgs, screenshotFrames } from '../compare-to-godot.mjs';
 import zlib from 'node:zlib';
 
@@ -357,4 +360,44 @@ test('project settings and Godot versions are read the way the capture needs the
   assert.deepEqual(parseGodotVersion('4.6.1.stable.official.14d19694e'), [4, 6]);
   assert.equal(resPath('level/level.tscn'), 'res://level/level.tscn');
   assert.equal(resPath('res://main.tscn'), 'res://main.tscn');
+});
+
+// --- random numbers (pat-y2ylj) ---------------------------------------------
+
+test('clock-seeded randomness in a script is rewritten to the pinned helpers', () => {
+  const src = [
+    'var rng := RandomNumberGenerator.new()',
+    'func _ready():',
+    '\trandomize()',
+    '\trng.randomize()',
+    '\tvar r = RandomNumberGenerator.new( )',
+    '\tmy_randomize()',
+    '\tvar x = randf()',
+  ].join('\n');
+  const { text, count } = pinRandomnessInScript(src);
+  assert.equal(count, 4);
+  const pin = 'preload("res://__godot_reference_capture.gd")';
+  assert.ok(text.startsWith(`var rng := ${pin}.pinned_rng()\n`), 'RandomNumberGenerator.new() takes the next instance seed');
+  assert.ok(text.includes(`\tvar r = ${pin}.pinned_rng()`));
+  assert.ok(text.includes(`\t${pin}.pinned_randomize()`), 'a bare randomize() re-seeds the global RNG from the pinned base');
+  assert.ok(text.includes(`\trng.set_seed(${pin}.next_instance_seed())`), 'an instance randomize() takes the next instance seed');
+  assert.ok(text.includes('\tmy_randomize()'), 'a function merely ending in randomize is left alone');
+  assert.ok(text.includes('\tvar x = randf()'), 'draws are left alone: only the SEEDING is pinned');
+  assert.equal(pinRandomnessInScript('func f():\n\tpass\n').count, 0);
+});
+
+test('the scenario carries a seed: --seed, else playtest.json, else the MCP play default', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'seed-scenario-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'project.godot'), PROJECT);
+    assert.equal(resolveScenario(dir, {}).seed, DEFAULT_SEED);
+    assert.equal(DEFAULT_SEED, 42, 'the agent play tool pins 42 when no seed is given');
+    fs.writeFileSync(path.join(dir, 'playtest.json'), JSON.stringify({ seed: 7 }));
+    assert.equal(resolveScenario(dir, {}).seed, 7);
+    assert.equal(resolveScenario(dir, { seed: 9 }).seed, 9);
+    const t = parseTimeline('wait:100', 60);
+    assert.equal(mcpPlayArgs({ frames: 6, timeline: t, watches: [], shots: [], size: [8, 8], seed: 9 }).seed, 9, 'Patina plays with the reference\'s seed');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

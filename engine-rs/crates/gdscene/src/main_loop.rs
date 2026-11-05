@@ -638,6 +638,10 @@ pub struct MainLoop {
     max_physics_steps_per_frame: u32,
     /// Total frames executed.
     frame_counter: u64,
+    /// A frame has been stepped (and so drawn) since the frame-draw signals
+    /// were last delivered (pat-9s7yp): the next `step` starts by emitting
+    /// `RenderingServer.frame_pre_draw` / `frame_post_draw` for it.
+    frame_drawn: bool,
     /// Total physics ticks executed, backing `Engine.get_physics_frames()`
     /// (pat-0q2kx.121).
     physics_tick_counter: u64,
@@ -835,6 +839,7 @@ impl MainLoop {
             physics_ticks_per_second: 60,
             max_physics_steps_per_frame: 8,
             frame_counter: 0,
+            frame_drawn: false,
             physics_tick_counter: 0,
             engine_physics_tps_gen: gdscript_interop::engine_physics_ticks_per_second_generation(),
             process_time: 0.0,
@@ -1407,495 +1412,7 @@ impl MainLoop {
     /// Closes the audit gap where `PathFollow3D::advance`/`position_on` were
     /// never called from the loop and PathFollow2D was defaults-only.
     pub fn process_path_follows(&mut self, dt: f32) {
-        use gdcore::math::{Vector2, Vector3};
-        // PathFollow3D's tilt is a rotation about the tangent, which has to be
-        // composed with the posture basis rather than added to an euler.
-        use gdcore::math3d::{Basis, Quaternion};
-
-        /// Shadow of the `progress` this loop last published, used to tell an
-        /// external write apart from its own (pat-0q2kx.104). Underscore-
-        /// prefixed like the engine's other internal node keys
-        /// (`_move_and_slide_requested`).
-        const PF_PUBLISHED_PROGRESS: &str = "_pathfollow_published_progress";
-        /// Shadow of the last published `progress_ratio`.
-        const PF_PUBLISHED_RATIO: &str = "_pathfollow_published_ratio";
-
-        struct Update3 {
-            id: NodeId,
-            progress: f32,
-            /// `progress / baked_length`, republished every tick — the 3D
-            /// branch used to publish only `progress`, so a script reading
-            /// `progress_ratio` off a PathFollow3D got `Nil` for ever.
-            progress_ratio: f32,
-            pos: Vector3,
-            rot: Option<Vector3>,
-        }
-        struct Update2 {
-            id: NodeId,
-            progress: f32,
-            /// `progress / baked_length`, republished every tick so the two
-            /// views of the position never drift apart (pat-0q2kx.104).
-            progress_ratio: f32,
-            pos: Vector2,
-            rot: Option<f32>,
-        }
-        let mut updates3: Vec<Update3> = Vec::new();
-        let mut updates2: Vec<Update2> = Vec::new();
-
-        /// A numeric node property as `f32`, defaulting to `0.0` when absent —
-        /// Godot's default for both `h_offset` and `v_offset`. Local because
-        /// the gather loop holds `&Node` directly; the crate's other
-        /// `float_prop` helpers all take `(tree, id, key)` and would need a
-        /// second borrow of the tree here.
-        fn float_property(node: &crate::node::Node, name: &str) -> f32 {
-            match node.get_property(name) {
-                Variant::Float(f) => f as f32,
-                Variant::Int(i) => i as f32,
-                _ => 0.0,
-            }
-        }
-
-        // Gather phase: read follow nodes + their parent curves (immutable).
-        for id in self.tree.all_nodes_in_tree_order() {
-            let Some(node) = self.tree.get_node(id) else {
-                continue;
-            };
-            let is3 = node.class_name() == "PathFollow3D";
-            let is2 = node.class_name() == "PathFollow2D";
-            if !is3 && !is2 {
-                continue;
-            }
-            let Some(parent_id) = node.parent() else {
-                continue;
-            };
-            let Some(parent) = self.tree.get_node(parent_id) else {
-                continue;
-            };
-
-            let progress = match node.get_property("progress") {
-                Variant::Float(f) => f as f32,
-                Variant::Int(i) => i as f32,
-                _ => 0.0,
-            };
-            let speed = match node.get_property("path_speed") {
-                Variant::Float(f) => f as f32,
-                Variant::Int(i) => i as f32,
-                _ => 0.0,
-            };
-            // Godot's PathFollow defaults `loop` to true.
-            let loop_path = !matches!(node.get_property("loop"), Variant::Bool(false));
-
-            if is3 {
-                if parent.class_name() != "Path3D" {
-                    continue;
-                }
-                let pts = match parent.get_property("curve_points") {
-                    Variant::PackedVector3Array(v) => v,
-                    _ => continue,
-                };
-                if pts.len() < 2 {
-                    continue;
-                }
-                let mut curve = Curve3D::new();
-                for p in &pts {
-                    curve.add_point(*p);
-                }
-                // Baked index-for-index with `curve_points` by the loader, so a
-                // length mismatch means one of the two is stale; drop the tilts
-                // rather than rotate by an angle belonging to another point.
-                if let Variant::PackedFloat32Array(t) = parent.get_property("curve_tilts") {
-                    if t.len() == pts.len() {
-                        curve.tilts = t;
-                    }
-                }
-                if let Variant::PackedVector3Array(u) = parent.get_property("curve_up_vectors") {
-                    if u.len() == pts.len() {
-                        curve.up_vectors = u;
-                    }
-                }
-                // The AUTHORED control points, in Godot's (in, out, position)
-                // triple order (pat-s3rrv.91 item 5). Unlike the three arrays
-                // above these are NOT index-aligned with the polyline and must
-                // not be length-checked against it — there are a handful of
-                // control points behind hundreds of baked samples. The guard is
-                // that the array divides into whole triples; a partial one would
-                // silently drop a handle and straighten the last segment.
-                if let Variant::PackedVector3Array(cp) = parent.get_property("curve_control_points")
-                {
-                    if !cp.is_empty() && cp.len() % 3 == 0 {
-                        curve.control = cp
-                            .chunks_exact(3)
-                            .map(|t| crate::bezier_bake::CurvePoint3 {
-                                in_handle: t[0],
-                                out_handle: t[1],
-                                position: t[2],
-                            })
-                            .collect();
-                    }
-                }
-                curve.closed = matches!(parent.get_property("curve_closed"), Variant::Bool(true));
-                let baked_len = curve.baked_length();
-
-                // The same reconciliation the 2D branch documents at length:
-                // Godot has ONE value with two views (`progress_ratio ==
-                // progress / baked_length`), Patina stores two properties, so
-                // whichever no longer matches its shadow is the one the outside
-                // world wrote. `progress` wins ties. The 3D branch published
-                // neither shadow before, so writing `progress_ratio` from a
-                // script did nothing at all here.
-                let last_progress = float_property(node, PF_PUBLISHED_PROGRESS);
-                let last_ratio = float_property(node, PF_PUBLISHED_RATIO);
-                let progress = if (progress - last_progress).abs() > 1e-5 {
-                    progress
-                } else if baked_len > 1e-6 {
-                    match node.get_property("progress_ratio") {
-                        Variant::Float(_) | Variant::Int(_) => {
-                            let ratio = float_property(node, "progress_ratio");
-                            if (ratio - last_ratio).abs() > 1e-5 {
-                                ratio * baked_len
-                            } else {
-                                progress
-                            }
-                        }
-                        _ => progress,
-                    }
-                } else {
-                    progress
-                };
-
-                // ⚠️ Godot's default is ROTATION_XYZ (3), NOT none
-                // (`doc/classes/PathFollow3D.xml:41`), so an absent or
-                // out-of-range property has to land on XYZ. The old `_ =>
-                // None` arm meant a follower authored without an explicit mode
-                // — the common case — did not rotate at all, and mode 4
-                // (ORIENTED) silently fell into the same hole.
-                let rotation_mode = match node.get_property("rotation_mode") {
-                    Variant::Int(0) => PathFollowRotation::None,
-                    Variant::Int(1) => PathFollowRotation::Y,
-                    Variant::Int(2) => PathFollowRotation::Xy,
-                    Variant::Int(4) => PathFollowRotation::Oriented,
-                    _ => PathFollowRotation::Xyz,
-                };
-                let mut follow = PathFollow3D {
-                    progress,
-                    loop_path,
-                    rotation_mode,
-                };
-                follow.advance(&curve, speed * dt);
-
-                // Godot samples with `sample_baked(progress, cubic)`
-                // (`path_3d.cpp:286, 289`). ⚠️ `cubic_interp` DEFAULTS TO TRUE
-                // (`class_db.rs:11798`, `doc/classes/PathFollow3D.xml`), so an
-                // absent property means CUBIC — reading it as false-by-default
-                // would silently downgrade every scene that never set it, and
-                // the two agree exactly on straight paths, so most fixtures
-                // would never notice.
-                let cubic = !matches!(node.get_property("cubic_interp"), Variant::Bool(false));
-                let mut pos = if cubic {
-                    curve.sample_baked_cubic(follow.progress)
-                } else {
-                    follow.position_on(&curve)
-                };
-
-                // Godot builds the frame with **-Z along the tangent**
-                // (`sample_baked_with_rotation`, then `correct_posture` locks
-                // axes in YXZ euler order — `path_3d.cpp:290-305, 371-400`).
-                //
-                // 🔑 The yaw here used to be `atan2(t.x, t.z)`, a "+Z is
-                // forward" convention this file described as "internally
-                // consistent". It is EXACTLY π away from Godot's on every
-                // tangent, so every follower faced backwards along its own
-                // path — and no test could see it, because the only
-                // PathFollow3D coverage asserted position. The values below are
-                // the YXZ euler of `Basis::looking_at(tangent)`, derived
-                // analytically and checked against Godot's `get_euler` on eight
-                // tangents.
-                let tangent = curve.sample_tangent(follow.progress);
-                // The posture frame: -Z along the tangent, +Y from the curve's
-                // own baked UP VECTOR (world up when none was baked, which is
-                // Godot's fallback and reproduces the flat-curve case exactly).
-                //
-                // ⚠️ Built as a frame rather than as `(pitch, yaw)` because the
-                // up vector carries ROLL. The analytic two-angle form this
-                // replaces assumed roll == 0, which is true only while up is
-                // world up — i.e. on flat curves, where both forms agree.
-                let up = curve.sample_baked_up_vector(follow.progress);
-                let frame = looking_at_basis(tangent, up);
-                // ROTATION_ORIENTED is Godot's `Basis::looking_at(tangent)` with
-                // the DEFAULT up, not the baked one (`path_3d.cpp:381`), so it
-                // is built separately rather than reusing the frame above.
-                let euler = frame.to_euler();
-                let (pitch, yaw, roll) = (euler.x, euler.y, euler.z);
-                // Roll stays 0. It comes from the curve's baked UP VECTORS and
-                // per-point tilt, neither of which is baked yet (the loader
-                // documents skipping `tilts`). ⚠️ Y and XY are EXACT regardless
-                // — `correct_posture` zeroes euler[2] for both — so only XYZ
-                // and ORIENTED are approximate, and only in roll.
-                // `correct_posture` locks axes on the YXZ euler of the frame
-                // (`path_3d.cpp:371-400`): Y keeps only yaw, XY drops roll, XYZ
-                // keeps everything. ⚠️ Y and XY are therefore EXACT whether or
-                // not up vectors were baked — the up vector only ever shows up
-                // in the roll term, which both of them zero.
-                let mut rot = match rotation_mode {
-                    PathFollowRotation::None => None,
-                    PathFollowRotation::Y => Some(Vector3::new(0.0, yaw, 0.0)),
-                    PathFollowRotation::Xy => Some(Vector3::new(pitch, yaw, 0.0)),
-                    PathFollowRotation::Oriented => {
-                        Some(looking_at_basis(tangent, Vector3::new(0.0, 1.0, 0.0)).to_euler())
-                    }
-                    PathFollowRotation::Xyz => Some(Vector3::new(pitch, yaw, roll)),
-                };
-
-                // `use_model_front` — Godot's "switch Z+ and Z-"
-                // (`path_3d.cpp:293-296`):
-                //
-                //     if (use_model_front) {
-                //         t.basis *= Basis::from_scale(Vector3(-1.0, 1.0, -1.0));
-                //     }
-                //
-                // For a model authored facing +Z instead of Godot's -Z. Default
-                // is FALSE (`doc/classes/PathFollow3D.xml`), unlike
-                // `tilt_enabled`, so an absent property reads as off.
-                //
-                // ⚠️ ORDER IS LOAD-BEARING: after the rotation mode built the
-                // basis and *before* the tilt twist. Godot puts it exactly
-                // there, and it is not commutative with the twist — tilt
-                // left-multiplies about the tangent while this right-multiplies
-                // about the follower's own axes, so swapping them rolls the
-                // model the wrong way on any tilted path.
-                //
-                // ⚠️ POST-multiplying by `diag(-1, 1, -1)` negates the basis's X
-                // and Z COLUMNS, which is all this does. `det = +1`, so it stays
-                // a rotation (a 180° turn about the frame's own Y) and survives
-                // the round trip through euler angles; a reflection would not.
-                //
-                // ⚠️ Inside the `Some` arm on purpose: ROTATION_NONE publishes no
-                // euler, and Godot's flip sits in the `else` of
-                // `rotation_mode == ROTATION_NONE` too — there is no frame to
-                // flip.
-                if matches!(node.get_property("use_model_front"), Variant::Bool(true)) {
-                    if let Some(euler) = rot {
-                        let mut basis = Basis::from_euler(euler);
-                        basis.x = -basis.x;
-                        basis.z = -basis.z;
-                        rot = Some(basis.to_euler());
-                    }
-                }
-
-                // Godot applies tilt as a twist about the TANGENT, *after*
-                // `correct_posture` and on the LEFT of the basis
-                // (`path_3d.cpp:299-305`):
-                //
-                //     const Basis twist(tangent, tilt);
-                //     t.basis = twist * t.basis;
-                //
-                // ⚠️ Left-multiplied, so it rotates the already-oriented frame
-                // about the path rather than adding to the follower's own roll;
-                // multiplying on the right would tilt about the follower's local
-                // Z and drift as the path turns.
-                //
-                // ⚠️ `tilt_enabled` defaults to TRUE
-                // (`doc/classes/PathFollow3D.xml`), so an absent property must
-                // NOT read as off. ROTATION_NONE has no frame to twist, which is
-                // Godot's behaviour too: the tilt branch sits inside the `else`
-                // of `rotation_mode == ROTATION_NONE`.
-                let tilt_enabled =
-                    !matches!(node.get_property("tilt_enabled"), Variant::Bool(false));
-                if tilt_enabled {
-                    if let Some(euler) = rot {
-                        let tilt = curve.sample_baked_tilt(follow.progress);
-                        if tilt != 0.0 {
-                            let twist =
-                                Basis::from_quaternion(Quaternion::from_axis_angle(tangent, tilt));
-                            rot = Some((twist * Basis::from_euler(euler)).to_euler());
-                        }
-                    }
-                }
-
-                // `h_offset`/`v_offset` are Godot's
-                // `t.translate_local(Vector3(h_offset, v_offset, 0))`
-                // (`path_3d.cpp:310`) — a shift along the frame's OWN x and y,
-                // applied AFTER the posture correction, so a row of followers
-                // stays perpendicular to the path instead of sliding along it.
-                // With ROTATION_NONE the basis is the identity and the two
-                // become plain world x/y, which is also Godot's behaviour.
-                let h_offset = float_property(node, "h_offset");
-                let v_offset = float_property(node, "v_offset");
-                if h_offset != 0.0 || v_offset != 0.0 {
-                    // Columns 0 and 1 of the FINAL basis — built from the euler
-                    // that was actually published, so the tilt above is included.
-                    // ⚠️ Derived through `Basis::from_euler` rather than from
-                    // `(pitch, yaw)` analytically: once tilt can put a non-zero
-                    // roll in there, a two-term expression that assumed roll == 0
-                    // silently offsets in the wrong direction.
-                    // `ROTATION_NONE` publishes no euler and gets the identity,
-                    // which is Godot's `translate_local` against an unrotated
-                    // transform.
-                    let basis = Basis::from_euler(rot.unwrap_or(Vector3::ZERO));
-                    pos = pos + basis.x * h_offset + basis.y * v_offset;
-                }
-
-                updates3.push(Update3 {
-                    id,
-                    progress: follow.progress,
-                    progress_ratio: if baked_len > 1e-6 {
-                        follow.progress / baked_len
-                    } else {
-                        0.0
-                    },
-                    pos,
-                    rot,
-                });
-            } else {
-                if parent.class_name() != "Path2D" {
-                    continue;
-                }
-                let pts = match parent.get_property("curve_points") {
-                    Variant::PackedVector2Array(v) => v,
-                    _ => continue,
-                };
-                if pts.len() < 2 {
-                    continue;
-                }
-                let mut curve = Curve2D::default();
-                for p in &pts {
-                    curve.add_point(*p);
-                }
-                let rotates = !matches!(node.get_property("rotates"), Variant::Bool(false));
-                let baked_len = curve.baked_length();
-
-                // `progress` and `progress_ratio` are two views of ONE value in
-                // Godot (`progress_ratio == progress / baked_length`), so it
-                // never has to decide between them. Patina stores them as two
-                // separate node properties, which means this loop does — and
-                // "whichever disagrees with the other wins" is not decidable
-                // from their values alone.
-                //
-                // Resolved by remembering what the previous tick published: the
-                // property that no longer matches its shadow is the one the
-                // outside world (script, animation track, `.tscn`) wrote.
-                // `progress` wins ties, since it is what `advance` operates on.
-                //
-                // ⚠️ Without the shadows, writing `progress` directly is undone
-                // on the next tick by the stale ratio published before it.
-                let last_progress = float_property(node, PF_PUBLISHED_PROGRESS);
-                let last_ratio = float_property(node, PF_PUBLISHED_RATIO);
-                let ratio_prop = node.get_property("progress_ratio");
-                let progress = if (progress - last_progress).abs() > 1e-5 {
-                    // `progress` was written externally: it wins.
-                    progress
-                } else if baked_len > 1e-6 {
-                    match ratio_prop {
-                        Variant::Float(_) | Variant::Int(_) => {
-                            let ratio = float_property(node, "progress_ratio");
-                            if (ratio - last_ratio).abs() > 1e-5 {
-                                // `progress_ratio` was written externally.
-                                ratio * baked_len
-                            } else {
-                                progress
-                            }
-                        }
-                        _ => progress,
-                    }
-                } else {
-                    progress
-                };
-
-                let mut follow = PathFollow2D {
-                    progress,
-                    loop_path,
-                    rotates,
-                };
-                follow.advance(&curve, speed * dt);
-                // Godot samples with `curve->sample_baked(progress, cubic_interp)`
-                // (`path_2d.cpp`, `PathFollow2D::_update_transform`).
-                //
-                // ⚠️ `cubic_interp` DEFAULTS TO TRUE (`PathFollow2D.xml`, and
-                // `classdb_2d_node_property_tables_match_godot.rs` asserts the
-                // Bool(true) default), so an ABSENT property means CUBIC.
-                // Reading it as false-by-default would silently downgrade every
-                // scene that never set it — and the two agree exactly on a
-                // straight path, so most fixtures would never notice. This is
-                // the same wiring the 3D branch already uses.
-                let cubic = !matches!(node.get_property("cubic_interp"), Variant::Bool(false));
-                let mut pos = if cubic {
-                    curve.sample_baked_cubic(follow.progress)
-                } else {
-                    follow.position_on(&curve)
-                };
-                let tangent = curve.sample_tangent(follow.progress);
-
-                // `h_offset`/`v_offset` shift the sample off the curve.
-                // Godot applies them in the *rotated* frame when `rotates` is
-                // on (`path_2d.cpp`: `t.translate_local(Vector2(h, v))` on a
-                // transform whose basis is tangent/normal) and in plain x/y
-                // when it is off — so a spaced-out row of followers stays
-                // perpendicular to the path rather than sliding along it.
-                let h_offset = float_property(node, "h_offset");
-                let v_offset = float_property(node, "v_offset");
-                if h_offset != 0.0 || v_offset != 0.0 {
-                    pos = if rotates {
-                        let normal = Vector2::new(-tangent.y, tangent.x);
-                        pos + tangent * h_offset + normal * v_offset
-                    } else {
-                        Vector2::new(pos.x + h_offset, pos.y + v_offset)
-                    };
-                }
-
-                let rot = if rotates {
-                    Some(tangent.y.atan2(tangent.x))
-                } else {
-                    None
-                };
-                updates2.push(Update2 {
-                    id,
-                    progress: follow.progress,
-                    progress_ratio: if baked_len > 1e-6 {
-                        follow.progress / baked_len
-                    } else {
-                        0.0
-                    },
-                    pos,
-                    rot,
-                });
-            }
-        }
-
-        // Apply phase: write progress + transform back onto the nodes.
-        for u in updates3 {
-            if let Some(node) = self.tree.get_node_mut(u.id) {
-                node.set_property("progress", Variant::Float(u.progress as f64));
-                // Published unconditionally and with its shadows, exactly as
-                // the 2D branch below does — otherwise the reconciliation above
-                // has nothing to compare against and `progress_ratio` reads
-                // `Nil` until something else writes it.
-                node.set_property("progress_ratio", Variant::Float(u.progress_ratio as f64));
-                node.set_property(PF_PUBLISHED_PROGRESS, Variant::Float(u.progress as f64));
-                node.set_property(PF_PUBLISHED_RATIO, Variant::Float(u.progress_ratio as f64));
-            }
-            crate::node3d::set_position(&mut self.tree, u.id, u.pos);
-            if let Some(euler) = u.rot {
-                crate::node3d::set_rotation(&mut self.tree, u.id, euler);
-            }
-        }
-        for u in updates2 {
-            if let Some(node) = self.tree.get_node_mut(u.id) {
-                node.set_property("progress", Variant::Float(u.progress as f64));
-                // Published unconditionally, not only when it changed: a
-                // getter that reads `progress_ratio` before it is ever written
-                // gets `Nil` rather than the real position.
-                node.set_property("progress_ratio", Variant::Float(u.progress_ratio as f64));
-                // Shadows of what was just published, so the next tick can tell
-                // which of the two an external writer touched. Written last and
-                // always, so they can never disagree with the pair above.
-                node.set_property(PF_PUBLISHED_PROGRESS, Variant::Float(u.progress as f64));
-                node.set_property(PF_PUBLISHED_RATIO, Variant::Float(u.progress_ratio as f64));
-            }
-            crate::node2d::set_position(&mut self.tree, u.id, u.pos);
-            if let Some(r) = u.rot {
-                crate::node2d::set_rotation(&mut self.tree, u.id, r);
-            }
-        }
+        process_path_follows_in(&mut self.tree, dt, None);
     }
 
     /// Runs the ORCA avoidance simulation over avoidance-enabled
@@ -3935,6 +3452,29 @@ impl MainLoop {
     ///
     /// Returns a [`FrameOutput`] describing what happened during this frame.
     pub fn step(&mut self, delta_secs: f64) -> FrameOutput {
+        // -- the PREVIOUS frame's draw signals (pat-9s7yp) --
+        // Godot's `Main::iteration` ends with `RenderingServer::draw`, which
+        // emits `frame_pre_draw` and `frame_post_draw` AFTER the process phase
+        // and the deferred calls, so `await RenderingServer.frame_post_draw`
+        // resumes between that frame and the next — after everything a frame
+        // records, before the next frame's input and physics. A host reads a
+        // frame's state when `step` returns, so this boundary is the START of
+        // the following step. Nothing is emitted before the first frame: Godot
+        // draws nothing before its first iteration, so an await in `_ready`
+        // resumes after frame 1.
+        if std::mem::take(&mut self.frame_drawn) {
+            // Godot draws BEFORE `_process_frames++` (main.cpp), so a resumed
+            // body still reads the drawn frame's own counters.
+            let drawn = self.frame_counter.saturating_sub(1);
+            gdscript_interop::set_engine_frame_counters(drawn, self.physics_tick_counter, drawn);
+            self.tree.emit_frame_draw_signals();
+            gdscript_interop::set_engine_frame_counters(
+                self.frame_counter,
+                self.physics_tick_counter,
+                self.frame_counter,
+            );
+        }
+
         // -- JavaScriptBridge callbacks (pat-mgixk.41) --
         // Runs the callbacks the browser invoked since the last frame, on the
         // main thread at a frame boundary. A `create_callback` closure cannot
@@ -4939,6 +4479,8 @@ impl MainLoop {
         // Movie capture runs last, once the frame is fully simulated, so a
         // writer sees the same state a renderer would have drawn.
         self.drive_movie_capture();
+        // This frame is drawn now; its draw signals open the next step.
+        self.frame_drawn = true;
 
         FrameOutput {
             frame_count: self.frame_counter,
@@ -5232,6 +4774,511 @@ impl MainLoop {
     /// This is the sum of all `delta_secs` values passed to [`step`](Self::step).
     pub fn process_time(&self) -> f64 {
         self.process_time
+    }
+}
+
+
+/// [`MainLoop::process_path_follows`] on `tree`, for every follow node or only
+/// `only` (pat-y2ylj).
+///
+/// 🔑 `only` is what a script write of `progress`/`progress_ratio` runs with
+/// `dt = 0`: Godot's setter calls `_update_transform()` AT ONCE
+/// (`PathFollow2D::set_progress`), so `follow.progress_ratio = randf()` then
+/// `mob.position = follow.position` — Dodge the Creeps' spawn — reads the NEW
+/// point. Patina published it only on the next frame's phase, so every mob
+/// spawned at the PREVIOUS spawn's point.
+pub fn process_path_follows_in(tree: &mut SceneTree, dt: f32, only: Option<NodeId>) {
+    use gdcore::math::{Vector2, Vector3};
+    // PathFollow3D's tilt is a rotation about the tangent, which has to be
+    // composed with the posture basis rather than added to an euler.
+    use gdcore::math3d::{Basis, Quaternion};
+
+    /// Shadow of the `progress` this loop last published, used to tell an
+    /// external write apart from its own (pat-0q2kx.104). Underscore-
+    /// prefixed like the engine's other internal node keys
+    /// (`_move_and_slide_requested`).
+    const PF_PUBLISHED_PROGRESS: &str = "_pathfollow_published_progress";
+    /// Shadow of the last published `progress_ratio`.
+    const PF_PUBLISHED_RATIO: &str = "_pathfollow_published_ratio";
+
+    struct Update3 {
+        id: NodeId,
+        progress: f32,
+        /// `progress / baked_length`, republished every tick — the 3D
+        /// branch used to publish only `progress`, so a script reading
+        /// `progress_ratio` off a PathFollow3D got `Nil` for ever.
+        progress_ratio: f32,
+        pos: Vector3,
+        rot: Option<Vector3>,
+    }
+    struct Update2 {
+        id: NodeId,
+        progress: f32,
+        /// `progress / baked_length`, republished every tick so the two
+        /// views of the position never drift apart (pat-0q2kx.104).
+        progress_ratio: f32,
+        pos: Vector2,
+        rot: Option<f32>,
+    }
+    let mut updates3: Vec<Update3> = Vec::new();
+    let mut updates2: Vec<Update2> = Vec::new();
+
+    /// A numeric node property as `f32`, defaulting to `0.0` when absent —
+    /// Godot's default for both `h_offset` and `v_offset`. Local because
+    /// the gather loop holds `&Node` directly; the crate's other
+    /// `float_prop` helpers all take `(tree, id, key)` and would need a
+    /// second borrow of the tree here.
+    fn float_property(node: &crate::node::Node, name: &str) -> f32 {
+        match node.get_property(name) {
+            Variant::Float(f) => f as f32,
+            Variant::Int(i) => i as f32,
+            _ => 0.0,
+        }
+    }
+
+    // Gather phase: read follow nodes + their parent curves (immutable).
+    for id in match only {
+        Some(id) => vec![id],
+        None => tree.all_nodes_in_tree_order(),
+    } {
+        let Some(node) = tree.get_node(id) else {
+            continue;
+        };
+        let is3 = node.class_name() == "PathFollow3D";
+        let is2 = node.class_name() == "PathFollow2D";
+        if !is3 && !is2 {
+            continue;
+        }
+        let Some(parent_id) = node.parent() else {
+            continue;
+        };
+        let Some(parent) = tree.get_node(parent_id) else {
+            continue;
+        };
+
+        let progress = match node.get_property("progress") {
+            Variant::Float(f) => f as f32,
+            Variant::Int(i) => i as f32,
+            _ => 0.0,
+        };
+        let speed = match node.get_property("path_speed") {
+            Variant::Float(f) => f as f32,
+            Variant::Int(i) => i as f32,
+            _ => 0.0,
+        };
+        // Godot's PathFollow defaults `loop` to true.
+        let loop_path = !matches!(node.get_property("loop"), Variant::Bool(false));
+
+        if is3 {
+            if parent.class_name() != "Path3D" {
+                continue;
+            }
+            let pts = match parent.get_property("curve_points") {
+                Variant::PackedVector3Array(v) => v,
+                _ => continue,
+            };
+            if pts.len() < 2 {
+                continue;
+            }
+            let mut curve = Curve3D::new();
+            for p in &pts {
+                curve.add_point(*p);
+            }
+            // Baked index-for-index with `curve_points` by the loader, so a
+            // length mismatch means one of the two is stale; drop the tilts
+            // rather than rotate by an angle belonging to another point.
+            if let Variant::PackedFloat32Array(t) = parent.get_property("curve_tilts") {
+                if t.len() == pts.len() {
+                    curve.tilts = t;
+                }
+            }
+            if let Variant::PackedVector3Array(u) = parent.get_property("curve_up_vectors") {
+                if u.len() == pts.len() {
+                    curve.up_vectors = u;
+                }
+            }
+            // The AUTHORED control points, in Godot's (in, out, position)
+            // triple order (pat-s3rrv.91 item 5). Unlike the three arrays
+            // above these are NOT index-aligned with the polyline and must
+            // not be length-checked against it — there are a handful of
+            // control points behind hundreds of baked samples. The guard is
+            // that the array divides into whole triples; a partial one would
+            // silently drop a handle and straighten the last segment.
+            if let Variant::PackedVector3Array(cp) = parent.get_property("curve_control_points")
+            {
+                if !cp.is_empty() && cp.len() % 3 == 0 {
+                    curve.control = cp
+                        .chunks_exact(3)
+                        .map(|t| crate::bezier_bake::CurvePoint3 {
+                            in_handle: t[0],
+                            out_handle: t[1],
+                            position: t[2],
+                        })
+                        .collect();
+                }
+            }
+            curve.closed = matches!(parent.get_property("curve_closed"), Variant::Bool(true));
+            let baked_len = curve.baked_length();
+
+            // The same reconciliation the 2D branch documents at length:
+            // Godot has ONE value with two views (`progress_ratio ==
+            // progress / baked_length`), Patina stores two properties, so
+            // whichever no longer matches its shadow is the one the outside
+            // world wrote. `progress` wins ties. The 3D branch published
+            // neither shadow before, so writing `progress_ratio` from a
+            // script did nothing at all here.
+            let last_progress = float_property(node, PF_PUBLISHED_PROGRESS);
+            let last_ratio = float_property(node, PF_PUBLISHED_RATIO);
+            let progress = if (progress - last_progress).abs() > 1e-5 {
+                progress
+            } else if baked_len > 1e-6 {
+                match node.get_property("progress_ratio") {
+                    Variant::Float(_) | Variant::Int(_) => {
+                        let ratio = float_property(node, "progress_ratio");
+                        if (ratio - last_ratio).abs() > 1e-5 {
+                            ratio * baked_len
+                        } else {
+                            progress
+                        }
+                    }
+                    _ => progress,
+                }
+            } else {
+                progress
+            };
+
+            // ⚠️ Godot's default is ROTATION_XYZ (3), NOT none
+            // (`doc/classes/PathFollow3D.xml:41`), so an absent or
+            // out-of-range property has to land on XYZ. The old `_ =>
+            // None` arm meant a follower authored without an explicit mode
+            // — the common case — did not rotate at all, and mode 4
+            // (ORIENTED) silently fell into the same hole.
+            let rotation_mode = match node.get_property("rotation_mode") {
+                Variant::Int(0) => PathFollowRotation::None,
+                Variant::Int(1) => PathFollowRotation::Y,
+                Variant::Int(2) => PathFollowRotation::Xy,
+                Variant::Int(4) => PathFollowRotation::Oriented,
+                _ => PathFollowRotation::Xyz,
+            };
+            let mut follow = PathFollow3D {
+                progress,
+                loop_path,
+                rotation_mode,
+            };
+            follow.advance(&curve, speed * dt);
+
+            // Godot samples with `sample_baked(progress, cubic)`
+            // (`path_3d.cpp:286, 289`). ⚠️ `cubic_interp` DEFAULTS TO TRUE
+            // (`class_db.rs:11798`, `doc/classes/PathFollow3D.xml`), so an
+            // absent property means CUBIC — reading it as false-by-default
+            // would silently downgrade every scene that never set it, and
+            // the two agree exactly on straight paths, so most fixtures
+            // would never notice.
+            let cubic = !matches!(node.get_property("cubic_interp"), Variant::Bool(false));
+            let mut pos = if cubic {
+                curve.sample_baked_cubic(follow.progress)
+            } else {
+                follow.position_on(&curve)
+            };
+
+            // Godot builds the frame with **-Z along the tangent**
+            // (`sample_baked_with_rotation`, then `correct_posture` locks
+            // axes in YXZ euler order — `path_3d.cpp:290-305, 371-400`).
+            //
+            // 🔑 The yaw here used to be `atan2(t.x, t.z)`, a "+Z is
+            // forward" convention this file described as "internally
+            // consistent". It is EXACTLY π away from Godot's on every
+            // tangent, so every follower faced backwards along its own
+            // path — and no test could see it, because the only
+            // PathFollow3D coverage asserted position. The values below are
+            // the YXZ euler of `Basis::looking_at(tangent)`, derived
+            // analytically and checked against Godot's `get_euler` on eight
+            // tangents.
+            let tangent = curve.sample_tangent(follow.progress);
+            // The posture frame: -Z along the tangent, +Y from the curve's
+            // own baked UP VECTOR (world up when none was baked, which is
+            // Godot's fallback and reproduces the flat-curve case exactly).
+            //
+            // ⚠️ Built as a frame rather than as `(pitch, yaw)` because the
+            // up vector carries ROLL. The analytic two-angle form this
+            // replaces assumed roll == 0, which is true only while up is
+            // world up — i.e. on flat curves, where both forms agree.
+            let up = curve.sample_baked_up_vector(follow.progress);
+            let frame = looking_at_basis(tangent, up);
+            // ROTATION_ORIENTED is Godot's `Basis::looking_at(tangent)` with
+            // the DEFAULT up, not the baked one (`path_3d.cpp:381`), so it
+            // is built separately rather than reusing the frame above.
+            let euler = frame.to_euler();
+            let (pitch, yaw, roll) = (euler.x, euler.y, euler.z);
+            // Roll stays 0. It comes from the curve's baked UP VECTORS and
+            // per-point tilt, neither of which is baked yet (the loader
+            // documents skipping `tilts`). ⚠️ Y and XY are EXACT regardless
+            // — `correct_posture` zeroes euler[2] for both — so only XYZ
+            // and ORIENTED are approximate, and only in roll.
+            // `correct_posture` locks axes on the YXZ euler of the frame
+            // (`path_3d.cpp:371-400`): Y keeps only yaw, XY drops roll, XYZ
+            // keeps everything. ⚠️ Y and XY are therefore EXACT whether or
+            // not up vectors were baked — the up vector only ever shows up
+            // in the roll term, which both of them zero.
+            let mut rot = match rotation_mode {
+                PathFollowRotation::None => None,
+                PathFollowRotation::Y => Some(Vector3::new(0.0, yaw, 0.0)),
+                PathFollowRotation::Xy => Some(Vector3::new(pitch, yaw, 0.0)),
+                PathFollowRotation::Oriented => {
+                    Some(looking_at_basis(tangent, Vector3::new(0.0, 1.0, 0.0)).to_euler())
+                }
+                PathFollowRotation::Xyz => Some(Vector3::new(pitch, yaw, roll)),
+            };
+
+            // `use_model_front` — Godot's "switch Z+ and Z-"
+            // (`path_3d.cpp:293-296`):
+            //
+            //     if (use_model_front) {
+            //         t.basis *= Basis::from_scale(Vector3(-1.0, 1.0, -1.0));
+            //     }
+            //
+            // For a model authored facing +Z instead of Godot's -Z. Default
+            // is FALSE (`doc/classes/PathFollow3D.xml`), unlike
+            // `tilt_enabled`, so an absent property reads as off.
+            //
+            // ⚠️ ORDER IS LOAD-BEARING: after the rotation mode built the
+            // basis and *before* the tilt twist. Godot puts it exactly
+            // there, and it is not commutative with the twist — tilt
+            // left-multiplies about the tangent while this right-multiplies
+            // about the follower's own axes, so swapping them rolls the
+            // model the wrong way on any tilted path.
+            //
+            // ⚠️ POST-multiplying by `diag(-1, 1, -1)` negates the basis's X
+            // and Z COLUMNS, which is all this does. `det = +1`, so it stays
+            // a rotation (a 180° turn about the frame's own Y) and survives
+            // the round trip through euler angles; a reflection would not.
+            //
+            // ⚠️ Inside the `Some` arm on purpose: ROTATION_NONE publishes no
+            // euler, and Godot's flip sits in the `else` of
+            // `rotation_mode == ROTATION_NONE` too — there is no frame to
+            // flip.
+            if matches!(node.get_property("use_model_front"), Variant::Bool(true)) {
+                if let Some(euler) = rot {
+                    let mut basis = Basis::from_euler(euler);
+                    basis.x = -basis.x;
+                    basis.z = -basis.z;
+                    rot = Some(basis.to_euler());
+                }
+            }
+
+            // Godot applies tilt as a twist about the TANGENT, *after*
+            // `correct_posture` and on the LEFT of the basis
+            // (`path_3d.cpp:299-305`):
+            //
+            //     const Basis twist(tangent, tilt);
+            //     t.basis = twist * t.basis;
+            //
+            // ⚠️ Left-multiplied, so it rotates the already-oriented frame
+            // about the path rather than adding to the follower's own roll;
+            // multiplying on the right would tilt about the follower's local
+            // Z and drift as the path turns.
+            //
+            // ⚠️ `tilt_enabled` defaults to TRUE
+            // (`doc/classes/PathFollow3D.xml`), so an absent property must
+            // NOT read as off. ROTATION_NONE has no frame to twist, which is
+            // Godot's behaviour too: the tilt branch sits inside the `else`
+            // of `rotation_mode == ROTATION_NONE`.
+            let tilt_enabled =
+                !matches!(node.get_property("tilt_enabled"), Variant::Bool(false));
+            if tilt_enabled {
+                if let Some(euler) = rot {
+                    let tilt = curve.sample_baked_tilt(follow.progress);
+                    if tilt != 0.0 {
+                        let twist =
+                            Basis::from_quaternion(Quaternion::from_axis_angle(tangent, tilt));
+                        rot = Some((twist * Basis::from_euler(euler)).to_euler());
+                    }
+                }
+            }
+
+            // `h_offset`/`v_offset` are Godot's
+            // `t.translate_local(Vector3(h_offset, v_offset, 0))`
+            // (`path_3d.cpp:310`) — a shift along the frame's OWN x and y,
+            // applied AFTER the posture correction, so a row of followers
+            // stays perpendicular to the path instead of sliding along it.
+            // With ROTATION_NONE the basis is the identity and the two
+            // become plain world x/y, which is also Godot's behaviour.
+            let h_offset = float_property(node, "h_offset");
+            let v_offset = float_property(node, "v_offset");
+            if h_offset != 0.0 || v_offset != 0.0 {
+                // Columns 0 and 1 of the FINAL basis — built from the euler
+                // that was actually published, so the tilt above is included.
+                // ⚠️ Derived through `Basis::from_euler` rather than from
+                // `(pitch, yaw)` analytically: once tilt can put a non-zero
+                // roll in there, a two-term expression that assumed roll == 0
+                // silently offsets in the wrong direction.
+                // `ROTATION_NONE` publishes no euler and gets the identity,
+                // which is Godot's `translate_local` against an unrotated
+                // transform.
+                let basis = Basis::from_euler(rot.unwrap_or(Vector3::ZERO));
+                pos = pos + basis.x * h_offset + basis.y * v_offset;
+            }
+
+            updates3.push(Update3 {
+                id,
+                progress: follow.progress,
+                progress_ratio: if baked_len > 1e-6 {
+                    follow.progress / baked_len
+                } else {
+                    0.0
+                },
+                pos,
+                rot,
+            });
+        } else {
+            if parent.class_name() != "Path2D" {
+                continue;
+            }
+            let pts = match parent.get_property("curve_points") {
+                Variant::PackedVector2Array(v) => v,
+                _ => continue,
+            };
+            if pts.len() < 2 {
+                continue;
+            }
+            let mut curve = Curve2D::default();
+            for p in &pts {
+                curve.add_point(*p);
+            }
+            let rotates = !matches!(node.get_property("rotates"), Variant::Bool(false));
+            let baked_len = curve.baked_length();
+
+            // `progress` and `progress_ratio` are two views of ONE value in
+            // Godot (`progress_ratio == progress / baked_length`), so it
+            // never has to decide between them. Patina stores them as two
+            // separate node properties, which means this loop does — and
+            // "whichever disagrees with the other wins" is not decidable
+            // from their values alone.
+            //
+            // Resolved by remembering what the previous tick published: the
+            // property that no longer matches its shadow is the one the
+            // outside world (script, animation track, `.tscn`) wrote.
+            // `progress` wins ties, since it is what `advance` operates on.
+            //
+            // ⚠️ Without the shadows, writing `progress` directly is undone
+            // on the next tick by the stale ratio published before it.
+            let last_progress = float_property(node, PF_PUBLISHED_PROGRESS);
+            let last_ratio = float_property(node, PF_PUBLISHED_RATIO);
+            let ratio_prop = node.get_property("progress_ratio");
+            let progress = if (progress - last_progress).abs() > 1e-5 {
+                // `progress` was written externally: it wins.
+                progress
+            } else if baked_len > 1e-6 {
+                match ratio_prop {
+                    Variant::Float(_) | Variant::Int(_) => {
+                        let ratio = float_property(node, "progress_ratio");
+                        if (ratio - last_ratio).abs() > 1e-5 {
+                            // `progress_ratio` was written externally.
+                            ratio * baked_len
+                        } else {
+                            progress
+                        }
+                    }
+                    _ => progress,
+                }
+            } else {
+                progress
+            };
+
+            let mut follow = PathFollow2D {
+                progress,
+                loop_path,
+                rotates,
+            };
+            follow.advance(&curve, speed * dt);
+            // Godot samples with `curve->sample_baked(progress, cubic_interp)`
+            // (`path_2d.cpp`, `PathFollow2D::_update_transform`).
+            //
+            // ⚠️ `cubic_interp` DEFAULTS TO TRUE (`PathFollow2D.xml`, and
+            // `classdb_2d_node_property_tables_match_godot.rs` asserts the
+            // Bool(true) default), so an ABSENT property means CUBIC.
+            // Reading it as false-by-default would silently downgrade every
+            // scene that never set it — and the two agree exactly on a
+            // straight path, so most fixtures would never notice. This is
+            // the same wiring the 3D branch already uses.
+            let cubic = !matches!(node.get_property("cubic_interp"), Variant::Bool(false));
+            let mut pos = if cubic {
+                curve.sample_baked_cubic(follow.progress)
+            } else {
+                follow.position_on(&curve)
+            };
+            let tangent = curve.sample_tangent(follow.progress);
+
+            // `h_offset`/`v_offset` shift the sample off the curve.
+            // Godot applies them in the *rotated* frame when `rotates` is
+            // on (`path_2d.cpp`: `t.translate_local(Vector2(h, v))` on a
+            // transform whose basis is tangent/normal) and in plain x/y
+            // when it is off — so a spaced-out row of followers stays
+            // perpendicular to the path rather than sliding along it.
+            let h_offset = float_property(node, "h_offset");
+            let v_offset = float_property(node, "v_offset");
+            if h_offset != 0.0 || v_offset != 0.0 {
+                pos = if rotates {
+                    let normal = Vector2::new(-tangent.y, tangent.x);
+                    pos + tangent * h_offset + normal * v_offset
+                } else {
+                    Vector2::new(pos.x + h_offset, pos.y + v_offset)
+                };
+            }
+
+            let rot = if rotates {
+                Some(tangent.y.atan2(tangent.x))
+            } else {
+                None
+            };
+            updates2.push(Update2 {
+                id,
+                progress: follow.progress,
+                progress_ratio: if baked_len > 1e-6 {
+                    follow.progress / baked_len
+                } else {
+                    0.0
+                },
+                pos,
+                rot,
+            });
+        }
+    }
+
+    // Apply phase: write progress + transform back onto the nodes.
+    for u in updates3 {
+        if let Some(node) = tree.get_node_mut(u.id) {
+            node.set_property("progress", Variant::Float(u.progress as f64));
+            // Published unconditionally and with its shadows, exactly as
+            // the 2D branch below does — otherwise the reconciliation above
+            // has nothing to compare against and `progress_ratio` reads
+            // `Nil` until something else writes it.
+            node.set_property("progress_ratio", Variant::Float(u.progress_ratio as f64));
+            node.set_property(PF_PUBLISHED_PROGRESS, Variant::Float(u.progress as f64));
+            node.set_property(PF_PUBLISHED_RATIO, Variant::Float(u.progress_ratio as f64));
+        }
+        crate::node3d::set_position(tree, u.id, u.pos);
+        if let Some(euler) = u.rot {
+            crate::node3d::set_rotation(tree, u.id, euler);
+        }
+    }
+    for u in updates2 {
+        if let Some(node) = tree.get_node_mut(u.id) {
+            node.set_property("progress", Variant::Float(u.progress as f64));
+            // Published unconditionally, not only when it changed: a
+            // getter that reads `progress_ratio` before it is ever written
+            // gets `Nil` rather than the real position.
+            node.set_property("progress_ratio", Variant::Float(u.progress_ratio as f64));
+            // Shadows of what was just published, so the next tick can tell
+            // which of the two an external writer touched. Written last and
+            // always, so they can never disagree with the pair above.
+            node.set_property(PF_PUBLISHED_PROGRESS, Variant::Float(u.progress as f64));
+            node.set_property(PF_PUBLISHED_RATIO, Variant::Float(u.progress_ratio as f64));
+        }
+        crate::node2d::set_position(tree, u.id, u.pos);
+        if let Some(r) = u.rot {
+            crate::node2d::set_rotation(tree, u.id, r);
+        }
     }
 }
 

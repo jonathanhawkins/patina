@@ -19,6 +19,14 @@
 // Defaults come from <game_dir>/playtest.json (scene, keys, watch). Frame
 // numbering matches the Patina MCP `play` tool: see scripts/lib/godot-reference-capture.gd.
 //
+// Random numbers (pat-y2ylj): Godot seeds its RNG from the clock at startup,
+// in `randomize()` and in `RandomNumberGenerator.new()`, so a game using
+// randomness recorded a different reference each run. The capture seeds the
+// global RNG with --seed before anything else runs, and the temp copy's
+// scripts are rewritten so `randomize()` / `RandomNumberGenerator.new()` /
+// `rng.randomize()` take seeds derived from it — the rule Patina's pinned
+// `play` applies, with a generator that is a bit-exact port of Godot's.
+//
 // Options:
 //   --scene X            scene to run (res:// path or relative), default run/main_scene (what Play runs)
 //   --keys "..."          browser-playtest key steps: wait:ms, Code:ms (held), down:Code, up:Code
@@ -28,6 +36,8 @@
 //   --shots 30,90,...     frames to picture (default: the step boundaries, at most 8)
 //   --fps N               frames per second the ms durations are translated at (default 60)
 //   --rendering-method M  forward_plus (default, the project's) | mobile | gl_compatibility
+//   --seed N              random seed the run is pinned to (default: playtest.json `seed`, else 42 —
+//                         the MCP `play` default). See "Random numbers" below.
 //   --godot PATH          Godot binary (default $GODOT or /Applications/Godot.app/Contents/MacOS/Godot)
 //   --keep-temp           keep the temp project copy (its path is printed)
 //   --timeout S           kill Godot after S seconds (default 120 + frames/30)
@@ -45,6 +55,48 @@ export const ROOT = path.resolve(HERE, '..');
 const CAPTURE_GD = path.join(HERE, 'lib', 'godot-reference-capture.gd');
 const AUTOLOAD_NAME = 'GodotReferenceCapture';
 const AUTOLOAD_FILE = '__godot_reference_capture.gd';
+/** The seed a run is pinned to when nothing names one: the MCP `play` default. */
+export const DEFAULT_SEED = 42;
+const PIN = `preload("res://${AUTOLOAD_FILE}")`;
+
+/**
+ * Rewrites one GDScript source so its clock-seeded randomness is pinned to the
+ * capture's seed (see scripts/lib/godot-reference-capture.gd):
+ * `rng.randomize()` -> `rng.set_seed(<next instance seed>)`, a bare
+ * `randomize()` -> `pinned_randomize()`, `RandomNumberGenerator.new()` ->
+ * `pinned_rng()`. Returns {text, count}.
+ */
+export function pinRandomnessInScript(text) {
+  let count = 0;
+  const bump = (f) => (...a) => { count++; return f(...a); };
+  let out = String(text);
+  out = out.replace(/\bRandomNumberGenerator\.new\(\s*\)/g, bump(() => `${PIN}.pinned_rng()`));
+  out = out.replace(/\.randomize\(\s*\)/g, bump(() => `.set_seed(${PIN}.next_instance_seed())`));
+  out = out.replace(/(^|[^\w.])randomize\(\s*\)/gm, bump((_, pre) => `${pre}${PIN}.pinned_randomize()`));
+  return { text: out, count };
+}
+
+/** Applies {@link pinRandomnessInScript} to every .gd file under `dir`; returns the notes. */
+export function pinRandomnessInProject(dir) {
+  const notes = [];
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) {
+        if (e.name !== '.godot') walk(p);
+      } else if (e.name.endsWith('.gd') && e.name !== AUTOLOAD_FILE) {
+        const src = fs.readFileSync(p, 'utf8');
+        const { text, count } = pinRandomnessInScript(src);
+        if (count) {
+          fs.writeFileSync(p, text);
+          notes.push(`${path.relative(dir, p)}: ${count} clock-seeded RNG call(s) pinned to the run's seed`);
+        }
+      }
+    }
+  };
+  walk(dir);
+  return notes;
+}
 
 export function defaultGodot() {
   return process.env.GODOT || '/Applications/Godot.app/Contents/MacOS/Godot';
@@ -145,7 +197,8 @@ export function resolveScenario(gameDir, opts) {
     size = [w, h];
   }
   const shots = opts.shots && opts.shots.length ? opts.shots.filter((f) => f >= 1 && f <= frames) : pickShotFrames(timeline, frames, 8);
-  return { gameDir, project, scene, keys, fps, timeline, frames, watches, size, shots };
+  const seed = Number.isFinite(opts.seed) ? opts.seed : Number.isFinite(playtest.seed) ? playtest.seed : DEFAULT_SEED;
+  return { gameDir, project, scene, keys, fps, timeline, frames, watches, size, shots, seed };
 }
 
 function copyGame(src, dst) {
@@ -183,7 +236,7 @@ export function runGodotReference(gameDir, opts = {}) {
     const patched = patchProjectGodot(sc.project, { godotVersion });
     fs.writeFileSync(path.join(tmp, 'project.godot'), patched.text);
     fs.copyFileSync(CAPTURE_GD, path.join(tmp, AUTOLOAD_FILE));
-    const notes = [...patched.notes];
+    const notes = [...patched.notes, ...pinRandomnessInProject(tmp)];
 
     const config = {
       out_dir: outDir,
@@ -191,6 +244,7 @@ export function runGodotReference(gameDir, opts = {}) {
       inputs: sc.timeline.inputs.map(({ key, start, end }) => ({ key, start, end })),
       watches: sc.watches,
       shots: sc.shots,
+      seed: sc.seed,
     };
     const configPath = path.join(tmp, '__godot_reference_config.json');
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
@@ -239,6 +293,7 @@ export function runGodotReference(gameDir, opts = {}) {
       frames: sc.frames,
       size: sc.size,
       shots: sc.shots,
+      seed: sc.seed,
       timeline: sc.timeline,
       watches: sc.watches,
       godot: versionText,
@@ -281,6 +336,7 @@ export function parseCommonArgs(argv, extra = {}) {
     else if (a === '--godot') opts.godot = value();
     else if (a === '--keep-temp') opts.keepTemp = true;
     else if (a === '--timeout') opts.timeout = Number(value());
+    else if (a === '--seed') opts.seed = Number(value());
     else if (a === '--json') opts.json = true;
     else if (extra[a]) extra[a](opts, value);
     else if (a === '-h' || a === '--help') opts.help = true;

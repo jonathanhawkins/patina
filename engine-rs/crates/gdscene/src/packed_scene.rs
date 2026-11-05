@@ -3288,6 +3288,8 @@ fn apply_template_properties(node: &mut Node, tmpl: &NodeTemplate) {
 /// `register_*_classes()` call yet) yields an empty list and seeds nothing, so
 /// this is inert rather than wrong in bare tests.
 fn node_with_class_defaults(name: &str, class_name: &str) -> Node {
+    // The global random draws Godot's constructor makes (pat-y2ylj).
+    crate::construction_randomness::on_construct(class_name);
     let mut node = Node::new(name, class_name);
     let props = gdobject::class_db::get_property_list(class_name);
     // 🔑 A Node3D's `transform` is a DERIVED VIEW of position/rotation/scale,
