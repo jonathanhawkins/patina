@@ -2795,6 +2795,10 @@ impl Interpreter {
             Expr::Index { object, index } => {
                 let idx = self.eval_expr(index)?;
                 let mut container = self.eval_expr(object)?;
+                if let Some((id, key)) = self.object_property_index(&container, &idx) {
+                    self.set_property_with_virtual(id, &key, value);
+                    return Ok(());
+                }
                 set_index(&mut container, &idx, value)?;
                 self.write_place(object, container)
             }
@@ -2917,6 +2921,21 @@ impl Interpreter {
                 // expression, mutate the element, then write the whole container
                 // back to its place. Supports `arr[i][j] = x`, `self.grid[i] = x`.
                 let mut container = self.eval_expr(object)?;
+                // `object["property"] = value` on an Object is `set()`
+                // (pat-v3co1) — how the official 3D platformer drives its
+                // AnimationTree: `_animation_tree[&"parameters/run/blend_amount"] = x`.
+                // `set_index` knows only value containers, so this raised
+                // "invalid index assignment" every physics frame.
+                if let Some((id, key)) = self.object_property_index(&container, &idx) {
+                    let final_val = if matches!(op, AssignOp::Assign) {
+                        rhs
+                    } else {
+                        let cur = self.get_property_with_virtual(id, &key);
+                        self.apply_assign_op(op, &cur, &rhs)?
+                    };
+                    self.set_property_with_virtual(id, &key, final_val);
+                    return Ok(());
+                }
                 let final_val = if matches!(op, AssignOp::Assign) {
                     rhs
                 } else {
@@ -4804,6 +4823,16 @@ impl Interpreter {
                             ) {
                                 return result;
                             }
+                            // `PhysicsRayQueryParameters3D.create(from, to,
+                            // collision_mask = 0xFFFFFFFF, exclude = [])`
+                            // (pat-v3co1). ClassDB registered `create` as a
+                            // static method with NO dispatch arm, so
+                            // `has_method` said yes while the call raised —
+                            // and it is the spelling Godot's docs and the
+                            // official 3D platformer's camera use.
+                            if type_name == "PhysicsRayQueryParameters3D" && member == "create" {
+                                return ray_query_parameters_3d_create(&evaluated_args);
+                            }
                             // Physics query parameter constructors —
                             // `PhysicsRayQueryParameters2D.create(from, to)`
                             // (pat-s3rrv.26). Same "call on a type name" shape
@@ -5851,6 +5880,10 @@ impl Interpreter {
             Expr::Index { object, index } => {
                 let obj = self.eval_expr(object)?;
                 let idx = self.eval_expr(index)?;
+                // `object["property"]` on an Object is `get()` (pat-v3co1).
+                if let Some((id, key)) = self.object_property_index(&obj, &idx) {
+                    return Ok(self.get_property_with_virtual(id, &key));
+                }
                 index_into(&obj, &idx)
             }
 
@@ -10711,6 +10744,39 @@ impl Interpreter {
                 gdvariant::shader_globals::get_list(),
             )),
 
+            // pat-v3co1. Godot answers the method the renderer was CREATED
+            // with: `rendering/renderer/rendering_method` (feature overrides
+            // applied), `--rendering-method`, or a hardware fallback
+            // (RenderingServer.xml). Patina has one renderer and no fallback,
+            // so the project's own setting is the whole answer. It is seeded
+            // with Godot's `forward_plus` default, which is what a project
+            // with no `renderer/rendering_method` key (the official 3D demos)
+            // runs on in Godot too — and Patina's 3D path lights in linear
+            // space and re-encodes to sRGB like Forward+, not like
+            // Compatibility's sRGB-space blending.
+            //
+            // ⚠️ Not a constant `"forward_plus"`: a project that explicitly
+            // picked Compatibility would take its `gl_compatibility` branches
+            // in Godot (the 3D platformer's `stage.gd` adds a dimmed light
+            // under it), so it must take them here. A name Godot does not know
+            // reads as the `forward_plus` default rather than being echoed.
+            "get_current_rendering_method" => {
+                arity(0)?;
+                let name =
+                    match project_setting_with_override("rendering/renderer/rendering_method") {
+                        Some(Variant::String(s))
+                            if matches!(
+                                s.as_str(),
+                                "forward_plus" | "mobile" | "gl_compatibility"
+                            ) =>
+                        {
+                            s
+                        }
+                        _ => "forward_plus".to_string(),
+                    };
+                Ok(Variant::String(name))
+            }
+
             _ => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
                 format!("RenderingServer.{method}"),
             ))),
@@ -11337,14 +11403,14 @@ impl Interpreter {
                         "Input.get_vector() takes 4 arguments".into(),
                     )));
                 }
+                // Action names are StringNames in Godot's signature, and
+                // `Input.get_vector(&"move_left", ...)` is how the official
+                // 3D platformer spells it — accepting only `String` raised a
+                // type error every physics frame and the player could not
+                // move (pat-v3co1). Same helper as every other Input method.
                 let strs: Vec<&str> = args
                     .iter()
-                    .map(|a| match a {
-                        Variant::String(s) => Ok(s.as_str()),
-                        _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                            "Input.get_vector() arguments must be strings".into(),
-                        ))),
-                    })
+                    .map(|a| Self::input_action_arg("get_vector", a))
                     .collect::<Result<_, _>>()?;
                 if let Some(ref access) = self.scene_access {
                     let (x, y) = access.get_input_vector(strs[0], strs[1], strs[2], strs[3]);
@@ -19281,6 +19347,24 @@ impl Interpreter {
     /// The order matters — running `_set` first would let it shadow genuine
     /// members, which Godot never does (gdscript.cpp `GDScriptInstance::set`
     /// tries the member table before the virtual).
+    /// `obj[key]` where `obj` is an Object and `key` a property name: Godot
+    /// resolves the subscript as `obj.get(key)` / `obj.set(key, value)`
+    /// (pat-v3co1). Answers the object id and property name in that case, and
+    /// `None` for every value container (or with no scene to reach the object
+    /// through), so those keep their own indexing rules.
+    fn object_property_index(&self, container: &Variant, idx: &Variant) -> Option<(u64, String)> {
+        let Variant::ObjectId(oid) = container else {
+            return None;
+        };
+        self.scene_access.as_ref()?;
+        let key = match idx {
+            Variant::String(s) => s.clone(),
+            Variant::StringName(s) => s.as_str().to_string(),
+            _ => return None,
+        };
+        Some((oid.raw(), key))
+    }
+
     pub(crate) fn set_property_with_virtual(&mut self, id: u64, property: &str, value: Variant) {
         let known = self
             .scene_access
@@ -26788,7 +26872,11 @@ fn call_displayserver_via_backend(
                 x as i32, y as i32,
             ))))
         }
-        "is_touchscreen_available" => Some(Ok(Variant::Bool(backend.touchscreen_available()))),
+        // Godot's Web/Android overrides answer the real capability OR'd with
+        // mouse-to-touch emulation, like the base below does (pat-v3co1).
+        "is_touchscreen_available" => Some(Ok(Variant::Bool(
+            backend.touchscreen_available() || emulating_touch_from_mouse(),
+        ))),
         "get_swap_cancel_ok" => Some(Ok(Variant::Bool(backend.swap_cancel_ok()))),
         "window_get_vsync_mode" => Some(Ok(Variant::Int(backend.vsync_mode()))),
         "window_set_vsync_mode" => {
@@ -26978,10 +27066,77 @@ fn call_displayserver_static(method: &str, args: &[Variant]) -> Result<Variant, 
         "virtual_keyboard_get_height" => Ok(Variant::Int(0)),
         "cursor_set_shape" | "cursor_set_custom_image" => Ok(Variant::Nil),
         "has_feature" => Ok(Variant::Bool(false)),
+        // pat-v3co1. Godot's BASE `DisplayServer::is_touchscreen_available()`
+        // (servers/display/display_server.cpp:574), which every desktop driver
+        // inherits, is `Input::is_emulating_touch_from_mouse()` and nothing
+        // else: a desktop has no touchscreen unless the project asks for
+        // mouse-to-touch emulation (`input_devices/pointing/
+        // emulate_touch_from_mouse`, default false).
+        //
+        // This arm was missing, so with no platform backend installed (the
+        // editor's Play, the runner) the call RAISED and aborted the caller's
+        // `_ready` — the official 3D platformer's virtual joystick then stayed
+        // visible on desktop because its `hide()` never ran.
+        "is_touchscreen_available" => Ok(Variant::Bool(emulating_touch_from_mouse())),
         other => Err(RuntimeError::new(RuntimeErrorKind::UndefinedFunction(
             format!("DisplayServer.{other}"),
         ))),
     }
+}
+
+/// `PhysicsRayQueryParameters3D.create(from, to, collision_mask, exclude)`:
+/// a parameters object built exactly like `.new()` (every ClassDB default),
+/// then the four arguments applied. Godot's defaults for the optional two are
+/// all layers and an empty exclude list.
+fn ray_query_parameters_3d_create(args: &[Variant]) -> Result<Variant, RuntimeError> {
+    let bad = |what: &str| {
+        RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+            "PhysicsRayQueryParameters3D.create(): {what}"
+        )))
+    };
+    let (from, to) = match (args.first(), args.get(1)) {
+        (Some(Variant::Vector3(f)), Some(Variant::Vector3(t))) => (*f, *t),
+        _ => return Err(bad("`from` and `to` must be Vector3")),
+    };
+    let mask = match args.get(2) {
+        None => 0xFFFF_FFFF_i64,
+        Some(Variant::Int(m)) => *m,
+        Some(_) => return Err(bad("`collision_mask` must be an int")),
+    };
+    let exclude = match args.get(3) {
+        None => Variant::Array(Default::default()),
+        Some(v @ Variant::Array(_)) => v.clone(),
+        Some(_) => return Err(bad("`exclude` must be an Array[RID]")),
+    };
+    if args.len() > 4 {
+        return Err(bad("takes at most 4 arguments"));
+    }
+    let mut properties: HashMap<String, Variant> =
+        gdobject::class_db::get_property_list("PhysicsRayQueryParameters3D")
+            .into_iter()
+            .map(|p| (p.name, p.default_value))
+            .collect();
+    properties.insert("from".into(), Variant::Vector3(from));
+    properties.insert("to".into(), Variant::Vector3(to));
+    properties.insert("collision_mask".into(), Variant::Int(mask));
+    properties.insert("exclude".into(), exclude);
+    Ok(Variant::Resource(Box::new(gdvariant::ResourceRef {
+        path: String::new(),
+        class_name: "PhysicsRayQueryParameters3D".to_string(),
+        properties,
+    })))
+}
+
+/// Godot's `Input.is_emulating_touch_from_mouse()` as seen from a static
+/// singleton call: the `input_devices/pointing/emulate_touch_from_mouse`
+/// project setting that Godot (and the editor's Play) seeds Input from.
+/// Anything but a true Bool — including an unseeded store — reads false, which
+/// is Godot's default.
+fn emulating_touch_from_mouse() -> bool {
+    matches!(
+        project_setting_with_override("input_devices/pointing/emulate_touch_from_mouse"),
+        Some(Variant::Bool(true))
+    )
 }
 
 /// The platform layer's JS value type. Aliased because `JsValue` on its own
@@ -29056,6 +29211,60 @@ fn call_direct_body_state_3d_instance(
             let r = dbs_vec3(args, 0) - s.center_of_mass_local;
             Variant::Vector3(s.linear_velocity + s.angular_velocity.cross(r))
         }
+        // The accessors Godot exposes as METHODS as well as properties
+        // (pat-v3co1). Only the property forms worked, so the catch-all below
+        // answered `Nil` for `state.get_step()` and silently swallowed
+        // `state.set_linear_velocity(v)` — the official 3D platformer's enemy
+        // `_integrate_forces` (`var delta := state.get_step()`) then raised
+        // "cannot multiply Vector3 and Nil" every tick and never walked. The
+        // 2D table already had the getter half of this list.
+        "get_step" => Variant::Float(s.step as f64),
+        "get_total_gravity" => Variant::Vector3(s.total_gravity),
+        "get_total_linear_damp" => Variant::Float(s.total_linear_damp as f64),
+        "get_total_angular_damp" => Variant::Float(s.total_angular_damp as f64),
+        "get_inverse_mass" => Variant::Float(s.inverse_mass as f64),
+        "get_inverse_inertia" => Variant::Vector3(s.inverse_inertia),
+        "get_inverse_inertia_tensor" => Variant::Basis(s.inverse_inertia_tensor),
+        "get_principal_inertia_axes" => Variant::Basis(s.principal_inertia_axes),
+        "get_center_of_mass" => Variant::Vector3(s.center_of_mass),
+        "get_center_of_mass_local" => Variant::Vector3(s.center_of_mass_local),
+        "get_linear_velocity" => Variant::Vector3(s.linear_velocity),
+        "get_angular_velocity" => Variant::Vector3(s.angular_velocity),
+        "get_transform" => Variant::Transform3D(s.transform),
+        "is_sleeping" => Variant::Bool(s.sleeping),
+        // Setters write the same fields the property assignments do, so
+        // `apply_state_3d` carries them back onto the body either way. A
+        // wrong-typed argument leaves the field alone, as the property path
+        // does.
+        "set_linear_velocity" => {
+            if let Some(Variant::Vector3(v)) = args.first() {
+                s.linear_velocity = *v;
+            }
+            Variant::Nil
+        }
+        "set_angular_velocity" => {
+            if let Some(Variant::Vector3(v)) = args.first() {
+                s.angular_velocity = *v;
+            }
+            Variant::Nil
+        }
+        "set_transform" => {
+            if let Some(Variant::Transform3D(t)) = args.first() {
+                s.transform = *t;
+            }
+            Variant::Nil
+        }
+        "set_sleep_state" => {
+            s.sleeping = matches!(args.first(), Some(Variant::Bool(true)));
+            Variant::Nil
+        }
+        // The collider's Object, or null when it has no node (`collider_id`
+        // 0) — same rule as the 2D table.
+        "get_contact_collider_object" => s
+            .contact(dbs_idx(args, 0))
+            .filter(|c| c.collider_id != 0)
+            .map(|c| Variant::ObjectId(gdcore::id::ObjectId::from_raw(c.collider_id as u64)))
+            .unwrap_or(Variant::Nil),
         "integrate_forces" => Variant::Nil,
         _ => Variant::Nil,
     });

@@ -2005,12 +2005,28 @@ impl Parser {
                 self.advance();
                 Ok(Expr::SuperRef)
             }
-            Token::Dollar => {
+            // `$Path`, and the unique-name shorthands `%Name` / `$%Name`
+            // (pat-v3co1). Godot's `%Name` is sugar for `get_node("%Name")`;
+            // it was not recognised at all in prefix position, so a script
+            // using it — the official 3D platformer's `player.gd`
+            // (`%CoinCount.text = ...`) — failed to PARSE and the node ran
+            // with no script. `%` in prefix position is unambiguous: the
+            // binary modulo operator is consumed by the operator loop before
+            // a primary is ever parsed.
+            Token::Dollar | Token::Percent => {
+                let mut sigil = String::new();
+                if self.check(&Token::Percent) {
+                    sigil.push('%');
+                }
                 self.advance();
+                if sigil.is_empty() && self.check(&Token::Percent) {
+                    self.advance();
+                    sigil.push('%');
+                }
                 let path = match self.peek().clone() {
                     Token::Ident(name) => {
                         self.advance();
-                        let mut full = name;
+                        let mut full = sigil.clone() + &name;
                         while self.check(&Token::Slash) {
                             self.advance();
                             let next = self.eat_ident()?;
@@ -2021,7 +2037,7 @@ impl Parser {
                     }
                     Token::StringLit(s) => {
                         self.advance();
-                        s
+                        sigil.clone() + &s
                     }
                     _ => {
                         let ts = self.tokens.get(self.pos);
@@ -2031,7 +2047,7 @@ impl Parser {
                         };
                         return Err(ParseError::UnexpectedToken {
                             token,
-                            expected: "identifier or string after $".to_string(),
+                            expected: "identifier or string after $ or %".to_string(),
                             line,
                             col,
                             source_line: if line > 0 {

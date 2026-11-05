@@ -93,6 +93,28 @@ struct NodeTemplate {
     has_type: bool,
 }
 
+impl NodeTemplate {
+    /// Closes a template once its `[node]` section has been read.
+    ///
+    /// 🔑 Godot 4 saves "Access as Unique Name" as the PROPERTY
+    /// `unique_name_in_owner = true` (Node's `set_unique_name_in_owner`), not
+    /// as a `%` in the header's `name=` — which is the only spelling this
+    /// loader used to recognise. Every editor-saved scene therefore lost the
+    /// flag, and `%Name` lookups failed with "node not found" (the official 3D
+    /// platformer's `%CoinCount`, pat-v3co1). Folded into `unique_name` here,
+    /// once, so every instancing path that copies `tmpl.unique_name` agrees;
+    /// the property row stays so a save round-trips it.
+    fn finish(mut self) -> Self {
+        if matches!(
+            self.properties.get("unique_name_in_owner"),
+            Some(Variant::Bool(true))
+        ) {
+            self.unique_name = true;
+        }
+        self
+    }
+}
+
 /// An external resource reference parsed from `[ext_resource]` sections.
 #[derive(Debug, Clone)]
 pub struct ExtResourceEntry {
@@ -347,7 +369,7 @@ impl PackedScene {
                 current_sub = None;
                 // Flush previous node template.
                 if let Some(tmpl) = current.take() {
-                    templates.push(tmpl);
+                    templates.push(tmpl.finish());
                 }
 
                 let inner = &line[1..line.len() - 1];
@@ -582,7 +604,7 @@ impl PackedScene {
 
         // Flush last template.
         if let Some(tmpl) = current.take() {
-            templates.push(tmpl);
+            templates.push(tmpl.finish());
         }
 
         // pat-ghfv0.40: record inline SubResource references for the served
