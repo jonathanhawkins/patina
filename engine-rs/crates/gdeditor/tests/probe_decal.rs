@@ -275,11 +275,12 @@ fn reflection_probe_decal_scene_render() {
     // Specifically *red*-tinted, not merely different. A probe that brightened
     // the frame uniformly would pass the count check above.
     //
-    // Asserted per pixel rather than on a frame-wide sum: a sum can be flat
-    // even when the probe works, because a channel that is already clamped at
-    // 1.0 cannot go higher. Every pixel the probe touches must move red UP and
-    // leave green and blue exactly where they were — a red ambient can do
-    // nothing else.
+    // ⚠️ pat-t42ca: Godot's ConstantColor probe REPLACES the environment
+    // ambient inside its box (`reflection_process` REFLECTION_AMBIENT_COLOR,
+    // then `ambient_light = ambient_accum.rgb`), it does not add to it. The
+    // grey environment ambient becomes pure red, so every touched pixel keeps
+    // or raises red and LOSES green and blue. (This used to assert g/b stay
+    // put, which encoded the additive misconception.)
     let mut reddened = 0usize;
     for (with, base) in with_probe.pixels.iter().zip(without.pixels.iter()) {
         if (with.r - base.r).abs() <= 1e-4
@@ -289,12 +290,13 @@ fn reflection_probe_decal_scene_render() {
             continue; // untouched
         }
         assert!(
-            with.r > base.r,
-            "a red ambient may only raise red: {base:?} -> {with:?}"
+            with.r >= base.r - 1e-4,
+            "a red ambient may not lower red: {base:?} -> {with:?}"
         );
         assert!(
-            (with.g - base.g).abs() <= 1e-4 && (with.b - base.b).abs() <= 1e-4,
-            "a red ambient must leave green and blue alone: {base:?} -> {with:?}"
+            with.g <= base.g + 1e-4 && with.b <= base.b + 1e-4,
+            "a red ambient REPLACING a grey one can only remove green and \
+             blue: {base:?} -> {with:?}"
         );
         reddened += 1;
     }
@@ -326,7 +328,11 @@ fn reflection_probe_decal_scene_render() {
 fn a_disabled_probe_contributes_nothing() {
     let vp = viewport();
     let disabled = render_editor_3d_frame(&vp, &load(DISABLED_PROBE));
-    let default_probe = render_editor_3d_frame(&vp, &load(DEFAULT_PROBE));
+    // pat-t42ca: the control is a Disabled probe with a BLACK ambient colour.
+    // A default (Environment) probe is no longer a valid control: in Godot it
+    // replaces the ambient with its blurred capture.
+    let default_probe =
+        render_editor_3d_frame(&vp, &load(&format!("{DEFAULT_PROBE}ambient_mode = 0\n")));
 
     // Guard: the floor must actually draw, or two empty frames are "identical".
     let empty = render_editor_3d_frame(&vp, &load(&DEFAULT_PROBE.replace(
@@ -341,17 +347,22 @@ fn a_disabled_probe_contributes_nothing() {
     assert_eq!(
         differing_pixels(&disabled.pixels, &default_probe.pixels),
         0,
-        "a probe with `ambient_mode = 0` must render identically to a default \
-         (black-ambient) probe, even with a red `ambient_color` authored"
+        "a probe with `ambient_mode = 0` must render identically to a \
+         black-ambient disabled probe, even with a red `ambient_color` authored"
     );
 }
 
-/// A probe left at Godot's defaults has a black `ambient_color`, so its ambient
-/// term must add exactly nothing: the frame equals the same probe with its
-/// ambient switched off. (Its reflection is common to both; see
-/// [`a_disabled_probe_contributes_nothing`].)
+/// A probe left at Godot's defaults (`ambient_mode = ENVIRONMENT`) REPLACES
+/// the ambient with its blurred capture (pat-t42ca), so its frame differs from
+/// the same probe with its ambient off — and its `ambient_color` is ignored:
+/// Godot reads `ambient_color` only in ConstantColor mode.
+///
+/// ⚠️ This test used to assert the default probe changed NOTHING, encoding
+/// the old additive `ambient_color * energy` (black) model; Godot measured on
+/// platformer_3d says otherwise (shadowed floor 69 with probes disabled, 40
+/// with the default mode).
 #[test]
-fn a_default_probe_leaves_the_frame_unchanged() {
+fn a_default_probe_replaces_the_ambient_with_its_capture() {
     let vp = viewport();
     let default_probe = load(DEFAULT_PROBE);
     let framed = render_editor_3d_frame(&vp, &default_probe);
@@ -373,10 +384,20 @@ fn a_default_probe_leaves_the_frame_unchanged() {
         "Godot's default `ambient_mode` is ENVIRONMENT (ReflectionProbe.xml:23)"
     );
 
+    assert!(
+        differing_pixels(&framed.pixels, &ambient_off.pixels) > 0,
+        "an Environment-mode probe must replace the ambient with its capture, \
+         so the frame must differ from the same probe with ambient_mode = 0"
+    );
+    let red_colour = render_editor_3d_frame(
+        &vp,
+        &load(&format!("{DEFAULT_PROBE}ambient_color = Color(1, 0, 0, 1)\n")),
+    );
     assert_eq!(
-        differing_pixels(&framed.pixels, &ambient_off.pixels),
+        differing_pixels(&framed.pixels, &red_colour.pixels),
         0,
-        "a probe with Godot's default black ambient must add exactly zero ambient"
+        "Environment mode must ignore `ambient_color`; adding it is the old \
+         additive model Godot never had"
     );
 }
 

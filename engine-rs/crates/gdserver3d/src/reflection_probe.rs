@@ -107,9 +107,19 @@ impl ReflectionProbe {
     }
 
     /// Returns the axis-aligned bounding box of the probe's influence volume
-    /// in world space, accounting for `size` and `origin_offset`.
+    /// in world space.
+    ///
+    /// ⚠️ The box is centred on the probe's OWN origin; `origin_offset` moves
+    /// only the capture point (pat-t42ca). Godot uploads `box_extents = size/2`
+    /// and `local_matrix = probe transform⁻¹` and tests
+    /// `abs(local_pos) > box_extents` (`scene_forward_lights_inc.glsl`
+    /// `reflection_process`), while `origin_offset` goes only to
+    /// `box_offset` (light_storage.cpp `update_reflection_probe_buffer`) and to
+    /// the capture camera (renderer_scene_cull.cpp `set_look_at(origin_offset,
+    /// …)`). Shifting the box by the offset moved the platformer's two big
+    /// probes 6.5 m down, out from under the floor they light.
     pub fn world_aabb_min_max(&self) -> (Vector3, Vector3) {
-        let center = self.transform.origin + self.origin_offset;
+        let center = self.transform.origin;
         let half = self.size * 0.5;
         (center - half, center + half)
     }
@@ -148,8 +158,14 @@ impl ReflectionProbe {
 /// contains `world_pos`.
 ///
 /// Each probe contributes `intensity * (ambient_color * ambient_color_energy)`
-/// when its `ambient_mode` is `Environment` or `ConstantColor`. `Disabled`
-/// probes skip the ambient term. Probes outside `world_pos` are skipped.
+/// when its `ambient_mode` is `ConstantColor`. `Disabled` probes skip the
+/// ambient term. Probes outside `world_pos` are skipped.
+///
+/// ⚠️ `Environment` (the default) contributes NOTHING here (pat-t42ca): Godot
+/// reads `ambient_color` only for REFLECTION_AMBIENT_COLOR; an Environment
+/// probe's ambient is its CAPTURE, applied per fragment through
+/// [`ProbeReflection::ambient`] once the probe has been captured. This sum is
+/// only the fallback for a probe with no capture yet.
 ///
 /// This is the parity oracle used by both the software and wgpu render paths
 /// to fold local probe ambience into the lit color of fragments inside the
@@ -164,10 +180,10 @@ pub fn sample_probes_at(probes: &[ReflectionProbe], world_pos: Vector3) -> Color
             continue;
         }
         let energy = match probe.ambient_mode {
-            ReflectionProbeAmbientMode::Disabled => continue,
-            ReflectionProbeAmbientMode::Environment | ReflectionProbeAmbientMode::ConstantColor => {
-                probe.ambient_color_energy
+            ReflectionProbeAmbientMode::Disabled | ReflectionProbeAmbientMode::Environment => {
+                continue
             }
+            ReflectionProbeAmbientMode::ConstantColor => probe.ambient_color_energy,
         };
         r += probe.ambient_color.r * energy * probe.intensity;
         g += probe.ambient_color.g * energy * probe.intensity;
@@ -192,13 +208,295 @@ pub enum CubeFace {
 /// Six square faces of linear colour. Deliberately low resolution: a probe
 /// re-renders the whole scene once per face, so this is the term that decides
 /// whether `update_mode = Always` is affordable at all.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ReflectionCubemap {
     /// Edge length of each square face, in texels.
     pub resolution: u32,
     /// Six faces in [`CubeFace`] order, each `resolution * resolution`,
     /// row-major.
     pub faces: [Vec<Color>; 6],
+    /// The GGX-prefiltered roughness levels, built on first use (pat-9gjpr).
+    /// Derived data: ignored by `PartialEq`, reset by [`Self::set_face`].
+    /// ⚠️ Writing `faces` directly after a rough sample leaves this stale.
+    roughness_chain: std::sync::OnceLock<RoughnessChain>,
+}
+
+impl PartialEq for ReflectionCubemap {
+    fn eq(&self, other: &Self) -> bool {
+        self.resolution == other.resolution && self.faces == other.faces
+    }
+}
+
+/// Godot's default `rendering/reflections/sky_reflections/roughness_layers`.
+pub const ROUGHNESS_LAYERS: usize = 8;
+/// `MAX_ROUGHNESS_LOD` in Godot's shaders: `roughness_layers - 1`.
+pub const MAX_ROUGHNESS_LOD: f32 = (ROUGHNESS_LAYERS - 1) as f32;
+/// Smallest face edge of a prefiltered level.
+pub const MIN_ROUGHNESS_LEVEL_RESOLUTION: u32 = 4;
+
+/// Face edge, in texels, of roughness level `level` for a base of `base`.
+pub fn roughness_level_resolution(base: u32, level: usize) -> u32 {
+    if level == 0 {
+        return base.max(1);
+    }
+    (base >> level).max(MIN_ROUGHNESS_LEVEL_RESOLUTION).min(base.max(1))
+}
+
+/// One cubemap level: six square faces of `resolution` texels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CubeLevel {
+    /// Face edge in texels.
+    pub resolution: u32,
+    /// Six faces in [`CubeFace`] order, row-major.
+    pub faces: [Vec<Color>; 6],
+}
+
+/// The radiance mip chain Godot samples reflections and probe ambient from
+/// (pat-9gjpr).
+///
+/// Level `k` of [`ROUGHNESS_LAYERS`] is the capture convolved with GGX at
+/// perceptual roughness `(k / MAX_ROUGHNESS_LOD)²`, ported from Godot's
+/// `octmap_roughness.glsl`: `copy_effects.cpp` pushes `p²` with
+/// `p = k / (layers - 1)` and the shader squares it twice more for
+/// `roughness4`, which is GGX alpha². So sampling at
+/// `lod = sqrt(roughness) * MAX_ROUGHNESS_LOD` (scene shader) lands on the
+/// level filtered for exactly `roughness`. Level 0 is the raw capture.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoughnessChain {
+    /// [`ROUGHNESS_LAYERS`] levels, level 0 first.
+    pub levels: Vec<CubeLevel>,
+}
+
+/// The face and its `[0,1]` texture coordinates a direction lands on, with
+/// the conventions of [`ReflectionCubemap::sample_direction`].
+fn cube_face_uv(dir: Vector3) -> Option<(usize, f32, f32)> {
+    let (ax, ay, az) = (dir.x.abs(), dir.y.abs(), dir.z.abs());
+    if !(ax + ay + az > 0.0) {
+        return None;
+    }
+    let (face, sc, tc, ma) = if ax >= ay && ax >= az {
+        if dir.x > 0.0 {
+            (CubeFace::PosX, -dir.z, -dir.y, ax)
+        } else {
+            (CubeFace::NegX, dir.z, -dir.y, ax)
+        }
+    } else if ay >= az {
+        if dir.y > 0.0 {
+            (CubeFace::PosY, dir.x, dir.z, ay)
+        } else {
+            (CubeFace::NegY, dir.x, -dir.z, ay)
+        }
+    } else if dir.z > 0.0 {
+        (CubeFace::PosZ, dir.x, -dir.y, az)
+    } else {
+        (CubeFace::NegZ, -dir.x, -dir.y, az)
+    };
+    Some((face as usize, 0.5 * (sc / ma + 1.0), 0.5 * (tc / ma + 1.0)))
+}
+
+/// Inverse of [`cube_face_uv`]: the (unnormalized) direction through `(u, v)`
+/// of `face`.
+fn cube_face_dir(face: usize, u: f32, v: f32) -> Vector3 {
+    let sc = 2.0 * u - 1.0;
+    let tc = 2.0 * v - 1.0;
+    match face {
+        0 => Vector3::new(1.0, -tc, -sc),
+        1 => Vector3::new(-1.0, -tc, sc),
+        2 => Vector3::new(sc, 1.0, tc),
+        3 => Vector3::new(sc, -1.0, -tc),
+        4 => Vector3::new(sc, -tc, 1.0),
+        _ => Vector3::new(-sc, -tc, -1.0),
+    }
+}
+
+/// Bilinear lookup inside one face (clamped at the face edge — no
+/// cross-face filtering), texel centres at `(i + 0.5) / res`.
+fn bilinear_face(face: &[Color], res: u32, u: f32, v: f32) -> Color {
+    let res_i = res.max(1) as i32;
+    let x = u.clamp(0.0, 1.0) * res_i as f32 - 0.5;
+    let y = v.clamp(0.0, 1.0) * res_i as f32 - 0.5;
+    let x0f = x.floor();
+    let y0f = y.floor();
+    let fx = x - x0f;
+    let fy = y - y0f;
+    let cl = |i: i32| i.clamp(0, res_i - 1);
+    let (x0, x1, y0, y1) = (cl(x0f as i32), cl(x0f as i32 + 1), cl(y0f as i32), cl(y0f as i32 + 1));
+    let at = |xx: i32, yy: i32| {
+        face.get((yy * res_i + xx) as usize)
+            .copied()
+            .unwrap_or(Color::new(0.0, 0.0, 0.0, 1.0))
+    };
+    let (a, b, c, d) = (at(x0, y0), at(x1, y0), at(x0, y1), at(x1, y1));
+    let mix = |p: f32, q: f32, r: f32, s: f32| {
+        (p * (1.0 - fx) + q * fx) * (1.0 - fy) + (r * (1.0 - fx) + s * fx) * fy
+    };
+    Color::new(
+        mix(a.r, b.r, c.r, d.r),
+        mix(a.g, b.g, c.g, d.g),
+        mix(a.b, b.b, c.b, d.b),
+        1.0,
+    )
+}
+
+impl CubeLevel {
+    /// Bilinear sample along `dir`.
+    pub fn sample(&self, dir: Vector3) -> Color {
+        match cube_face_uv(dir) {
+            Some((face, u, v)) => bilinear_face(&self.faces[face], self.resolution, u, v),
+            None => Color::new(0.0, 0.0, 0.0, 1.0),
+        }
+    }
+
+    /// 2x2 box downsample (a face of 1 texel stays 1 texel).
+    fn downsample(&self) -> CubeLevel {
+        let res = self.resolution;
+        let half = (res / 2).max(1);
+        let faces = std::array::from_fn(|f| {
+            let src = &self.faces[f];
+            let mut out = Vec::with_capacity((half * half) as usize);
+            for y in 0..half {
+                for x in 0..half {
+                    let mut acc = [0.0f32; 3];
+                    let mut n = 0.0;
+                    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                        let sx = (x * 2 + dx).min(res - 1);
+                        let sy = (y * 2 + dy).min(res - 1);
+                        if let Some(c) = src.get((sy * res + sx) as usize) {
+                            acc[0] += c.r;
+                            acc[1] += c.g;
+                            acc[2] += c.b;
+                            n += 1.0;
+                        }
+                    }
+                    let n = f32::max(n, 1.0);
+                    out.push(Color::new(acc[0] / n, acc[1] / n, acc[2] / n, 1.0));
+                }
+            }
+            out
+        });
+        CubeLevel { resolution: half, faces }
+    }
+}
+
+/// Van der Corput radical inverse, as Godot's `radicalInverse_VdC`.
+fn radical_inverse_vdc(mut bits: u32) -> f32 {
+    bits = bits.rotate_left(16);
+    bits = ((bits & 0x5555_5555) << 1) | ((bits & 0xAAAA_AAAA) >> 1);
+    bits = ((bits & 0x3333_3333) << 2) | ((bits & 0xCCCC_CCCC) >> 2);
+    bits = ((bits & 0x0F0F_0F0F) << 4) | ((bits & 0xF0F0_F0F0) >> 4);
+    bits = ((bits & 0x00FF_00FF) << 8) | ((bits & 0xFF00_FF00) >> 8);
+    bits as f32 * 2.328_306_4e-10
+}
+
+impl RoughnessChain {
+    /// Builds the chain from a capture (Godot `octmap_roughness.glsl`).
+    pub fn build(base: &ReflectionCubemap) -> Self {
+        let res = base.resolution.max(1);
+        let level0 = CubeLevel {
+            resolution: res,
+            faces: base.faces.clone(),
+        };
+        // Box-downsampled source mips, which Godot's filter reads at the LOD
+        // matching each sample's solid angle (avoids aliasing a wide lobe).
+        let mut src = vec![level0.clone()];
+        while src.last().map_or(1, |l| l.resolution) > 1 {
+            let next = src.last().unwrap().downsample();
+            src.push(next);
+        }
+        let solid_angle_texel = 4.0 * std::f32::consts::PI / (6.0 * (res * res) as f32);
+
+        let mut levels = vec![level0];
+        for k in 1..ROUGHNESS_LAYERS {
+            let p = k as f32 / MAX_ROUGHNESS_LOD;
+            let pushed = p * p; // copy_effects.cpp: `p_roughness * p_roughness`
+            let roughness2 = pushed * pushed;
+            let roughness4 = roughness2 * roughness2; // GGX alpha²
+            // Godot scales its 32 GGX samples by `4 * roughness`; a little more
+            // here keeps the tiny low-resolution levels free of banding.
+            let total = ((256.0 * pushed) as u32).max(32);
+            let mut samples: Vec<(Vector3, usize)> = Vec::with_capacity(total as usize);
+            for i in 0..total {
+                let xi = (i as f32 / total as f32, radical_inverse_vdc(i));
+                let phi = 2.0 * std::f32::consts::PI * xi.0;
+                let cos_t =
+                    ((1.0 - xi.1) / (1.0 + (roughness4 - 1.0) * xi.1)).max(0.0).sqrt();
+                let sin_t = (1.0 - cos_t * cos_t).max(0.0).sqrt();
+                let h = Vector3::new(sin_t * phi.cos(), sin_t * phi.sin(), cos_t);
+                let n_dot_h = h.z;
+                let l = Vector3::new(2.0 * n_dot_h * h.x, 2.0 * n_dot_h * h.y, 2.0 * n_dot_h * h.z - 1.0);
+                if l.z <= 0.0 {
+                    continue;
+                }
+                let nh2 = n_dot_h * n_dot_h;
+                let denom = nh2 * (roughness4 - 1.0) + 1.0;
+                let d = roughness4 / (std::f32::consts::PI * denom * denom);
+                let pdf = d / 4.0 + 0.0001;
+                let solid_angle_sample = 1.0 / (total as f32 * pdf + 0.0001);
+                let mip = (0.5 * (solid_angle_sample / solid_angle_texel).log2())
+                    .round()
+                    .clamp(0.0, (src.len() - 1) as f32) as usize;
+                samples.push((l, mip));
+            }
+            let lres = roughness_level_resolution(res, k);
+            let faces = std::array::from_fn(|f| {
+                let mut out = Vec::with_capacity((lres * lres) as usize);
+                for y in 0..lres {
+                    for x in 0..lres {
+                        let n = cube_face_dir(
+                            f,
+                            (x as f32 + 0.5) / lres as f32,
+                            (y as f32 + 0.5) / lres as f32,
+                        )
+                        .normalized();
+                        let up = if n.y.abs() < 0.99999 {
+                            Vector3::new(0.0, 1.0, 0.0)
+                        } else {
+                            Vector3::new(0.0, 0.0, 1.0)
+                        };
+                        let t0 = up.cross(n).normalized();
+                        let t1 = n.cross(t0);
+                        let mut acc = [0.0f32; 3];
+                        let mut wsum = 0.0f32;
+                        for (l, mip) in &samples {
+                            let w = t0 * l.x + t1 * l.y + n * l.z;
+                            let c = src[*mip].sample(w);
+                            acc[0] += c.r * l.z;
+                            acc[1] += c.g * l.z;
+                            acc[2] += c.b * l.z;
+                            wsum += l.z;
+                        }
+                        let wsum = wsum.max(1e-6);
+                        out.push(Color::new(acc[0] / wsum, acc[1] / wsum, acc[2] / wsum, 1.0));
+                    }
+                }
+                out
+            });
+            levels.push(CubeLevel {
+                resolution: lres,
+                faces,
+            });
+        }
+        Self { levels }
+    }
+
+    /// Trilinear sample at `lod` in `0..=MAX_ROUGHNESS_LOD`.
+    pub fn sample_lod(&self, dir: Vector3, lod: f32) -> Color {
+        let max = (self.levels.len().max(1) - 1) as f32;
+        let lod = if lod.is_finite() { lod.clamp(0.0, max) } else { 0.0 };
+        let i = lod.floor() as usize;
+        let f = lod - i as f32;
+        let a = self.levels[i].sample(dir);
+        if f <= 0.0 || i + 1 >= self.levels.len() {
+            return a;
+        }
+        let b = self.levels[i + 1].sample(dir);
+        Color::new(
+            a.r + (b.r - a.r) * f,
+            a.g + (b.g - a.g) * f,
+            a.b + (b.b - a.b) * f,
+            1.0,
+        )
+    }
 }
 
 impl ReflectionCubemap {
@@ -215,6 +513,7 @@ impl ReflectionCubemap {
                 vec![fill; n],
                 vec![fill; n],
             ],
+            roughness_chain: std::sync::OnceLock::new(),
         }
     }
 
@@ -223,7 +522,21 @@ impl ReflectionCubemap {
         let n = (self.resolution as usize) * (self.resolution as usize);
         if pixels.len() == n {
             self.faces[face as usize] = pixels;
+            self.roughness_chain = std::sync::OnceLock::new();
         }
+    }
+
+    /// The GGX-prefiltered levels (built once, then cached).
+    pub fn roughness_chain(&self) -> &RoughnessChain {
+        self.roughness_chain.get_or_init(|| RoughnessChain::build(self))
+    }
+
+    /// Roughness-filtered lookup: Godot's
+    /// `textureLod(reflection_atlas, …, lod)` with
+    /// `lod = sqrt(roughness) * MAX_ROUGHNESS_LOD` for a reflection and
+    /// `lod = MAX_ROUGHNESS_LOD` for probe ambient.
+    pub fn sample_lod(&self, dir: Vector3, lod: f32) -> Color {
+        self.roughness_chain().sample_lod(dir, lod)
     }
 
     /// Nearest-texel lookup along `dir` (need not be normalized).
@@ -298,9 +611,72 @@ pub struct ProbeReflection {
     pub intensity: f32,
     /// Metres of fade at the box boundary; `0.0` means a hard edge.
     pub blend_distance: f32,
+    /// How the probe replaces the ambient light inside its box (pat-t42ca).
+    pub ambient_mode: ReflectionProbeAmbientMode,
+    /// `ambient_color` (linear) times `ambient_color_energy`, used by
+    /// [`ReflectionProbeAmbientMode::ConstantColor`].
+    pub ambient_color: Color,
 }
 
 impl ProbeReflection {
+    /// The box-projected (when enabled) lookup direction for `reflection`.
+    fn lookup_dir(&self, world_pos: Vector3, reflection: Vector3) -> Vector3 {
+        if self.box_projection {
+            crate::box_projection::box_project_reflection(
+                world_pos,
+                reflection,
+                self.box_min,
+                self.box_max,
+                self.origin,
+            )
+        } else {
+            reflection
+        }
+    }
+
+    /// The probe's fade weight at `world_pos` (Godot `blend`), `0..=1`.
+    pub fn blend_at(&self, world_pos: Vector3) -> f32 {
+        self.blend_weight(world_pos)
+    }
+
+    /// Roughness-filtered reflection (pat-9gjpr), Godot `reflection_process`:
+    /// `textureLod(atlas, box_projected(ref_vec), sqrt(roughness) *
+    /// MAX_ROUGHNESS_LOD) * intensity * blend`.
+    pub fn sample_rough(&self, world_pos: Vector3, reflection: Vector3, roughness: f32) -> Color {
+        let dir = self.lookup_dir(world_pos, reflection);
+        let lod = roughness.clamp(0.0, 1.0).sqrt() * MAX_ROUGHNESS_LOD;
+        let c = self.cubemap.sample_lod(dir, lod);
+        let strength = self.intensity * self.blend_weight(world_pos);
+        Color::new(c.r * strength, c.g * strength, c.b * strength, 1.0)
+    }
+
+    /// The ambient light at `world_pos` with this probe applied (pat-t42ca).
+    ///
+    /// Godot `reflection_process` + `scene_forward_clustered.glsl` 2082-2096:
+    /// inside the box the probe's ambient REPLACES `base` (the environment
+    /// ambient) by the fade weight —
+    /// `ambient = probe_ambient * blend + base * (1 - blend)`. In
+    /// `Environment` mode (the default) the probe ambient is the capture's
+    /// most-blurred level (`lod = MAX_ROUGHNESS_LOD`) along the NORMAL, with
+    /// no box projection and no `intensity`; `ConstantColor` uses
+    /// `ambient_color * energy`; `Disabled` leaves `base` alone.
+    pub fn ambient(&self, world_pos: Vector3, normal: Vector3, base: Color) -> Color {
+        let probe = match self.ambient_mode {
+            ReflectionProbeAmbientMode::Disabled => return base,
+            ReflectionProbeAmbientMode::Environment => {
+                self.cubemap.sample_lod(normal, MAX_ROUGHNESS_LOD)
+            }
+            ReflectionProbeAmbientMode::ConstantColor => self.ambient_color,
+        };
+        let b = self.blend_weight(world_pos);
+        Color::new(
+            probe.r * b + base.r * (1.0 - b),
+            probe.g * b + base.g * (1.0 - b),
+            probe.b * b + base.b * (1.0 - b),
+            1.0,
+        )
+    }
+
     /// The reflected colour for a surface at `world_pos` reflecting along
     /// `reflection`.
     ///
@@ -375,7 +751,29 @@ impl ProbeReflection {
     }
 }
 
-/// The first captured probe whose influence box contains `world_pos`.
+/// The index of the probe Godot applies first at `world_pos`: the SMALLEST
+/// captured probe whose influence box contains it.
+///
+/// Godot sorts probes by `-extents.length()` (light_storage.cpp
+/// `update_reflection_probe_buffer`) and the cluster loop walks bits with
+/// `findMSB`, so the smallest box is processed first and its full-weight
+/// interior saturates both accumulators. Patina binds ONE probe per draw, so
+/// it binds that one. Ties keep list order.
+pub fn probe_index_at(probes: &[ReflectionProbe], world_pos: Vector3) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for (i, probe) in probes.iter().enumerate() {
+        if probe.captured.is_none() || !probe.contains_point(world_pos) {
+            continue;
+        }
+        let size = (probe.size * 0.5).length();
+        if best.map_or(true, |(_, s)| size < s) {
+            best = Some((i, size));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// The captured probe covering `world_pos` (see [`probe_index_at`]).
 ///
 /// `None` when no such probe has a capture yet — the caller then keeps whatever
 /// flat ambient term it already had, so a scene with no probe, or one whose
@@ -384,26 +782,23 @@ pub fn probe_reflection_at(
     probes: &[ReflectionProbe],
     world_pos: Vector3,
 ) -> Option<ProbeReflection> {
-    for probe in probes {
-        if !probe.contains_point(world_pos) {
-            continue;
-        }
-        let cubemap = match probe.captured.as_ref() {
-            Some(c) => c.clone(),
-            None => continue,
-        };
-        let (box_min, box_max) = probe.world_aabb_min_max();
-        return Some(ProbeReflection {
-            cubemap,
-            box_min,
-            box_max,
-            origin: probe.capture_origin(),
-            box_projection: probe.box_projection,
-            intensity: probe.intensity,
-            blend_distance: probe.blend_distance,
-        });
-    }
-    None
+    let probe = &probes[probe_index_at(probes, world_pos)?];
+    let cubemap = probe.captured.as_ref()?.clone();
+    let (box_min, box_max) = probe.world_aabb_min_max();
+    let ac = probe.ambient_color.srgb_to_linear();
+    let e = probe.ambient_color_energy;
+    Some(ProbeReflection {
+        cubemap,
+        box_min,
+        box_max,
+        origin: probe.capture_origin(),
+        box_projection: probe.box_projection,
+        intensity: probe.intensity,
+        blend_distance: probe.blend_distance,
+        ambient_mode: probe.ambient_mode,
+        // light_storage.cpp: `ambient_color.srgb_to_linear() * energy`.
+        ambient_color: Color::new(ac.r * e, ac.g * e, ac.b * e, 1.0),
+    })
 }
 
 #[cfg(test)]
@@ -452,9 +847,12 @@ mod tests {
     fn contains_point_with_offset() {
         let mut probe = ReflectionProbe::new(ReflectionProbeId(1));
         probe.origin_offset = Vector3::new(5.0, 0.0, 0.0);
-        // Center shifted to (5, 0, 0), so range on X is -5..15.
-        assert!(probe.contains_point(Vector3::new(14.0, 0.0, 0.0)));
-        assert!(!probe.contains_point(Vector3::new(-6.0, 0.0, 0.0)));
+        // Godot: `origin_offset` moves the capture point, NOT the influence
+        // box, which stays centred on the probe origin (-10..10 on X). The old
+        // expectation here (-5..15) encoded the shifted-box misconception.
+        assert!(probe.contains_point(Vector3::new(-9.0, 0.0, 0.0)));
+        assert!(!probe.contains_point(Vector3::new(14.0, 0.0, 0.0)));
+        assert_eq!(probe.capture_origin(), Vector3::new(5.0, 0.0, 0.0));
     }
 
     #[test]

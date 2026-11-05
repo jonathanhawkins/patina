@@ -1144,7 +1144,18 @@ impl SoftwareRenderer3D {
                 // With no probes — or a probe left at Godot's default black
                 // `ambient_color` — this adds exactly zero, so every existing
                 // frame is byte-identical.
-                let probe_ambient = self.sample_reflection_probes(entry.transform.origin);
+                //
+                // ⚠️ Only for an UNCAPTURED probe (pat-t42ca). A captured probe
+                // replaces the ambient per fragment in the shader
+                // (`ProbeReflection::ambient`), as Godot does; adding
+                // `ambient_color` on top in `Environment` mode is something
+                // Godot never does.
+                let probe = probe_reflection_at(&self.reflection_probes, entry.transform.origin);
+                let probe_ambient = if probe.is_some() {
+                    Color::new(0.0, 0.0, 0.0, 1.0)
+                } else {
+                    self.sample_reflection_probes(entry.transform.origin)
+                };
                 // VoxelGI indirect, sampled at the same point and added the same
                 // way (pat-s3rrv.114). An unbaked volume, or a scene with no GI
                 // node at all, samples black and leaves the frame untouched.
@@ -1171,7 +1182,7 @@ impl SoftwareRenderer3D {
                     // The probe covering this instance, resolved at the same
                     // point as its ambient term above and sampled per fragment
                     // in the specular stage (pat-s3rrv.206).
-                    probe: probe_reflection_at(&self.reflection_probes, entry.transform.origin),
+                    probe,
                     // The half of `light_cull_mask` the shading loop was
                     // missing: WHICH instance it is shading.
                     layers: inst.geometry.layers,

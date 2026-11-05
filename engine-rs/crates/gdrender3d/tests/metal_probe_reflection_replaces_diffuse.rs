@@ -53,6 +53,8 @@ fn red_probe() -> ProbeReflection {
         intensity: 1.0,
         // A hard edge, so `blend_weight` is 1.0 anywhere inside the box.
         blend_distance: 0.0,
+        ambient_mode: gdserver3d::reflection_probe::ReflectionProbeAmbientMode::Disabled,
+        ambient_color: Color::new(0.0, 0.0, 0.0, 1.0),
     }
 }
 
