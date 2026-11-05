@@ -46,6 +46,13 @@ pub fn slider_axis(class_name: &str) -> Option<SliderAxis> {
 /// puts it is not expressible.
 pub const GRABBER_EXTENT: f32 = 10.0;
 
+/// A SLIDER's grabber extent: the default theme's `slider_grabber.svg`, a 16x16
+/// icon (pat-9ww3e). Godot's drag maths and draw both read the icon's size
+/// (`slider.cpp:69-70`, `:329-334`); now that Patina draws that icon, the
+/// slider geometry below uses its size too. (Scrollbars keep
+/// [`GRABBER_EXTENT`] as their minimum grabber length.)
+pub const SLIDER_GRABBER_EXTENT: f32 = 16.0;
+
 /// The usable track length: the control's extent along its axis minus the
 /// grabber, because the grabber's *centre* travels only between the half-grabber
 /// insets at each end (`slider.cpp:71`).
@@ -57,7 +64,7 @@ pub fn track_length(size: Vector2, axis: SliderAxis) -> f32 {
         SliderAxis::Horizontal => size.x,
         SliderAxis::Vertical => size.y,
     };
-    (extent - GRABBER_EXTENT).max(f32::EPSILON)
+    (extent - SLIDER_GRABBER_EXTENT).max(f32::EPSILON)
 }
 
 /// The `[0, 1]` ratio a point **in control-local space** selects.
@@ -76,7 +83,7 @@ pub fn track_length(size: Vector2, axis: SliderAxis) -> f32 {
 /// catch.
 pub fn ratio_at_local_point(size: Vector2, axis: SliderAxis, local: Vector2) -> f64 {
     let max = track_length(size, axis) as f64;
-    let half = (GRABBER_EXTENT / 2.0) as f64;
+    let half = (SLIDER_GRABBER_EXTENT / 2.0) as f64;
     let ratio = match axis {
         SliderAxis::Horizontal => (local.x as f64 - half) / max,
         SliderAxis::Vertical => 1.0 - ((local.y as f64 - half) / max),
@@ -93,12 +100,12 @@ pub fn grabber_rect(size: Vector2, axis: SliderAxis, ratio: f32) -> Rect2 {
     match axis {
         SliderAxis::Horizontal => Rect2::new(
             Vector2::new(travel, 0.0),
-            Vector2::new(GRABBER_EXTENT, size.y),
+            Vector2::new(SLIDER_GRABBER_EXTENT, size.y),
         ),
         // Ratio 0 sits at the BOTTOM, so the offset counts down from the far end.
         SliderAxis::Vertical => Rect2::new(
             Vector2::new(0.0, track_length(size, axis) - travel),
-            Vector2::new(size.x, GRABBER_EXTENT),
+            Vector2::new(size.x, SLIDER_GRABBER_EXTENT),
         ),
     }
 }

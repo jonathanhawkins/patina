@@ -164,13 +164,26 @@ fn the_whole_range_family_is_registered_under_range() {
 #[test]
 fn a_scene_loaded_slider_draws_its_grabber_at_the_value() {
     let (mut tree, root, bar) = load_scene();
-    let rects = draw(&mut tree, root);
-
-    assert!(
-        rects.len() >= 2,
-        "a slider draws a track and a grabber; got {} filled rect(s). An empty \
-         or single-rect list usually means the control resolved to zero size",
-        rects.len()
+    let mut vp = Viewport::new(300, 120, Color::BLACK);
+    let theme = Theme::default_theme();
+    render_control_tree(&mut tree, root, &theme, &mut vp, Vector2::new(300.0, 120.0));
+    // Godot's grabber is the 16x16 `slider_grabber.svg` disc (pat-9ww3e).
+    let discs: Vec<Vector2> = vp
+        .get_sorted_items()
+        .iter()
+        .flat_map(|it| it.commands.clone())
+        .filter_map(|c| match c {
+            DrawCommand::DrawCircle { center, radius, .. } if (radius - 7.0).abs() < 1e-3 => {
+                Some(center)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        discs.len(),
+        1,
+        "a slider draws one grabber disc. None usually means the control \
+         resolved to zero size"
     );
 
     let size = control::get_size(&tree, bar);
@@ -181,17 +194,13 @@ fn a_scene_loaded_slider_draws_its_grabber_at_the_value() {
     );
 
     let expected = range_controls::grabber_rect(size, SliderAxis::Horizontal, 0.25);
-    let grabber = rects
-        .iter()
-        .find(|(_, s)| (s.x - expected.size.x).abs() < 1e-3)
-        .unwrap_or_else(|| panic!("no rect the width of a grabber among {rects:?}"));
-
+    let origin = control::get_global_position(&tree, bar);
+    let want = origin.x + expected.position.x + expected.size.x / 2.0;
     assert!(
-        (grabber.0.x - expected.position.x).abs() < 1e-3,
+        (discs[0].x - want).abs() < 1.0,
         "value 25 of 0..100 must put the grabber a quarter along the track \
-         (x = {}), got {}",
-        expected.position.x,
-        grabber.0.x,
+         (centre x = {want}), got {}",
+        discs[0].x,
     );
 }
 
@@ -221,11 +230,13 @@ fn dragging_a_scene_loaded_slider_reaches_a_gdscript_handler_once() {
         Connection::new(root.object_id(), "_on_value_changed"),
     );
 
-    // x = 5 + 75: `ratio_at_local_point` is `(x - GRABBER_EXTENT/2) / track`.
+    // `ratio_at_local_point` is `(x - grabber/2) / (width - grabber)` with
+    // Godot's 16px grabber (pat-9ww3e): on this 110-wide slider ratio 0.75 is
+    // x = 8 + 0.75 * 94 = 78.5.
     tree.push_input(&InputEvent::MouseButton {
         button: MouseButton::Left,
         pressed: true,
-        position: Vector2::new(80.0, 8.0),
+        position: Vector2::new(78.5, 8.0),
     });
 
     assert_eq!(
@@ -249,12 +260,12 @@ fn dragging_a_scene_loaded_slider_reaches_a_gdscript_handler_once() {
     tree.push_input(&InputEvent::MouseButton {
         button: MouseButton::Left,
         pressed: false,
-        position: Vector2::new(80.0, 8.0),
+        position: Vector2::new(78.5, 8.0),
     });
     tree.push_input(&InputEvent::MouseButton {
         button: MouseButton::Left,
         pressed: true,
-        position: Vector2::new(80.0, 8.0),
+        position: Vector2::new(78.5, 8.0),
     });
 
     assert_eq!(

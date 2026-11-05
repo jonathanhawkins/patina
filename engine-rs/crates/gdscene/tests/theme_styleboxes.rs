@@ -126,8 +126,12 @@ fn button_normal_is_a_flat_stylebox_with_godot_metrics() {
     // Disabled and focus exist at all — they were unrepresentable before.
     assert!(theme.has_stylebox("Button", "disabled"));
     let focus = flat_of(&theme, "Button", "focus");
+    // Godot's focus box carries `style_focus_color` as its bg but sets
+    // `draw_center = false` (default_theme.cpp:142), which is what makes it
+    // an outline drawn OVER the state box (pat-9ww3e).
     assert!(
-        focus.bg_color.a == 0.0 && focus.border_width.iter().all(|w| *w > 0.0),
+        (focus.bg_color.a == 0.0 || !focus.draw_center)
+            && focus.border_width.iter().all(|w| *w > 0.0),
         "the focus box is a transparent fill with a border, so it draws OVER \
          the state box rather than replacing it; got bg {:?} borders {:?}",
         focus.bg_color,
@@ -144,6 +148,15 @@ fn the_typed_and_legacy_stylebox_stores_agree() {
     for (control, property) in STYLED_CONTROLS {
         // Separators are StyleBoxLine, which has no flat bg to mirror.
         if control.ends_with("Separator") {
+            continue;
+        }
+        // Godot's CheckBox states are StyleBoxEmpty (default_theme.cpp:275,
+        // pat-9ww3e): no background, so no legacy colour may claim one.
+        if let Some(StyleBox::Empty(_)) = theme.get_stylebox(control, property) {
+            assert!(
+                theme.get_item(ThemePropertyType::Stylebox, control, property).is_none(),
+                "{control}/{property} is an empty box but a legacy colour still paints it"
+            );
             continue;
         }
         let flat = flat_of(&theme, control, property);

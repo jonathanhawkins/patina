@@ -36,13 +36,13 @@ use gdvariant::Variant;
 // ---------------------------------------------------------------------------
 
 /// `ratio_at_local_point` maps `x` through `(x - grabber/2) / (width - grabber)`
-/// with a grabber extent of 10, so a **110**-wide slider has a track of exactly
-/// 100 and `x = 5 + v` selects value `v` on a 0..100 range.
+/// with Godot's 16px grabber icon (pat-9ww3e), so a **116**-wide slider has a
+/// track of exactly 100 and `x = 8 + v` selects value `v` on a 0..100 range.
 ///
 /// Chosen so the expected values below are read off the fixture rather than
 /// reverse-engineered from the implementation.
-const SLIDER_WIDTH: f32 = 110.0;
-const TRACK_ORIGIN: f32 = 5.0;
+const SLIDER_WIDTH: f32 = 116.0;
+const TRACK_ORIGIN: f32 = 8.0;
 
 /// Records every `value_changed` payload, in order.
 #[derive(Clone, Default)]

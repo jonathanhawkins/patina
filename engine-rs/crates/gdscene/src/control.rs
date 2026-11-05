@@ -1582,10 +1582,13 @@ pub fn resolve_control_layout(tree: &mut SceneTree, node_id: NodeId, parent: Vec
     let mut x2 = parent.x * ar + or_;
     let mut y2 = parent.y * ab + ob;
 
-    let custom_min = get_custom_minimum_size(tree, node_id);
-    let inner_min = get_min_size(tree, node_id);
-    let min_w = custom_min.x.max(inner_min.x);
-    let min_h = custom_min.y.max(inner_min.y);
+    // Godot grows the rect to `get_combined_minimum_size()`
+    // (`Control::_size_changed`), which includes the control's OWN minimum —
+    // a container's children, a Label's text — not only `custom_minimum_size`
+    // (pat-9ww3e).
+    let combined = combined_minimum_size(tree, node_id);
+    let min_w = combined.x;
+    let min_h = combined.y;
 
     let width = x2 - x1;
     if width < min_w {
@@ -1632,10 +1635,271 @@ pub fn resolve_control_layout(tree: &mut SceneTree, node_id: NodeId, parent: Vec
 pub const LAYOUT_RECT_KEY: &str = "__layout_rect";
 
 fn effective_min(tree: &SceneTree, node_id: NodeId) -> Vector2 {
+    combined_minimum_size(tree, node_id)
+}
+
+/// Godot's `Control::get_combined_minimum_size()`: the componentwise max of
+/// `custom_minimum_size`, a stored `min_size` (RichTextLabel `fit_content`
+/// writes one) and the control's own `get_minimum_size()`.
+///
+/// 🔑 For a CONTAINER the own minimum is built from its children's combined
+/// minimums, recursively, as each Godot container's `get_minimum_size` does
+/// (pat-9ww3e). This used to be zero for every container, so an anchored
+/// container never grew to fit its content: truck_town's car strip laid out
+/// 0px tall and its buttons hung 122px above it, and a MarginContainer in a
+/// PanelContainer handed its HBox a 0x0 rect, so every CheckBox in the menu
+/// was 0px tall.
+pub fn combined_minimum_size(tree: &SceneTree, node_id: NodeId) -> Vector2 {
     let cm = get_custom_minimum_size(tree, node_id);
     let mm = get_min_size(tree, node_id);
-    let content = content_minimum_size(tree, node_id);
-    Vector2::new(cm.x.max(mm.x).max(content.x), cm.y.max(mm.y).max(content.y))
+    let own = own_minimum_size(tree, node_id);
+    Vector2::new(cm.x.max(mm.x).max(own.x), cm.y.max(mm.y).max(own.y))
+}
+
+/// The children a container lays out: visible Controls that are not
+/// `top_level` (Godot's `as_sortable_control(..., SortableVisibilityMode::
+/// VISIBLE)`). A hidden child takes no space and a non-Control child (an
+/// AnimationPlayer, a Timer) is not a Control at all.
+pub fn sortable_children(tree: &SceneTree, container_id: NodeId) -> Vec<NodeId> {
+    tree.get_node(container_id)
+        .map(|n| n.children().to_vec())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|&c| {
+            node_is_control(tree, c)
+                && tree.get_node(c).is_some_and(|n| {
+                    !matches!(n.get_property("visible"), Variant::Bool(false))
+                        && !matches!(n.get_property("top_level"), Variant::Bool(true))
+                })
+        })
+        .collect()
+}
+
+/// Godot's default theme, which layout resolves theme items against (cached
+/// per thread: building it allocates every type's items).
+pub(crate) fn with_layout_theme<R>(f: impl FnOnce(&crate::theme::Theme) -> R) -> R {
+    thread_local! {
+        static THEME: crate::theme::Theme = crate::theme::Theme::default_theme();
+    }
+    THEME.with(|t| f(t))
+}
+
+/// The node's own `theme_override_styles/<name>`, rebuilt from the inline
+/// sub-resource body the scene loader copies onto the node
+/// (`__subres__theme_override_styles/<name>__<key>`, class from `__resref__`).
+pub fn node_stylebox_override(
+    tree: &SceneTree,
+    node_id: NodeId,
+    name: &str,
+) -> Option<crate::stylebox::StyleBox> {
+    let node = tree.get_node(node_id)?;
+    let prop = format!("theme_override_styles/{name}");
+    let class = match node.get_property(&format!("__resref__{prop}")) {
+        Variant::String(s) => s.split("::").next()?.to_string(),
+        _ => return None,
+    };
+    let prefix = format!("__subres__{prop}__");
+    let props: std::collections::HashMap<String, Variant> = node
+        .properties()
+        .filter_map(|(k, v)| k.strip_prefix(&prefix).map(|r| (r.to_string(), v.clone())))
+        .collect();
+    crate::stylebox::stylebox_from_props(&class, &props)
+}
+
+/// A control's stylebox as Godot's `get_theme_stylebox` resolves it: the
+/// node's own override first, then the theme's `class`/`name` item.
+pub fn resolve_stylebox_in(
+    tree: &SceneTree,
+    node_id: NodeId,
+    theme: &crate::theme::Theme,
+    class: &str,
+    name: &str,
+) -> Option<crate::stylebox::StyleBox> {
+    node_stylebox_override(tree, node_id, name)
+        .or_else(|| theme.get_stylebox(class, name).cloned())
+}
+
+/// `StyleBox::get_minimum_size()`: the content margins, summed per axis.
+fn stylebox_min(sb: Option<crate::stylebox::StyleBox>) -> Vector2 {
+    sb.map(|sb| {
+        let [l, t, r, b] = sb.content_margins();
+        Vector2::new(l + r, t + b)
+    })
+    .unwrap_or(Vector2::ZERO)
+}
+
+fn layout_stylebox_min(tree: &SceneTree, node_id: NodeId, class: &str, name: &str) -> Vector2 {
+    with_layout_theme(|theme| stylebox_min(resolve_stylebox_in(tree, node_id, theme, class, name)))
+}
+
+/// An integer theme constant as `get_theme_constant` resolves it: the node's
+/// `theme_override_constants/<name>`, else the default theme's, else `fallback`.
+fn layout_constant(tree: &SceneTree, node_id: NodeId, class: &str, name: &str, fallback: i64) -> f32 {
+    let own = tree.get_node(node_id).and_then(|n| {
+        match n.get_property(&format!("theme_override_constants/{name}")) {
+            Variant::Int(i) => Some(i),
+            Variant::Float(f) => Some(f as i64),
+            _ => None,
+        }
+    });
+    own.or_else(|| with_layout_theme(|t| t.get_constant(class, name)))
+        .unwrap_or(fallback) as f32
+}
+
+/// The font size a control's text is shaped at: a Label's `label_settings`,
+/// else `theme_override_font_sizes/font_size`, else the theme's (16).
+pub fn resolved_font_size(tree: &SceneTree, node_id: NodeId) -> f32 {
+    let Some(node) = tree.get_node(node_id) else {
+        return DEFAULT_FONT_SIZE;
+    };
+    let as_size = |v: Variant| match v {
+        Variant::Int(i) if i > 0 => Some(i as f32),
+        Variant::Float(f) if f > 0.0 => Some(f as f32),
+        _ => None,
+    };
+    if node.class_name() == "Label"
+        && matches!(node.get_property("__label_settings__"), Variant::Bool(true))
+    {
+        // `LabelSettings.font_size` defaults to 16 and REPLACES the theme.
+        return as_size(node.get_property("__ls__font_size")).unwrap_or(16.0);
+    }
+    if let Some(size) = as_size(node.get_property("theme_override_font_sizes/font_size")) {
+        return size;
+    }
+    let class = node.class_name().to_string();
+    with_layout_theme(|t| t.get_font_size(&class, "font_size"))
+        .map(|s| s as f32)
+        .unwrap_or(DEFAULT_FONT_SIZE)
+}
+
+/// Width of one line of text as Godot's shaped paragraph reports it, whole
+/// pixels up.
+fn text_line_width(text: &str, font_size: f32, font_path: Option<&str>) -> f32 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    crate::control_render::measure_text_px_in(text, font_size, font_path).ceil()
+}
+
+/// Godot's `Control::get_minimum_size()` for one control (no custom minimum).
+fn own_minimum_size(tree: &SceneTree, node_id: NodeId) -> Vector2 {
+    let Some(node) = tree.get_node(node_id) else {
+        return Vector2::ZERO;
+    };
+    let class = node.class_name().to_string();
+    let max_of_children = |tree: &SceneTree| {
+        sortable_children(tree, node_id)
+            .into_iter()
+            .map(|c| combined_minimum_size(tree, c))
+            .fold(Vector2::ZERO, |a, m| Vector2::new(a.x.max(m.x), a.y.max(m.y)))
+    };
+    let texture_size = |props: &[&str]| {
+        props
+            .iter()
+            .find_map(|p| {
+                crate::control_render::texture_path_prop(tree, node_id, p)
+                    .and_then(|t| crate::control_render::texture_pixel_size(&t))
+            })
+            .unwrap_or(Vector2::ZERO)
+    };
+    match class.as_str() {
+        // `BoxContainer::_get_minimum_size`: the children end to end on the
+        // main axis, separated, and the widest on the cross axis.
+        "HBoxContainer" | "VBoxContainer" | "BoxContainer" => {
+            let vertical = is_box_vertical(tree, node_id);
+            let sep = box_separation(tree, node_id);
+            let mut main = 0.0f32;
+            let mut cross = 0.0f32;
+            for (i, c) in sortable_children(tree, node_id).iter().enumerate() {
+                let m = combined_minimum_size(tree, *c);
+                let (a, b) = if vertical { (m.y, m.x) } else { (m.x, m.y) };
+                main += a + if i > 0 { sep } else { 0.0 };
+                cross = cross.max(b);
+            }
+            if vertical {
+                Vector2::new(cross, main)
+            } else {
+                Vector2::new(main, cross)
+            }
+        }
+        // `MarginContainer::get_minimum_size`: the largest child plus margins.
+        "MarginContainer" => {
+            let m = get_margins(tree, node_id);
+            let c = max_of_children(tree);
+            Vector2::new(c.x + m.left + m.right, c.y + m.top + m.bottom)
+        }
+        // `PanelContainer::get_minimum_size`: the largest child plus the
+        // `panel` stylebox's content margins.
+        "PanelContainer" => {
+            max_of_children(tree) + layout_stylebox_min(tree, node_id, "PanelContainer", "panel")
+        }
+        "CenterContainer" => max_of_children(tree),
+        // `Separator::get_minimum_size`: 3px along the line, `separation` (4)
+        // across it.
+        "HSeparator" => Vector2::new(3.0, layout_constant(tree, node_id, "HSeparator", "separation", 4)),
+        "VSeparator" => Vector2::new(layout_constant(tree, node_id, "VSeparator", "separation", 4), 3.0),
+        "LinkButton" => {
+            let font_size = resolved_font_size(tree, node_id);
+            let font_path = crate::control_render::font_override_path(tree, node_id);
+            let text = match node.get_property("text") {
+                Variant::String(s) => s,
+                _ => String::new(),
+            };
+            Vector2::new(
+                text_line_width(&text, font_size, font_path.as_deref()),
+                crate::control_render::line_height_px_in(font_size, font_path.as_deref()),
+            )
+        }
+        // `Slider::get_minimum_size`: the `slider` stylebox's minimum, and on
+        // the cross axis at least the grabber icon (16x16).
+        "HSlider" | "VSlider" => {
+            let ss = layout_stylebox_min(tree, node_id, &class, "slider");
+            if class == "VSlider" {
+                Vector2::new(ss.x.max(SLIDER_GRABBER_SIZE), ss.y)
+            } else {
+                Vector2::new(ss.x, ss.y.max(SLIDER_GRABBER_SIZE))
+            }
+        }
+        // `TextureButton::get_minimum_size`: nothing with
+        // `ignore_texture_size`, else the normal (or pressed) texture.
+        "TextureButton" => {
+            if matches!(node.get_property("ignore_texture_size"), Variant::Bool(true)) {
+                return Vector2::ZERO;
+            }
+            texture_size(&["texture_normal", "texture_pressed"])
+        }
+        // `TextureProgressBar::get_minimum_size`: the stretch margins under
+        // nine-patch, else the under, progress or over texture's size.
+        "TextureProgressBar" => {
+            if matches!(node.get_property("nine_patch_stretch"), Variant::Bool(true)) {
+                let m = |k: &str| match node.get_property(k) {
+                    Variant::Int(i) => i as f32,
+                    Variant::Float(f) => f as f32,
+                    _ => 0.0,
+                };
+                return Vector2::new(
+                    m("stretch_margin_left") + m("stretch_margin_right"),
+                    m("stretch_margin_top") + m("stretch_margin_bottom"),
+                );
+            }
+            texture_size(&["texture_under", "texture_progress", "texture_over"])
+        }
+        _ => content_minimum_size(tree, node_id),
+    }
+}
+
+/// The default theme's 16x16 slider grabber icon (`slider_grabber.svg`).
+pub(crate) const SLIDER_GRABBER_SIZE: f32 = 16.0;
+/// The default theme's 16x16 CheckBox icons (`checked.svg`, `radio_*.svg`).
+pub(crate) const CHECKBOX_ICON_SIZE: f32 = 16.0;
+
+/// A BoxContainer's `separation`: its override, else the default theme's 4.
+pub fn box_separation(tree: &SceneTree, node_id: NodeId) -> f32 {
+    let class = tree
+        .get_node(node_id)
+        .map(|n| n.class_name().to_string())
+        .unwrap_or_default();
+    layout_constant(tree, node_id, &class, "separation", 4)
 }
 
 /// Godot's own `get_minimum_size()` for the controls whose content decides it
@@ -1643,66 +1907,109 @@ fn effective_min(tree: &SceneTree, node_id: NodeId) -> Vector2 {
 /// not cover. Without it every Label and Button in a container had a zero
 /// minimum, so a VBoxContainer stacked all of them on the same line.
 ///
-/// * Label: one line height per line of text, at its font size; as wide as its
-///   longest line unless it autowraps (Godot's minimum width is then 0).
-/// * Button family: the text plus the default stylebox's content margins.
+/// * Label (`Label::get_minimum_size`): one font height (ascent + descent,
+///   23px for the default 16px face) per line plus `line_spacing` (3) between
+///   lines, plus its `normal` stylebox; as wide as its longest line unless it
+///   autowraps (Godot's minimum width is then 0).
+/// * Button family (`Button::get_minimum_size_for_text_and_icon`): text and
+///   icon plus the `normal` stylebox's content margins; a CheckBox adds its
+///   16px check icon and `h_separation` (`CheckBox::get_minimum_size`).
 pub fn content_minimum_size(tree: &SceneTree, node_id: NodeId) -> Vector2 {
     let Some(node) = tree.get_node(node_id) else {
         return Vector2::ZERO;
     };
-    let class = node.class_name();
+    let class = node.class_name().to_string();
     let text = match node.get_property("text") {
         Variant::String(s) => s,
         _ => String::new(),
     };
-    let font_size = match node.get_property("theme_override_font_sizes/font_size") {
-        Variant::Int(i) if i > 0 => i as f32,
-        Variant::Float(f) if f > 0.0 => f as f32,
-        _ => DEFAULT_FONT_SIZE,
-    };
-    let line_h = crate::control_render::line_height_px(font_size);
+    let font_size = resolved_font_size(tree, node_id);
     // The face the control is drawn with, so the minimum size agrees with what
     // the layout measures and the rasterizer paints.
     let font_path = crate::control_render::font_override_path(tree, node_id);
+    let line_h = crate::control_render::line_height_px_in(font_size, font_path.as_deref());
     let text_w = |t: &str| {
-        t.lines()
-            .map(|l| {
-                crate::control_render::measure_text_px_in(l, font_size, font_path.as_deref())
-            })
+        t.split('\n')
+            .map(|l| text_line_width(l, font_size, font_path.as_deref()))
             .fold(0.0f32, f32::max)
     };
     if class == "Label" {
-        let lines = text.lines().count().max(1) as f32;
-        let wraps = !matches!(
+        let lines = text.split('\n').count().max(1) as f32;
+        // `Label::get_minimum_size`: no minimum width when the text may wrap,
+        // clip or be trimmed — it fits whatever width it is given instead of
+        // growing to its text (an ELLIPSIS label must be able to be short).
+        let unbounded = !matches!(
             node.get_property("autowrap_mode"),
             Variant::Nil | Variant::Int(0)
-        );
-        let width = if wraps { 0.0 } else { text_w(&text) };
-        return Vector2::new(width, lines * line_h);
+        ) || matches!(node.get_property("clip_text"), Variant::Bool(true))
+            || !matches!(
+                node.get_property("text_overrun_behavior"),
+                Variant::Nil | Variant::Int(0)
+            );
+        let width = if unbounded { 0.0 } else { text_w(&text) };
+        let style = layout_stylebox_min(tree, node_id, "Label", "normal");
+        return Vector2::new(width, lines * line_h + (lines - 1.0) * label_line_spacing(tree, node_id))
+            + style;
     }
-    if gdobject::class_db::is_parent_class(class, "BaseButton") {
+    if gdobject::class_db::is_parent_class(&class, "BaseButton")
+        || matches!(
+            class.as_str(),
+            "Button" | "CheckBox" | "CheckButton" | "OptionButton" | "MenuButton"
+        )
+    {
         // A Button's `icon` adds to its minimum (`Button::
         // get_minimum_size_for_text_and_icon`): beside the text, separated by
         // the theme's `h_separation` (4) when there is text, and at least as
         // tall (pat-60d96). Without it truck_town's three icon-only car buttons
         // laid out 8x24 and their pictures had nowhere to draw.
-        let icon = if class == "Button" && !matches!(node.get_property("expand_icon"), Variant::Bool(true)) {
+        let icon = if class == "Button"
+            && !matches!(node.get_property("expand_icon"), Variant::Bool(true))
+        {
             crate::control_render::texture_path_prop(tree, node_id, "icon")
                 .and_then(|p| crate::control_render::texture_pixel_size(&p))
         } else {
             None
         };
         let tw = text_w(&text);
-        let (w, h) = match icon {
-            Some(sz) => (
+        let th = if text.is_empty() { 0.0 } else { line_h };
+        let mut content = match icon {
+            Some(sz) => Vector2::new(
                 tw + sz.x + if text.is_empty() { 0.0 } else { BUTTON_H_SEPARATION },
-                line_h.max(sz.y),
+                th.max(sz.y),
             ),
-            None => (tw, line_h),
+            None => Vector2::new(tw, th),
         };
-        return Vector2::new(w + 2.0 * BUTTON_CONTENT_MARGIN, h + 2.0 * BUTTON_CONTENT_MARGIN);
+        if class == "CheckBox" {
+            // `CheckBox::get_minimum_size`: the check icon beside the text.
+            if content.x > 0.0 {
+                content.x += layout_constant(tree, node_id, "CheckBox", "h_separation", 4);
+            }
+            content.x += CHECKBOX_ICON_SIZE;
+            content.y = content.y.max(CHECKBOX_ICON_SIZE);
+        }
+        let style = with_layout_theme(|theme| {
+            let own = resolve_stylebox_in(tree, node_id, theme, &class, "normal");
+            stylebox_min(own.or_else(|| theme.get_stylebox("Button", "normal").cloned()))
+        });
+        return content + style;
     }
     Vector2::ZERO
+}
+
+/// A Label's gap between lines: its `label_settings.line_spacing` (default 3)
+/// when it has settings, else the `line_spacing` theme constant (3).
+pub fn label_line_spacing(tree: &SceneTree, node_id: NodeId) -> f32 {
+    let Some(node) = tree.get_node(node_id) else {
+        return 3.0;
+    };
+    if matches!(node.get_property("__label_settings__"), Variant::Bool(true)) {
+        return match node.get_property("__ls__line_spacing") {
+            Variant::Int(i) => i as f32,
+            Variant::Float(f) => f as f32,
+            _ => 3.0,
+        };
+    }
+    layout_constant(tree, node_id, "Label", "line_spacing", 3)
 }
 
 /// Godot's default theme font size.
@@ -2373,10 +2680,24 @@ pub fn arrange_container(tree: &mut SceneTree, container_id: NodeId, total: Vect
         .get_node(container_id)
         .map(|n| n.class_name().to_string())
         .unwrap_or_default();
-    let children: Vec<NodeId> = tree
+    let all_children: Vec<NodeId> = tree
         .get_node(container_id)
         .map(|n| n.children().to_vec())
         .unwrap_or_default();
+    // 🔑 Godot's containers sort only their visible, non-top-level Control
+    // children (pat-9ww3e): a hidden child takes no space, and a non-Control
+    // child (an AnimationPlayer under a TextureProgressBar's sibling) is not
+    // placed at all. Laying them out anyway left a gap where truck_town's
+    // hidden "Controls" help text would be.
+    let sortable = sortable_children(tree, container_id);
+    let children: Vec<NodeId> = match class.as_str() {
+        // These address their children by index (the current tab, the first
+        // child), so they keep the full list.
+        "TabContainer" | "SubViewportContainer" | "ScrollContainer" | "FoldableContainer" => {
+            all_children
+        }
+        _ => sortable,
+    };
     let sep = get_separation(tree, container_id) as f32;
 
     match class.as_str() {
@@ -2384,7 +2705,24 @@ pub fn arrange_container(tree: &mut SceneTree, container_id: NodeId, total: Vect
             let rtl = is_layout_rtl(tree, container_id);
             let vertical = is_box_vertical(tree, container_id);
             let alignment = get_box_alignment(tree, container_id);
+            // The default theme's `separation` is 4, not 0 (pat-9ww3e).
+            let sep = box_separation(tree, container_id);
             arrange_box(tree, &children, total, sep, vertical, alignment, rtl)
+        }
+        // `PanelContainer::_notification(SORT_CHILDREN)`: every child fitted to
+        // the rect inset by the `panel` stylebox's content margins. Done here
+        // (not only in the render walk) so a container nested inside is sorted
+        // against the inset rect it is actually given.
+        "PanelContainer" => {
+            let [l, t, r, b] = with_layout_theme(|theme| {
+                resolve_stylebox_in(tree, container_id, theme, "PanelContainer", "panel")
+                    .map(|sb| sb.content_margins())
+                    .unwrap_or([0.0; 4])
+            });
+            let inner = Vector2::new((total.x - l - r).max(0.0), (total.y - t - b).max(0.0));
+            for &c in &children {
+                fit_child_in_rect(tree, c, Vector2::new(l, t), inner, false);
+            }
         }
         // FlowContainer defaults to horizontal flow (Godot's `vertical` property
         // is false by default); H/VFlowContainer force the direction.
@@ -2801,6 +3139,43 @@ pub fn subviewport_container_to_viewport_coord(
 /// inside a `VBoxContainer` keeps its child unarranged). This walks depth-first:
 /// each child that is itself a container is re-arranged against the size its
 /// parent just allocated it.
+/// Resolves the anchor/offset rect of every Control under `root` that NO
+/// container manages, top-down, against its parent Control's rect (or
+/// `viewport` for a Control with no Control parent) — the same walk and parent
+/// sizes the render pass uses (pat-9ww3e).
+///
+/// 🔑 It has to run BEFORE the containers are sorted: an anchored container's
+/// rect grows to its combined minimum (`grow_horizontal`/`grow_vertical`), and
+/// sorting it against the un-grown anchor rect laid its children out in a
+/// rect that did not exist. truck_town's car strip is anchored to a 0px line
+/// across the menu's middle; Godot grows it to 243px around that line, and
+/// Patina sorted its three buttons against the 0px line, 122px too high.
+pub fn resolve_free_control_rects(tree: &mut SceneTree, root: NodeId, viewport: Vector2) {
+    fn walk(tree: &mut SceneTree, id: NodeId, parent_size: Vector2, parent_is_container: bool) {
+        let children: Vec<NodeId> = tree
+            .get_node(id)
+            .map(|n| n.children().to_vec())
+            .unwrap_or_default();
+        if node_is_control(tree, id) {
+            if !parent_is_container {
+                resolve_control_layout(tree, id, parent_size);
+            }
+            let size = get_size(tree, id);
+            let is_container = tree
+                .get_node(id)
+                .is_some_and(|n| is_container_class_name(n.class_name()));
+            for c in children {
+                walk(tree, c, size, is_container);
+            }
+        } else {
+            for c in children {
+                walk(tree, c, parent_size, false);
+            }
+        }
+    }
+    walk(tree, root, viewport, false);
+}
+
 pub fn sort_container_tree(tree: &mut SceneTree, container_id: NodeId, total: Vector2) {
     arrange_container(tree, container_id, total);
     let children: Vec<NodeId> = tree
@@ -3049,9 +3424,10 @@ fn arrange_margin(tree: &mut SceneTree, children: &[NodeId], total: Vector2, m: 
         (total.x - m.left - m.right).max(0.0),
         (total.y - m.top - m.bottom).max(0.0),
     );
+    // `MarginContainer` fits each child with `fit_child_in_rect`, so its size
+    // flags still apply inside the margins.
     for &c in children {
-        set_position(tree, c, Vector2::new(m.left, m.top));
-        set_size(tree, c, inner);
+        fit_child_in_rect(tree, c, Vector2::new(m.left, m.top), inner, false);
     }
 }
 
@@ -3072,9 +3448,10 @@ fn arrange_center(tree: &mut SceneTree, children: &[NodeId], total: Vector2, use
         let pos = if use_top_left {
             Vector2::new(-size.x * 0.5, -size.y * 0.5)
         } else {
+            // Floored, as Godot's `((size - minsize) / 2).floor()`.
             Vector2::new(
-                ((total.x - size.x) * 0.5).max(0.0),
-                ((total.y - size.y) * 0.5).max(0.0),
+                ((total.x - size.x) * 0.5).floor().max(0.0),
+                ((total.y - size.y) * 0.5).floor().max(0.0),
             )
         };
         set_position(tree, c, pos);
@@ -5465,6 +5842,9 @@ func _on_pressed():
     fn rtl_layout_mirrors_hbox_child_positions() {
         // Two Expand children split 200px evenly -> 100px each.
         let (mut tree, cid, kids) = container_with_children("HBoxContainer", 2);
+        // Godot's default BoxContainer `separation` is 4 (pat-9ww3e); this
+        // test's arithmetic is for a gapless box, so it says so.
+        set_separation(&mut tree, cid, 0);
         set_h_size_flags(&mut tree, kids[0], SizeFlags::EXPAND_FILL);
         set_h_size_flags(&mut tree, kids[1], SizeFlags::EXPAND_FILL);
         set_layout_direction(&mut tree, cid, LayoutDirection::Rtl);
@@ -5488,6 +5868,9 @@ func _on_pressed():
     #[test]
     fn ltr_is_the_default_and_unmirrored() {
         let (mut tree, cid, kids) = container_with_children("HBoxContainer", 2);
+        // Godot's default BoxContainer `separation` is 4 (pat-9ww3e); this
+        // test's arithmetic is for a gapless box, so it says so.
+        set_separation(&mut tree, cid, 0);
         set_h_size_flags(&mut tree, kids[0], SizeFlags::EXPAND_FILL);
         set_h_size_flags(&mut tree, kids[1], SizeFlags::EXPAND_FILL);
         assert_eq!(get_layout_direction(&tree, cid), LayoutDirection::Inherited);
@@ -5542,6 +5925,9 @@ func _on_pressed():
         // Two Expand children with stretch ratios 1 and 3 share the container's
         // 200px width 1:3 (no min sizes, no separation) -> 50 / 150.
         let (mut tree, cid, kids) = container_with_children("HBoxContainer", 2);
+        // Godot's default BoxContainer `separation` is 4 (pat-9ww3e); this
+        // test's arithmetic is for a gapless box, so it says so.
+        set_separation(&mut tree, cid, 0);
         set_h_size_flags(&mut tree, kids[0], SizeFlags::EXPAND_FILL);
         set_h_size_flags(&mut tree, kids[1], SizeFlags::EXPAND_FILL);
         set_stretch_ratio(&mut tree, kids[0], 1.0);
@@ -5557,6 +5943,7 @@ func _on_pressed():
 
         // No regression: equal (default) ratios still split expand space evenly.
         let (mut tree2, cid2, kids2) = container_with_children("HBoxContainer", 2);
+        set_separation(&mut tree2, cid2, 0);
         set_h_size_flags(&mut tree2, kids2[0], SizeFlags::EXPAND_FILL);
         set_h_size_flags(&mut tree2, kids2[1], SizeFlags::EXPAND_FILL);
         arrange_container(&mut tree2, cid2, Vector2::new(200.0, 100.0));

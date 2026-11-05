@@ -639,7 +639,15 @@ impl SoftwareRenderer {
                     // vertex; the software rasterizer has no per-vertex
                     // interpolation, so the first color wins.
                     let color = colors.first().copied().unwrap_or(Color::WHITE);
-                    polygon_raster::fill_polygon(fb, &pts, color);
+                    // A translucent polygon BLENDS, as every other fill here
+                    // does: overwriting left a 60%-alpha default Panel's
+                    // pixels as raw (0.1, 0.1, 0.1, 0.6) instead of composited
+                    // over what was under it (pat-9ww3e).
+                    if color.a < 1.0 {
+                        polygon_raster::fill_polygon_blended(fb, &pts, color);
+                    } else {
+                        polygon_raster::fill_polygon(fb, &pts, color);
+                    }
                 }
                 DrawCommand::DrawTextureRect {
                     texture_path,

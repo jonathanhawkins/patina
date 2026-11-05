@@ -79,12 +79,12 @@ fn play() -> (PreparedPlay3DFrame, HashMap<String, u64>) {
     std::thread::sleep(Duration::from_millis(400));
     let out = {
         let state = handle.state();
-        let st = state.lock().unwrap();
-        let tree = st
-            .run_main_loop
-            .as_ref()
-            .map(|ml| ml.tree())
-            .unwrap_or(&st.scene_tree);
+        let mut st = state.lock().unwrap();
+        let st = &mut *st;
+        let tree = match st.run_main_loop.as_mut() {
+            Some(ml) => ml.tree_mut(),
+            None => &mut st.scene_tree,
+        };
         let mut ids = HashMap::new();
         for n in tree.all_nodes_in_tree_order() {
             if let Some(node) = tree.get_node(n) {

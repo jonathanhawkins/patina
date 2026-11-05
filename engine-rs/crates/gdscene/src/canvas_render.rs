@@ -2332,6 +2332,16 @@ pub fn build_control_render_items_sourced(
     root: crate::NodeId,
     size: Vector2,
 ) -> Vec<(Render2DItem, Option<crate::NodeId>)> {
+    layout_controls(tree, root, size);
+    build_control_draw_items(tree, root, size)
+}
+
+/// Lays out every Control under `root` against a `size` canvas: each free
+/// Control's anchor rect, then every outermost container's sort — what Godot
+/// has done by the end of a frame, independent of drawing. The main loop runs
+/// it every frame (pat-9ww3e) so a script or a trace reading `size` sees the
+/// laid-out rect, not whatever the last render left behind.
+pub fn layout_controls(tree: &mut SceneTree, root: crate::NodeId, size: Vector2) {
     // (1) Lay out containers first. `sort_container_tree` recurses, but it must be
     // entered at every container that is *not* nested inside another container —
     // entering at the subtree root would skip a container whose parent is a plain
@@ -2346,6 +2356,10 @@ pub fn build_control_render_items_sourced(
     // container ended up laid out against the viewport instead of its own rect.
     // Entering only at the outermost containers leaves the recursion to do the
     // nested ones, which is what the comment above always claimed.
+    // (0) Every Control no container manages gets its anchor rect first, grown
+    // to its combined minimum, so an outermost container below is sorted
+    // against the rect it really has (pat-9ww3e).
+    control::resolve_free_control_rects(tree, root, size);
     let mut subtree = Vec::new();
     tree.collect_subtree_top_down(root, &mut subtree);
     for id in subtree {
@@ -2375,31 +2389,30 @@ pub fn build_control_render_items_sourced(
             found
         };
         if !nested {
-            // The container's OWN rect, from its anchors and offsets, not the
-            // viewport: an outermost container was laid out as if it filled
-            // the screen, so a centred 300px menu spread its children across
-            // the whole window. A container placed only by a stored `size`
-            // (no offsets) keeps that; one with neither still gets the viewport.
-            let anchored = control::anchored_size(tree, id, size);
-            // ⚠️ `||`, not `&&` (pat-60d96): a container anchored as a full-width
-            // STRIP (truck_town's CarContainer: anchor_top = anchor_bottom = 0.5,
-            // anchor_right = 1, offsets 0) has zero authored height and grows
-            // around its centre line. `&&` sent it to the viewport fallback, so
-            // it was laid out 648 tall and its buttons sank 75px.
-            let own = if anchored.x > 0.0 || anchored.y > 0.0 {
-                anchored
+            // The container's OWN rect as step (0) resolved it — anchors and
+            // offsets grown to its combined minimum — not the viewport: an
+            // outermost container was laid out as if it filled the screen, so a
+            // centred 300px menu spread its children across the whole window.
+            // ⚠️ Not the bare anchor rect either (pat-9ww3e): truck_town's
+            // CarContainer is anchored to a 0px strip and GROWS to 243px.
+            let resolved = control::get_size(tree, id);
+            let own = if resolved.x > 0.0 || resolved.y > 0.0 {
+                resolved
             } else {
-                let stored = control::get_size(tree, id);
-                if stored.x > 0.0 && stored.y > 0.0 {
-                    stored
-                } else {
-                    size
-                }
+                size
             };
             control::sort_container_tree(tree, id, own);
         }
     }
+}
 
+/// The drawing half of [`build_control_render_items_sourced`], after
+/// [`layout_controls`].
+fn build_control_draw_items(
+    tree: &mut SceneTree,
+    root: crate::NodeId,
+    size: Vector2,
+) -> Vec<(Render2DItem, Option<crate::NodeId>)> {
     // (2) Draw, then translate each primitive into a render item. Positions are
     // already global viewport space, so the item transform is a pure translation.
     // 🔑 Each Control's own `theme` resource is resolved here and handed to the
@@ -2423,6 +2436,16 @@ pub fn build_control_render_items_sourced(
     );
     let mut out = Vec::with_capacity(items.len());
     for (item, source) in items {
+        // 🔑 `Render2DKind::Text` carries no colour and `Sprite` no tint: the
+        // rasterizer paints both with the ITEM's modulate. Leaving that at
+        // white dropped every Control text colour and texture modulate
+        // (pat-9ww3e) — truck_town's half-alpha "F1 - Toggle controls" and its
+        // grey TURBO label drew opaque white.
+        let tint = match &item {
+            ControlDrawItem::Text { color, .. } => *color,
+            ControlDrawItem::Texture { modulate, .. } => *modulate,
+            _ => Color::new(1.0, 1.0, 1.0, 1.0),
+        };
         let (transform, z, kind) = match item {
             ControlDrawItem::Rect {
                 rect,
@@ -2481,6 +2504,11 @@ pub fn build_control_render_items_sourced(
                     Render2DKind::Polygon { points, color },
                 )
             }
+            ControlDrawItem::Polygon { points, color, z } => (
+                Transform2D::IDENTITY,
+                z,
+                Render2DKind::Polygon { points, color },
+            ),
             ControlDrawItem::Line {
                 from,
                 to,
@@ -2568,9 +2596,18 @@ pub fn build_control_render_items_sourced(
             // id to attribute them to; 0 marks "not pickable as a node".
             node_id: 0,
             global_transform: transform,
-            // Each primitive already carries its own themed colour, so the
-            // item-level tint stays neutral.
-            modulate: Color::new(1.0, 1.0, 1.0, 1.0),
+            // Shapes carry their own themed colour; text and textures take it
+            // from here (see `tint` above).
+            // ...times the node's inherited `modulate`/`self_modulate`, as for
+            // every other canvas item: spark_keeper's hint Label
+            // (`modulate = Color(1, 1, 1, 0.6)`) drew at full opacity.
+            modulate: match source {
+                Some(node) => {
+                    let m = canvas_order::effective_modulate(tree, node);
+                    Color::new(tint.r * m.r, tint.g * m.g, tint.b * m.b, tint.a * m.a)
+                }
+                None => tint,
+            },
             z_index,
             canvas_layer,
             canvas_follow,
@@ -3597,6 +3634,23 @@ pub fn rasterize_render_list_with_quality(
                 // branches rasterize outlines and the only difference is WHICH
                 // face. Default-theme text does change appearance by design:
                 // that is the bug being fixed.
+                //
+                // 🔑 The item's SCALE applies to the glyphs too (pat-9ww3e): a
+                // `canvas_items` stretch (the browser's Game view is rarely the
+                // project's 1152x648), a Camera2D zoom or a scaled parent grows
+                // the text with everything else, as Godot's canvas transform
+                // does. Only the origin was used, so in a 995x843 Game view
+                // truck_town's boxes shrank to 0.86x while their text did not
+                // and overflowed them.
+                let text_scale = {
+                    let s = xform.determinant().abs().sqrt();
+                    if s.is_finite() && s > 0.0 {
+                        s
+                    } else {
+                        1.0
+                    }
+                };
+                let font_size = &((*font_size as f32 * text_scale).max(1.0));
                 let drawn = font_path.as_deref().is_some_and(|path| {
                     with_override_font(path, |ttf, atlas| {
                         gdrender2d::ttf_font::draw_ttf_text_with_fallbacks(
@@ -3606,7 +3660,7 @@ pub fn rasterize_render_list_with_quality(
                             &[],
                             text,
                             xform.origin,
-                            *font_size as f32,
+                            *font_size,
                             item.modulate,
                         );
                     })
@@ -3633,7 +3687,7 @@ pub fn rasterize_render_list_with_quality(
                             &[],
                             text,
                             xform.origin,
-                            *font_size as f32,
+                            *font_size,
                             item.modulate,
                         );
                     });
@@ -5312,6 +5366,15 @@ pub(crate) fn measure_with_override_font(path: &str, text: &str, px_size: f32) -
     let mut width = None;
     with_override_font(path, |ttf, _atlas| width = Some(ttf.measure_line(text, px_size)));
     width
+}
+
+/// The override face's line height (`ascent + descent`, rounded up as Godot
+/// does), or `None` when it cannot be loaded — see
+/// [`measure_with_override_font`].
+pub(crate) fn line_height_with_override_font(path: &str, px_size: f32) -> Option<f32> {
+    let mut h = None;
+    with_override_font(path, |ttf, _atlas| h = Some(ttf.line_height(px_size)));
+    h
 }
 
 /// Runs `f` with the embedded default UI face and its glyph atlas

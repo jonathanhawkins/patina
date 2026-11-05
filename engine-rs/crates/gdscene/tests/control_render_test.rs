@@ -96,10 +96,11 @@ fn control_tree_renders_themed_pixels() {
 
     let tol = 0.03;
 
-    // Panel background (themed StyleBox flat = 0.15 gray), on the top half
-    // where the ColorRect does not cover it.
+    // Panel background: Godot's default `style_normal_color` (0.1, 0.1, 0.1)
+    // at 60% alpha (pat-9ww3e) over the black clear = 0.06 gray, on the top
+    // half where the ColorRect does not cover it.
     assert!(
-        close(pixel_at(&fb, 150, 50), Color::new(0.15, 0.15, 0.15, 1.0), tol),
+        close(pixel_at(&fb, 150, 50), Color::new(0.06, 0.06, 0.06, 1.0), tol),
         "Panel StyleBox bg should fill its rect, got {:?}",
         pixel_at(&fb, 150, 50)
     );
@@ -111,9 +112,11 @@ fn control_tree_renders_themed_pixels() {
         pixel_at(&fb, 30, 30)
     );
 
-    // Button background (themed normal StyleBox = 0.2 gray), away from centered text.
+    // Button background: Godot's normal StyleBox is `style_normal_color`, the
+    // same 60%-alpha (0.1, 0.1, 0.1) as the Panel (pat-9ww3e) -> 0.06 over the
+    // black clear, away from the centred text.
     assert!(
-        close(pixel_at(&fb, 15, 155), Color::new(0.2, 0.2, 0.2, 1.0), tol),
+        close(pixel_at(&fb, 15, 155), Color::new(0.06, 0.06, 0.06, 1.0), tol),
         "Button StyleBox bg should fill its rect, got {:?}",
         pixel_at(&fb, 15, 155)
     );
@@ -184,6 +187,9 @@ fn scroll_scene() -> (SceneTree, NodeId) {
     place(&mut tree, scroll, 0.0, 0.0, 200.0, 100.0);
 
     let vbox = add(&mut tree, scroll, "Content", "VBoxContainer");
+    // Gapless bands: Godot's default `separation` is 4 (pat-9ww3e), and the
+    // scroll arithmetic below is for 3 x 100 = 300px of content.
+    set_prop(&mut tree, vbox, "theme_override_constants/separation", Variant::Int(0));
     // A container distributes space from `effective_min`, and Patina does not
     // derive an implicit minimum from children yet, so the content extent is
     // authored — the same accommodation play_view_renders_controls_e2e makes.
@@ -483,6 +489,9 @@ fn wheel_over_non_scrolling_content_is_not_consumed() {
     let scroll = add(&mut tree, root, "Scroll", "ScrollContainer");
     place(&mut tree, scroll, 0.0, 0.0, 200.0, 100.0);
     let vbox = add(&mut tree, scroll, "Content", "VBoxContainer");
+    // Gapless bands: Godot's default `separation` is 4 (pat-9ww3e), and the
+    // scroll arithmetic below is for 3 x 100 = 300px of content.
+    set_prop(&mut tree, vbox, "theme_override_constants/separation", Variant::Int(0));
     set_prop(
         &mut tree,
         vbox,

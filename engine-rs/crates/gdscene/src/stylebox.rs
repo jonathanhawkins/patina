@@ -250,6 +250,42 @@ impl StyleBoxFlat {
         }
 
         let has_border = self.border_width.iter().any(|w| *w > 0.0) && self.border_color.a > 0.0;
+        // ⚠️ The layered draw below (a border-coloured box, then the centre
+        // over it) is only right when the centre is drawn AND opaque. With
+        // `draw_center = false` it filled the WHOLE box with the border colour
+        // — Godot's default focus frame (a 2px border, no centre) painted the
+        // focused button solid white — and a translucent centre composited
+        // over the border colour instead of over what is behind the box
+        // (pat-9ww3e). Those cases draw the border as four edge strips.
+        if has_border && (!self.draw_center || self.bg_color.a < 1.0) {
+            let [bl, bt, br, bb] = self.border_width;
+            let (p, s) = (rect.position, rect.size);
+            let mut strip = |x: f32, y: f32, w: f32, h: f32| {
+                if w > 0.0 && h > 0.0 {
+                    out.push(DrawCommand::DrawRect {
+                        rect: Rect2::new(Vector2::new(x, y), Vector2::new(w, h)),
+                        color: self.border_color,
+                        filled: true,
+                    });
+                }
+            };
+            strip(p.x, p.y, s.x, bt);
+            strip(p.x, p.y + s.y - bb, s.x, bb);
+            strip(p.x, p.y + bt, bl, s.y - bt - bb);
+            strip(p.x + s.x - br, p.y + bt, br, s.y - bt - bb);
+            if self.draw_center {
+                let inner = Rect2::new(
+                    Vector2::new(p.x + bl, p.y + bt),
+                    Vector2::new((s.x - bl - br).max(0.0), (s.y - bt - bb).max(0.0)),
+                );
+                let inset = |a: usize, b: usize| {
+                    (radii[a] - self.border_width[a].max(self.border_width[b])).max(0.0)
+                };
+                let inner_radii = [inset(0, 1), inset(1, 2), inset(2, 3), inset(3, 0)];
+                push_rounded_per_corner(&mut out, inner, inner_radii, self.bg_color);
+            }
+            return out;
+        }
         if has_border {
             // Border layer, then the background inset by the border widths.
             push_rounded_per_corner(&mut out, rect, radii, self.border_color);
@@ -584,6 +620,17 @@ fn push_rounded_per_corner(out: &mut Vec<DrawCommand>, rect: Rect2, radii: [f32;
             rect,
             color,
             filled: true,
+        });
+        return;
+    }
+    // ⚠️ A TRANSLUCENT box cannot be built from overlapping pieces: each corner
+    // disc overlaps the bands beside it, and where they overlap the colour
+    // blends twice, so Godot's 60%-alpha default buttons came out with
+    // darker blotches at every corner (pat-9ww3e). It is one polygon instead.
+    if color.a < 1.0 {
+        out.push(DrawCommand::DrawPolygon {
+            points: rounded_box_outline(rect, [tl, tr, br, bl], 6, Vector2::ZERO),
+            colors: vec![color],
         });
         return;
     }
@@ -1248,12 +1295,27 @@ mod flat_field_tests {
         })
         .draw(rect);
 
+        // ⚠️ Not a command COUNT: the old outline emitted fewer commands and was
+        // still wrong — its "border layer" was a border-coloured box over the
+        // whole rect, so the outline box painted its middle solid (pat-9ww3e;
+        // Godot's focus frame drew focused buttons white). What matters is that
+        // nothing it paints covers the centre.
+        let centre = Vector2::new(20.0, 15.0);
+        let covers_centre = |c: &DrawCommand| match c {
+            DrawCommand::DrawRect { rect, .. } => {
+                centre.x >= rect.position.x
+                    && centre.x < rect.position.x + rect.size.x
+                    && centre.y >= rect.position.y
+                    && centre.y < rect.position.y + rect.size.y
+            }
+            DrawCommand::DrawPolygon { .. } => true,
+            _ => false,
+        };
         assert!(
-            outline.len() < filled.len(),
-            "skipping the centre must emit fewer commands ({} vs {})",
-            outline.len(),
-            filled.len()
+            !outline.iter().any(covers_centre),
+            "draw_center = false must leave the middle unpainted: {outline:?}"
         );
+        assert!(filled.iter().any(covers_centre), "draw_center = true fills the middle");
         // The border colour is still painted; the bg colour is not.
         let has_bg = |cmds: &[DrawCommand]| {
             cmds.iter().any(|c| {

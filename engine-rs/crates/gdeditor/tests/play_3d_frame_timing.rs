@@ -65,8 +65,12 @@ fn play_3d_frame_timing() {
         let t0 = Instant::now();
         let prepared = {
             let state = handle.state();
-            let st = state.lock().unwrap();
-            let tree = st.run_main_loop.as_ref().map(|ml| ml.tree()).unwrap_or(&st.scene_tree);
+            let mut st = state.lock().unwrap();
+            let st = &mut *st;
+            let tree = match st.run_main_loop.as_mut() {
+                Some(ml) => ml.tree_mut(),
+                None => &mut st.scene_tree,
+            };
             let clear = st
                 .run_project_settings
                 .as_ref()
@@ -171,8 +175,12 @@ fn play_3d_frame_dump() {
     for _ in 0..6 {
         let prepared = {
             let state = handle.state();
-            let st = state.lock().unwrap();
-            let tree = st.run_main_loop.as_ref().map(|ml| ml.tree()).unwrap_or(&st.scene_tree);
+            let mut st = state.lock().unwrap();
+            let st = &mut *st;
+            let tree = match st.run_main_loop.as_mut() {
+                Some(ml) => ml.tree_mut(),
+                None => &mut st.scene_tree,
+            };
             let clear = st
                 .run_project_settings
                 .as_ref()

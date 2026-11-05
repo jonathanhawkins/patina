@@ -598,7 +598,87 @@ impl Theme {
             set_flat(&mut theme, control, property, bg);
         }
 
+        godot_default_styleboxes(&mut theme);
         theme
+    }
+}
+
+/// The default theme's styleboxes for the controls a game UI is made of, with
+/// Godot's OWN colours and margins (`scene/theme/default_theme.cpp`,
+/// pat-9ww3e) rather than Patina's earlier opaque dark scheme — a Button there
+/// was an opaque (0.2, 0.2, 0.2) where Godot's is a 60%-alpha (0.1, 0.1, 0.1),
+/// and a PanelContainer inset its child by 4px where Godot's insets by 0.
+fn godot_default_styleboxes(theme: &mut Theme) {
+    // `style_normal_color` and friends.
+    let normal = Color::new(0.1, 0.1, 0.1, 0.6);
+    let hover = Color::new(0.225, 0.225, 0.225, 0.6);
+    let pressed = Color::new(0.0, 0.0, 0.0, 0.6);
+    let disabled = Color::new(0.1, 0.1, 0.1, 0.3);
+    let focus = Color::new(1.0, 1.0, 1.0, 0.75);
+    let progress = Color::new(1.0, 1.0, 1.0, 0.4);
+    let flat = |bg: Color, margin: f32, radius: f32| {
+        StyleBox::Flat(StyleBoxFlat {
+            bg_color: bg,
+            corner_radius: [radius; 4],
+            content_margin: [margin; 4],
+            ..StyleBoxFlat::default()
+        })
+    };
+    let set = |theme: &mut Theme, class: &str, name: &str, sb: StyleBox| {
+        if let Some(bg) = sb.bg_color() {
+            theme.set_item(ThemePropertyType::Stylebox, class, name, Variant::Color(bg));
+        }
+        theme.set_stylebox(class, name, sb);
+    };
+    // Panel / PanelContainer: `make_flat_stylebox(style_normal_color, 0, 0, 0, 0)`.
+    set(theme, "Panel", "panel", flat(normal, 0.0, DEFAULT_CORNER_RADIUS));
+    set(theme, "PanelContainer", "panel", flat(normal, 0.0, DEFAULT_CORNER_RADIUS));
+    // Button: `make_flat_stylebox(<state colour>)`, margins 4.
+    for (name, bg) in [
+        ("normal", normal),
+        ("hover", hover),
+        ("pressed", pressed),
+        ("disabled", disabled),
+    ] {
+        set(theme, "Button", name, flat(bg, DEFAULT_CONTENT_MARGIN, DEFAULT_CORNER_RADIUS));
+    }
+    // Button focus: no fill, a 2px `style_focus_color` border, expanded 2px
+    // so it sits flush OUTSIDE the button (`focus->set_expand_margin_all(2)`).
+    theme.set_stylebox(
+        "Button",
+        "focus",
+        StyleBox::Flat(StyleBoxFlat {
+            bg_color: focus,
+            draw_center: false,
+            border_width: [2.0; 4],
+            border_color: focus,
+            expand_margin: [2.0; 4],
+            corner_radius: [DEFAULT_CORNER_RADIUS; 4],
+            content_margin: [DEFAULT_CONTENT_MARGIN; 4],
+            ..StyleBoxFlat::default()
+        }),
+    );
+    // CheckBox: every state is a StyleBoxEmpty with 4px content margins.
+    for name in ["normal", "pressed", "hover", "hover_pressed", "disabled"] {
+        // An EMPTY box has no background, so no legacy colour item either
+        // (`stylebox_bg` would otherwise paint the old flat colour).
+        theme.remove_item(ThemePropertyType::Stylebox, "CheckBox", name);
+        theme.set_stylebox(
+            "CheckBox",
+            name,
+            StyleBox::Empty(crate::stylebox::StyleBoxEmpty {
+                content_margin: [DEFAULT_CONTENT_MARGIN; 4],
+            }),
+        );
+    }
+    theme.set_constant("CheckBox", "h_separation", 4);
+    theme.set_color("CheckBox", "font_color", Color::new(0.875, 0.875, 0.875, 1.0));
+    theme.set_color("CheckBox", "font_pressed_color", Color::WHITE);
+    // Sliders: `make_flat_stylebox(colour, 4, 4, 4, 4, 4)`.
+    for class in ["HSlider", "VSlider"] {
+        set(theme, class, "slider", flat(normal, 4.0, 4.0));
+        set(theme, class, "grabber_area", flat(progress, 4.0, 4.0));
+        set(theme, class, "grabber_area_highlight", flat(focus, 4.0, 4.0));
     }
 }
 
