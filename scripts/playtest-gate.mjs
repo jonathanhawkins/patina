@@ -367,6 +367,13 @@ export function newestEngineSourceMtime(engineDir = path.join(ROOT, 'engine-rs')
   return newest;
 }
 
+/// The command that rebuilds the release editor, as [cmd, args, cwd]. `cmd` is
+/// ABSOLUTE: spawned relative to `cwd: engine-rs` it resolved to a script that
+/// doesn't exist, so `--build` failed with ENOENT and exited 2 silently.
+export function editorBuildCommand() {
+  return [path.join(ROOT, 'scripts', 'rust_task.sh'), ['build', '--release', '--example', 'editor'], path.join(ROOT, 'engine-rs')];
+}
+
 /// Null when `binary` is at least as new as the engine sources, else a message
 /// saying how far behind it is. A missing binary counts as stale.
 export function staleBinaryMessage(binary, newestSourceMs) {
@@ -385,8 +392,12 @@ async function main() {
     process.exit(2);
   }
   if (o.build) {
-    const b = sh('scripts/rust_task.sh', ['build', '--release', '--example', 'editor'], { cwd: path.join(ROOT, 'engine-rs'), stdio: 'inherit' });
-    if (b.status !== 0) process.exit(2);
+    const [cmd, args, cwd] = editorBuildCommand();
+    const b = sh(cmd, args, { cwd, stdio: 'inherit' });
+    if (b.status !== 0) {
+      console.error(`playtest-gate: building the release editor failed (${b.error ? b.error.message : `exit ${b.status}`})`);
+      process.exit(2);
+    }
   }
   const stale = staleBinaryMessage(path.join(ROOT, 'engine-rs/target/release/examples/editor'), newestEngineSourceMtime());
   if (stale && !o.allowStale) {

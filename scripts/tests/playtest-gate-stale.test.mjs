@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { parseArgs, newestEngineSourceMtime, staleBinaryMessage } from '../playtest-gate.mjs';
+import { parseArgs, newestEngineSourceMtime, staleBinaryMessage, editorBuildCommand } from '../playtest-gate.mjs';
 
 test('both baseline-update flags rebuild the editor first', () => {
   assert.equal(parseArgs(['--update-godot-baselines']).build, true);
@@ -54,4 +54,12 @@ test('a binary older than the sources is stale; a newer one is not', () => {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('the editor build command is an absolute, existing script', () => {
+  const [cmd, args, cwd] = editorBuildCommand();
+  assert.ok(path.isAbsolute(cmd), cmd);
+  assert.ok(fs.existsSync(cmd), `${cmd} must exist`);
+  assert.ok(fs.existsSync(cwd), cwd);
+  assert.deepEqual(args.slice(0, 2), ['build', '--release']);
 });
