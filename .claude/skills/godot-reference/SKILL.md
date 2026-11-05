@@ -104,6 +104,33 @@ command.
 - With physics interpolation on (both platformers), a picture can trail its
   property by up to one physics tick. The tool prints a note.
 
+## The standing gate: parity can only improve
+
+`node scripts/playtest-gate.mjs --godot-only --games <g> --port-base <P>`
+(or `--godot` alongside the browser playtest) runs compare-to-godot for each
+game with its playtest.json keys and watches, and scores it: per property the
+first divergence frame and max error, per shot frame the mismatch % and mean
+RGB delta. Each score is compared with `scripts/godot-parity-baselines.json`.
+Worse beyond the noise margin (`DEFAULT_MARGINS` in
+`scripts/lib/godot-parity.mjs`; a game may override them under `margins`) is a
+functional failure. Better is reported as `improved`. A baseline recorded
+under another scenario or Godot version reads `stale` and is not compared.
+
+- Output: `.playtest-gate/parity.md` (`node scripts/parity-report.mjs`
+  rebuilds it), the full compare in `.playtest-gate/parity/<g>/`.
+- The Godot capture is cached in `.playtest-gate/godot-cache/<g>/<key>/`. The
+  key hashes the game files (minus hidden `.godot/` and `.editor/`), the resolved scenario, `godot
+  --version` and the capture tool, so a second run only plays Patina.
+  `--godot-cache DIR` shares one cache between worktrees.
+- 3D captures need the real off-screen window (above). Run the gate from a
+  logged-in macOS session, never `--headless`.
+- `--update-godot-baselines` is for a person or the coordinator, after
+  merging. Agents never run it: re-recording hides the regression it would
+  have caught. An improvement you made is re-recorded by the coordinator.
+- A frame where NEITHER engine has the watched node (a title screen before
+  the scene change) counts as a match; one side missing is infinite.
+- Tests: `node --test scripts/tests/godot-parity.test.mjs`.
+
 ## Pitfalls
 
 - Watch paths name the MAIN scene's tree (`/root/Game/...`). The tool runs

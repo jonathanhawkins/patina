@@ -29,8 +29,9 @@ Parse the JSON. Extract `open` and `in_progress` counts from the `groups` array.
 ```bash
 jq -r '.at, (.results[] | "\(.status) \(.game) \(.shown_fps // "-") fps")' .playtest-gate/latest.json 2>/dev/null || echo "NO GATE REPORT"
 ```
-- No report, or `.at` older than 24 h: run `node scripts/playtest-gate.mjs --file-beads` (release editor already built; add `--build` only if `engine-rs/target/release/examples/editor` is missing). It plays every `games/<g>/playtest.json` scenario in headless Chrome and files one `br` bug per failing game (label `playtest-gate`, deduped by title). Exit 3 = only INCONCLUSIVE (host busy): log it, file nothing.
-- Report the counts in the planner log line: `gate: N pass / M fail / K inconclusive`.
+- No report, or `.at` older than 24 h: run `node scripts/playtest-gate.mjs --godot --file-beads` (release editor already built; add `--build` only if `engine-rs/target/release/examples/editor` is missing). It plays every `games/<g>/playtest.json` scenario in headless Chrome and files one `br` bug per failing game (label `playtest-gate`, deduped by title). Exit 3 = only INCONCLUSIVE (host busy): log it, file nothing.
+- `--godot` also diffs every game against real Godot and writes `.playtest-gate/parity.md` (per game: trace first divergence + max error, picture mismatch + mean delta, base -> now, trend, side-by-side PNG). A score WORSE than `scripts/godot-parity-baselines.json` beyond its noise margin fails the game, and `--file-beads` files ONE bead per game for its WORST regression (label `godot-parity`, title names the metric so it dedupes). Read `parity.md`'s summary table; regenerate it with `node scripts/parity-report.mjs`.
+- Report the counts in the planner log line: `gate: N pass / M fail / K inconclusive; parity: R regressed / S stale`.
 - Do NOT create beads for gate failures yourself: the gate already did, with the report path and a reproduce command. Do not re-file one that `br list --label playtest-gate --status open` already shows.
 - A new real game in `games/` without a `playtest.json` is a gap: create ONE bead to add its scenario (keys from its input map, at least one `expect` rule per control).
 
@@ -207,7 +208,7 @@ widget is absent. See `prd/EDITOR_PARITY_VISUAL_FIDELITY_METHODOLOGY.md`.
 
 - NEVER wrap `br search` (or `br ready`, `br count`, `br list`) in a python (or any) filter that defines its own match/dedup predicate. Use the shown `jq -r '.issues | length'` extractor and apply the integer rule (`>= 1` skip, `== 0` create).
 - NEVER inspect candidate titles to decide if a `br search` hit is "really" a duplicate — any hit is a duplicate, period.
-- The playtest gate (`scripts/playtest-gate.mjs`, step 0b) is NOT a Rust test run and is allowed; never pass it `--update-baselines` from the planner (baselines are set by a person after a deliberate perf change).
+- The playtest gate (`scripts/playtest-gate.mjs`, step 0b) is NOT a Rust test run and is allowed; never pass it `--update-baselines` or `--update-godot-baselines` from the planner (baselines are set by a person or the coordinator after a deliberate change; re-recording to make a parity regression go away hides it).
 - NEVER run the full Rust test suite (`cargo test`, `cargo nextest`, `rust_task.sh`) from the planner. The verifier lane is the sole builder. The planner reads the bead map + queue counts only.
 - NEVER skip the queue-health gate (Step 0) silently — always append the SKIPPED line to `prd/planner_log.md` so the cycle is auditable.
 - NEVER write a bead with literal placeholder text (`TITLE`, `PRIORITY`, `LABELS`, `KEY`, or `ACCEPTANCE`) appearing verbatim in any field. Always substitute the recommendation's real values from the JSON.

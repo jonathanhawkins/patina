@@ -29,6 +29,22 @@
 //                        game, unless an open one with the same title exists
 //   --update-baselines   record this run's render times as the new baselines
 //                        (scripts/playtest-baselines.json)
+//   --godot              also diff each game against REAL Godot (compare-to-godot
+//                        with the scenario's keys and watches, on the same editor):
+//                        per watched property the first divergence frame and max
+//                        error, per shot frame the picture mismatch % and mean RGB
+//                        delta. A score WORSE than scripts/godot-parity-baselines.json
+//                        beyond the noise margin (scripts/lib/godot-parity.mjs) is a
+//                        functional failure. Writes .playtest-gate/parity.md; with
+//                        --file-beads files one bead per game for the WORST regression
+//                        (label godot-parity). The Godot capture is cached under
+//                        --godot-cache (default .playtest-gate/godot-cache) by a hash
+//                        of (game files, scenario, Godot version, capture tool).
+//   --godot-only         the --godot comparison without the browser playtest
+//   --godot-cache <dir>  where Godot captures are cached
+//   --update-godot-baselines  record this run's parity scores as the baselines.
+//                        Only a person or the coordinator runs this, after merging
+//                        (agents never do: it would hide their own regressions)
 //
 // A scenario is validated first (scene exists, steps parse, every `expect`
 // names a step and a watched value): an invalid one is that game's ERROR.
@@ -52,13 +68,20 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import crypto from 'node:crypto';
+import { resolveScenario, runGodotReference, defaultGodot } from './godot-reference.mjs';
+import {
+  hashGameFiles, captureCacheKey, captureComplete, scenarioKey, parityScores,
+  compareParity, baselineEntry, regressionBeadTitle,
+} from './lib/godot-parity.mjs';
+import { PARITY_BASELINES, readBaselines, writeParityReport } from './parity-report.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BASELINES = path.join(ROOT, 'scripts', 'playtest-baselines.json');
 const OUT_DIR = path.join(ROOT, '.playtest-gate');
 
 export function parseArgs(argv) {
-  const o = { games: null, soak: 0, build: false, fileBeads: false, updateBaselines: false, portBase: 9500, json: false };
+  const o = { games: null, soak: 0, build: false, fileBeads: false, updateBaselines: false, portBase: 9500, json: false, godot: false, godotOnly: false, godotCache: path.join(OUT_DIR, 'godot-cache'), updateGodotBaselines: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const v = () => argv[++i];
@@ -69,6 +92,10 @@ export function parseArgs(argv) {
     else if (a === '--update-baselines') o.updateBaselines = true;
     else if (a === '--port-base') o.portBase = Number(v());
     else if (a === '--json') o.json = true;
+    else if (a === '--godot') o.godot = true;
+    else if (a === '--godot-only') o.godot = o.godotOnly = true;
+    else if (a === '--godot-cache') o.godotCache = path.resolve(v());
+    else if (a === '--update-godot-baselines') o.updateGodotBaselines = o.godot = true;
     else if (a === '-h' || a === '--help') {
       console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1).filter((l) => l.startsWith('//')).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
       process.exit(0);
@@ -168,13 +195,71 @@ export function judge(sc, report, baseline) {
   return { functional: [...new Set(functional)], perf: [...new Set(perf)] };
 }
 
+function headCommit() {
+  try { return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim(); } catch { return null; }
+}
+
 function sh(cmd, args, opts = {}) {
   return spawnSync(cmd, args, { cwd: ROOT, encoding: 'utf8', ...opts });
 }
 
-function runOne(sc, port, soak) {
+const TOOL_FILES = ['scripts/lib/godot-reference-capture.gd', 'scripts/godot-reference.mjs'];
+
+/**
+ * The Godot side of a game's parity check: the cached capture when one with
+ * the same key exists, else a fresh capture into the cache. Returns
+ * {dir, key, hit, scenario, version}.
+ */
+export function prepareReference(gameDir, cacheRoot, { godot = defaultGodot() } = {}) {
+  const scenario = resolveScenario(gameDir, {});
+  const version = spawnSync(godot, ['--version'], { encoding: 'utf8' }).stdout?.trim() || 'unknown';
+  const tool = crypto.createHash('sha256').update(TOOL_FILES.map((f) => fs.readFileSync(path.join(ROOT, f))).join('\0')).digest('hex');
+  const key = captureCacheKey({ files: hashGameFiles(gameDir), scenario, godotVersion: version, tool });
+  const dir = path.join(cacheRoot, path.basename(gameDir), key);
+  if (captureComplete(dir)) return { dir, key, hit: true, scenario, version };
+  // Capture next to the final dir, then rename: a killed run never leaves a
+  // half-written capture that a later run would take for a hit.
+  const tmp = `${dir}.tmp-${process.pid}`;
+  fs.rmSync(tmp, { recursive: true, force: true });
+  runGodotReference(gameDir, { out: tmp, godot });
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.renameSync(tmp, dir);
+  return { dir, key, hit: false, scenario, version };
+}
+
+/** compare-to-godot on the running editor against the (cached) reference; the scores and their comparison. */
+function runParity(sc, port, o, base) {
+  const gameDir = path.join(ROOT, 'games', sc.game);
+  const out = path.join(OUT_DIR, 'parity', sc.game);
+  let ref;
+  try {
+    ref = prepareReference(gameDir, o.godotCache);
+  } catch (e) {
+    return { error: `Godot capture failed: ${e.message.split('\n').slice(0, 6).join(' | ')}` };
+  }
+  const cache = { key: ref.key, hit: ref.hit, dir: ref.dir };
+  const r = sh('node', ['scripts/compare-to-godot.mjs', `games/${sc.game}`, '--port', String(port), '--reference', ref.dir, '--out', out, '--json'], { timeout: 15 * 60 * 1000, maxBuffer: 64 << 20 });
+  let report;
+  try {
+    if (r.status === 2) throw new Error('setup');
+    report = JSON.parse(fs.readFileSync(path.join(out, 'report.json'), 'utf8'));
+  } catch {
+    return { cache, out, error: `compare-to-godot exited ${r.status}: ${(r.stderr || r.stdout || '').trim().slice(-400)}` };
+  }
+  const scores = parityScores(report, { scenario_key: scenarioKey(ref.scenario), godot_version: ref.version });
+  return { cache, out, scores, comparison: compareParity(base, scores) };
+}
+
+function runOne(sc, port, soak, { playtest = true, parity = null } = {}) {
   const start = sh('scripts/editor-bg.sh', ['start', '--release', '--port', String(port), `games/${sc.game}`, sc.scene], { timeout: 120000 });
   if (start.status !== 0) return { error: `editor did not start: ${(start.stderr || start.stdout).trim().slice(-300)}` };
+  if (!playtest) {
+    try {
+      return { parity: parity() };
+    } finally {
+      sh('scripts/editor-bg.sh', ['stop', '--port', String(port)]);
+    }
+  }
   const args = ['scripts/browser-playtest.mjs', '--url', `http://localhost:${port}/editor`, '--keys', sc.keys, '--json', '--min-fps', String(sc.min_fps ?? 45)];
   for (const w of sc.watch || []) args.push('--watch', w);
   if (sc.edit_steps) args.push('--edit-steps', sc.edit_steps);
@@ -184,8 +269,16 @@ function runOne(sc, port, soak) {
   // is a functional failure, not a warning.
   if ((sc.expect || []).length) args.push('--expect-move');
   const r = sh('node', args, { timeout: 15 * 60 * 1000, maxBuffer: 64 << 20 });
+  let report;
   try {
-    return { report: JSON.parse(r.stdout) };
+    report = JSON.parse(r.stdout);
+  } catch {
+    report = null;
+  }
+  try {
+    if (!report) throw new Error('no report');
+    // After the playtest, on the same editor: MCP `play` opens the main scene itself.
+    return { report, parity: parity ? parity() : undefined };
   } catch {
     return { error: `browser-playtest exited ${r.status}: ${(r.stderr || r.stdout || '').trim().slice(-400)}` };
   } finally {
@@ -193,8 +286,34 @@ function runOne(sc, port, soak) {
   }
 }
 
+/** Files (or finds) the bead for a game's WORST parity regression. The title names the metric, not the numbers, so it dedupes run to run. */
+function fileParityBead(game, result) {
+  const c = result.parity.comparison;
+  const worst = c.regressions[0];
+  const title = regressionBeadTitle(game, worst);
+  let open = [];
+  try {
+    open = JSON.parse(execFileSync('br', ['list', '--label', 'godot-parity', '--status', 'open', '--json'], { cwd: ROOT, encoding: 'utf8' }));
+  } catch { /* no tracker: file anyway */ }
+  const list = Array.isArray(open) ? open : open.issues || [];
+  if (list.some((i) => i.title === title)) return `exists: ${title}`;
+  const side = worst.metric.startsWith('picture') ? result.parity.scores.images[worst.id]?.side : null;
+  const body = [
+    `The Godot-parity gate (node scripts/playtest-gate.mjs --godot) found games/${game} got WORSE against real Godot than its recorded baseline (scripts/godot-parity-baselines.json).`,
+    '', `Worst: ${worst.text}`, '', 'All regressions:', ...c.regressions.map((x) => `- ${x.text}`),
+    ...(side ? ['', `Godot | Patina | heat: ${side}`] : []),
+    '', `Report: .playtest-gate/parity.md, ${result.parity.out}/report.json`,
+    `Reproduce: node scripts/playtest-gate.mjs --godot-only --games ${game}`,
+    'Find the change that made it worse (the regression is relative to the baseline, not absolute). Do not re-record the baseline to close this.',
+  ].join('\n');
+  const id = execFileSync('br', ['create', '-t', 'bug', '-p', '1', '-l', `godot-parity,${game}`, '-d', body, '--silent', title], { cwd: ROOT, encoding: 'utf8' }).trim();
+  return `filed ${id}: ${title}`;
+}
+
+const PARITY_TAG = 'godot-parity: ';
+
 function fileBead(game, result) {
-  const first = result.functional[0] || result.perf[0] || result.error;
+  const first = result.functional.find((x) => !x.startsWith(PARITY_TAG)) || result.perf[0] || result.error;
   const title = `[playtest-gate] ${game}: ${first}`.slice(0, 140);
   let open = [];
   try {
@@ -225,6 +344,7 @@ async function main() {
     if (b.status !== 0) process.exit(2);
   }
   const baselines = fs.existsSync(BASELINES) ? JSON.parse(fs.readFileSync(BASELINES, 'utf8')) : {};
+  const parityBase = o.godot ? readBaselines() : {};
   const busy = () => os.loadavg()[0] > os.cpus().length * 0.75;
   const results = [];
   for (const [i, sc] of scenarios.entries()) {
@@ -236,27 +356,49 @@ async function main() {
       if (!o.json) console.log(`${'ERROR'.padEnd(12)} ${sc.game}\n             - ${res.error}`);
       continue;
     }
-    let attempt = runOne(sc, port, o.soak);
-    let verdict = attempt.report ? judge(sc, attempt.report, baselines[sc.game]) : null;
+    const parity = o.godot ? () => runParity(sc, port, o, parityBase[sc.game]) : null;
+    let attempt = runOne(sc, port, o.soak, { playtest: !o.godotOnly, parity });
+    let verdict = attempt.report ? judge(sc, attempt.report, baselines[sc.game]) : o.godotOnly && attempt.parity ? { functional: [], perf: [] } : null;
     let rerun = false;
-    if (verdict && !verdict.functional.length && verdict.perf.length && busy()) {
+    if (attempt.report && verdict && !verdict.functional.length && verdict.perf.length && busy()) {
       rerun = true;
-      attempt = runOne(sc, port, o.soak);
-      verdict = attempt.report ? judge(sc, attempt.report, baselines[sc.game]) : null;
+      const again = runOne(sc, port, o.soak);
+      if (again.report) {
+        attempt = { ...again, parity: attempt.parity };
+        verdict = judge(sc, again.report, baselines[sc.game]);
+      }
     }
     const res = { game: sc.game, port, rerun, load1: +os.loadavg()[0].toFixed(1), cpus: os.cpus().length };
-    if (!verdict) Object.assign(res, { status: 'error', error: attempt.error, functional: [], perf: [] });
+    if (attempt.parity) {
+      res.parity = attempt.parity;
+      const c = attempt.parity.comparison;
+      if (verdict) {
+        if (attempt.parity.error) verdict.functional.push(`${PARITY_TAG}${attempt.parity.error}`);
+        for (const x of c?.regressions || []) verdict.functional.push(`${PARITY_TAG}${x.text}`);
+      }
+      if (o.updateGodotBaselines && attempt.parity.scores) {
+        parityBase[sc.game] = baselineEntry(attempt.parity.scores, { recorded: new Date().toISOString().slice(0, 10), commit: headCommit(), margins: parityBase[sc.game]?.margins || null });
+      }
+    }
+    if (!verdict) Object.assign(res, { status: 'error', error: attempt.error || attempt.parity?.error, functional: [], perf: [] });
     else {
       const r = attempt.report;
       Object.assign(res, verdict, {
         status: verdict.functional.length ? 'fail' : verdict.perf.length ? (busy() ? 'inconclusive' : 'fail') : 'pass',
+      });
+      if (r) Object.assign(res, {
         shown_fps: r.shown_fps, render_ms: r.server?.render_ms, sim_fps: r.server?.sim_fps,
         soak_rss_mb_per_min: r.soak_rss_mb_per_min ?? null, report_dir: r.screenshots?.[0] ? path.dirname(r.screenshots[0]) : null,
       });
-      if (o.updateBaselines && res.status !== 'error' && r.server?.render_ms) baselines[sc.game] = { render_ms: r.server.render_ms, recorded: new Date().toISOString().slice(0, 10) };
+      if (o.updateBaselines && r && res.status !== 'error' && r.server?.render_ms) baselines[sc.game] = { render_ms: r.server.render_ms, recorded: new Date().toISOString().slice(0, 10) };
     }
-    if (o.fileBeads && (res.status === 'fail' || res.status === 'error')) {
+    // The playtest bead is for playtest problems; parity regressions get their own bead (worst one per game).
+    const playtestBad = res.status === 'error' || res.perf.length || res.functional.some((x) => !x.startsWith(PARITY_TAG));
+    if (o.fileBeads && (res.status === 'fail' || res.status === 'error') && playtestBad) {
       try { res.bead = fileBead(sc.game, res); } catch (e) { res.bead = `could not file: ${e.message}`; }
+    }
+    if (o.fileBeads && res.parity?.comparison?.regressions.length) {
+      try { res.parity_bead = fileParityBead(sc.game, res); } catch (e) { res.parity_bead = `could not file: ${e.message}`; }
     }
     results.push(res);
     if (!o.json) {
@@ -265,13 +407,27 @@ async function main() {
       for (const x of [...(res.functional || []), ...(res.perf || [])]) console.log(`             - ${x}`);
       if (res.error) console.log(`             - ${res.error}`);
       if (res.bead) console.log(`             bead: ${res.bead}`);
+      const pc = res.parity?.comparison;
+      if (pc) console.log(`             godot parity: ${pc.status}, ${pc.regressions.length} worse / ${pc.improvements.length} better (Godot capture ${res.parity.cache.hit ? 'cached' : 'fresh'})${pc.stale.length ? `; ${pc.stale.join('; ')}` : ''}`);
+      if (res.parity_bead) console.log(`             parity bead: ${res.parity_bead}`);
     }
   }
   if (o.updateBaselines) fs.writeFileSync(BASELINES, JSON.stringify(baselines, null, 2) + '\n');
+  if (o.updateGodotBaselines) {
+    let doc = {};
+    try { doc = JSON.parse(fs.readFileSync(PARITY_BASELINES, 'utf8')); } catch { /* first record */ }
+    doc._doc = doc._doc || 'Godot-parity baselines for node scripts/playtest-gate.mjs --godot. Lower is better. Re-record ONLY as a person or the coordinator: node scripts/playtest-gate.mjs --godot-only --update-godot-baselines';
+    doc.games = { ...(doc.games || {}), ...parityBase };
+    fs.writeFileSync(PARITY_BASELINES, JSON.stringify(doc, null, 2) + '\n');
+  }
   fs.mkdirSync(OUT_DIR, { recursive: true });
   const summary = { at: new Date().toISOString(), soak: o.soak, results };
   fs.writeFileSync(path.join(OUT_DIR, 'latest.json'), JSON.stringify(summary, null, 2));
   fs.writeFileSync(path.join(OUT_DIR, `${summary.at.replace(/[:.]/g, '-')}.json`), JSON.stringify(summary, null, 2));
+  if (o.godot) {
+    const { out } = writeParityReport({ latest: summary, baselines: readBaselines() });
+    if (!o.json) console.log(`godot parity report: ${path.relative(ROOT, out)}`);
+  }
   if (o.json) console.log(JSON.stringify(summary, null, 2));
   const st = results.map((r) => r.status);
   process.exit(st.some((s) => s === 'fail' || s === 'error') ? 1 : st.some((s) => s === 'inconclusive') ? 3 : 0);

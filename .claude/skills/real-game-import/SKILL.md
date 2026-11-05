@@ -140,6 +140,11 @@ each other. Keep tool changes surgical.
   game (`--games <g> --port-base <yours>`, one at a time). A fix for the new
   game must not turn an old game red. Close a bead only when its finding has
   gone from the audit or gate output.
+- Run the gate with `--godot` too (`--godot-only --games <g> --port-base <yours>`
+  is the quick form). It fails when a game got WORSE against real Godot than
+  `scripts/godot-parity-baselines.json`. A new game has no baseline
+  (`no-baseline`): ask the coordinator to record one after the merge. Agents
+  never pass `--update-godot-baselines`.
 
 ## Gotchas
 

@@ -113,6 +113,13 @@ An invalid scenario is that game's ERROR, not a crash. Never run the gate on
 someone else's ports: it uses `--port-base` + game index, so pass
 `--port-base <yours> --games <one>` to stay on one port.
 
+`--godot` adds the Godot-parity check on the same editor (see the
+`godot-reference` skill): scores that got worse than
+`scripts/godot-parity-baselines.json` fail the game, and
+`.playtest-gate/parity.md` has the numbers. `--godot-only` skips the browser
+part. `--update-baselines` and `--update-godot-baselines` are for a person or
+the coordinator only, never an agent.
+
 - It launches its own headless Chrome (throwaway profile, free port) and kills
   only that one. The person's Chrome is never touched, and no extension is
   needed, which matters when Claude in Chrome isn't connected.
