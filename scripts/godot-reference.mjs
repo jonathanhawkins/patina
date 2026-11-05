@@ -36,6 +36,7 @@
 //   --shots 30,90,...     frames to picture (default: the step boundaries, at most 8)
 //   --fps N               frames per second the ms durations are translated at (default 60)
 //   --rendering-method M  forward_plus (default, the project's) | mobile | gl_compatibility
+//   --attempts N          runs of Godot before a disturbed capture is given up (default 3)
 //   --seed N              random seed the run is pinned to (default: playtest.json `seed`, else 42 —
 //                         the MCP `play` default). See "Random numbers" below.
 //   --godot PATH          Godot binary (default $GODOT or /Applications/Godot.app/Contents/MacOS/Godot)
@@ -146,6 +147,26 @@ export function patchProjectGodot(text, { godotVersion = null, autoloadName = AU
   return { text: out, notes };
 }
 
+/**
+ * Makes the capture window one that can never become the KEY window
+ * (`display/window/size/no_focus`, WINDOW_FLAG_NO_FOCUS: macOS
+ * `canBecomeKeyWindow` answers NO). macOS Godot releases every held key when
+ * its window RESIGNS key status (`windowDidResignKey` ->
+ * `Input::release_pressed_events`), and a window launched from a script
+ * gained and lost the key status at random in its first frames — Dodge the
+ * Creeps' Enter (held f1..f18) was released at f1 or f2 in 2 of 4 runs — and
+ * again whenever another Godot window opened. A window that is never key
+ * never resigns. Input is unaffected: the capture parses its events straight
+ * into `Input`, which does not look at focus. Returns the patched text.
+ */
+export function withUnfocusableWindow(text) {
+  let out = text.replace(/^window\/size\/no_focus=.*\n?/m, '');
+  const line = 'window/size/no_focus=true';
+  if (/^\[display\]\s*$/m.test(out)) out = out.replace(/^\[display\]\s*\n/m, `[display]\n\n${line}\n`);
+  else out = out.replace(/\n*$/, '\n') + `\n[display]\n\n${line}\n`;
+  return out;
+}
+
 /** Reads a project setting's raw value from project.godot text (`section/key`). */
 export function projectSetting(text, key) {
   const [section, ...rest] = key.split('/');
@@ -212,6 +233,77 @@ function copyGame(src, dst) {
   });
 }
 
+/** How many times a disturbed capture is run again before giving up. */
+export const DEFAULT_ATTEMPTS = 3;
+
+/**
+ * A capture that something outside the timeline disturbed on every attempt
+ * (pat-y2ylj follow-up): a held key the OS released (window focus moved), or
+ * an iteration Godot did not draw (window occluded).
+ */
+export class DisturbedCaptureError extends Error {
+  constructor(game, attempts, disturbances) {
+    const first = disturbances.slice(0, 4).map((d) => `${d.kind} at f${d.frame}${d.detail ? ` (${d.detail})` : ''}`).join(', ');
+    super(
+      `every one of ${attempts} Godot capture(s) of ${game} was disturbed — ${first}. ` +
+        'A held key released by a focus change re-fires is_action_just_pressed, and an undrawn frame leaves a stale picture, ' +
+        'so such a run is not a reference. Something keeps taking the capture window\'s focus or hiding it ' +
+        '(another Godot window, a display sleep); run again when the desktop is quiet.',
+    );
+    this.disturbances = disturbances;
+  }
+}
+
+/** Whether a pid is a live process. */
+function alive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code === 'EPERM';
+  }
+}
+
+/**
+ * Runs `fn` holding the machine-wide capture-window lock, so two captures (two
+ * agents, two worktrees) never have windows open at once: a Godot window
+ * opening takes the focus from the other one, and macOS Godot releases every
+ * held key when its window resigns key status. A stale lock (dead pid) is
+ * taken over; after `waitMs` the capture runs anyway (a disturbed run is
+ * detected and retried regardless).
+ */
+export function withCaptureWindowLock(fn, { dir = path.join(os.tmpdir(), 'godot-reference-window.lock'), waitMs = 15 * 60_000 } = {}) {
+  const deadline = Date.now() + waitMs;
+  const nap = new Int32Array(new SharedArrayBuffer(4));
+  let held = false;
+  while (!held) {
+    try {
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'pid'), String(process.pid));
+      held = true;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      let pid = NaN;
+      try {
+        pid = Number(fs.readFileSync(path.join(dir, 'pid'), 'utf8'));
+      } catch {
+        // being written: wait
+      }
+      if (Number.isFinite(pid) && pid > 0 && !alive(pid)) {
+        fs.rmSync(dir, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() > deadline) break;
+      Atomics.wait(nap, 0, 0, 250);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    if (held) fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 /**
  * Runs the whole capture. Returns {outDir, trace, frames: [{frame, png}], log, notes}.
  * Throws with Godot's log tail when Godot fails.
@@ -235,7 +327,7 @@ export function runGodotReference(gameDir, opts = {}) {
   try {
     copyGame(gameDir, tmp);
     const patched = patchProjectGodot(sc.project, { godotVersion });
-    fs.writeFileSync(path.join(tmp, 'project.godot'), patched.text);
+    fs.writeFileSync(path.join(tmp, 'project.godot'), withUnfocusableWindow(patched.text));
     fs.copyFileSync(CAPTURE_GD, path.join(tmp, AUTOLOAD_FILE));
     const notes = [...patched.notes, ...pinRandomnessInProject(tmp)];
 
@@ -246,9 +338,12 @@ export function runGodotReference(gameDir, opts = {}) {
       watches: sc.watches,
       shots: sc.shots,
       seed: sc.seed,
+      // Test hook (tests/godot-reference-determinism): frames after which the
+      // capture releases its held keys the way a focus loss does.
+      simulate_focus_loss: opts.simulateFocusLossAt || [],
+      simulate_undrawn: opts.simulateUndrawnAt || [],
     };
     const configPath = path.join(tmp, '__godot_reference_config.json');
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 
     // First import: builds .godot/imported (textures, meshes, GridMap
     // libraries) so the run loads the same resources the editor would.
@@ -268,15 +363,43 @@ export function runGodotReference(gameDir, opts = {}) {
     if (opts.renderingMethod) args.push('--rendering-method', opts.renderingMethod);
     args.push(sc.scene, '--', '--godot-reference-config', configPath);
     const timeout = (opts.timeout || 120 + Math.ceil(sc.frames / 30)) * 1000;
-    const run = spawnSync(godot, args, { encoding: 'utf8', timeout });
-    log.push(`$ godot ${args.join(' ')}`, run.stdout || '', run.stderr || '');
-    fs.writeFileSync(path.join(outDir, 'godot.log'), log.join('\n'));
     const tracePath = path.join(outDir, 'trace.json');
-    if (!fs.existsSync(tracePath)) {
-      const tail = log.join('\n').split('\n').slice(-30).join('\n');
-      throw new Error(`Godot wrote no trace (exit ${run.status}${run.signal ? `, ${run.signal}` : ''}):\n${tail}`);
+    // 🔑 A run that something outside the timeline disturbed (a held key the
+    // OS released, an undrawn frame: see the capture's header) is thrown away
+    // and run again; only an undisturbed run is a reference.
+    const attempts = Math.max(1, opts.attempts ?? DEFAULT_ATTEMPTS);
+    let trace = null;
+    const disturbed = [];
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      fs.rmSync(tracePath, { force: true });
+      fs.rmSync(path.join(outDir, 'frames'), { recursive: true, force: true });
+      fs.mkdirSync(path.join(outDir, 'frames'), { recursive: true });
+      // The test hook disturbs the first attempt only, unless told otherwise.
+      const first = attempt === 1 || opts.simulateEveryAttempt;
+      fs.writeFileSync(configPath, JSON.stringify({
+        ...config,
+        simulate_focus_loss: first ? config.simulate_focus_loss : [],
+        simulate_undrawn: first ? config.simulate_undrawn : [],
+      }, null, 2));
+      const run = withCaptureWindowLock(() => spawnSync(godot, args, { encoding: 'utf8', timeout }));
+      log.push(`$ godot ${args.join(' ')}   # attempt ${attempt}`, run.stdout || '', run.stderr || '');
+      fs.writeFileSync(path.join(outDir, 'godot.log'), log.join('\n'));
+      if (!fs.existsSync(tracePath)) {
+        const tail = log.join('\n').split('\n').slice(-30).join('\n');
+        throw new Error(`Godot wrote no trace (exit ${run.status}${run.signal ? `, ${run.signal}` : ''}):\n${tail}`);
+      }
+      const t = JSON.parse(fs.readFileSync(tracePath, 'utf8'));
+      const d = t.disturbances || [];
+      // `acceptDisturbed` keeps a disturbed run anyway: for diagnosing one.
+      if (d.length === 0 || opts.acceptDisturbed) {
+        trace = t;
+        if (disturbed.length) notes.push(`${disturbed.length} disturbed attempt(s) discarded before this capture: ${disturbed.map((x) => `${x.kind} at f${x.frame}`).slice(0, 4).join(', ')}`);
+        trace.attempts = attempt;
+        break;
+      }
+      disturbed.push(...d);
     }
-    const trace = JSON.parse(fs.readFileSync(tracePath, 'utf8'));
+    if (!trace) throw new DisturbedCaptureError(path.relative(ROOT, gameDir) || gameDir, attempts, disturbed);
     if (trace.quit_early) notes.push('the game left the tree before the timeline ended');
     if (trace.physics_ticks_per_second < sc.fps) {
       notes.push(`physics_ticks_per_second ${trace.physics_ticks_per_second} < ${sc.fps} fps: frames with no physics tick are not recorded`);
@@ -338,6 +461,7 @@ export function parseCommonArgs(argv, extra = {}) {
     else if (a === '--keep-temp') opts.keepTemp = true;
     else if (a === '--timeout') opts.timeout = Number(value());
     else if (a === '--seed') opts.seed = Number(value());
+    else if (a === '--attempts') opts.attempts = Number(value());
     else if (a === '--json') opts.json = true;
     else if (extra[a]) extra[a](opts, value);
     else if (a === '-h' || a === '--help') opts.help = true;

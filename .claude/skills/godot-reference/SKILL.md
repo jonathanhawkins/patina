@@ -140,6 +140,16 @@ under another scenario or Godot version reads `stale` and is not compared.
 - The Godot capture is cached in `.playtest-gate/godot-cache/<g>/<key>/`. The
   key hashes the game files (minus hidden `.godot/` and `.editor/`), the resolved scenario, `godot
   --version` and the capture tool, so a second run only plays Patina.
+- A capture something outside the timeline DISTURBED is thrown away and run
+  again (`--attempts`, default 3): a held key the OS released (a focus change;
+  the re-press is a fresh `is_action_just_pressed`, so a held jump restarts)
+  or an iteration Godot did not draw (an occluded window; one skipped draw
+  changed every later picture by up to ~200 per channel). `trace.json`
+  `disturbances` / `window_events` say what happened. The window is made
+  unfocusable (`display/window/size/no_focus` in the temp copy), so it never
+  resigns key status, and captures take a machine-wide window lock
+  (`$TMPDIR/godot-reference-window.lock`) so two never have windows open at
+  once.
 - On a cache miss Godot captures TWICE and the reference is cached only when
   both agree (every watched value; every picture within 2 per channel). An
   unstable reference is refused with the differing frames named — it would

@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { runGodotReference, defaultGodot, ROOT } from '../godot-reference.mjs';
+import { runGodotReference, defaultGodot, ROOT, DisturbedCaptureError } from '../godot-reference.mjs';
 import { compareCaptures } from '../lib/godot-parity.mjs';
 
 const HAVE_GODOT = fs.existsSync(defaultGodot());
@@ -49,6 +49,14 @@ test('two captures of dodge_the_creeps record the same trace and the same pictur
     assert.deepEqual(check, { stable: true, differences: [] });
     assert.ok(a.frames.length >= 3, 'the scenario takes pictures');
     assert.equal(a.trace.seed, 42);
+    // The window can never be key, so it never RESIGNS key status — the
+    // macOS event that releases every held key (Enter, held f1..f18, was
+    // released at f1/f2 in 2 of 4 runs before the window was made unfocusable).
+    for (const cap of [a, b]) {
+      assert.deepEqual(cap.trace.disturbances, []);
+      const windowFocusOut = cap.trace.window_events.filter((e) => e.what === 1005);
+      assert.deepEqual(windowFocusOut, [], 'no NOTIFICATION_WM_WINDOW_FOCUS_OUT');
+    }
 
     // The first mob's `progress_ratio = randf()` is Godot's third number for
     // seed 42 — the Player's Trail (GPUParticles2D) constructor takes two.
@@ -138,12 +146,58 @@ test('a key held by the timeline survives the window losing it (focus out / move
       '',
     ].join('\n'));
     // W held for 18 frames after a 2-frame wait (ms at 60 fps).
-    const cap = runGodotReference(game, { watch: ['/root/Main:held_ticks'], keys: 'wait:33,KeyW:300,wait:50', out: path.join(tmp, 'a') });
+    const cap = runGodotReference(game, { watch: ['/root/Main:held_ticks'], keys: 'wait:33,KeyW:300,wait:50', out: path.join(tmp, 'a'), acceptDisturbed: true });
     const values = cap.trace.frames.map((s) => s.values['/root/Main:held_ticks']);
     const held = values[values.length - 1];
     // One physics tick per frame (60 ticks/s): W reads pressed on every tick it is held.
     assert.equal(held, 18, `W must read pressed on all 18 of its ticks, got ${held} (${values.join(',')})`);
     assert.ok(cap.trace.held_keys_reasserted >= 1, 'the move released the key and the capture pressed it again');
+    assert.ok(cap.trace.disturbances.some((d) => d.kind === 'held_key_released'), 'and the run is marked disturbed, so it is never taken as a reference');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('a capture a focus change disturbed is run again, and only an undisturbed run is the reference', { skip }, () => {
+  // The coordinator's platformer pair: y 591.858 vs 593.608 from f154. Its
+  // ArrowUp (jump) is held f151..f168; a focus change released it, the
+  // capture pressed it again, and the re-press was a FRESH press —
+  // is_action_just_pressed fired a second time, so the jump started over on
+  // whichever tick the focus moved. The test releases the held keys at f154
+  // the way `Input::release_pressed_events` does.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'disturbed-'));
+  const game = path.join(ROOT, 'games', 'platformer');
+  try {
+    const clean = runGodotReference(game, { out: path.join(tmp, 'clean') });
+    assert.deepEqual(clean.trace.disturbances, [], 'an undisturbed run records no disturbance (every iteration drew)');
+    assert.equal(clean.trace.attempts, 1);
+
+    // The mechanism: a run released at f154 is NOT the timeline.
+    const kept = runGodotReference(game, { out: path.join(tmp, 'kept'), simulateFocusLossAt: [154], acceptDisturbed: true });
+    assert.deepEqual(kept.trace.disturbances.map((d) => [d.kind, d.frame, d.detail]), [['held_key_released', 154, 'Up']]);
+    const diff = compareCaptures(clean.outDir, kept.outDir);
+    assert.equal(diff.stable, false);
+    assert.match(diff.differences[0], /^f155 \/root\/Game\/Level\/Player:position/, 'the re-press restarts the jump on the next frame');
+
+    // With one attempt, a disturbed run is refused...
+    assert.throws(
+      () => runGodotReference(game, { out: path.join(tmp, 'refused'), simulateFocusLossAt: [154], attempts: 1 }),
+      (e) => e instanceof DisturbedCaptureError && /held_key_released at f154 \(Up\)/.test(e.message),
+    );
+    // ...and by default it is run again, and the second run is the reference.
+    const retried = runGodotReference(game, { out: path.join(tmp, 'retried'), simulateFocusLossAt: [154] });
+    assert.equal(retried.trace.attempts, 2);
+    assert.match(retried.notes.join('\n'), /1 disturbed attempt\(s\) discarded/);
+    assert.deepEqual(compareCaptures(clean.outDir, retried.outDir), { stable: true, differences: [] });
+
+    // An iteration Godot does not draw (an occluded window: platformer_3d's
+    // pictures differed by up to 181 per channel with an identical trace)
+    // leaves the previous frame in the texture; it is detected the same way.
+    const undrawn = runGodotReference(game, { out: path.join(tmp, 'undrawn'), simulateUndrawnAt: [89], acceptDisturbed: true });
+    assert.deepEqual(undrawn.trace.disturbances.map((d) => [d.kind, d.frame]), [['frame_not_drawn', 89]]);
+    const redrawn = runGodotReference(game, { out: path.join(tmp, 'redrawn'), simulateUndrawnAt: [89] });
+    assert.equal(redrawn.trace.attempts, 2);
+    assert.deepEqual(compareCaptures(clean.outDir, redrawn.outDir), { stable: true, differences: [] });
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

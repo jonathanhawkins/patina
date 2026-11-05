@@ -15,7 +15,7 @@ import {
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { patchProjectGodot, projectSetting, parseGodotVersion, resPath, pinRandomnessInScript, resolveScenario, DEFAULT_SEED } from '../godot-reference.mjs';
+import { patchProjectGodot, projectSetting, parseGodotVersion, resPath, pinRandomnessInScript, resolveScenario, DEFAULT_SEED, withUnfocusableWindow } from '../godot-reference.mjs';
 import { mcpPlayArgs, screenshotFrames } from '../compare-to-godot.mjs';
 import zlib from 'node:zlib';
 
@@ -400,4 +400,14 @@ test('the scenario carries a seed: --seed, else playtest.json, else the MCP play
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('the capture window is made one that can never take the focus', () => {
+  const plain = withUnfocusableWindow('config_version=5\n\n[application]\n\nconfig/name="x"\n');
+  assert.equal(projectSetting(plain, 'display/window/size/no_focus'), 'true');
+  const display = withUnfocusableWindow('[display]\n\nwindow/size/viewport_width=480\nwindow/size/no_focus=false\n');
+  assert.equal(projectSetting(display, 'display/window/size/no_focus'), 'true');
+  assert.equal(projectSetting(display, 'display/window/size/viewport_width'), '480', 'the rest of [display] is kept');
+  assert.equal((display.match(/no_focus/g) || []).length, 1, 'a game\'s own no_focus line is replaced, not duplicated');
+  assert.equal((display.match(/^\[display\]/gm) || []).length, 1);
 });

@@ -46,6 +46,19 @@
 ## re-pressed the moment a focus-out arrives, and checked again before each
 ## iteration's physics, so the game sees the timeline and nothing else.
 ##
+## ⚠️ ...but a re-press is NOT the timeline (pat-y2ylj follow-up): it is a
+## fresh press, so `is_action_just_pressed` fires again — the platformer's
+## held ArrowUp jumped a second time on whichever tick the focus happened to
+## move (two captures: y 591.858 vs 593.608 from f154). And an OCCLUDED window
+## is not drawn at all (`can_any_window_draw()` is false, so `Main::iteration`
+## skips `RenderingServer::draw`), leaving a stale texture for the next
+## picture (platformer_3d: up to 181 apart per channel with an identical
+## trace). Neither can be undone from here, so both are recorded in
+## `disturbances` — a held key the OS released, an iteration that drew
+## nothing — and godot-reference.mjs throws the capture away and runs it
+## again. The re-press stays: it keeps a disturbed run's trace close enough
+## to read, but a disturbed run is never a reference.
+##
 ## 🔑 Random numbers are PINNED (pat-y2ylj). Godot seeds its global RNG from
 ## the clock at startup (`SceneTree::SceneTree` calls `Math::randomize()`), and
 ## again in every `randomize()` and every `RandomNumberGenerator.new()`, so a
@@ -80,6 +93,18 @@ var finished := false
 var held: Dictionary = {}
 ## How many times a held key had to be pressed again after the OS dropped it.
 var reasserted := 0
+## What made this run not the timeline: [{frame, kind, detail}] (see header).
+var disturbances: Array = []
+## Focus changes the window saw, for diagnosing a disturbance: [{frame, what, pos}].
+var window_events: Array = []
+## `Engine.get_frames_drawn()` at the previous iteration's first tick.
+var last_frames_drawn := -1
+## Test hook: frames after which every held key is released as a focus loss
+## releases it (`Input::release_pressed_events`), to prove the detection.
+var simulate_focus_loss: Dictionary = {}
+## Test hook: frames whose NEXT iteration is not drawn, as an occluded window's
+## is not (`can_any_window_draw()` false), to prove the detection.
+var simulate_undrawn: Dictionary = {}
 
 
 ## The k-th bare `randomize()` of a pinned run (the rewrite in
@@ -132,6 +157,10 @@ func _ready() -> void:
 	out_dir = cfg["out_dir"]
 	for s in cfg.get("shots", []):
 		shots[int(s)] = true
+	for s in cfg.get("simulate_focus_loss", []):
+		simulate_focus_loss[int(s)] = true
+	for s in cfg.get("simulate_undrawn", []):
+		simulate_undrawn[int(s)] = true
 	DirAccess.make_dir_recursive_absolute(out_dir.path_join("frames"))
 	print("godot-reference: ", RenderingServer.get_current_rendering_method(), " on ",
 		RenderingServer.get_current_rendering_driver_name(), ", window ", get_viewport().size,
@@ -147,12 +176,15 @@ func _reassert_held(flush: bool) -> void:
 		if not Input.is_physical_key_pressed(ev.physical_keycode):
 			Input.parse_input_event(ev)
 			reasserted += 1
+			disturbances.append({"frame": Engine.get_process_frames(), "kind": "held_key_released", "detail": name, "window": [get_window().position.x, get_window().position.y, get_window().has_focus()]})
 			any = true
 	if any and flush:
 		Input.flush_buffered_events()
 
 
 func _notification(what: int) -> void:
+	if what in [NOTIFICATION_WM_WINDOW_FOCUS_OUT, NOTIFICATION_APPLICATION_FOCUS_OUT, NOTIFICATION_WM_WINDOW_FOCUS_IN, NOTIFICATION_APPLICATION_FOCUS_IN]:
+		window_events.append({"frame": Engine.get_process_frames(), "what": what, "pos": [get_window().position.x, get_window().position.y]})
 	if what == NOTIFICATION_WM_WINDOW_FOCUS_OUT or what == NOTIFICATION_APPLICATION_FOCUS_OUT:
 		_reassert_held(false)
 
@@ -167,6 +199,14 @@ func _physics_process(_delta: float) -> void:
 	if frame == last_iteration:
 		return
 	last_iteration = frame
+	# Iteration `frame` (completed) must have drawn: a skipped draw leaves the
+	# texture of an older frame for the next picture.
+	var drawn := Engine.get_frames_drawn()
+	if not RenderingServer.render_loop_enabled:
+		RenderingServer.render_loop_enabled = true
+	if last_frames_drawn >= 0 and drawn <= last_frames_drawn:
+		disturbances.append({"frame": frame, "kind": "frame_not_drawn", "detail": "frames_drawn stayed %d" % drawn})
+	last_frames_drawn = drawn
 	if frame == 0:
 		_record(0)
 		_inject(0)
@@ -201,6 +241,15 @@ func _end_of_frame(done: int) -> void:
 ## releases of inputs held through `done`, presses of inputs starting at
 ## `done + 1`. Left buffered on purpose (see the header).
 func _inject(done: int) -> void:
+	if simulate_undrawn.has(done):
+		RenderingServer.render_loop_enabled = false
+	if simulate_focus_loss.has(done):
+		# What `Input::release_pressed_events` does to our held keys: released,
+		# while the timeline still holds them.
+		for name in held:
+			var up: InputEventKey = held[name].duplicate()
+			up.pressed = false
+			Input.parse_input_event(up)
 	for inp in cfg["inputs"]:
 		if int(inp["end"]) == done:
 			_key(inp, false)
@@ -305,6 +354,8 @@ func _write() -> void:
 		"frames": samples,
 		"quit_early": not finished,
 		"held_keys_reasserted": reasserted,
+		"disturbances": disturbances,
+		"window_events": window_events,
 	}
 	var f := FileAccess.open(out_dir.path_join("trace.json"), FileAccess.WRITE)
 	f.store_string(JSON.stringify(data, "\t"))
