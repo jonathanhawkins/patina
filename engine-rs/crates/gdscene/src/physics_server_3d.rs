@@ -253,6 +253,42 @@ fn vec3_opt_prop_3d(tree: &SceneTree, id: NodeId, key: &str) -> Option<Vector3> 
 }
 
 /// Reads a `Vector3` property from a 3D node, defaulting to `default`.
+/// A rigid body's moments of inertia where Godot's differ from the
+/// shape-centred ones Patina derives by default (pat-qg3nu).
+///
+/// - `center_of_mass_mode = CUSTOM` (1) with `center_of_mass` at the origin:
+///   the body turns about its ORIGIN, which is also Patina's pivot, so the
+///   shape's inertia moves there by the parallel-axis theorem (Jolt's
+///   `OffsetCenterOfMassShape`). truck_town's cars are authored this way.
+/// - an authored non-zero `inertia` axis replaces that axis
+///   (`JoltBody3D::_calculate_mass_properties`).
+///
+/// `None` keeps the shape's own inertia: an AUTO centre of mass, or a custom
+/// one away from the origin (Patina has no separate pivot to put it at).
+fn authored_inertia_3d(tree: &SceneTree, nid: NodeId, body: &PhysicsBody3D) -> Option<Vector3> {
+    let custom_com_at_origin = u32_prop_3d(tree, nid, "center_of_mass_mode", 0) == 1
+        && vec3_prop_3d(tree, nid, "center_of_mass", Vector3::ZERO) == Vector3::ZERO;
+    let authored = vec3_prop_3d(tree, nid, "inertia", Vector3::ZERO);
+    if !custom_com_at_origin && authored == Vector3::ZERO {
+        return None;
+    }
+    let mut i = if custom_com_at_origin {
+        body.shape_inertia_about_origin()
+    } else {
+        body.shape_inertia()
+    };
+    if authored.x > 0.0 {
+        i.x = authored.x;
+    }
+    if authored.y > 0.0 {
+        i.y = authored.y;
+    }
+    if authored.z > 0.0 {
+        i.z = authored.z;
+    }
+    Some(i)
+}
+
 fn vec3_prop_3d(tree: &SceneTree, id: NodeId, key: &str, default: Vector3) -> Vector3 {
     tree.get_node(id)
         .map(|n| match n.get_property(key) {
@@ -761,6 +797,16 @@ pub struct PhysicsServer3D {
     /// (pat-s3rrv.194). The chassis itself is an ordinary rigid body in the
     /// world; the controller only pushes it.
     vehicles: HashMap<NodeId, VehicleController3D>,
+    /// Each vehicle's `VehicleWheel3D` nodes, in the order of its controller's
+    /// wheels (pat-qg3nu). A wheel's simulation state follows its NODE across
+    /// ticks, and its transform is written back to that node.
+    vehicle_wheel_nodes: HashMap<NodeId, Vec<NodeId>>,
+    /// Vehicles whose `_body_state_changed` ran in this tick's step.
+    vehicles_updated: HashSet<NodeId>,
+    /// `physics/3d/default_linear_damp` / `default_angular_damp` (Godot: 0.1
+    /// each), combined into every rigid body's damping (pat-qg3nu).
+    default_linear_damp: f32,
+    default_angular_damp: f32,
     /// Source of joint ids. `PhysicsWorld3D::add_joint` keeps whatever id the
     /// joint was built with, so the server is what has to hand out unique ones.
     next_joint_id: u64,
@@ -850,6 +896,10 @@ impl PhysicsServer3D {
             node_to_joint: HashMap::new(),
             ragdoll_joints: HashMap::new(),
             vehicles: HashMap::new(),
+            vehicle_wheel_nodes: HashMap::new(),
+            vehicles_updated: HashSet::new(),
+            default_linear_damp: 0.1,
+            default_angular_damp: 0.1,
             next_joint_id: 1,
             soft_bodies: HashMap::new(),
             next_soft_body_id: 1,
@@ -879,6 +929,10 @@ impl PhysicsServer3D {
             node_to_joint: HashMap::new(),
             ragdoll_joints: HashMap::new(),
             vehicles: HashMap::new(),
+            vehicle_wheel_nodes: HashMap::new(),
+            vehicles_updated: HashSet::new(),
+            default_linear_damp: 0.1,
+            default_angular_damp: 0.1,
             next_joint_id: 1,
             soft_bodies: HashMap::new(),
             next_soft_body_id: 1,
@@ -907,6 +961,36 @@ impl PhysicsServer3D {
     pub fn set_gravity(&mut self, gravity: Vector3) {
         self.gravity = gravity;
         self.world.gravity = gravity;
+    }
+
+    /// `physics/3d/default_linear_damp` (Godot default 0.1).
+    pub fn set_default_linear_damp(&mut self, damp: f32) {
+        self.default_linear_damp = damp;
+    }
+
+    /// `physics/3d/default_angular_damp` (Godot default 0.1).
+    pub fn set_default_angular_damp(&mut self, damp: f32) {
+        self.default_angular_damp = damp;
+    }
+
+    /// A rigid body's total damping, as `JoltBody3D::_update_damp` combines it:
+    /// the space default PLUS the body's own under `DAMP_MODE_COMBINE` (0, the
+    /// default), the body's alone under `DAMP_MODE_REPLACE` (1) (pat-qg3nu).
+    /// Patina had no 3D space default, so every body coasted forever where a
+    /// Godot one loses 0.1 of its speed per second: truck_town's car ran 12%
+    /// fast at full throttle. Area damp overrides are not folded in here.
+    fn total_damp_3d(&self, tree: &SceneTree, nid: NodeId) -> (f32, f32) {
+        let linear = float_prop_3d(tree, nid, "linear_damp", 0.0) as f32;
+        let angular = float_prop_3d(tree, nid, "angular_damp", 0.0) as f32;
+        let linear = match u32_prop_3d(tree, nid, "linear_damp_mode", 0) {
+            1 => linear,
+            _ => self.default_linear_damp + linear,
+        };
+        let angular = match u32_prop_3d(tree, nid, "angular_damp_mode", 0) {
+            1 => angular,
+            _ => self.default_angular_damp + angular,
+        };
+        (linear, angular)
     }
 
     /// The total gravity at a node's body — what `PhysicsBody3D.get_gravity()`
@@ -962,6 +1046,11 @@ impl PhysicsServer3D {
     /// Returns the underlying physics world (read-only).
     pub fn world(&self) -> &PhysicsWorld3D {
         &self.world
+    }
+
+    /// Mutable access to the underlying physics world, for tests and tools.
+    pub fn world_mut(&mut self) -> &mut PhysicsWorld3D {
+        &mut self.world
     }
 
     /// Godot `PhysicsBody3D.add_collision_exception_with(body)` (pat-s3rrv.105).
@@ -1203,18 +1292,23 @@ impl PhysicsServer3D {
                         body.shape_offset = shape_offset;
                         body.shape_rotation = shape_rotation;
                         body.extra_shapes = authored;
+                        body.inertia_override = authored_inertia_3d(tree, nid, &body);
 
-                        // Initial orientation from the node transform.
-                        body.rotation =
-                            gdcore::math3d::Quaternion::from_euler(node3d::get_rotation(tree, nid));
+                        // Initial orientation: the node's WORLD one, like its
+                        // position (pat-qg3nu). The LOCAL rotation dropped the
+                        // parent's: truck_town's car, under an `InstancePos`
+                        // turned 90 degrees, simulated facing world +Z while
+                        // drawn facing +X, so it drove sideways.
+                        body.rotation = node3d::get_global_rotation_quaternion(tree, nid);
 
                         // Read the physics material / body properties from the
                         // node so authored values drive the simulation.
                         body.collision_layer = u32_prop_3d(tree, nid, "collision_layer", 1);
                         body.collision_mask = u32_prop_3d(tree, nid, "collision_mask", 1);
                         body.gravity_scale = float_prop_3d(tree, nid, "gravity_scale", 1.0) as f32;
-                        body.linear_damp = float_prop_3d(tree, nid, "linear_damp", 0.0) as f32;
-                        body.angular_damp = float_prop_3d(tree, nid, "angular_damp", 0.0) as f32;
+                        let (linear_damp, angular_damp) = self.total_damp_3d(tree, nid);
+                        body.linear_damp = linear_damp;
+                        body.angular_damp = angular_damp;
                         // pat-s3rrv.105 — Godot's `custom_integrator` hands
                         // force integration to the script's
                         // `_integrate_forces`. The engine then applies NO
@@ -1313,9 +1407,7 @@ impl PhysicsServer3D {
                         // pushes rigid bodies correctly.
                         if let Some(&body_id) = self.node_to_body.get(&nid) {
                             let position = node3d::get_global_transform(tree, nid).origin;
-                            let rotation = gdcore::math3d::Quaternion::from_euler(
-                                node3d::get_rotation(tree, nid),
-                            );
+                            let rotation = node3d::get_global_rotation_quaternion(tree, nid);
                             // ⚠️ Absent `sync_to_physics` means ON (it defaults
                             // to true in Godot), and the displacement has to be
                             // taken BEFORE `b.position` is overwritten below.
@@ -2051,8 +2143,7 @@ impl PhysicsServer3D {
         let axis_velocity = vec3_opt_prop_3d(tree, nid, "_pending_axis_velocity");
         // doc/classes/RigidBody3D.xml defaults.
         let gravity_scale = float_prop_3d(tree, nid, "gravity_scale", 1.0) as f32;
-        let linear_damp = float_prop_3d(tree, nid, "linear_damp", 0.0) as f32;
-        let angular_damp = float_prop_3d(tree, nid, "angular_damp", 0.0) as f32;
+        let (linear_damp, angular_damp) = self.total_damp_3d(tree, nid);
         let lock_rotation = truthy_prop_3d(tree, nid, "lock_rotation", false);
         let can_sleep = truthy_prop_3d(tree, nid, "can_sleep", true);
         let sleeping = truthy_prop_3d(tree, nid, "sleeping", false);
@@ -2192,71 +2283,97 @@ impl PhysicsServer3D {
         }
     }
 
-    /// Registers `Area3D` nodes into the world and refreshes the per-tick state
-    /// of the ones already registered (pat-0q2kx.35).
+    /// Writes each wheel's simulated state back onto its `VehicleWheel3D`
+    /// node (pat-s3rrv.194, pat-qg3nu).
     ///
-    /// Mirrors the 2D server's Area2D handling: an area's shape comes from its
-    /// `CollisionShape3D` child, its transform and authored properties are read
-    /// back every tick so a moved or retuned area takes effect, and areas whose
-    /// nodes left the tree are freed.
-    /// Builds and refreshes a [`VehicleController3D`] for every `VehicleBody3D`
-    /// node, reading its `VehicleWheel3D` children's authored properties
-    /// (pat-s3rrv.194).
+    /// 🔑 The wheel node's TRANSFORM is written here, as Godot's
+    /// `_body_state_changed` does without physics interpolation
+    /// (`wheels[i]->set_transform(state.transform.inverse() * m_worldTransform)`):
+    /// the suspension drop, steering and spin. Before pat-qg3nu it never was,
+    /// so a wheel stayed at its authored pose forever.
     ///
-    /// ⚠️ Re-read EVERY tick, not just at registration. `engine_force`, `brake`
-    /// and `steering` are exactly the properties a script writes each frame —
-    /// that is the entire interface of a drivable car — so caching them once
-    /// would leave the throttle authorable and inert, which is the same class of
-    /// bug this bead exists to fix.
-    /// Writes each wheel's simulated contact state back onto its
-    /// `VehicleWheel3D` node (pat-s3rrv.194).
-    ///
-    /// ⚠️ Published as node PROPERTIES rather than kept inside the controller,
-    /// because that is the only place a script can reach them: by the time
-    /// GDScript runs, it has the tree and nothing else. `is_in_contact()` reads
-    /// `_wheel_in_contact` straight off the node.
+    /// The contact state travels as node properties because that is the only
+    /// place a script can reach it: `is_in_contact()` reads
+    /// `_wheel_in_contact`, `get_skidinfo()` `_wheel_skidinfo`, `get_rpm()`
+    /// `_wheel_rpm`.
     fn publish_wheel_state(&self, tree: &mut SceneTree) {
         if self.vehicles.is_empty() {
             return;
         }
-        // Wheel order follows scene order, which is exactly how `sync_vehicles`
-        // collected them — the two walks must stay in step or a wheel would be
-        // handed another wheel's contact.
-        let updates: Vec<(NodeId, bool, f32, Vector3)> = self
-            .vehicles
-            .iter()
-            .filter_map(|(&body_node, controller)| {
-                let node = tree.get_node(body_node)?;
-                let wheel_nodes: Vec<NodeId> = node
-                    .children()
-                    .iter()
-                    .copied()
-                    .filter(|&c| {
-                        tree.get_node(c)
-                            .map(|n| n.class_name() == "VehicleWheel3D")
-                            .unwrap_or(false)
-                    })
-                    .collect();
-                Some(
-                    wheel_nodes
-                        .into_iter()
-                        .zip(controller.wheels.iter())
-                        .map(|(wnode, w)| (wnode, w.in_contact, w.compression, w.contact_point))
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .flatten()
-            .collect();
-
-        for (wnode, in_contact, compression, contact_point) in updates {
-            if let Some(node) = tree.get_node_mut(wnode) {
-                node.set_property("_wheel_in_contact", Variant::Bool(in_contact));
-                node.set_property("_wheel_compression", Variant::Float(compression as f64));
-                node.set_property("_wheel_contact_point", Variant::Vector3(contact_point));
+        struct WheelOut {
+            node: NodeId,
+            local: Option<gdcore::math3d::Transform3D>,
+            in_contact: bool,
+            skid: f32,
+            rpm: f32,
+            point: Vector3,
+            normal: Vector3,
+            compression: f32,
+        }
+        let mut updates: Vec<WheelOut> = Vec::new();
+        for (body_node, controller) in &self.vehicles {
+            let Some(body) = self.world.get_body(controller.chassis) else {
+                continue;
+            };
+            let chassis = gdcore::math3d::Transform3D {
+                basis: gdcore::math3d::Basis::from_quaternion(body.rotation),
+                origin: body.position,
+            };
+            // Only once the vehicle has run: a held (fresh) chassis has had no
+            // callback yet, and its wheels keep their authored pose.
+            let posed = self.vehicles_updated.contains(body_node);
+            let Some(wheel_nodes) = self.vehicle_wheel_nodes.get(body_node) else {
+                continue;
+            };
+            for (i, (wnode, w)) in wheel_nodes.iter().zip(controller.wheels.iter()).enumerate() {
+                let travel = w.max_suspension_travel;
+                let compression = if travel > 0.0 {
+                    ((w.suspension_rest_length - w.suspension_length) / travel).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                updates.push(WheelOut {
+                    node: *wnode,
+                    local: if posed { controller.wheel_local_transform(i, &chassis) } else { None },
+                    in_contact: w.in_contact,
+                    skid: w.skid_info,
+                    rpm: w.rpm,
+                    point: w.contact_point,
+                    normal: w.contact_normal,
+                    compression,
+                });
             }
+        }
+
+        for u in updates {
+            let Some(node) = tree.get_node_mut(u.node) else {
+                continue;
+            };
+            if let Some(local) = u.local {
+                node3d::set_transform_component(node, "transform", &Variant::Transform3D(local));
+            }
+            node.set_property("_wheel_in_contact", Variant::Bool(u.in_contact));
+            node.set_property("_wheel_compression", Variant::Float(u.compression as f64));
+            node.set_property("_wheel_skidinfo", Variant::Float(u.skid as f64));
+            node.set_property("_wheel_rpm", Variant::Float(u.rpm as f64));
+            node.set_property("_wheel_contact_point", Variant::Vector3(u.point));
+            node.set_property("_wheel_contact_normal", Variant::Vector3(u.normal));
         }
     }
 
+    /// Builds and refreshes a [`VehicleController3D`] for every `VehicleBody3D`
+    /// node from its `VehicleWheel3D` children (pat-s3rrv.194, pat-qg3nu).
+    ///
+    /// ⚠️ A wheel's GEOMETRY (connection point, direction, axle) is read ONCE,
+    /// when the wheel first joins, as Godot reads it at the wheel's
+    /// `NOTIFICATION_ENTER_TREE`. From then on the node's transform is the
+    /// vehicle's OUTPUT (`publish_wheel_state`); re-reading it each tick would
+    /// feed the suspension drop back in as a new hard point and the car would
+    /// sink by a suspension length per tick.
+    ///
+    /// The tunables and `engine_force`/`brake`/`steering` are re-read every
+    /// tick: they are what a script writes each frame, and Godot's setters
+    /// take effect at once.
     fn sync_vehicles(&mut self, tree: &SceneTree, all_nodes: &[NodeId]) {
         let mut live: Vec<NodeId> = Vec::new();
         for &nid in all_nodes {
@@ -2282,40 +2399,75 @@ impl PhysicsServer3D {
                 })
                 .collect();
 
+            let previous = self.vehicle_wheel_nodes.get(&nid).cloned().unwrap_or_default();
             let controller = self
                 .vehicles
                 .entry(nid)
                 .or_insert_with(|| VehicleController3D::new(chassis));
             controller.chassis = chassis;
-            controller.engine_force = float_prop_3d(tree, nid, "engine_force", 0.0) as f32;
-            controller.brake = float_prop_3d(tree, nid, "brake", 0.0) as f32;
-            controller.steering = float_prop_3d(tree, nid, "steering", 0.0) as f32;
+            // doc/classes/VehicleBody3D.xml: mass defaults to 40.
+            controller.mass = float_prop_3d(tree, nid, "mass", 40.0) as f32;
+            controller.collision_mask = u32_prop_3d(tree, nid, "collision_mask", 1);
 
-            controller.wheels.clear();
-            for wnode in wheel_nodes {
-                let mut wheel = VehicleWheel3D::new(node3d::get_position(tree, wnode));
+            // A wheel keeps its simulation state across ticks; one seen for the
+            // first time caches its authored pose.
+            let mut wheels = Vec::with_capacity(wheel_nodes.len());
+            for &wnode in &wheel_nodes {
+                let kept = previous
+                    .iter()
+                    .position(|&p| p == wnode)
+                    .and_then(|i| controller.wheels.get(i).cloned());
+                let mut wheel = kept.unwrap_or_else(|| {
+                    VehicleWheel3D::new(node3d::get_local_transform(tree, wnode))
+                });
+                // Defaults from scene/3d/physics/vehicle_body_3d.h.
                 wheel.radius = float_prop_3d(tree, wnode, "wheel_radius", 0.5) as f32;
                 wheel.suspension_rest_length =
                     float_prop_3d(tree, wnode, "wheel_rest_length", 0.15) as f32;
-                wheel.suspension_travel =
+                wheel.max_suspension_travel =
                     float_prop_3d(tree, wnode, "suspension_travel", 0.2) as f32;
                 wheel.suspension_stiffness =
                     float_prop_3d(tree, wnode, "suspension_stiffness", 5.88) as f32;
-                // ⚠️ `damping_compression` (0.83), not `damping_relaxation`
-                // (0.88). The compression damper resists the spring while the
-                // wheel is being pushed up, which is the phase this
-                // single-damper model stands for.
-                wheel.suspension_damping =
+                wheel.max_suspension_force =
+                    float_prop_3d(tree, wnode, "suspension_max_force", 6000.0) as f32;
+                wheel.damping_compression =
                     float_prop_3d(tree, wnode, "damping_compression", 0.83) as f32;
-                wheel.friction = float_prop_3d(tree, wnode, "wheel_friction_slip", 10.5) as f32;
-                wheel.driven = truthy_prop_3d(tree, wnode, "use_as_traction", false);
-                wheel.steerable = truthy_prop_3d(tree, wnode, "use_as_steering", false);
-                controller.wheels.push(wheel);
+                wheel.damping_relaxation =
+                    float_prop_3d(tree, wnode, "damping_relaxation", 0.88) as f32;
+                wheel.friction_slip =
+                    float_prop_3d(tree, wnode, "wheel_friction_slip", 10.5) as f32;
+                wheel.roll_influence =
+                    float_prop_3d(tree, wnode, "wheel_roll_influence", 0.1) as f32;
+                wheel.traction = truthy_prop_3d(tree, wnode, "use_as_traction", false);
+                wheel.steers = truthy_prop_3d(tree, wnode, "use_as_steering", false);
+                // The wheel's own engine_force/brake/steering, for a wheel the
+                // body's setters skip (Godot's body setter writes only traction
+                // or steering wheels).
+                wheel.engine_force = float_prop_3d(tree, wnode, "engine_force", 0.0) as f32;
+                wheel.brake = float_prop_3d(tree, wnode, "brake", 0.0) as f32;
+                wheel.steering = float_prop_3d(tree, wnode, "steering", 0.0) as f32;
+                wheels.push(wheel);
             }
+            controller.wheels = wheels;
+            controller.set_engine_force(float_prop_3d(tree, nid, "engine_force", 0.0) as f32);
+            let brake = float_prop_3d(tree, nid, "brake", 0.0) as f32;
+            if brake != 0.0 {
+                controller.set_brake(brake);
+            }
+            controller.set_steering(float_prop_3d(tree, nid, "steering", 0.0) as f32);
+            self.vehicle_wheel_nodes.insert(nid, wheel_nodes);
         }
         self.vehicles.retain(|nid, _| live.contains(nid));
+        self.vehicle_wheel_nodes.retain(|nid, _| live.contains(nid));
     }
 
+    /// Registers `Area3D` nodes into the world and refreshes the per-tick state
+    /// of the ones already registered (pat-0q2kx.35).
+    ///
+    /// Mirrors the 2D server's Area2D handling: an area's shape comes from its
+    /// `CollisionShape3D` child, its transform and authored properties are read
+    /// back every tick so a moved or retuned area takes effect, and areas whose
+    /// nodes left the tree are freed.
     fn sync_areas(&mut self, tree: &SceneTree, all_nodes: &[NodeId]) {
         let mut current_area_nodes: HashMap<NodeId, ()> = HashMap::new();
 
@@ -2445,20 +2597,6 @@ impl PhysicsServer3D {
                 }
             }
         }
-        // ⚠️ BEFORE `world.step`, so suspension and drive forces are part of the
-        // same integration that resolves contacts. Applied afterwards they would
-        // be a frame late and the chassis would visibly sag into the ground on
-        // the tick it landed.
-        //
-        // Controllers are taken out and put back because `step` needs `&mut
-        // self.world` while `self.vehicles` is also behind `&mut self`.
-        if !self.vehicles.is_empty() {
-            let mut taken: Vec<(NodeId, VehicleController3D)> = self.vehicles.drain().collect();
-            for (_, controller) in &mut taken {
-                controller.step(&mut self.world, dt);
-            }
-            self.vehicles.extend(taken);
-        }
         // 🔑 Godot steps the space at the END of a tick, after the scripts,
         // and copies the result onto the nodes at the NEXT tick's
         // `flush_queries` (`main.cpp`: sync, flush_queries, physics_process,
@@ -2511,6 +2649,28 @@ impl PhysicsServer3D {
                 b.angular_velocity = ang;
             }
             self.held_this_step.insert(id);
+        }
+        // 🔑 The vehicles run AFTER the step (pat-qg3nu). Godot's
+        // `VehicleBody3D::_body_state_changed` is the chassis' state-sync
+        // callback, called from the next tick's `flush_queries`: it sees the
+        // stepped chassis, reads the `engine_force`/`steering` the scripts
+        // wrote last tick, and its impulses move the body in the FOLLOWING
+        // step, like `_integrate_forces`. Running it before the step (as this
+        // used to) moved the car by forces of the same step and read controls
+        // one tick early. A held (fresh) chassis gets no callback yet, since
+        // Godot has not stepped it. Controllers are taken out and put back
+        // because `update` needs `&mut self.world`.
+        self.vehicles_updated.clear();
+        if !self.vehicles.is_empty() && dt > 0.0 {
+            let mut taken: Vec<(NodeId, VehicleController3D)> = self.vehicles.drain().collect();
+            for (nid, controller) in &mut taken {
+                if self.held_this_step.contains(&controller.chassis) {
+                    continue;
+                }
+                controller.update(&mut self.world, dt);
+                self.vehicles_updated.insert(*nid);
+            }
+            self.vehicles.extend(taken);
         }
         self.detect_body_contacts();
         if self.world.area_count() > 0 {
@@ -3012,7 +3172,8 @@ impl PhysicsServer3D {
                     node3d::set_global_position(tree, nid, body.position);
                     // Pull the simulated orientation back so tumbling/rolling
                     // rigid bodies rotate their scene nodes too.
-                    node3d::set_rotation(tree, nid, body.rotation.to_euler());
+                    // World orientation, de-parented like the position.
+                    node3d::set_global_rotation_quaternion(tree, nid, body.rotation);
                 }
             }
         }
@@ -3348,6 +3509,53 @@ mod tests {
         );
     }
 
+    /// pat-qg3nu: `DAMP_MODE_REPLACE` (1) drops the space default; a
+    /// project's `default_linear_damp` feeds the COMBINE sum.
+    #[test]
+    fn damp_mode_replace_ignores_the_space_default() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let mut node = Node::new("Ball", "RigidBody3D");
+        node.set_property("linear_damp", Variant::Float(0.3));
+        node.set_property("linear_damp_mode", Variant::Int(1));
+        let replaced = tree.add_child(root, node).unwrap();
+        let combined = tree.add_child(root, Node::new("Other", "RigidBody3D")).unwrap();
+        let mut server = PhysicsServer3D::new();
+        server.set_default_linear_damp(0.5);
+        server.sync_to_physics(&tree);
+        let damp = |nid| server.world().get_body(server.body_for_node(nid).unwrap()).unwrap().linear_damp;
+        assert!((damp(replaced) - 0.3).abs() < 1e-6, "replace: {}", damp(replaced));
+        assert!((damp(combined) - 0.5).abs() < 1e-6, "combine: {}", damp(combined));
+    }
+
+    /// pat-qg3nu: a rigid body under a ROTATED parent simulates in its world
+    /// orientation and writes its local one back. truck_town's car sits under
+    /// an `InstancePos` turned 90 degrees about Y: registered with its LOCAL
+    /// (identity) rotation, it was simulated facing world +Z and drove off
+    /// sideways relative to its drawn heading.
+    #[test]
+    fn rigid_body_under_a_rotated_parent_uses_its_world_orientation() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let parent = tree.add_child(root, Node::new("InstancePos", "Node3D")).unwrap();
+        node3d::set_rotation(&mut tree, parent, Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0));
+        let mut ball = Node::new("Ball", "RigidBody3D");
+        ball.set_property("gravity_scale", Variant::Float(0.0));
+        ball.set_property("can_sleep", Variant::Bool(false));
+        let body_nid = tree.add_child(parent, ball).unwrap();
+
+        let mut server = PhysicsServer3D::new();
+        server.sync_to_physics(&tree);
+        let bid = server.body_for_node(body_nid).unwrap();
+        let world_z = server.world().get_body(bid).unwrap().rotation.xform(Vector3::new(0.0, 0.0, 1.0));
+        assert!((world_z - Vector3::new(1.0, 0.0, 0.0)).length() < 1e-5, "body +Z in the world: {world_z:?}");
+
+        server.step(1.0 / 60.0);
+        server.sync_from_physics(&mut tree);
+        let local = node3d::get_rotation(&tree, body_nid);
+        assert!(local.length() < 1e-4, "an unmoved body keeps its local rotation, got {local:?}");
+    }
+
     #[test]
     fn reads_physics_props_from_node() {
         let mut tree = SceneTree::new();
@@ -3371,7 +3579,9 @@ mod tests {
         assert!((body.mass - 4.0).abs() < 1e-5);
         assert_eq!(body.collision_mask, 0b0110);
         assert!((body.gravity_scale - 2.5).abs() < 1e-5);
-        assert!((body.linear_damp - 0.3).abs() < 1e-5);
+        // DAMP_MODE_COMBINE (the default): the space's 0.1 plus the body's 0.3.
+        assert!((body.linear_damp - 0.4).abs() < 1e-5, "linear_damp {}", body.linear_damp);
+        assert!((body.angular_damp - 0.1).abs() < 1e-5, "angular_damp {}", body.angular_damp);
         assert!((body.friction - 0.8).abs() < 1e-5);
         assert!((body.bounce - 0.6).abs() < 1e-5);
         assert!(body.continuous_cd);
