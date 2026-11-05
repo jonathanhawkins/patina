@@ -22,6 +22,18 @@
 use gdscript_interop::interpreter::Interpreter;
 use gdvariant::Variant;
 
+/// Serializes the tests in this binary that touch the res:// path roots (each test roots res:// at its own temp dir) (pat-hukbz).
+///
+/// That state is process-global. Nextest gives each test its own process, but
+/// plain `cargo test` runs the tests as threads in ONE process, where they
+/// overwrote each other's state mid-test. Bind the guard for the whole test.
+/// Poison-tolerant, so one failing test does not fail the rest.
+#[must_use = "bind it for the whole test: `let _guard = serial();`"]
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Three lines, so a line number is distinguishable from an offset and from 1.
 ///
 /// ⚠️ The indentation before `<item>` is load-bearing: it makes the element
@@ -88,6 +100,7 @@ func run():
 /// offset that round-trips through `seek()`, and a safe attribute read.
 #[test]
 fn xml_parser_open_offset_and_line() {
+    let _guard = serial();
     let _dir = with_res_doc();
 
     // Re-run per assertion because each `call_method` builds a fresh
@@ -153,6 +166,7 @@ fn xml_parser_open_offset_and_line() {
 /// denied a class a script could construct and use.
 #[test]
 fn xml_parser_open_offset_and_line_is_registered() {
+    let _guard = serial();
     use gdobject::class_db::{class_exists, get_class_info, register_all_classes};
 
     register_all_classes();
@@ -192,6 +206,7 @@ fn xml_parser_open_offset_and_line_is_registered() {
 /// which reads as plausible until someone matches it against an editor.
 #[test]
 fn xml_parser_open_offset_and_line_starts_at_line_one() {
+    let _guard = serial();
     let _dir = with_res_doc();
 
     let src = "\

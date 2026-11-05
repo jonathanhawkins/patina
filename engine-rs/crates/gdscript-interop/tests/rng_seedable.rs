@@ -18,6 +18,18 @@
 use gdscript_interop::interpreter::Interpreter;
 use gdvariant::Variant;
 
+/// Serializes the tests in this binary that touch the interpreter's global RNG (pat-hukbz).
+///
+/// That state is process-global. Nextest gives each test its own process, but
+/// plain `cargo test` runs the tests as threads in ONE process, where they
+/// overwrote each other's state mid-test. Bind the guard for the whole test.
+/// Poison-tolerant, so one failing test does not fail the rest.
+#[must_use = "bind it for the whole test: `let _guard = serial();`"]
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn run_val(src: &str) -> Variant {
     let mut interp = Interpreter::new();
     interp
@@ -46,6 +58,7 @@ fn ints(v: Variant) -> Vec<i64> {
 /// seed produces a different one.
 #[test]
 fn seed_makes_the_sequence_reproducible() {
+    let _guard = serial();
     // Two runs of the same seed inside ONE script, so the comparison cannot be
     // confounded by anything else touching the global state between them.
     let seq = ints(run_val(
@@ -90,6 +103,7 @@ fn seed_makes_the_sequence_reproducible() {
 /// so a zero draw would yield NaN/-inf if it were not guarded.
 #[test]
 fn randfn_returns_a_finite_float() {
+    let _guard = serial();
     // Seed ONCE and then walk the sequence: re-seeding inside the loop would
     // draw the same value 64 times and prove nothing about the rare inputs
     // (a near-zero uniform) that make `ln` blow up.
@@ -122,6 +136,7 @@ fn randfn_returns_a_finite_float() {
 /// `randomize()` and `rand_from_seed()` exist and behave as Godot documents.
 #[test]
 fn randomize_and_rand_from_seed_are_defined() {
+    let _guard = serial();
     // Executing at all is the acceptance's bar — these used to be
     // UndefinedFunction.
     assert_eq!(run_val("randomize()\nreturn 1\n"), Variant::Int(1));
@@ -155,6 +170,7 @@ fn randomize_and_rand_from_seed_are_defined() {
 /// a no-op wearing the name.
 #[test]
 fn randomize_changes_the_sequence() {
+    let _guard = serial();
     let seeded = ints(run_val("seed(5)\nreturn [randi()]\n"))[0];
     let randomized = ints(run_val("seed(5)\nrandomize()\nreturn [randi()]\n"))[0];
     assert_ne!(

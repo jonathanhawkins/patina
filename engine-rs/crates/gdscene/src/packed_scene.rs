@@ -6675,9 +6675,17 @@ value = 42
     }
 
     // -- Property tests: only explicit tscn properties stored on nodes -----
+    //
+    // 🔑 These pin what `instance()` stores when NO ClassDB defaults exist to
+    // seed (`node_with_class_defaults` seeds every registered default, so with
+    // a populated ClassDB `position` reads `Vector2(0, 0)`, not Nil). Each test
+    // therefore takes a test-scoped empty ClassDB first (pat-hukbz): under
+    // `cargo test` the process-wide one holds whatever the other tests in this
+    // binary registered, so they passed only under nextest.
 
     #[test]
     fn unset_properties_return_nil() {
+        gdobject::class_db::clear_for_testing();
         let scene = PackedScene::from_tscn(SIMPLE_TSCN).unwrap();
         let nodes = scene.instance().unwrap();
         let sprite = &nodes[2]; // Sprite2D with no explicit properties
@@ -6690,6 +6698,7 @@ value = 42
 
     #[test]
     fn explicit_position_preserved() {
+        gdobject::class_db::clear_for_testing();
         let scene = PackedScene::from_tscn(SIMPLE_TSCN).unwrap();
         let nodes = scene.instance().unwrap();
         let player = &nodes[1];
@@ -6703,6 +6712,7 @@ value = 42
 
     #[test]
     fn only_explicit_properties_on_characterbody2d() {
+        gdobject::class_db::clear_for_testing();
         let tscn = "[gd_scene format=3]
 
 [node name=\"Root\" type=\"Node\"]
@@ -6725,6 +6735,7 @@ position = Vector2(400, 200)
 
     #[test]
     fn node_class_has_no_implicit_properties() {
+        gdobject::class_db::clear_for_testing();
         let scene = PackedScene::from_tscn(SIMPLE_TSCN).unwrap();
         let nodes = scene.instance().unwrap();
         let root = &nodes[0];

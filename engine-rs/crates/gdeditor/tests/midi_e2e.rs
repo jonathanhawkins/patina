@@ -41,6 +41,18 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
 
+/// Serializes the tests in this binary that touch the process-global MIDI port store (pat-hukbz).
+///
+/// That state is process-global. Nextest gives each test its own process, but
+/// plain `cargo test` runs the tests as threads in ONE process, where they
+/// overwrote each other's state mid-test. Bind the guard for the whole test.
+/// Poison-tolerant, so one failing test does not fail the rest.
+#[must_use = "bind it for the whole test: `let _guard = serial();`"]
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 // ---------------------------------------------------------------------------
 // HTTP harness (same shape as the other pipeline tests in this suite)
 // ---------------------------------------------------------------------------
@@ -217,6 +229,7 @@ func _input(event):
 /// `OS.get_connected_midi_inputs()` reflects the ports the client reported.
 #[test]
 fn webmidi_input_events() {
+    let _guard = serial();
     let (_handle, port, _dir) = boot_with_script(MIDI_GD);
     play_paused(port);
     // `_ready` runs as the play tree is built; this frame drains it, so
@@ -283,6 +296,7 @@ fn webmidi_input_events() {
 /// pitch/velocity.
 #[test]
 fn control_change_on_a_nonzero_channel_round_trips() {
+    let _guard = serial();
     let (_handle, port, _dir) = boot_with_script(
         "\
 extends Node2D
@@ -327,6 +341,7 @@ func _input(event):
 /// action.
 #[test]
 fn a_truncated_packet_is_refused_not_padded() {
+    let _guard = serial();
     let (_handle, port, _dir) = boot_with_script(
         "\
 extends Node2D
@@ -356,6 +371,7 @@ func _input(event):
 /// still has to populate `OS.get_connected_midi_inputs()`.
 #[test]
 fn a_ports_only_report_carries_no_event() {
+    let _guard = serial();
     let (_handle, port, _dir) = boot_with_script(
         "\
 extends Node2D

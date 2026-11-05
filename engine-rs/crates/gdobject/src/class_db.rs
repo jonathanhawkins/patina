@@ -619,8 +619,33 @@ impl ClassDB {
     }
 }
 
-/// Returns a reference to the global ClassDB instance.
+thread_local! {
+    /// A test-scoped ClassDB for THIS thread (pat-hukbz).
+    ///
+    /// `clear_for_testing()` used to empty the one process-wide ClassDB. Under
+    /// `cargo test` many tests share a process, so one test's clear wiped the
+    /// classes another test had just registered (`viewport_2d_render` lost its
+    /// Sprite2D items mid-test), and a test that registered a small fixture
+    /// hierarchy saw a concurrent test's `register_2d_classes()` leak into its
+    /// counts. Nextest hid all of it by giving each test its own process.
+    ///
+    /// Now `clear_for_testing()` gives the calling thread a private, empty DB
+    /// and every ClassDB call on that thread goes to it; other threads keep
+    /// using the global one. libtest runs every test on its own fresh thread,
+    /// so the private DB is exactly test-scoped and needs no teardown. Leaked
+    /// once per clearing thread — tests only.
+    ///
+    /// ⚠️ A thread the test spawns does NOT inherit it: it sees the global DB.
+    static TEST_DB: std::cell::Cell<Option<&'static Mutex<ClassDB>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Returns the ClassDB this thread uses: its test-scoped one if
+/// `clear_for_testing()` installed one, else the process-wide instance.
 fn global_db() -> &'static Mutex<ClassDB> {
+    if let Some(db) = TEST_DB.with(|slot| slot.get()) {
+        return db;
+    }
     static DB: OnceLock<Mutex<ClassDB>> = OnceLock::new();
     DB.get_or_init(|| Mutex::new(ClassDB::new()))
 }
@@ -32031,12 +32056,27 @@ fn register_resource_importer_classes() {
     }
 }
 
-/// Clears all registered classes. **For testing only.**
+/// Gives the calling thread an empty, private ClassDB. **For testing only.**
 ///
-/// This is necessary because the ClassDB is global and tests run in the
-/// same process. Each test that registers classes should call this first.
+/// Every later ClassDB call on this thread reads and writes that private DB,
+/// so a test that clears and registers its own fixture classes can neither
+/// disturb nor be disturbed by tests running concurrently in the same process
+/// (pat-hukbz). A test that needs an EMPTY ClassDB must call this too — the
+/// process-wide DB is whatever the other tests in the binary have registered.
+/// Calling it again on the same thread empties the private DB again.
+///
+/// The process-wide DB is never touched. Threads the test spawns do not see
+/// the private DB.
 pub fn clear_for_testing() {
-    let mut db = global_db().lock().expect("ClassDB lock poisoned");
+    let db = TEST_DB.with(|slot| match slot.get() {
+        Some(db) => db,
+        None => {
+            let db: &'static Mutex<ClassDB> = Box::leak(Box::new(Mutex::new(ClassDB::new())));
+            slot.set(Some(db));
+            db
+        }
+    });
+    let mut db = db.lock().expect("ClassDB lock poisoned");
     db.classes.clear();
     db.by_id.clear();
     db.next_id = 1;
@@ -33828,6 +33868,53 @@ mod tests {
         let guard = TEST_LOCK.lock().expect("test lock poisoned");
         clear_for_testing();
         guard
+    }
+
+    // -- pat-hukbz: clear_for_testing is scoped to the calling thread --------
+
+    /// `clear_for_testing()` must give its thread a private DB and leave the
+    /// process-wide one alone. Before pat-hukbz it emptied the process-wide
+    /// DB, so under `cargo test` one test's clear wiped classes a concurrent
+    /// test had just registered. Each step runs on its own thread, the way
+    /// libtest runs each test.
+    #[test]
+    fn clear_for_testing_is_scoped_to_the_calling_thread() {
+        std::thread::spawn(|| {
+            register_class(ClassRegistration::new("HukbzProcessWideOnly"));
+        })
+        .join()
+        .unwrap();
+
+        std::thread::spawn(|| {
+            clear_for_testing();
+            assert!(
+                !class_exists("HukbzProcessWideOnly"),
+                "a cleared thread must start from an EMPTY ClassDB"
+            );
+            register_class(ClassRegistration::new("HukbzThreadOnly"));
+            assert!(class_exists("HukbzThreadOnly"));
+            clear_for_testing();
+            assert!(
+                !class_exists("HukbzThreadOnly"),
+                "a second clear empties the thread's DB again"
+            );
+            register_class(ClassRegistration::new("HukbzThreadOnly"));
+        })
+        .join()
+        .unwrap();
+
+        std::thread::spawn(|| {
+            assert!(
+                class_exists("HukbzProcessWideOnly"),
+                "another thread's clear_for_testing must not empty the process-wide ClassDB"
+            );
+            assert!(
+                !class_exists("HukbzThreadOnly"),
+                "a class registered on a cleared thread must not leak process-wide"
+            );
+        })
+        .join()
+        .unwrap();
     }
 
     // -- pat-nzgdu.98: signals / integer constants / enums on ClassInfo -------

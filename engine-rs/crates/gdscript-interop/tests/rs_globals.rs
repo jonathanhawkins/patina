@@ -17,6 +17,18 @@
 use gdscript_interop::interpreter::Interpreter;
 use gdvariant::Variant;
 
+/// Serializes the tests in this binary that touch the global shader-parameter table (gdvariant::shader_globals) (pat-hukbz).
+///
+/// That state is process-global. Nextest gives each test its own process, but
+/// plain `cargo test` runs the tests as threads in ONE process, where they
+/// overwrote each other's state mid-test. Bind the guard for the whole test.
+/// Poison-tolerant, so one failing test does not fail the rest.
+#[must_use = "bind it for the whole test: `let _guard = serial();`"]
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Runs `check()` on a fresh instance of `src` through real VM dispatch.
 fn call_check(src: &str) -> Variant {
     let mut interp = Interpreter::new();
@@ -31,6 +43,7 @@ fn call_check(src: &str) -> Variant {
 
 #[test]
 fn global_shader_parameter_add_set_and_get() {
+    let _guard = serial();
     gdvariant::shader_globals::clear();
 
     let src = "\
@@ -60,6 +73,7 @@ func check():
 /// and reading back the INT is exactly the round trip that was broken.
 #[test]
 fn global_shader_parameter_get_type_reports_the_declared_type() {
+    let _guard = serial();
     gdvariant::shader_globals::clear();
 
     let src = "\
@@ -80,6 +94,7 @@ func check():
 /// make the inspector and any script iterating it nondeterministic.
 #[test]
 fn global_shader_parameter_get_list_is_sorted() {
+    let _guard = serial();
     gdvariant::shader_globals::clear();
 
     let src = "\
@@ -102,6 +117,7 @@ func check():
 /// typeless entry that would fail later at shader binding.
 #[test]
 fn setting_an_undeclared_parameter_does_not_create_it() {
+    let _guard = serial();
     gdvariant::shader_globals::clear();
 
     let src = "\
@@ -122,6 +138,7 @@ func check():
 /// script last set — the behaviour `ShaderGlobalsOverride` depends on.
 #[test]
 fn override_applies_and_reverts() {
+    let _guard = serial();
     gdvariant::shader_globals::clear();
 
     let src = "\
@@ -157,6 +174,7 @@ func check():
 /// `remove` drops it entirely.
 #[test]
 fn global_shader_parameter_remove() {
+    let _guard = serial();
     gdvariant::shader_globals::clear();
 
     let src = "\

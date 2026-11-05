@@ -21,6 +21,18 @@
 use gdscript_interop::interpreter::Interpreter;
 use gdvariant::Variant;
 
+/// Serializes the tests in this binary that touch the res:// path roots (each test roots res:// at its own temp project) (pat-hukbz).
+///
+/// That state is process-global. Nextest gives each test its own process, but
+/// plain `cargo test` runs the tests as threads in ONE process, where they
+/// overwrote each other's state mid-test. Bind the guard for the whole test.
+/// Poison-tolerant, so one failing test does not fail the rest.
+#[must_use = "bind it for the whole test: `let _guard = serial();`"]
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Builds a small project tree and points `res://` at it.
 ///
 /// Returns the temp dir; the caller must keep it alive for the test's duration
@@ -80,6 +92,7 @@ fn strs(v: &Variant) -> Vec<String> {
 /// `EditorFileSystemDirectory`, and enumerate files matching the real tree.
 #[test]
 fn editor_filesystem_service_reachable_via_editorinterface() {
+    let _guard = serial();
     let _root = project_fixture();
 
     // Walk the root: its own path, its subdirectories, and its files.
@@ -124,6 +137,7 @@ fn editor_filesystem_service_reachable_via_editorinterface() {
 /// anything it found.
 #[test]
 fn walking_into_a_subdirectory_yields_resource_paths() {
+    let _guard = serial();
     let _root = project_fixture();
 
     let v = run_val(
@@ -157,6 +171,7 @@ fn walking_into_a_subdirectory_yields_resource_paths() {
 /// script climbing with `while d.get_parent() != null` never stops.
 #[test]
 fn the_root_has_no_parent() {
+    let _guard = serial();
     let _root = project_fixture();
 
     let v = run_val(
@@ -171,6 +186,7 @@ fn the_root_has_no_parent() {
 /// test covers every clause it names rather than most of them.
 #[test]
 fn editor_paths_cache_dir_resolves() {
+    let _guard = serial();
     let v = run_val("return EditorPaths.get_cache_dir()\n");
     match v {
         Variant::String(s) => assert!(

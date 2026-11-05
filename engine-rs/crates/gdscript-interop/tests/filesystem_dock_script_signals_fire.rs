@@ -19,6 +19,18 @@ use gdobject::class_db::{class_exists, is_parent_class, register_all_classes};
 use gdscript_interop::interpreter::Interpreter;
 use gdvariant::Variant;
 
+/// Serializes the tests in this binary that touch the FileSystemDock signal queue (pat-hukbz).
+///
+/// That state is process-global. Nextest gives each test its own process, but
+/// plain `cargo test` runs the tests as threads in ONE process, where they
+/// overwrote each other's state mid-test. Bind the guard for the whole test.
+/// Poison-tolerant, so one failing test does not fail the rest.
+#[must_use = "bind it for the whole test: `let _guard = serial();`"]
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 const SCRIPT: &str = "\
 var moved_old = \"\"
 var moved_new = \"\"
@@ -109,6 +121,7 @@ fn instance() -> (Interpreter, gdscript_interop::interpreter::ClassInstance) {
 
 #[test]
 fn get_file_system_dock_returns_a_dock_a_script_can_use() {
+    let _guard = serial();
     let (mut interp, mut inst) = instance();
     let ok = interp
         .call_instance_method(&mut inst, "setup", &[])
@@ -122,6 +135,7 @@ fn get_file_system_dock_returns_a_dock_a_script_can_use() {
 
 #[test]
 fn a_connected_script_receives_files_moved_from_the_editor_server() {
+    let _guard = serial();
     let (mut interp, mut inst) = instance();
     interp
         .call_instance_method(&mut inst, "setup", &[])
@@ -163,6 +177,7 @@ fn a_connected_script_receives_files_moved_from_the_editor_server() {
 
 #[test]
 fn an_unconnected_signal_reaches_nobody_and_does_not_raise() {
+    let _guard = serial();
     // The control: a queued signal with no listener must drain harmlessly
     // rather than erroring or landing on the wrong callback.
     let (mut interp, mut inst) = instance();

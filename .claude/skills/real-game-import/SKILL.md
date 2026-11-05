@@ -127,6 +127,39 @@ brief includes:
 Tell agents that touch the same file (for example the Play render path) about
 each other. Keep tool changes surgical.
 
+### Plain `cargo test` per crate is safe (pat-hukbz)
+
+Nextest starts one process per test. With several agents testing at once
+that floods the macOS launch queue (a hello-world once took 34 s to start).
+`cargo test` runs a whole binary's tests as threads in ONE process, so it
+launches far fewer processes. For gdscene, gdeditor, gdobject,
+gdscript-interop and gdresource it is green and stable:
+
+    scripts/rust_task.sh test -p <crate> --lib --tests
+
+Give all crates in ONE command (`-p a -p b ...`). Separate per-crate
+commands resolve features differently and rebuild about 25 crates each time.
+
+A test that touches process-global state must isolate itself. Use these
+patterns, never `#[ignore]`:
+
+- **ClassDB.** `gdobject::class_db::clear_for_testing()` gives the calling
+  test thread its own EMPTY ClassDB. Every later ClassDB call on that thread
+  uses it, and the process-wide DB is never touched. A test that needs an
+  empty ClassDB must call it, because the process-wide DB holds whatever the
+  other tests registered. Threads that the test spawns (an editor server,
+  rayon) still see the process-wide DB.
+- **Other globals.** This covers `set_path_roots`, the TranslationServer
+  locale, the global RNG, `shader_globals`, the MIDI/command/dock stores and
+  the `*ServerManager` registries. Lock a file-local `serial()` mutex (copy it
+  from `crates/gdscript-interop/tests/editor_cmds.rs`) for the whole test.
+  Restore anything that outlives the test, such as a changed default server.
+- **Node ids** come from a process-wide counter. Never hard-code `1` for the
+  root; read `tree.root_id().raw()`.
+
+A failure that appears only under `cargo test` is an isolation bug in that
+test. Fix it with one of the patterns above.
+
 ## 6. Merge, then the full suite, then the gate
 
 - Merge the worktree branches one at a time and resolve conflicts by reading

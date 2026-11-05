@@ -27,6 +27,18 @@
 
 use gdobject::class_db::{class_exists, get_class_info, register_all_classes};
 
+/// Serializes the tests in this binary that touch the TranslationServer locale/translations and the OS logger list (pat-hukbz).
+///
+/// That state is process-global. Nextest gives each test its own process, but
+/// plain `cargo test` runs the tests as threads in ONE process, where they
+/// overwrote each other's state mid-test. Bind the guard for the whole test.
+/// Poison-tolerant, so one failing test does not fail the rest.
+#[must_use = "bind it for the whole test: `let _guard = serial();`"]
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// `(class, parent, [(virtual, argument count, is const)])`.
 type Surface = (
     &'static str,
@@ -326,6 +338,7 @@ func _get_message(src_message, context):
 /// a DIFFERENT script — while an unmapped key falls through unchanged.
 #[test]
 fn script_translation_answers_tr_and_unmapped_keys_fall_through() {
+    let _guard = serial();
     let driver = "\
 extends Node
 
@@ -360,6 +373,7 @@ func _ready():
 /// dispatch and not a constant.
 #[test]
 fn a_declining_script_translation_falls_back_to_the_catalog() {
+    let _guard = serial();
     let driver = "\
 extends Node
 
@@ -383,6 +397,7 @@ func _ready():
 /// receives one `_log_message` per `print()` from a scene script.
 #[test]
 fn script_logger_receives_one_log_message_per_print() {
+    let _guard = serial();
     let sink = "\
 extends Logger
 
@@ -427,6 +442,7 @@ func _ready():
 /// hypothetical — without it this test does not fail, it hangs or overflows.
 #[test]
 fn a_logger_that_prints_does_not_recurse() {
+    let _guard = serial();
     let sink = "\
 extends Logger
 
@@ -459,6 +475,7 @@ func _ready():
 /// not a latch that is on once anything registers.
 #[test]
 fn removing_a_logger_stops_the_dispatch() {
+    let _guard = serial();
     let sink = "\
 extends Logger
 
