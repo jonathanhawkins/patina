@@ -394,3 +394,90 @@ fn the_robot_draws_with_the_external_materials_its_import_names() {
         .expect("surface 1: player_glow");
     assert!((glow.albedo.b - 1.75).abs() < 1e-4, "{:?}", glow.albedo);
 }
+
+/// 🔑 pat-3u1wu: `tile_material.tres` authors `texture_filter = 4`
+/// (NEAREST_WITH_MIPMAPS_ANISOTROPIC) and `texture_repeat = false`, and the
+/// tile draws reach the renderer with both — and the GPU sampler built for
+/// them is nearest/nearest with a linear mip filter, clamped, as Godot's
+/// `material_storage.cpp` configures it. Before the fix neither key was read
+/// and the GPU sampled every material bilinear, so the pixel-art tiles were
+/// blurred against Godot's crisp ones.
+#[test]
+fn level_tiles_sample_nearest_and_clamped_as_their_material_authors() {
+    use gdserver3d::material::TextureFilter;
+    let (prepared, _) = play_frame(320, 180);
+    let Play3DScene::Camera { inputs, .. } = &prepared.scene else {
+        panic!("game.tscn has a current Camera3D");
+    };
+    let floors = mesh_items(&inputs.items, "stage/meshes/floor.res");
+    assert!(!floors.is_empty(), "floor tiles in the render list");
+    let mat = floors[0].material.as_ref().expect("tile material");
+    assert_eq!(mat.texture_filter, TextureFilter::NearestWithMipmapsAnisotropic);
+    assert!(!mat.texture_repeat, "texture_repeat = false");
+
+    #[cfg(feature = "gpu-render")]
+    {
+        use gdrender3d::wgpu::{AddressMode, FilterMode, MipmapFilterMode};
+        use gdrender3d::wgpu_pipeline::{material_sampler_descriptor, MaterialSamplerKey};
+        let d = material_sampler_descriptor(MaterialSamplerKey::of(mat));
+        assert_eq!((d.mag_filter, d.min_filter), (FilterMode::Nearest, FilterMode::Nearest));
+        assert_eq!(d.mipmap_filter, MipmapFilterMode::Linear);
+        assert_eq!(d.address_mode_u, AddressMode::ClampToEdge);
+        // CONTROL: a material that authors nothing keeps Godot's default
+        // LINEAR_WITH_MIPMAPS + repeat, so the tile result is the key, not a
+        // sampler that is nearest for everything.
+        let def = material_sampler_descriptor(MaterialSamplerKey::of(
+            &gdserver3d::material::Material3D::default(),
+        ));
+        assert_eq!((def.mag_filter, def.min_filter), (FilterMode::Linear, FilterMode::Linear));
+        assert_eq!(def.address_mode_u, AddressMode::Repeat);
+    }
+}
+
+/// 🔑 pat-wyei2: the player's coin counter (`CoinCount`, a Label3D with
+/// `no_depth_test`, default `alpha_cut` and `outline_size` 12 at 48 pt)
+/// reaches the renderer ALPHA-BLENDED, with a text texture that is transparent
+/// around a THIN outline — Godot draws bare yellow outlined text.
+///
+/// Before the fix the label material was opaque (`Transparency::Disabled`), so
+/// every uncovered texel drew as a dark box, and `outline_size` was read as the
+/// ring's RADIUS where Godot's stroker uses a quarter of it, so the ring
+/// closed over the glyph's counters into a solid slab.
+#[test]
+fn the_coin_counter_label_is_alpha_blended_text_with_a_thin_outline() {
+    use gdserver3d::material::Transparency;
+    let (prepared, paths) = play_frame(320, 180);
+    let Play3DScene::Camera { inputs, .. } = &prepared.scene else {
+        panic!("game.tscn has a current Camera3D");
+    };
+    let label = items_at(&inputs.items, &paths, "/root/Game/Player/Player/Skeleton/CoinCount");
+    assert_eq!(label.len(), 1, "CoinCount in the render list");
+    let mat = label[0].material.as_ref().expect("label material");
+    assert_eq!(mat.transparency, Transparency::Alpha, "alpha_cut DISABLED = alpha blending");
+    assert!(mat.no_depth_test, "player.tscn sets no_depth_test = true");
+
+    let tex = mat.albedo_texture.as_ref().expect("label text texture");
+    let clear = tex.pixels.iter().filter(|c| c.a == 0.0).count();
+    let outline = tex
+        .pixels
+        .iter()
+        .filter(|c| c.a > 0.0 && c.r + c.g + c.b < 0.05)
+        .count();
+    let glyph = tex.pixels.iter().filter(|c| c.a > 0.0 && c.r > 0.5).count();
+    assert!(glyph > 0, "the digit draws in its modulate colour");
+    // Godot: stroke radius = outline_size / 4 font px = 3 px at 48 pt, i.e.
+    // 3 * 42/48 = 2.6 -> 3 texels of this 42-texel-tall glyph.
+    assert_eq!(gdeditor::sprite3d_render::label3d_outline_texels(12, 48, 6), 3);
+    // The built-in 5x7 "0" fills most of its cell, so only the corners and
+    // the counters stay clear (276 of 1728 texels at the fixed radius).
+    assert!(
+        clear * 10 > tex.pixels.len(),
+        "the label quad must stay transparent around the text: \
+         {clear} clear of {} texels ({outline} outline, {glyph} glyph)",
+        tex.pixels.len()
+    );
+    assert!(
+        outline < glyph * 2,
+        "the outline is a thin ring, not a slab: {outline} outline texels vs {glyph} glyph"
+    );
+}

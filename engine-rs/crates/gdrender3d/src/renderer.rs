@@ -431,7 +431,7 @@ impl SoftwareRenderer3D {
                     },
                     environment: base.environment.clone(),
                 };
-                let frame = self.render_frame_solid(&face_view);
+                let frame = self.render_frame_solid_with(&face_view, false);
                 cube.set_face(
                     face,
                     remap_capture_to_cubemap_face(face, &basis, &frame.pixels, resolution),
@@ -775,6 +775,20 @@ impl SoftwareRenderer3D {
     }
 
     fn render_frame_solid(&self, viewport: &Viewport3D) -> FrameData3D {
+        self.render_frame_solid_with(viewport, true)
+    }
+
+    /// [`Self::render_frame_solid`], optionally WITHOUT the camera
+    /// post-process (tonemap + sRGB encode).
+    ///
+    /// ⚠️ A reflection-probe face must be captured with `camera_post = false`
+    /// (pat-3u1wu). Godot's probe atlas holds the scene's LINEAR HDR radiance,
+    /// and both renderers multiply what they sample from it straight into the
+    /// linear shading sum. A tonemapped, sRGB-ENCODED capture lifted every
+    /// reflected value (linear 0.05 reads back as 0.25), so the platformer's
+    /// metal robot, which Godot shows near-black reflecting dark walls, drew
+    /// light grey.
+    fn render_frame_solid_with(&self, viewport: &Viewport3D, camera_post: bool) -> FrameData3D {
         let w = viewport.width;
         let h = viewport.height;
         let pixel_count = (w * h) as usize;
@@ -1172,6 +1186,7 @@ impl SoftwareRenderer3D {
                         roughness: entry.material.roughness_texture.clone(),
                         metallic: entry.material.metallic_texture.clone(),
                         emission: entry.material.emission_texture.clone(),
+                        nearest: entry.material.texture_filter.is_nearest(),
                     },
                 };
 
@@ -1306,7 +1321,9 @@ impl SoftwareRenderer3D {
         );
         // SSAO runs before tonemapping, gated on the environment.
         crate::postprocess::apply_ssao_env(&mut pixels, &depth_normalized, w, h, env);
-        crate::postprocess::apply_camera_post(&mut pixels, w, h, env);
+        if camera_post {
+            crate::postprocess::apply_camera_post(&mut pixels, w, h, env);
+        }
 
         FrameData3D {
             width: w,

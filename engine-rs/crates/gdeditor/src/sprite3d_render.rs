@@ -22,7 +22,7 @@ use gdrender2d::font::{char_bitmap, CHAR_GAP, CHAR_HEIGHT, CHAR_WIDTH};
 use gdscene::node::NodeId;
 use gdscene::render_server_3d::MaterialTextureCache;
 use gdscene::SceneTree;
-use gdserver3d::material::{CullMode, Material3D, ShadingMode, TextureImage};
+use gdserver3d::material::{CullMode, Material3D, ShadingMode, TextureImage, Transparency};
 use gdserver3d::mesh::{Mesh3D, PrimitiveType};
 use gdvariant::Variant;
 
@@ -645,6 +645,35 @@ fn cached_label_texture(
     Some(texture)
 }
 
+/// The outline ring's radius in texture texels for a Label3D with
+/// `outline_size` at `font_size`, drawn with glyph cells `scale` texels per
+/// font cell (pat-wyei2): Godot's stroke radius is `outline_size / 4` font
+/// pixels (see the call site), rescaled to this texture's glyph height.
+pub fn label3d_outline_texels(outline_size: i64, font_size: i64, scale: u32) -> u32 {
+    if outline_size <= 0 {
+        return 0;
+    }
+    let radius_font_px = outline_size as f32 / 4.0;
+    let texels_per_font_px = (CHAR_HEIGHT * scale) as f32 / font_size.max(1) as f32;
+    ((radius_font_px * texels_per_font_px).round() as u32).max(1)
+}
+
+/// The `BaseMaterial3D` transparency Godot gives a Label3D's glyph material
+/// for its `alpha_cut` mode (`label_3d.cpp:386-393`, pat-wyei2).
+///
+/// ⚠️ `ALPHA_CUT_DISABLED` (the default) is ALPHA BLENDING, not opaque. Patina
+/// left the label material at `Transparency::Disabled`, so every texel the
+/// glyphs do not cover — transparent black — drew as an opaque dark box.
+pub fn label3d_transparency(alpha_cut: i64) -> Transparency {
+    match alpha_cut {
+        1 => Transparency::AlphaScissor,
+        3 => Transparency::AlphaHash,
+        // 0 = DISABLED, 2 = OPAQUE_PREPASS (TRANSPARENCY_ALPHA_DEPTH_PRE_PASS,
+        // which Patina draws as plain alpha — `Transparency::from_godot_int(4)`).
+        _ => Transparency::Alpha,
+    }
+}
+
 pub fn label3d_geometry(tree: &SceneTree, nid: NodeId) -> Option<(Mesh3D, Material3D)> {
     let node = tree.get_node(nid)?;
     let text = match node.get_property("text") {
@@ -688,13 +717,17 @@ pub fn label3d_geometry(tree: &SceneTree, nid: NodeId) -> Option<(Mesh3D, Materi
     // Godot, which is what "has outline-colour pixels around the glyphs" means
     // at any font size.
     //
+    // ⚠️ `outline_size` is NOT the ring's radius (pat-wyei2). Godot strokes the
+    // glyph with `FT_Stroker_Set(stroker, size.y * 16, ...)`
+    // (text_server_adv.cpp:1383) where `size.y` is `outline_size` and the
+    // radius is in 26.6 fixed point — `outline_size * 16 / 64`, a QUARTER of
+    // it. Reading it as the radius made the platformer's 12 px coin-counter
+    // outline 4x too thick: the ring closed over the glyph's counters and drew
+    // a solid dark slab behind the digit.
+    //
     // `max(1)` once non-zero: an authored outline must never round down to no
     // outline at all, which would look exactly like the property being ignored.
-    let outline_px = if outline_size == 0 {
-        0
-    } else {
-        ((outline_size * (CHAR_HEIGHT as i64) * (scale as i64)) / font_size.max(1)).max(1) as u32
-    };
+    let outline_px = label3d_outline_texels(outline_size, font_size, scale);
 
     // ⚠️ Two different colour conventions, and the albedo below depends on
     // which ran. With an outline the texture carries BOTH colours and the
@@ -740,6 +773,20 @@ pub fn label3d_geometry(tree: &SceneTree, nid: NodeId) -> Option<(Mesh3D, Materi
         // by winding and the text never reaches a pixel (pat-mgixk.34).
         double_sided: true,
         cull_mode: CullMode::Disabled,
+        // pat-wyei2: Godot's label material (`get_material_for_2d`) is
+        // transparent per `alpha_cut`, honours `no_depth_test`, and samples
+        // with the label's own `texture_filter`.
+        transparency: label3d_transparency(match node.get_property("alpha_cut") {
+            Variant::Int(i) => i,
+            _ => 0,
+        }),
+        alpha_scissor_threshold: as_f32(node.get_property("alpha_scissor_threshold"))
+            .unwrap_or(0.5),
+        no_depth_test: matches!(node.get_property("no_depth_test"), Variant::Bool(true)),
+        texture_filter: match node.get_property("texture_filter") {
+            Variant::Int(i) => gdserver3d::material::TextureFilter::from_godot_int(i),
+            _ => gdserver3d::material::TextureFilter::LinearWithMipmaps,
+        },
         ..Default::default()
     };
     Some((mesh, material))
