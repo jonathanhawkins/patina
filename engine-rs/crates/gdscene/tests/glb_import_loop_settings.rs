@@ -35,12 +35,22 @@ fn platformer_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../games/platformer_3d")
 }
 
+/// The upstream `player.glb.import`, shipped with the fixture (games/ tracks
+/// its `.import` files).
 fn upstream_sidecar() -> String {
-    std::fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/platformer_3d_upstream_import/player.glb.import"),
-    )
-    .expect("upstream sidecar fixture")
+    std::fs::read_to_string(platformer_root().join("player/player.glb.import"))
+        .expect("games/platformer_3d/player/player.glb.import")
+}
+
+/// The platformer's `project.godot` and `player/` folder in a temp project
+/// with the glb's sidecar REMOVED: Godot's behaviour with no `.import`.
+fn project_without_sidecar() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(platformer_root().join("project.godot"), dir.path().join("project.godot"))
+        .unwrap();
+    copy_dir(&platformer_root().join("player"), &dir.path().join("player"));
+    std::fs::remove_file(dir.path().join("player/player.glb.import")).unwrap();
+    dir
 }
 
 fn copy_dir(from: &Path, to: &Path) {
@@ -115,8 +125,9 @@ fn upstream_sidecar_loops_exactly_the_clips_godot_loops() {
 #[test]
 fn without_a_sidecar_no_platformer_clip_loops_as_in_godot() {
     let _g = ROOTS.lock().unwrap_or_else(|e| e.into_inner());
-    let (tree, glb) = boot(&platformer_root(), "player/player.glb");
-    // Godot on the fixture as shipped (no `.import`): every loop_mode is 0.
+    let project = project_without_sidecar();
+    let (tree, glb) = boot(project.path(), "player/player.glb");
+    // Godot with no `.import` next to the glb: every loop_mode is 0.
     for (name, mode) in loop_modes(&tree, glb) {
         assert_eq!(mode, LoopMode::None, "{name}");
     }

@@ -41,9 +41,42 @@ fn platformer_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../games/platformer_3d")
 }
 
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let dest = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &dest);
+        } else {
+            std::fs::copy(entry.path(), dest).unwrap();
+        }
+    }
+}
+
+/// The Godot reference numbers below were captured on the fixture WITHOUT its
+/// `.glb.import` sidecars (they were gitignored then); with the sidecar
+/// `idle`/`jump` loop instead of holding their last frame. So the tests boot a
+/// temp copy of the game with both glb sidecars removed, rather than relying on
+/// what the checkout happens to contain.
+fn sidecarless_root() -> PathBuf {
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        copy_dir(&platformer_root(), dir.path());
+        for glb in ["player/player.glb.import", "enemy/enemy.glb.import"] {
+            let _ = std::fs::remove_file(dir.path().join(glb));
+        }
+        dir
+    })
+    .path()
+    .to_path_buf()
+}
+
 fn boot(scene: &str) -> (SceneTree, NodeId) {
-    let root = platformer_root();
+    let root = sidecarless_root();
     assert!(root.join("project.godot").exists(), "fixture missing");
+    assert!(!root.join("player/player.glb.import").exists());
     gdcore::file_access::set_path_roots(Some(root), None);
     begin_subscene_session();
     let packed = load_scene_from_res(&format!("res://{scene}"))
