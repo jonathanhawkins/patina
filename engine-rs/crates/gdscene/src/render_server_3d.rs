@@ -2231,6 +2231,161 @@ pub fn mesh3d_from_gltf_resource_for_mesh(
 /// Extracts a [`Material3D`] from a glTF resource's first sub-resource PBR properties.
 ///
 /// Returns `None` if no material properties are present.
+/// The material of every surface of a glTF mesh, in the surface order
+/// [`mesh3d_from_gltf_resource_for_mesh`] builds them (pat-zwvgw), memoized per
+/// thread by `(path, mesh_index)` — the render list asks every frame.
+///
+/// 🔑 glTF factors are LINEAR; Godot's importer stores them on the
+/// StandardMaterial3D sRGB-encoded (`GLTFDocument::_parse_materials`:
+/// `linear_to_srgb()` on `baseColorFactor` and `emissiveFactor`), and
+/// [`Material3D`] colours are sRGB authoring values, so they are encoded here.
+/// `material_from_gltf_resource` (first primitive only, raw factor) predates
+/// this and is left for its callers.
+pub fn gltf_surface_materials(path: &str, mesh_index: Option<i64>) -> Vec<Material3D> {
+    thread_local! {
+        static CACHE: std::cell::RefCell<HashMap<(String, Option<i64>), Vec<Material3D>>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    let key = (path.to_string(), mesh_index);
+    if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    let on_disk = path.strip_prefix("res://").unwrap_or(path);
+    let resolved = gdcore::resolve_path(path)
+        .ok()
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| std::path::PathBuf::from(on_disk));
+    let external = gltf_external_materials(path);
+    let out: Vec<Material3D> = gdresource::import_gltf(&resolved)
+        .map(|res| {
+            let mut subs: Vec<(&String, &Arc<gdresource::Resource>)> = match mesh_index {
+                Some(want) => {
+                    let mut m: Vec<_> = res
+                        .subresources
+                        .iter()
+                        .filter(|(_, s)| {
+                            matches!(s.get_property("mesh_index"), Some(Variant::Int(i)) if *i == want)
+                        })
+                        .collect();
+                    m.sort_by_key(|(_, s)| match s.get_property("primitive_index") {
+                        Some(Variant::Int(i)) => *i,
+                        _ => 0,
+                    });
+                    m
+                }
+                None => {
+                    let mut all: Vec<_> = res.subresources.iter().collect();
+                    all.sort_by_key(|(k, _)| (*k).clone());
+                    all
+                }
+            };
+            subs.retain(|(_, s)| s.get_property("vertices").is_some());
+            subs.iter()
+                .map(|(_, s)| {
+                    // The import's external material for this glTF material
+                    // name wins, as it does in Godot's scene importer.
+                    if let Some(Variant::String(name)) = s.get_property("material_name") {
+                        if let Some(mat) = external.get(name) {
+                            return mat.clone();
+                        }
+                    }
+                    let color = |k: &str, d: Color| match s.get_property(k) {
+                        Some(Variant::Color(c)) => *c,
+                        _ => d,
+                    };
+                    let float = |k: &str, d: f32| match s.get_property(k) {
+                        Some(Variant::Float(f)) => *f as f32,
+                        _ => d,
+                    };
+                    let albedo_lin = color("material_albedo", Color::new(1.0, 1.0, 1.0, 1.0));
+                    let albedo = Color::new(albedo_lin.r, albedo_lin.g, albedo_lin.b, 1.0)
+                        .linear_to_srgb();
+                    let emission = color("material_emissive", Color::BLACK).linear_to_srgb();
+                    Material3D {
+                        albedo: Color::new(albedo.r, albedo.g, albedo.b, albedo_lin.a),
+                        metallic: float("material_metallic", 1.0),
+                        roughness: float("material_roughness", 1.0),
+                        emission: Color::new(emission.r, emission.g, emission.b, 1.0),
+                        double_sided: matches!(
+                            s.get_property("material_double_sided"),
+                            Some(Variant::Bool(true))
+                        ),
+                        // StandardMaterial3D's shading: per-pixel PBR.
+                        shading_mode: gdserver3d::material::ShadingMode::Phong,
+                        ..Material3D::default()
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    CACHE.with(|c| c.borrow_mut().insert(key, out.clone()));
+    out
+}
+
+/// The external materials a glTF's `.import` maps its materials to
+/// (`_subresources.materials.<name>`, `use_external/enabled = true`), by glTF
+/// material name, loaded from each one's `use_external/fallback_path`
+/// (pat-zwvgw). The official 3D platformer's robot draws with
+/// `player_gray.tres` / `player_glow.tres` this way, not the glb's own colours.
+fn gltf_external_materials(gltf_path: &str) -> HashMap<String, Material3D> {
+    let mut out = HashMap::new();
+    let import_path = format!("{gltf_path}.import");
+    let Ok(text) = gdcore::file_access::FileAccess::read_file_string(&import_path) else {
+        return out;
+    };
+    let Some(start) = text.find("\"materials\": {") else {
+        return out;
+    };
+    let body = &text[start + "\"materials\": {".len()..];
+    let mut textures = MaterialTextureCache::new();
+    // Entries look like `"name": {\n"use_external/enabled": true, ... }`.
+    let mut rest = body;
+    while let Some(q) = rest.find('"') {
+        let after = &rest[q + 1..];
+        let Some(end) = after.find('"') else { break };
+        let name = &after[..end];
+        let tail = &after[end + 1..];
+        let Some(open) = tail.find('{') else { break };
+        if !tail[..open].trim().starts_with(':') {
+            break;
+        }
+        let Some(close) = tail[open..].find('}') else { break };
+        let entry = &tail[open + 1..open + close];
+        let enabled = entry.contains("\"use_external/enabled\": true");
+        let fallback = entry
+            .split("\"use_external/fallback_path\": \"")
+            .nth(1)
+            .and_then(|s| s.split('"').next());
+        if let (true, Some(path)) = (enabled, fallback) {
+            if let Ok(src) = gdcore::file_access::FileAccess::read_file_string(path) {
+                if let Ok(res) = gdresource::loader::TresLoader::new().parse_str(&src, path) {
+                    let props: HashMap<String, Variant> = res
+                        .properties()
+                        .map(|(k, v)| {
+                            let v = match v {
+                                Variant::String(r) => r
+                                    .strip_prefix("ExtResource:")
+                                    .and_then(|id| res.ext_resources.get(id))
+                                    .map(|e| Variant::String(e.path.clone()))
+                                    .unwrap_or_else(|| v.clone()),
+                                _ => v.clone(),
+                            };
+                            (k.clone(), v)
+                        })
+                        .collect();
+                    out.insert(name.to_string(), material3d_from_props(&props, &mut textures));
+                }
+            }
+        }
+        rest = &tail[open + close + 1..];
+        // The `materials` block ends at the next unmatched `}`.
+        if rest.trim_start().starts_with('}') {
+            break;
+        }
+    }
+    out
+}
+
 pub fn material_from_gltf_resource(resource: &gdresource::Resource) -> Option<Material3D> {
     let sub = resource.subresources.values().next()?;
 
@@ -3015,10 +3170,17 @@ pub fn standard_material_from_props(props: &HashMap<String, Variant>) -> Standar
 /// caches BOTH outcomes: a successful decode as `Some`, a failure as `None`, so
 /// each path is attempted exactly once per process (pat-0q2kx.42).
 ///
-/// [`gdresource::importers::load_color_texture_linear`] already does the decode
-/// — it honours `.import` sidecars, handles PNG/WebP/`.ctex`, and returns
-/// exactly the `(width, height, pixels)` that [`TextureImage`] wants — so this
-/// only adds path resolution and memoization on top.
+/// [`gdresource::importers::load_color_texture_linear`] does the decode — it
+/// honours `.import` sidecars, handles PNG/WebP/`.ctex` — and this adds path
+/// resolution and memoization on top.
+///
+/// 🔑 **Texels are stored AS AUTHORED (sRGB-encoded), not linear**
+/// (pat-zwvgw). Both renderers decode a colour map at sample time — the
+/// software `sample_material` calls `srgb_to_linear` per texel and the GPU
+/// binds colour maps as `Rgba8UnormSrgb` — so a cache that had already
+/// linearized handed them linear values to decode a SECOND time: every albedo
+/// texture drew several times too dark and over-saturated (a 0.5 texel came
+/// out 0.04 instead of Godot's 0.21), and data maps needed an undo step.
 #[derive(Debug, Default)]
 pub struct MaterialTextureCache {
     entries: HashMap<String, Option<Arc<TextureImage>>>,
@@ -3099,6 +3261,11 @@ impl MaterialTextureCache {
     }
 
     fn load(res_path: &str) -> Option<Arc<TextureImage>> {
+        // An inline GradientTexture2D, carried as a descriptor (pat-cezo4).
+        if res_path.starts_with(crate::gradient_texture::DESCRIPTOR_PREFIX) {
+            let (w, h, pixels) = crate::gradient_texture::generate(res_path)?;
+            return Some(Arc::new(TextureImage::new(w, h, pixels)));
+        }
         // `res://` needs the project roots that `set_path_roots` installs at
         // boot; a bare filesystem path is passed through so tests and tools can
         // load a texture without a project.
@@ -3114,6 +3281,9 @@ impl MaterialTextureCache {
             // absent so the material falls back to its albedo colour.
             return None;
         }
+        // Back to the authored encoding: the renderers decode colour maps
+        // themselves (see the type's note).
+        let pixels = pixels.into_iter().map(|c| c.linear_to_srgb()).collect();
         Some(Arc::new(TextureImage::new(width, height, pixels)))
     }
 }
@@ -3374,8 +3544,53 @@ pub fn material3d_for_node(
     node_id: NodeId,
     textures: &mut MaterialTextureCache,
 ) -> Option<Material3D> {
-    let props = material_props_from_node(tree, node_id)?;
-    let standard = standard_material_from_props(&props);
+    let mut props = material_props_from_node(tree, node_id)?;
+    // An inline generated texture (GradientTexture2D) travels as a descriptor
+    // in `__mattex__<slot>`, beside the raw `SubResource:` reference the bag
+    // keeps for the saver (pat-cezo4).
+    if let Some(node) = tree.get_node(node_id) {
+        for slot in ["albedo_texture"] {
+            if let Variant::String(d) = node.get_property(&format!("__mattex__{slot}")) {
+                props.insert(slot.to_string(), Variant::String(d));
+            }
+        }
+    }
+    Some(material3d_from_props(&props, textures))
+}
+
+/// The materials an `ArrayMesh` FILE gives its own surfaces, split the way the
+/// render items carry them: surface 0's material, then one entry per
+/// additional surface (`Mesh3D::surfaces[i]`) — pat-zwvgw.
+///
+/// These are the LOWEST priority materials Godot draws a surface with, below
+/// `material_override` and `surface_material_override/N`; the caller fills
+/// only the slots the node left empty. `(None, [])` for a path that is not an
+/// ArrayMesh file or whose surfaces carry no material.
+pub fn array_mesh_surface_materials(
+    path: &str,
+    textures: &mut MaterialTextureCache,
+) -> (Option<Material3D>, Vec<Option<Material3D>>) {
+    if !crate::array_mesh::is_mesh_resource_path(path) {
+        return (None, Vec::new());
+    }
+    let mut mats = crate::array_mesh::load_array_mesh_surface_materials(path)
+        .into_iter()
+        .map(|m| m.map(|m| material3d_from_props(&m.props, textures)));
+    let first = mats.next().flatten();
+    let rest: Vec<Option<Material3D>> = mats.collect();
+    if rest.iter().all(Option::is_none) {
+        return (first, Vec::new());
+    }
+    (first, rest)
+}
+
+/// A StandardMaterial3D property bag -> the renderer's [`Material3D`], with
+/// every texture reference loaded through `textures`.
+pub fn material3d_from_props(
+    props: &HashMap<String, Variant>,
+    textures: &mut MaterialTextureCache,
+) -> Material3D {
+    let standard = standard_material_from_props(props);
     let mut material = standard.to_material3d();
     if let Some(slot) = standard.albedo_texture.as_ref() {
         material.albedo_texture = textures.get_or_load(&slot.path);
@@ -3384,7 +3599,7 @@ pub fn material3d_for_node(
         material.normal_texture = textures.get_or_load(&slot.path);
     }
     load_orm_maps(&standard, &mut material, textures);
-    Some(material)
+    material
 }
 
 /// Loads a StandardMaterial3D's roughness and metallic maps into the runtime
@@ -3401,24 +3616,16 @@ fn load_orm_maps(
 ) {
     // ⚠️ DATA, not colour: Godot samples these as `hint_roughness_*` /
     // `hint_metallic`, never `source_color`, so a texel of 0.2 IS roughness
-    // 0.2. The shared cache decodes every texture sRGB→linear (right for
-    // albedo), which turned 0.2 into 0.033 — re-encode to the stored value.
-    let raw = |t: &TextureImage| {
-        TextureImage::new(
-            t.width,
-            t.height,
-            t.pixels.iter().map(|c| c.linear_to_srgb()).collect(),
-        )
-    };
+    // 0.2. The cache keeps texels as authored, so they are used as they come.
     if let Some(slot) = standard.roughness_texture.as_ref() {
         material.roughness_texture = textures
             .get_or_load(&slot.path)
-            .map(|t| Arc::new(standard.roughness_texture_channel.broadcast(&raw(&t))));
+            .map(|t| Arc::new(standard.roughness_texture_channel.broadcast(&t)));
     }
     if let Some(slot) = standard.metallic_texture.as_ref() {
         material.metallic_texture = textures
             .get_or_load(&slot.path)
-            .map(|t| Arc::new(standard.metallic_texture_channel.broadcast(&raw(&t))));
+            .map(|t| Arc::new(standard.metallic_texture_channel.broadcast(&t)));
     }
 }
 
@@ -4933,6 +5140,53 @@ mod material_texture_cache_tests {
 
     /// A real 1x1 red PNG that lives in the repo, so the success path exercises
     /// an actual decode rather than a hand-built buffer.
+    /// 🔑 pat-zwvgw: the cache hands out texels AS AUTHORED (sRGB-encoded).
+    ///
+    /// Both renderers decode a colour map at sample time (software
+    /// `sample_material` -> `srgb_to_linear`; GPU -> `Rgba8UnormSrgb`), so a
+    /// cache that linearized first made every albedo texture decode TWICE and
+    /// draw several times too dark — the platformer's grass read (9,31,14)
+    /// where Godot draws (38,96,54).
+    #[test]
+    fn the_texture_cache_keeps_texels_as_authored() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../games/platformer_3d/stage/tiles_albedo.webp");
+        let raw = gdresource::importers::import_webp(&path).expect("decode the webp");
+        let raw: Vec<Color> = match raw.get_property("pixels") {
+            Some(Variant::Array(a)) => a
+                .to_vec()
+                .iter()
+                .map(|v| match v {
+                    Variant::Color(c) => *c,
+                    _ => Color::BLACK,
+                })
+                .collect(),
+            other => panic!("pixels: {other:?}"),
+        };
+        let mut cache = MaterialTextureCache::new();
+        let cached = cache
+            .get_or_load(&path.to_string_lossy())
+            .expect("cache loads the webp");
+        assert_eq!(cached.pixels.len(), raw.len());
+        // A mid-tone texel, where sRGB and linear differ the most.
+        let i = raw
+            .iter()
+            .position(|c| c.g > 0.3 && c.g < 0.8)
+            .expect("the grass has mid-tone texels");
+        for (got, want) in [
+            (cached.pixels[i].r, raw[i].r),
+            (cached.pixels[i].g, raw[i].g),
+            (cached.pixels[i].b, raw[i].b),
+        ] {
+            assert!(
+                (got - want).abs() < 2e-3,
+                "texel {i}: cached {:?}, file {:?}",
+                cached.pixels[i],
+                raw[i]
+            );
+        }
+    }
+
     fn fixture_png() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../gdresource/fixtures/red1x1.png")
     }

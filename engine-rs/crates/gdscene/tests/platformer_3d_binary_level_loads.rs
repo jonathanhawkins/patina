@@ -105,3 +105,26 @@ fn a_binary_scene_file_loads_as_the_main_scene() {
     assert_eq!(tree.get_node(id).unwrap().class_name(), "GridMap");
     assert!(GridMap::from_node(&tree, id).unwrap().cell_count() > 2000);
 }
+
+/// pat-zwvgw: every tile `.res` names `tile_material.tres` on its surface, and
+/// that resolves to the material's own property bag with its texture
+/// references turned into the files they name — the input the render list
+/// builds each tile's material from.
+#[test]
+fn tile_meshes_resolve_their_surface_material_with_texture_paths() {
+    let _tree = load_stage();
+    let mats =
+        gdscene::array_mesh::load_array_mesh_surface_materials("res://stage/meshes/floor.res");
+    assert_eq!(mats.len(), 1, "floor.res has one surface");
+    let mat = mats[0].as_ref().expect("surface 0 names tile_material.tres");
+    assert_eq!(mat.class, "StandardMaterial3D");
+    assert_eq!(
+        mat.props.get("albedo_texture"),
+        Some(&Variant::String("res://stage/tiles_albedo.webp".into()))
+    );
+    assert_eq!(
+        mat.props.get("roughness_texture"),
+        Some(&Variant::String("res://stage/tiles_rough.webp".into()))
+    );
+    assert_eq!(mat.props.get("texture_filter"), Some(&Variant::Int(4)));
+}

@@ -130,6 +130,104 @@ pub fn load_array_mesh_file(path: &str) -> Option<Mesh3D> {
     mesh
 }
 
+/// A surface material an `ArrayMesh` file names, as the property bag of the
+/// material resource (pat-zwvgw).
+///
+/// Every texture reference in `props` is already resolved to a loadable path
+/// (`res://…`), so the bag can go straight to
+/// [`crate::render_server_3d::standard_material_from_props`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct SurfaceMaterialProps {
+    /// The material's class (`StandardMaterial3D`, `ORMMaterial3D`, …).
+    pub class: String,
+    /// The material's own properties.
+    pub props: HashMap<String, Variant>,
+}
+
+thread_local! {
+    static SURFACE_MATERIAL_CACHE: RefCell<HashMap<String, Vec<Option<SurfaceMaterialProps>>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// The material each surface of the `ArrayMesh` file at `path` carries
+/// (`_surfaces[i].material`), in surface order, memoized per thread.
+///
+/// 🔑 Godot draws a mesh surface with its OWN material whenever nothing
+/// overrides it (`render_forward_clustered.cpp`: `material_override`, else the
+/// instance's surface override, else the mesh surface's material). The
+/// official 3D platformer's whole level is GridMap cells and MeshInstance3Ds of
+/// `.res` tiles whose only material is this one, so before this every tile drew
+/// untextured grey: [`decode_surfaces`] read the reference and nothing used it.
+///
+/// `None` entries are surfaces with no material, or one that is a
+/// `ShaderMaterial` (that is a separate render channel) or cannot be read.
+pub fn load_array_mesh_surface_materials(path: &str) -> Vec<Option<SurfaceMaterialProps>> {
+    if let Some(hit) = SURFACE_MATERIAL_CACHE.with(|c| c.borrow().get(path).cloned()) {
+        return hit;
+    }
+    let out: Vec<Option<SurfaceMaterialProps>> = read_resource_file(path)
+        .filter(|res| res.class_name == "ArrayMesh")
+        .map(|res| {
+            decode_surfaces(&res)
+                .iter()
+                .map(|s| s.material.as_deref().and_then(|r| material_from_ref(&res, r)))
+                .collect()
+        })
+        .unwrap_or_default();
+    SURFACE_MATERIAL_CACHE.with(|c| c.borrow_mut().insert(path.to_string(), out.clone()));
+    out
+}
+
+/// Resolves a `SubResource:<id>` / `ExtResource:<id>` material reference held by
+/// `owner` into the material's property bag.
+fn material_from_ref(owner: &Resource, reference: &str) -> Option<SurfaceMaterialProps> {
+    let material: std::sync::Arc<Resource> =
+        if let Some(id) = reference.strip_prefix("SubResource:") {
+            owner.subresources.get(id)?.clone()
+        } else if let Some(id) = reference.strip_prefix("ExtResource:") {
+            let ext = owner.ext_resources.get(id)?;
+            read_resource_file(&ext.path)?
+        } else if reference.starts_with("res://") {
+            read_resource_file(reference)?
+        } else {
+            return None;
+        };
+    if material.class_name == "ShaderMaterial" {
+        return None;
+    }
+    // A sub-resource material resolves its textures against the file that holds
+    // it; an external one against its own file.
+    let texture_owner: &Resource = if reference.starts_with("SubResource:") {
+        owner
+    } else {
+        &material
+    };
+    let props = material
+        .properties()
+        .map(|(k, v)| {
+            let v = match v {
+                Variant::String(s) => match texture_ref_path(texture_owner, s) {
+                    Some(p) => Variant::String(p),
+                    None => v.clone(),
+                },
+                _ => v.clone(),
+            };
+            (k.clone(), v)
+        })
+        .collect();
+    Some(SurfaceMaterialProps {
+        class: material.class_name.clone(),
+        props,
+    })
+}
+
+/// The `res://` path an `ExtResource:<id>` reference names in `owner`, or `None`
+/// when `value` is not such a reference.
+fn texture_ref_path(owner: &Resource, value: &str) -> Option<String> {
+    let id = value.strip_prefix("ExtResource:")?;
+    owner.ext_resources.get(id).map(|e| e.path.clone())
+}
+
 /// Whether `path` names a resource file an `ArrayMesh` can live in.
 pub fn is_mesh_resource_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();

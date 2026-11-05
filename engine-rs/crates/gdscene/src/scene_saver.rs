@@ -1677,6 +1677,9 @@ fn is_internal_prop(key: &str) -> bool {
         // reference, which is what round-trips; emitting the cache would invent
         // a property Godot has never heard of.
         || key.starts_with("__extres__")
+        // `__mattex__<slot>`: a generated texture's descriptor (pat-cezo4),
+        // derived from the material's `SubResource` texture on load.
+        || key.starts_with("__mattex__")
         // `__object_*__` holds the Object API surface's per-node runtime state —
         // the `set_block_signals` flag, the `add_user_signal` name list, and the
         // translation enable/domain (pat-mgixk.99). All four are RUNTIME state a

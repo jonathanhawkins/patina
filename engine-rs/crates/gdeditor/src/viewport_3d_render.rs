@@ -187,6 +187,19 @@ impl Viewport3D {
                 let nid = gdscene::node::NodeId::from_object_id(gdcore::id::ObjectId::from_raw(
                     r.node_id,
                 ));
+                // A particle system draws its PARTICLES, never its draw-pass
+                // mesh at the emitter; one that is not emitting has none alive
+                // (pat-cezo4: the platformer's coin and enemy one-shot bursts
+                // drew as static white/orange quads). There is no 3D particle
+                // simulation on this path yet, so an emitting one keeps its old
+                // stand-in.
+                if matches!(r.class_name.as_str(), "CPUParticles3D" | "GPUParticles3D")
+                    && tree.get_node(nid).is_some_and(|n| {
+                        matches!(n.get_property("emitting"), gdvariant::Variant::Bool(false))
+                    })
+                {
+                    return Vec::new();
+                }
                 let material = gdscene::render_server_3d::material3d_for_node(
                     tree,
                     nid,
@@ -405,10 +418,18 @@ impl Viewport3D {
                     cam_basis.y,
                 ) {
                     base.global_transform.basis = basis;
+                } else if let Some(basis) = material_billboard_basis(
+                    tree,
+                    nid,
+                    base.global_transform.basis,
+                    cam_basis,
+                ) {
+                    base.global_transform.basis = basis;
                 }
                 if is_gridmap {
-                    return gridmap_items(tree, nid, &base);
+                    return gridmap_items(tree, nid, &base, material_textures);
                 }
+                fill_mesh_file_materials(tree, nid, &mut base, material_textures);
                 vec![base]
             })
             .collect()
@@ -425,7 +446,12 @@ impl Viewport3D {
 /// ⚠️ Uses `mesh_instances_oriented`, not `mesh_instances`: the latter drops each
 /// cell's rotation, and a tiled map drawn unrotated reads as badly authored art
 /// rather than as missing data.
-fn gridmap_items(tree: &SceneTree, nid: gdscene::NodeId, base: &Render3DItem) -> Vec<Render3DItem> {
+fn gridmap_items(
+    tree: &SceneTree,
+    nid: gdscene::NodeId,
+    base: &Render3DItem,
+    material_textures: &mut gdscene::render_server_3d::MaterialTextureCache,
+) -> Vec<Render3DItem> {
     let Some(mut grid) = gdscene::grid_map::GridMap::from_node(tree, nid) else {
         return Vec::new();
     };
@@ -436,17 +462,159 @@ fn gridmap_items(tree: &SceneTree, nid: gdscene::NodeId, base: &Render3DItem) ->
             grid.mesh_library = library;
         }
     }
+    // One resolution per distinct tile, not per cell: a level is thousands of
+    // cells over a dozen meshes.
+    let mut tile_materials: std::collections::HashMap<String, Render3DItem> =
+        std::collections::HashMap::new();
     grid.mesh_instances_oriented()
         .into_iter()
-        .map(|(origin, basis, path)| Render3DItem {
-            // The cell's placement is relative to the GridMap node, so it
-            // composes with the node's own global transform rather than
-            // replacing it.
-            global_transform: base.global_transform * Transform3D { basis, origin },
-            kind: Render3DKind::Mesh { path },
-            ..base.clone()
+        .map(|(origin, basis, path)| {
+            let template = tile_materials.entry(path.clone()).or_insert_with(|| {
+                let mut t = base.clone();
+                t.kind = Render3DKind::Mesh { path: path.clone() };
+                fill_mesh_file_materials(tree, nid, &mut t, material_textures);
+                t
+            });
+            Render3DItem {
+                // The cell's placement is relative to the GridMap node, so it
+                // composes with the node's own global transform rather than
+                // replacing it.
+                global_transform: base.global_transform * Transform3D { basis, origin },
+                ..template.clone()
+            }
         })
         .collect()
+}
+
+/// The basis a mesh whose StandardMaterial3D sets `billboard_mode` draws with
+/// (pat-cezo4), or `None` for `BILLBOARD_DISABLED`.
+///
+/// Godot applies this in the material's vertex stage (`material.cpp`,
+/// `BILLBOARD_ENABLED`: `MODELVIEW = VIEW * mat4(INV_VIEW columns, origin)`),
+/// so a `MeshInstance3D` + `QuadMesh` with a billboard material faces the
+/// camera however the node is turned — the official 3D platformer's coin
+/// glow. Without `billboard_keep_scale` the node's scale is dropped, as in
+/// Godot. `BILLBOARD_FIXED_Y` keeps the node's up axis.
+fn material_billboard_basis(
+    tree: &SceneTree,
+    nid: gdscene::NodeId,
+    node_basis: gdcore::math3d::Basis,
+    cam_basis: gdcore::math3d::Basis,
+) -> Option<gdcore::math3d::Basis> {
+    let node = tree.get_node(nid)?;
+    let mode = match node.get_property("__material__billboard_mode") {
+        gdvariant::Variant::Int(m) => m,
+        _ => return None,
+    };
+    let keep_scale = matches!(
+        node.get_property("__material__billboard_keep_scale"),
+        gdvariant::Variant::Bool(true)
+    );
+    let (sx, sy, sz) = if keep_scale {
+        (node_basis.x.length(), node_basis.y.length(), node_basis.z.length())
+    } else {
+        (1.0, 1.0, 1.0)
+    };
+    match mode {
+        // BILLBOARD_ENABLED: the camera's own axes.
+        1 => Some(gdcore::math3d::Basis {
+            x: cam_basis.x * sx,
+            y: cam_basis.y * sy,
+            z: cam_basis.z * sz,
+        }),
+        // BILLBOARD_FIXED_Y: up stays world/node up, facing turns about it.
+        2 => {
+            let up = node_basis.y.normalized();
+            let fwd = cam_basis.z - up * cam_basis.z.dot(up);
+            if fwd.length() < 1e-6 {
+                return None;
+            }
+            let z = fwd.normalized();
+            let x = up.cross(z).normalized();
+            Some(gdcore::math3d::Basis {
+                x: x * sx,
+                y: up * sy,
+                z: z * sz,
+            })
+        }
+        // BILLBOARD_PARTICLES (3) is per-particle; not a mesh billboard here.
+        _ => None,
+    }
+}
+
+/// Gives a mesh-file item the materials its `ArrayMesh` surfaces carry, in the
+/// slots nothing on the node overrode (pat-zwvgw).
+///
+/// Godot's order is `material_override`, then `surface_material_override/N`,
+/// then the mesh surface's own material. The first two are already resolved
+/// onto `item` (`material` / `surface_materials`); this supplies the third,
+/// which no render path read — so every `.res` tile of the 3D platformer, and
+/// every GridMap cell, drew untextured.
+///
+/// ⚠️ A `material_override` covers EVERY surface, and the renderers fall back
+/// to `item.material` for a surface with no entry; filling the extra surfaces
+/// under an override would replace the override there, so nothing is filled.
+fn fill_mesh_file_materials(
+    tree: &SceneTree,
+    nid: gdscene::NodeId,
+    item: &mut Render3DItem,
+    material_textures: &mut gdscene::render_server_3d::MaterialTextureCache,
+) {
+    let Some(node) = tree.get_node(nid) else {
+        return;
+    };
+    if !matches!(node.get_property("material_override"), gdvariant::Variant::Nil) {
+        return;
+    }
+    // A glTF mesh — skinned ones arrive as deformed `Geometry` — draws with the
+    // document's own materials, one per primitive (pat-zwvgw). Before this
+    // every glb character drew in the default white material.
+    let gltf = |path: &str| {
+        let lower = path.to_ascii_lowercase();
+        if !(lower.ends_with(".glb") || lower.ends_with(".gltf")) {
+            return None;
+        }
+        let mesh_index = match node.get_property("gltf_mesh_index") {
+            gdvariant::Variant::Int(i) => Some(i),
+            _ => None,
+        };
+        let mut mats = gdscene::render_server_3d::gltf_surface_materials(path, mesh_index)
+            .into_iter()
+            .map(Some);
+        Some((mats.next().flatten(), mats.collect::<Vec<_>>()))
+    };
+    let (first, rest) = match &item.kind {
+        Render3DKind::Mesh { path } => {
+            let file = path.split('?').next().unwrap_or(path);
+            match gltf(file) {
+                Some(m) => m,
+                None => {
+                    gdscene::render_server_3d::array_mesh_surface_materials(file, material_textures)
+                }
+            }
+        }
+        Render3DKind::Geometry { .. } => {
+            let Some(m) = gdscene::node3d::get_mesh_path(tree, nid).and_then(|p| gltf(&p)) else {
+                return;
+            };
+            m
+        }
+        _ => return,
+    };
+    if item.material.is_none() {
+        item.material = first;
+    }
+    if rest.is_empty() {
+        return;
+    }
+    if item.surface_materials.len() < rest.len() {
+        item.surface_materials.resize(rest.len(), None);
+    }
+    for (slot, mesh_mat) in item.surface_materials.iter_mut().zip(rest) {
+        if slot.is_none() {
+            *slot = mesh_mat;
+        }
+    }
 }
 
 /// Maps a collected spatial node to its draw item.
@@ -2202,7 +2370,30 @@ fn decal_texture_image(
     if path.is_empty() {
         return None;
     }
-    DECAL_TEXTURES.with(|c| c.borrow_mut().get_or_load(path))
+    // The material cache keeps texels as authored (sRGB); the decal pass
+    // blends its texels as linear colour, so decode here (pat-zwvgw kept the
+    // decal path's input unchanged).
+    let raw = DECAL_TEXTURES.with(|c| c.borrow_mut().get_or_load(path))?;
+    // Memoised by the raw image's identity, so the decoded `Arc` is stable
+    // across frames like the cache's own.
+    thread_local! {
+        static DECAL_LINEAR: std::cell::RefCell<
+            std::collections::HashMap<usize, std::sync::Arc<gdserver3d::material::TextureImage>>,
+        > = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    let key = std::sync::Arc::as_ptr(&raw) as usize;
+    Some(DECAL_LINEAR.with(|m| {
+        m.borrow_mut()
+            .entry(key)
+            .or_insert_with(|| {
+                std::sync::Arc::new(gdserver3d::material::TextureImage::new(
+                    raw.width,
+                    raw.height,
+                    raw.pixels.iter().map(|c| c.srgb_to_linear()).collect(),
+                ))
+            })
+            .clone()
+    }))
 }
 
 thread_local! {

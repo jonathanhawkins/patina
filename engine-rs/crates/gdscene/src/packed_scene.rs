@@ -1090,6 +1090,32 @@ impl PackedScene {
                         tmpl.properties
                             .insert(format!("__material__{key}"), value.clone());
                     }
+                    // pat-cezo4: an inline GradientTexture2D albedo has no file
+                    // to load at render time; carry a generator descriptor in a
+                    // SEPARATE companion so the `__material__*` bag (which the
+                    // saver writes back) keeps the authored reference.
+                    if let Some(Variant::String(r)) = mat_props.get("albedo_texture") {
+                        if let Some(tex_id) = r.strip_prefix("SubResource:") {
+                            if sub_resources.get(tex_id).map(String::as_str)
+                                == Some("GradientTexture2D")
+                            {
+                                if let Some(tex_props) = sub_resource_props.get(tex_id) {
+                                    let gradient = match tex_props.get("gradient") {
+                                        Some(Variant::String(g)) => g
+                                            .strip_prefix("SubResource:")
+                                            .and_then(|gid| sub_resource_props.get(gid)),
+                                        _ => None,
+                                    };
+                                    tmpl.properties.insert(
+                                        "__mattex__albedo_texture".into(),
+                                        Variant::String(crate::gradient_texture::descriptor(
+                                            tex_props, gradient,
+                                        )),
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
