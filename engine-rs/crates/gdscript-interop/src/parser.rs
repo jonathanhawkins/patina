@@ -1971,6 +1971,11 @@ impl Parser {
             Token::Func => {
                 // Lambda / anonymous function: `func(x, y): return x + y`
                 self.advance();
+                // Godot's `parse_lambda` accepts an optional name
+                // (`func my_lambda():`), used only for debugging.
+                if matches!(self.peek(), Token::Ident(_)) {
+                    self.advance();
+                }
                 self.expect(&Token::LParen)?;
                 let mut params = Vec::new();
                 if !self.check(&Token::RParen) {
@@ -1981,6 +1986,13 @@ impl Parser {
                     }
                 }
                 self.expect(&Token::RParen)?;
+                // `func() -> void:` — the same `parse_function_signature` as a
+                // named function, so a return type is legal (pat-rp4bp:
+                // truck_town's vehicle.gd failed with "unexpected token ->").
+                if self.check(&Token::Arrow) {
+                    self.advance();
+                    self.parse_type_hint()?;
+                }
                 self.expect(&Token::Colon)?;
                 // Lambda body: either a single-line statement or a block
                 let body = if self.check(&Token::Newline) || self.check(&Token::Indent) {
@@ -1991,9 +2003,16 @@ impl Parser {
                     let expr = self.parse_expr()?;
                     vec![Stmt::Return(Some(expr))]
                 } else {
-                    // Single expression body (implicit return)
-                    let expr = self.parse_expr()?;
-                    vec![Stmt::Return(Some(expr))]
+                    // A one-line statement body (`func(): node.visible = false`,
+                    // `a(); b()`), as Godot's `parse_suite`. A lone expression
+                    // keeps the implicit-return behaviour this parser had.
+                    let mut stmts = self.parse_block()?;
+                    if stmts.len() == 1 && matches!(stmts[0], Stmt::ExprStmt(_)) {
+                        if let Some(Stmt::ExprStmt(e)) = stmts.pop() {
+                            stmts.push(Stmt::Return(Some(e)));
+                        }
+                    }
+                    stmts
                 };
                 Ok(Expr::Lambda { params, body })
             }

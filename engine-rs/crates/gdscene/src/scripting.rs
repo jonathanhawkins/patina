@@ -197,12 +197,21 @@ pub fn attach_subtree_scripts_from_res(tree: &mut SceneTree, subtree_root: NodeI
 
     let mut attached = 0;
     for (id, res_path) in to_load {
-        let Ok(source) = gdcore::file_access::FileAccess::read_file_string(&res_path) else {
-            continue;
+        let source = match gdcore::file_access::FileAccess::read_file_string(&res_path) {
+            Ok(source) => source,
+            Err(e) => {
+                // Skipped, but not silently (pat-kkqnm): into the script-error
+                // log every host drains.
+                tree.record_script_load_error(id, &res_path, &format!("{e:?}"));
+                continue;
+            }
         };
-        if let Ok(instance) = GDScriptNodeInstance::from_source(&source, id) {
-            tree.attach_script(id, Box::new(instance));
-            attached += 1;
+        match GDScriptNodeInstance::from_source(&source, id) {
+            Ok(instance) => {
+                tree.attach_script(id, Box::new(instance));
+                attached += 1;
+            }
+            Err(e) => tree.record_script_load_error(id, &res_path, &e.to_string()),
         }
     }
     attached
@@ -527,6 +536,12 @@ impl ScriptInstance for GDScriptNodeInstance {
             .map_err(|e| ScriptError::TypeError(e.to_string()))
     }
 
+    fn resolve_member_initializers(&mut self) -> Result<(), ScriptError> {
+        self.interpreter
+            .resolve_deferred_initializers(&mut self.instance)
+            .map_err(|e| ScriptError::TypeError(e.to_string()))
+    }
+
     fn set_scene_access(&mut self, access: Box<dyn SceneAccess>, node_id: u64) {
         self.interpreter.set_scene_access(access, node_id);
     }
@@ -546,6 +561,22 @@ impl ScriptInstance for GDScriptNodeInstance {
         let _ = self
             .interpreter
             .tick_instance_coroutine_frames(&mut self.instance);
+    }
+
+    fn take_coroutine_errors(&mut self) -> Vec<(String, String)> {
+        self.interpreter
+            .take_coroutine_errors()
+            .into_iter()
+            .map(|(function, err)| {
+                // One line, kind + location — the call-stack tail of the full
+                // Display is multi-line and the log is line-oriented.
+                let msg = match &err.source_location {
+                    Some(loc) if loc.line > 0 => format!("{} at line {}", err.kind, loc.line),
+                    _ => err.kind.to_string(),
+                };
+                (function, msg)
+            })
+            .collect()
     }
 
     fn pump_xr_signals(&mut self) {
@@ -3297,7 +3328,22 @@ impl SceneAccess for SceneTreeAccessor {
 
     fn call_script_method(&mut self, node: u64, method: &str, args: &[Variant]) -> Option<Variant> {
         let nid = NodeId::from_object_id(ObjectId::from_raw(node));
-        self.tree_mut().call_script_method(nid, method, args)
+        // Asked BEFORE the call: the tree answers `None` both for "no such
+        // script method" and for "the method raised".
+        let declared = self.tree().script_declares_method(nid, method);
+        let result = self.tree_mut().call_script_method(nid, method, args);
+        if result.is_none() && declared {
+            // 🔑 The callee raised. Godot aborts the CALLEE, logs the error and
+            // hands the caller `null` — the caller keeps running. Answering
+            // `None` here made the interpreter fall through to the native table
+            // and fail the CALLER too ("Native method 'Node3D.setup' is
+            // registered in ClassDB but not implemented"): truck_town's
+            // `car_select.gd` `_load_scene` died at `town.setup(...)` because
+            // one line inside `setup` failed, so the town was never added.
+            // The callee's error is already in the tree's script-error log.
+            return Some(Variant::Nil);
+        }
+        result
     }
 
     fn node_has_method(&self, node: u64, method: &str) -> bool {
