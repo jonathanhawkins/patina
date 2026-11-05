@@ -251,7 +251,7 @@ console.log(JSON.stringify({ tree: { name: 'root', class: 'Window', path: '/root
 test('CLI: a placeholder instance fails the audit (exit 1) and names the scene', () => {
   const { dir, game, runner } = fakeGame(RUNNER('Node'));
   try {
-    const r = spawnSync(process.execPath, [AUDIT, game, '--runner', runner, '--json'], { encoding: 'utf8' });
+    const r = spawnSync(process.execPath, [AUDIT, game, '--runner', runner, '--json', '--no-godot'], { encoding: 'utf8' });
     assert.equal(r.status, 1, r.stderr);
     const rep = JSON.parse(r.stdout);
     assert.equal(rep.ok, false);
@@ -266,7 +266,7 @@ test('CLI: a placeholder instance fails the audit (exit 1) and names the scene',
 test('CLI: a clean game exits 0', () => {
   const { dir, game, runner } = fakeGame(RUNNER('Area2D'));
   try {
-    const r = spawnSync(process.execPath, [AUDIT, game, '--runner', runner], { encoding: 'utf8' });
+    const r = spawnSync(process.execPath, [AUDIT, game, '--runner', runner, '--no-godot'], { encoding: 'utf8' });
     assert.equal(r.status, 0, r.stdout + r.stderr);
     assert.match(r.stdout, /→ OK$/m);
   } finally {

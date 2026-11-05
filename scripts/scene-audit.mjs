@@ -4,6 +4,7 @@
 //
 //   node scripts/scene-audit.mjs <game_dir> [--json] [--frames 3] [--port N]
 //        [--runner PATH] [--jobs N] [--timeout-ms 30000]
+//        [--no-godot] [--godot PATH] [--godot-cache DIR]
 //
 // For each .tscn/.scn under <game_dir> (dot-directories skipped) it runs
 // `patina-runner <scene> --frames N --script-output` from the game directory
@@ -23,6 +24,26 @@
 //   unsupported    a node / ext_resource / sub_resource type Patina's ClassDB
 //                  does not register (from `patina-runner --class-list`)
 //
+// The Godot side (default; --no-godot turns it off): every scene is also run
+// in REAL Godot (Godot.app 4.6.1, headless, same frames) from a temp copy of
+// the game (scripts/lib/scene-audit-godot.mjs), and the audit then reports
+// only what DIFFERS from Godot:
+//
+//   script error     Patina raises it, Godot does not
+//   missed check     Godot raises it, Patina does not
+//   different error  same script + function, a different error
+//   node count       the scene trees differ (with the paths only one side has)
+//   instance class   an instanced root of another class than Godot's
+//
+// Errors both engines raise go under "matches Godot (expected)": a sub-scene
+// run STANDALONE raises them in Godot too (truck_town's vehicle.gd:22
+// `assert(turbometer)` — the parent scene normally sets it). Errors are
+// matched by MEANING (assert / access 'x' on Nil / no method 'x' / ...),
+// script and function, not by text: the two engines word them differently.
+// Godot's side is cached by content hash (game files, frames, Godot version,
+// capture script) in --godot-cache (default .playtest-gate/godot-cache), so a
+// re-run is fast. No Godot found: a warning, and the Patina-only audit.
+//
 // --port N also reads a running editor (http://127.0.0.1:N): the open scene's
 // edit tree, then a short Play (POST /api/runtime/play, ~1.5 s) for the LIVE
 // tree and the game's errors from /api/logs, then stops it. Never on someone
@@ -36,12 +57,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { captureGodotSide, diffScene } from './lib/scene-audit-godot.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_RUNNER = path.join(ROOT, 'engine-rs', 'target', 'release', 'patina-runner');
 
 export function parseArgs(argv) {
-  const o = { dir: null, json: false, frames: 3, port: null, runner: process.env.PATINA_RUNNER || DEFAULT_RUNNER, jobs: Math.min(8, os.cpus().length), timeoutMs: 30000 };
+  const o = { dir: null, json: false, frames: 3, port: null, runner: process.env.PATINA_RUNNER || DEFAULT_RUNNER, jobs: Math.min(8, os.cpus().length), timeoutMs: 30000, godot: true, godotPath: null, godotCache: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const v = () => {
@@ -54,6 +76,9 @@ export function parseArgs(argv) {
     else if (a === '--runner') o.runner = path.resolve(v());
     else if (a === '--jobs') o.jobs = Math.max(1, Number(v()));
     else if (a === '--timeout-ms') o.timeoutMs = Number(v());
+    else if (a === '--no-godot') o.godot = false;
+    else if (a === '--godot') o.godotPath = path.resolve(v());
+    else if (a === '--godot-cache') o.godotCache = path.resolve(v());
     else if (a === '-h' || a === '--help') o.help = true;
     else if (a.startsWith('-')) throw new Error(`unknown option ${a}`);
     else if (!o.dir) o.dir = a;
@@ -324,6 +349,81 @@ export function sceneFindings(s) {
   return f;
 }
 
+/**
+ * Everything about one scene that DIFFERS from Godot, as finding strings
+ * (`s.godot` = the Godot run, `s.diff` = {@link diffScene}). Errors both
+ * engines raise are not findings: they are in `s.diff.matched`.
+ */
+export function sceneFindingsVsGodot(s) {
+  const f = [];
+  const g = s.godot, d = s.diff;
+  if (s.error && g.ok) f.push(`load error: ${s.error}${s.format !== 'text' ? ` (${s.format} file)` : ''} (Godot loads it)`);
+  // A placeholder Godot also has (a childless plain Node there) is not Patina's.
+  for (const p of s.placeholders) if (!p.godot_same) f.push(`placeholder: ${p.finding}`);
+  if (d) {
+    for (const e of d.patina_only) {
+      if (e.startsWith('script failed to load: ')) f.push(`script load failure: ${e.slice('script failed to load: '.length)} (Godot loads it)`);
+      else f.push(`script error: ${e} (Godot does not raise it)`);
+    }
+    for (const e of d.different) f.push(`different error: ${e}`);
+    for (const e of d.godot_only) f.push(`missed check: Godot raises ${e}; Patina does not`);
+    const n = d.node_count;
+    if (s.ok && g.ok && n.patina !== n.godot) {
+      const parts = [];
+      if (d.only_in_patina.length) parts.push(`only in Patina: ${d.only_in_patina.slice(0, 4).join(', ')}${d.only_in_patina.length > 4 ? `, … (${d.only_in_patina.length})` : ''}`);
+      if (d.only_in_godot.length) parts.push(`only in Godot: ${d.only_in_godot.slice(0, 4).join(', ')}${d.only_in_godot.length > 4 ? `, … (${d.only_in_godot.length})` : ''}`);
+      f.push(`node count: Patina ${n.patina}, Godot ${n.godot}${parts.length ? ` (${parts.join('; ')})` : ''}`);
+    }
+    for (const c of d.instance_classes) f.push(`instance class: ${c}`);
+  }
+  for (const u of s.unsupported) f.push(`unsupported type: ${u.type} (${u.as.join(', ')})`);
+  return f;
+}
+
+/**
+ * Attaches one scene's Godot run to its Patina audit: the diff, Godot's own
+ * node count, missing methods restricted to the errors Godot does not raise,
+ * and the findings recomputed against Godot. `patinaTree` and
+ * `patinaErrors` are the runner's raw tree and script_errors.
+ */
+export function applyGodot(s, godotScene, { patinaTree, patinaErrors, rootName }) {
+  s.godot = { ok: godotScene.ok, error: godotScene.error, node_count: null };
+  if (!godotScene.ok && !s.ok) {
+    s.diff = null;
+    s.matches_godot = [`load error: Godot does not run it either (${godotScene.error})`];
+    s.findings = sceneFindingsVsGodot(s);
+    return s;
+  }
+  if (!s.ok) {
+    // Patina never ran the scene: its errors cannot be compared, the load
+    // error is the finding.
+    s.diff = null;
+    s.matches_godot = [];
+    s.findings = sceneFindingsVsGodot(s);
+    return s;
+  }
+  const d = diffScene({
+    patina: { ok: s.ok, tree: patinaTree, script_errors: patinaErrors, script_load_failures: s.script_load_failures },
+    godot: godotScene, rootName,
+  });
+  s.diff = d;
+  s.godot.node_count = d.node_count.godot;
+  s.godot.engine_messages = d.godot_engine;
+  s.matches_godot = d.matched;
+  s.printerr = d.printerr;
+  // Missing methods are only the ones Godot HAS (it raised nothing there).
+  s.missing_methods = missingMethods([...d.patina_only, ...d.different]);
+  const gIndex = new Map();
+  const walk = (n) => { if (!n) return; gIndex.set(n.path, n); (n.children || []).forEach(walk); };
+  walk(godotScene.tree);
+  for (const p of s.placeholders) {
+    const gn = gIndex.get(p.path);
+    p.godot_same = !!gn && gn.class === p.got && !(gn.children || []).length;
+  }
+  s.findings = sceneFindingsVsGodot(s);
+  return s;
+}
+
 // ---------------------------------------------------------------------------
 // Running
 // ---------------------------------------------------------------------------
@@ -414,6 +514,8 @@ async function auditScene(o, gameDir, rel, classes, flags) {
     binary_resources,
   };
   s.findings = sceneFindings(s);
+  // The raw run, for the Godot diff (kept out of --json).
+  Object.defineProperty(s, 'raw', { value: { tree: r.tree, script_errors: r.script_errors, rootName: parsed.root?.name || null }, enumerable: false });
   return s;
 }
 
@@ -491,9 +593,14 @@ export function printReport(rep) {
   const w = Math.max(...rep.scenes.map((s) => s.scene.length), 10);
   for (const s of rep.scenes) {
     const tag = s.findings.length ? 'FAIL' : 'OK  ';
-    const what = s.ok ? `${s.node_count} nodes` : 'did not load';
+    const what = (s.ok ? `${s.node_count} nodes` : 'did not load') + (s.godot ? (s.godot.ok ? ` (Godot ${s.godot.node_count})` : ` (Godot: ${s.godot.error})`) : '');
     lines.push(`  ${tag}  ${s.scene.padEnd(w)}  ${what}`);
     for (const f of s.findings) lines.push(`          - ${f}`);
+    if (s.matches_godot?.length) {
+      lines.push(`          matches Godot (expected): ${s.matches_godot.length}`);
+      for (const m of s.matches_godot.slice(0, 4)) lines.push(`            = ${m}`);
+      if (s.matches_godot.length > 4) lines.push(`            = … ${s.matches_godot.length - 4} more (--json lists all)`);
+    }
     if (s.binary_resources?.length) lines.push(`          note: ${s.binary_resources.length} binary resource(s): ${s.binary_resources.slice(0, 3).join(', ')}${s.binary_resources.length > 3 ? ', …' : ''}`);
   }
   if (rep.live) {
@@ -502,7 +609,9 @@ export function printReport(rep) {
     if (!rep.live.findings.length) lines.push('          (clean)');
   }
   const t = rep.totals;
-  lines.push(`summary: ${t.scenes} scenes · ${t.load_errors} load errors · ${t.placeholders} placeholder instances · ${t.script_load_failures} script load failures · ${t.missing_methods} missing methods · ${t.script_errors} other script errors · ${t.unsupported} unsupported types${rep.live ? ` · ${rep.live.findings.length} live findings` : ''} → ${rep.ok ? 'OK' : 'FAIL'}`);
+  const vs = rep.godot ? ` · ${t.missed_checks} missed checks · ${t.different_errors} different errors · ${t.node_count_diffs} tree diffs · ${t.matches_godot} errors match Godot` : '';
+  if (rep.godot) lines.push(`godot: ${rep.godot.version}, ${rep.godot.hit ? 'cached' : 'fresh run'} (${rep.godot.file})`);
+  lines.push(`summary: ${t.scenes} scenes · ${t.load_errors} load errors · ${t.placeholders} placeholder instances · ${t.script_load_failures} script load failures · ${t.missing_methods} missing methods · ${t.script_errors} other script errors · ${t.unsupported} unsupported types${vs}${rep.live ? ` · ${rep.live.findings.length} live findings` : ''} → ${rep.ok ? 'OK' : 'FAIL'}`);
   return lines.join('\n');
 }
 
@@ -510,13 +619,17 @@ export function totals(scenes, live) {
   const uniq = (xs) => new Set(xs).size;
   return {
     scenes: scenes.length,
-    load_errors: scenes.filter((s) => !s.ok).length,
-    placeholders: scenes.reduce((a, s) => a + s.placeholders.length, 0),
-    script_load_failures: uniq(scenes.flatMap((s) => (s.script_load_failures || []).map((l) => l.split(': ')[0]))),
+    load_errors: scenes.filter((s) => s.findings.some((f) => f.startsWith('load error'))).length,
+    placeholders: scenes.reduce((a, s) => a + s.findings.filter((f) => f.startsWith('placeholder')).length, 0),
+    script_load_failures: uniq(scenes.flatMap((s) => s.findings.filter((f) => f.startsWith('script load failure')).map((f) => f.split(': ')[1]))),
     missing_methods: uniq(scenes.flatMap((s) => s.missing_methods)),
     script_errors: scenes.reduce((a, s) => a + s.findings.filter((f) => f.startsWith('script error')).length, 0),
     unsupported: uniq(scenes.flatMap((s) => s.unsupported.map((u) => u.type))),
     live_findings: live ? live.findings.length : 0,
+    missed_checks: scenes.reduce((a, s) => a + s.findings.filter((f) => f.startsWith('missed check')).length, 0),
+    different_errors: scenes.reduce((a, s) => a + s.findings.filter((f) => f.startsWith('different error')).length, 0),
+    node_count_diffs: scenes.filter((s) => s.findings.some((f) => f.startsWith('node count') || f.startsWith('instance class'))).length,
+    matches_godot: scenes.reduce((a, s) => a + (s.matches_godot || []).length, 0),
   };
 }
 
@@ -537,12 +650,26 @@ async function main() {
   const flags = runnerFlags(o.runner);
   if (!flags.scriptOutput) warnings.push('the runner has no --script-output (stale build?): script errors not checked');
   if (!flags.resRoot) warnings.push('the runner has no --res-root (stale build?): instances in sub-folder scenes will read as placeholders');
-  const scenes = await pool(listScenes(gameDir), o.jobs, (rel) => auditScene(o, gameDir, rel, classes, flags));
+  const rels = listScenes(gameDir);
+  const scenes = await pool(rels, o.jobs, (rel) => auditScene(o, gameDir, rel, classes, flags));
+  let godot = null;
+  if (o.godot) {
+    try {
+      const g = await captureGodotSide(gameDir, rels, {
+        frames: o.frames, ...(o.godotPath ? { godot: o.godotPath } : {}), ...(o.godotCache ? { cacheDir: o.godotCache } : {}),
+        jobs: Math.min(4, o.jobs), log: (m) => console.error(`scene-audit: ${m}`),
+      });
+      godot = { version: g.version, key: g.key, hit: g.hit, file: path.relative(process.cwd(), g.file) };
+      for (const s of scenes) applyGodot(s, g.scenes[s.scene], { patinaTree: s.raw.tree, patinaErrors: s.raw.script_errors, rootName: s.raw.rootName });
+    } catch (e) {
+      warnings.push(`no Godot side (${e.message}): every script error is reported, including ones Godot raises too`);
+    }
+  }
   const live = o.port ? await auditLive(o.port, gameDir) : null;
   const t = totals(scenes, live);
   const rep = {
     game_dir: path.relative(process.cwd(), gameDir) || '.', runner: path.relative(process.cwd(), o.runner), frames: o.frames, warnings,
-    ok: scenes.every((s) => !s.findings.length) && !(live && live.findings.length), totals: t, scenes, live,
+    ok: scenes.every((s) => !s.findings.length) && !(live && live.findings.length), totals: t, godot, scenes, live,
   };
   console.log(o.json ? JSON.stringify(rep, null, 2) : printReport(rep));
   process.exit(rep.ok ? 0 : 1);
