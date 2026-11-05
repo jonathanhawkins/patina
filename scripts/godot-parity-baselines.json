@@ -41,7 +41,7 @@
       "scenario_key": "eab60a154d4a7143",
       "godot_version": "4.6.1.stable.official.14d19694e",
       "recorded": "2026-11-05",
-      "commit": "8a032f3",
+      "commit": "50f5674",
       "traces": {
         "/root/Game/Level/Player:position": {
           "compared": 301,
@@ -82,45 +82,45 @@
       "scenario_key": "f2736ee492903c6f",
       "godot_version": "4.6.1.stable.official.14d19694e",
       "recorded": "2026-11-05",
-      "commit": "8a032f3",
+      "commit": "50f5674",
       "traces": {
         "/root/Game/Player:position": {
           "compared": 349,
-          "first_divergence": 237,
-          "max_error": 0.0895,
+          "first_divergence": 288,
+          "max_error": 0.0477,
           "max_error_frame": 348
         }
       },
       "images": {
         "f90": {
-          "mismatch_pct": 1.476,
-          "mean_delta": 6.721,
-          "coarse_mismatch_pct": 1.012
+          "mismatch_pct": 1.303,
+          "mean_delta": 3.945,
+          "coarse_mismatch_pct": 0.874
         },
         "f180": {
-          "mismatch_pct": 9.981,
-          "mean_delta": 16.266,
-          "coarse_mismatch_pct": 4.218
+          "mismatch_pct": 8.636,
+          "mean_delta": 13.148,
+          "coarse_mismatch_pct": 3.884
         },
         "f240": {
-          "mismatch_pct": 7.513,
-          "mean_delta": 15.576,
-          "coarse_mismatch_pct": 5.616
+          "mismatch_pct": 7.855,
+          "mean_delta": 13.603,
+          "coarse_mismatch_pct": 6.19
         },
         "f300": {
-          "mismatch_pct": 6.584,
-          "mean_delta": 16.228,
-          "coarse_mismatch_pct": 5.821
+          "mismatch_pct": 4.241,
+          "mean_delta": 9.836,
+          "coarse_mismatch_pct": 3.549
         },
         "f318": {
-          "mismatch_pct": 8.742,
-          "mean_delta": 20.869,
-          "coarse_mismatch_pct": 7.956
+          "mismatch_pct": 3.391,
+          "mean_delta": 9.177,
+          "coarse_mismatch_pct": 3.309
         },
         "f348": {
-          "mismatch_pct": 5.974,
-          "mean_delta": 15.934,
-          "coarse_mismatch_pct": 4.724
+          "mismatch_pct": 1.322,
+          "mean_delta": 7.221,
+          "coarse_mismatch_pct": 0.9
         }
       }
     },
