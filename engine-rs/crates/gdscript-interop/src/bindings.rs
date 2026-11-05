@@ -900,6 +900,15 @@ pub trait SceneAccess {
         false
     }
 
+    /// Whether `node` has a property `prop` at all — a script member or
+    /// constant, a property it carries, or one Godot documents for its class —
+    /// for raising Godot's "Invalid access to property or key" on a read of a
+    /// name that does not exist (pat-w0q0w). `None` = cannot judge (not a
+    /// node, a class Godot does not document), and the caller must not raise.
+    fn node_has_property(&self, _node: u64, _prop: &str) -> Option<bool> {
+        None
+    }
+
     /// Declared parameter count of `node`'s `method`, for
     /// `Object.get_method_argument_count`. `None` when the method is unknown.
     fn node_method_argument_count(&self, _node: u64, _method: &str) -> Option<i64> {

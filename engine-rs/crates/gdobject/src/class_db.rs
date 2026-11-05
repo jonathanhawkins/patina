@@ -1117,6 +1117,36 @@ pub fn class_has_property(class_name: &str, property_name: &str) -> bool {
     props.iter().any(|p| p.name == property_name)
 }
 
+/// Whether REAL Godot's class `class_name` (or an ancestor) documents a
+/// property `property_name`, from the generated
+/// [`crate::godot_doc_properties`] table — independent of this ClassDB, whose
+/// property lists are incomplete (`Node` registers no `owner`).
+///
+/// `None` when Godot's docs have no class of that name (a Patina-only class,
+/// an extension), so a caller cannot judge and must not raise (pat-w0q0w).
+pub fn godot_class_has_property(class_name: &str, property_name: &str) -> Option<bool> {
+    use crate::godot_doc_properties::CLASSES;
+    let find = |name: &str| {
+        CLASSES
+            .binary_search_by(|(c, _, _)| (*c).cmp(name))
+            .ok()
+            .map(|i| &CLASSES[i])
+    };
+    let mut entry = find(class_name)?;
+    // Bounded: Godot's deepest chain is well under this.
+    for _ in 0..64 {
+        let (_, parent, props) = entry;
+        if props.binary_search(&property_name).is_ok() {
+            return Some(true);
+        }
+        match find(parent) {
+            Some(next) if !parent.is_empty() => entry = next,
+            _ => return Some(false),
+        }
+    }
+    Some(false)
+}
+
 /// Registers the standard Godot 3D class hierarchy in the ClassDB.
 ///
 /// This includes Node3D, Camera3D, MeshInstance3D, the Light3D family,

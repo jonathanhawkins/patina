@@ -147,6 +147,15 @@ pub(crate) fn running_script_class_names(node_id: NodeId) -> Option<Vec<String>>
 /// methods runs, so a lookup through `get_script` cannot see the signals it
 /// declares from inside its own `_ready` — exactly where `my_signal.connect(..)`
 /// is written.
+/// Whether `node_id`'s **currently executing** script has a member, constant
+/// or enum named `prop`; `None` when the node is not executing.
+pub(crate) fn running_script_has_property(node_id: NodeId, prop: &str) -> Option<bool> {
+    with_active_script(node_id, |script| {
+        script.get_property(prop).is_some()
+            || script.list_properties().iter().any(|p| p.name == prop)
+    })
+}
+
 pub(crate) fn running_script_declares_signal(node_id: NodeId, signal: &str) -> bool {
     with_active_script(node_id, |script| {
         script.list_signals().iter().any(|s| s == signal)
@@ -6416,6 +6425,51 @@ impl SceneTree {
         result
     }
 
+    /// Writes `prop` on `node_id`'s script instance — through its `set = fn`
+    /// setter when it declares one — with scene access INSTALLED for the
+    /// duration, as [`Self::call_script_method`] does for a call.
+    ///
+    /// Returns `None` when the node has no script in the arena, otherwise
+    /// whether the script took the write (it declares `prop`).
+    ///
+    /// ⚠️ A setter is ordinary script code and is entitled to the tree: Godot's
+    /// `set_mood` in truck_town reads its children, and the probe's setter calls
+    /// `is_inside_tree()`. Writing through `script.set_property` with no access
+    /// installed ran the setter's first line and then failed on the first scene
+    /// call, silently (pat-ivcj2) — `mood` read 5, but nothing the setter
+    /// maintains happened.
+    pub(crate) fn set_script_property_with_access(
+        &mut self,
+        node_id: NodeId,
+        prop: &str,
+        value: Variant,
+    ) -> Option<bool> {
+        let mut script = self.scripts.remove(&node_id)?;
+        // SAFETY: the same invariant as `call_script_method` — the accessor is
+        // cleared before this function returns, so the pointer cannot escape.
+        let accessor = unsafe { crate::scripting::SceneTreeAccessor::new(self as *mut SceneTree) };
+        script.set_scene_access(Box::new(accessor), node_id.raw());
+        let published = ActiveScriptGuard::push(node_id, &mut *script as *mut dyn ScriptInstance);
+        let handled = script.set_property(prop, value);
+        drop(published);
+        script.clear_scene_access();
+        self.record_coroutine_errors(node_id, &mut *script);
+        // Mirror the script's members onto the node, as after a call, so a
+        // reader of the node property bag sees what the setter wrote.
+        let prop_values: Vec<(String, Variant)> = script
+            .list_properties()
+            .into_iter()
+            .filter_map(|info| script.get_property(&info.name).map(|v| (info.name, v)))
+            .collect();
+        if let Some(node) = self.nodes.get_mut(&node_id) {
+            for (name, val) in prop_values {
+                node.set_property(&name, val);
+            }
+        }
+        self.scripts.insert(node_id, script);
+        Some(handled)
+    }
+
     /// Whether `node_id` responds to `method`: its script's methods first, then
     /// its class's registered methods. Mirrors Godot's `Object.has_method`, which
     /// reports script and native methods alike.
@@ -9324,12 +9378,35 @@ impl SceneTree {
                     continue;
                 }
                 if call.method == "set" {
-                    // Godot Object.set(property, value) deferred form.
+                    // Godot `Object.set(property, value)`, deferred
+                    // (`set_deferred`) — the SAME write a script's `obj.prop = v`
+                    // makes (pat-ivcj2). This used to be a raw
+                    // `Node::set_property` bag write, which nothing reads for a
+                    // script variable (it lives on the script instance) or for
+                    // `name` (a struct field), so `set_deferred(&"mood", m)`
+                    // never ran `set_mood`, `set_deferred("plain", 7)` left the
+                    // member at 0 and `set_deferred(&"name", …)` never renamed.
+                    // The accessor's `set_node_property` runs the script setter,
+                    // the member write, the rename and the engine-property
+                    // routing, exactly as a direct assignment does.
                     if call.args.len() >= 2 {
-                        if let Variant::String(prop) = &call.args[0] {
-                            if let Some(node) = self.nodes.get_mut(&call.node_id) {
-                                node.set_property(prop, call.args[1].clone());
-                            }
+                        let prop = match &call.args[0] {
+                            Variant::String(s) => Some(s.clone()),
+                            Variant::StringName(s) => Some(s.as_str().to_string()),
+                            _ => None,
+                        };
+                        if let Some(prop) = prop {
+                            // SAFETY: as in `call_object_method` — the accessor
+                            // lives only for this call and does not escape.
+                            let mut accessor = unsafe {
+                                crate::scripting::SceneTreeAccessor::new(self as *mut SceneTree)
+                            };
+                            gdscript_interop::bindings::SceneAccess::set_node_property(
+                                &mut accessor,
+                                call.node_id.raw(),
+                                &prop,
+                                call.args[1].clone(),
+                            );
                         }
                     }
                     continue;
@@ -13068,9 +13145,11 @@ mod tests {
                 &[Variant::String("name".into()), Variant::String("B".into())],
             );
             tree.process_deferred_calls();
+            // `name` is the node's real name, not a property-bag entry: a
+            // deferred `set("name", …)` renames the node (pat-ivcj2).
             assert_eq!(
-                tree.get_node(n).unwrap().get_property("name"),
-                Variant::String("B".into()),
+                tree.get_node(n).unwrap().name(),
+                "B",
                 "last deferred set should win (FIFO)"
             );
         }

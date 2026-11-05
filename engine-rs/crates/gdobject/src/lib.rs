@@ -19,6 +19,10 @@
 
 pub mod class_db;
 pub mod editor_plugin_classes;
+/// Godot's documented property names per class (generated, pat-w0q0w) — see
+/// [`class_db::godot_class_has_property`].
+#[rustfmt::skip]
+pub mod godot_doc_properties;
 pub mod movie_writer;
 pub mod notification;
 pub mod object;
