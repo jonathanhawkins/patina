@@ -2366,6 +2366,12 @@ impl MainLoop {
             if let Some(v) = settings.get(&key("position_steps")).and_then(|v| v.as_int()) {
                 p.position_steps = v.max(0) as u32;
             }
+            if let Some(v) = settings.get(&key("velocity_steps")).and_then(|v| v.as_int()) {
+                p.velocity_steps = v.max(0) as u32;
+            }
+            if let Some(v) = float_setting(settings, &key("bounce_velocity_threshold")) {
+                p.bounce_velocity_threshold = v;
+            }
             p
         }));
 

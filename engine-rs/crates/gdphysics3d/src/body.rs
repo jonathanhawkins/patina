@@ -164,6 +164,13 @@ pub struct PhysicsBody3D {
     /// (pat-qg3nu): a body's authored `inertia`, or the inertia about the
     /// body ORIGIN when its centre of mass is custom-placed there.
     pub inertia_override: Option<Vector3>,
+    /// The centre of mass, in the body's LOCAL frame relative to its origin
+    /// (pat-zljoy). The body rotates about this point, `linear_velocity` is
+    /// this point's velocity, and contact/force lever arms are measured from
+    /// it, as in Godot. `ZERO` (the default) is the body origin: Godot's
+    /// `center_of_mass_mode` CUSTOM with the default `center_of_mass`. The
+    /// server sets AUTO bodies to their shapes' centroid.
+    pub center_of_mass: Vector3,
     /// Accumulated force for the current frame.
     accumulated_force: Vector3,
     /// Accumulated torque for the current frame.
@@ -209,7 +216,12 @@ impl PhysicsBody3D {
             shape_rotation: Quaternion::IDENTITY,
             extra_shapes: Vec::new(),
             mass,
-            friction: 0.5,
+            // Godot's body default with no `PhysicsMaterial`: friction 1.0,
+            // bounce 0 (`RigidBody3D`/`StaticBody3D::_reload_physics_characteristics`
+            // write `BODY_PARAM_FRICTION, 1`; Jolt's `JoltShapedObject3D`
+            // starts at `mFriction = 1.0f`). 0.5 let a box slide 0.6 m down
+            // truck_town's 6 degree road (pat-uqw01).
+            friction: 1.0,
             bounce: 0.0,
             gravity_scale: 1.0,
             linear_damp: 0.0,
@@ -231,6 +243,7 @@ impl PhysicsBody3D {
             collision_layer: 1,
             collision_mask: 1,
             inertia_override: None,
+            center_of_mass: Vector3::ZERO,
             accumulated_force: Vector3::ZERO,
             accumulated_torque: Vector3::ZERO,
             contacts: Vec::new(),
@@ -257,7 +270,7 @@ impl PhysicsBody3D {
     pub fn apply_force_at_position(&mut self, force: Vector3, position: Vector3) {
         if self.is_active_rigid() {
             self.accumulated_force = self.accumulated_force + force;
-            let offset = position - self.position;
+            let offset = position - self.center_of_mass_world();
             self.accumulated_torque = self.accumulated_torque + offset.cross(force);
             self.wake_up();
         }
@@ -296,7 +309,7 @@ impl PhysicsBody3D {
     pub fn apply_impulse_at_position(&mut self, impulse: Vector3, position: Vector3) {
         if self.is_active_rigid() && self.mass > 0.0 {
             self.linear_velocity = self.linear_velocity + impulse * (1.0 / self.mass);
-            let offset = position - self.position;
+            let offset = position - self.center_of_mass_world();
             let torque_impulse = offset.cross(impulse);
             self.angular_velocity =
                 self.angular_velocity + self.apply_inverse_inertia(torque_impulse);
@@ -352,6 +365,10 @@ impl PhysicsBody3D {
         // (pat-s3rrv.105).
         apply_axis_lock(&mut self.linear_velocity, self.axis_lock_linear);
 
+        // `linear_velocity` moves the centre of mass; the rotation below then
+        // turns the body about it, and the origin is put back relative to the
+        // moved, turned centre (pat-zljoy).
+        let com_after = self.center_of_mass_world() + self.linear_velocity * dt;
         self.position = self.position + self.linear_velocity * dt;
 
         // Angular integration — skipped entirely when rotation is locked
@@ -393,6 +410,9 @@ impl PhysicsBody3D {
                 // `InstancePos` rotated 90 degrees about Y, so its pitch
                 // integrated as a ROLL and the parked car rolled over.
                 self.rotation = (dq * self.rotation).normalized();
+                if self.center_of_mass != Vector3::ZERO {
+                    self.position = com_after - self.rotation.xform(self.center_of_mass);
+                }
             }
         }
 
@@ -600,6 +620,11 @@ impl PhysicsBody3D {
             ));
         }
         out
+    }
+
+    /// The centre of mass in world space: the point the body rotates about.
+    pub fn center_of_mass_world(&self) -> Vector3 {
+        self.position + self.rotation.xform(self.center_of_mass)
     }
 
     /// Returns `true` if this body is allowed to collide with `other` under
@@ -896,7 +921,7 @@ mod tests {
         assert_eq!(body.body_type, BodyType3D::Rigid);
         assert_eq!(body.linear_velocity, Vector3::ZERO);
         assert_eq!(body.rotation, Quaternion::IDENTITY);
-        assert!((body.friction - 0.5).abs() < f32::EPSILON);
+        assert!((body.friction - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]

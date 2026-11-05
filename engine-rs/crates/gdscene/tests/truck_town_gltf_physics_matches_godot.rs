@@ -209,7 +209,8 @@ fn rigid_body(tree: &mut SceneTree, name: &str, shape: &str, key: &str, value: V
 /// | unit box | (-15.957, 8, 12.389), flat road at y 5.182 | (-15.957, 5.6807, 12.389) |
 /// | r=0.5 sphere | (-20.085, 8, 17.12), flat road | (-20.085, 5.6807, 17.12) |
 /// | r=0.5 sphere | (0, 20, 0), a hole in the grass mesh | clips the hole's rim at tick ~170 and bounces off: (-0.1840, 10.2228, 1.1113) at tick 200, rolling on OuterGroundCollider (box, top y 0) at (-1.0434, 0.4999, 8.3874) at tick 500 |
-/// | unit box | (35.48, 12, 10), the 6 degree road by the car spawn | (35.4948, 9.2836, 10.0241) |
+/// | unit box | (35.48, 12, 10), the 6 degree road by the car spawn | (35.4948, 9.2836, 10.0241), turned to the road: quaternion (0.0232, -0.0005, -0.0234, 0.9995) |
+/// | unit box turned 0.5 rad about (1, 0, 1) | (-17.957, 8, 9.389), flat road | lands on an edge, tips flat and rests at (-17.7196, 5.6821, 9.1520), unrotated |
 ///
 /// Without the import every one of them free-falls past y -100.
 #[test]
@@ -220,8 +221,20 @@ fn bodies_dropped_on_the_town_rest_where_godots_do() {
     let flat_sphere = rigid_body(&mut tree, "SphereOnFlatRoad", "SphereShape3D", "radius", Variant::Float(0.5), Vector3::new(-20.085, 8.0, 17.12));
     let hole_sphere = rigid_body(&mut tree, "SphereOnGrass", "SphereShape3D", "radius", Variant::Float(0.5), Vector3::new(0.0, 20.0, 0.0));
     let slope_box = rigid_body(&mut tree, "BoxOnRoad", "BoxShape3D", "size", unit_box(), Vector3::new(35.48, 12.0, 10.0));
+    let tilted_box = rigid_body(&mut tree, "TiltedBox", "BoxShape3D", "size", unit_box(), Vector3::new(-17.957, 8.0, 9.389));
+    gdscene::node3d::set_global_rotation_quaternion(
+        &mut tree,
+        tilted_box,
+        gdcore::math3d::Quaternion::from_axis_angle(Vector3::new(1.0, 0.0, 1.0), 0.5),
+    );
     let mut ml = MainLoop::new(tree);
-    ml.set_physics_ticks_per_second(120);
+    // The project's own settings: 120 ticks/s and `3d/physics_engine="Jolt
+    // Physics"`, which selects Jolt's contact model (pat-std5q). Without
+    // them the town ran GodotPhysics' solver against Godot's Jolt numbers.
+    let text = std::fs::read_to_string(game_dir().join("project.godot")).unwrap();
+    let settings = gdcore::project_settings::ProjectSettings::from_godot_format(&text).unwrap();
+    gdscene::project_runtime::apply_project_settings(&mut ml, &settings);
+    assert_eq!(ml.physics_ticks_per_second(), 120);
     ml.register_physics_bodies();
     // The hole sphere is checked along its path: it is still rolling at tick
     // 600 in Godot (0.39 m/s), so its end point is not a rest pose.
@@ -233,7 +246,7 @@ fn bodies_dropped_on_the_town_rest_where_godots_do() {
         }
     }
     let pos = |id| gdscene::node3d::get_global_transform(ml.tree(), id).origin;
-    for (name, id) in [("flat box", flat_box), ("flat sphere", flat_sphere), ("hole sphere", hole_sphere), ("slope box", slope_box)] {
+    for (name, id) in [("flat box", flat_box), ("flat sphere", flat_sphere), ("hole sphere", hole_sphere), ("slope box", slope_box), ("tilted box", tilted_box)] {
         eprintln!("{name}: {:?}", pos(id));
     }
     let near = |p: Vector3, w: (f32, f32, f32), tol: f32| {
@@ -250,11 +263,30 @@ fn bodies_dropped_on_the_town_rest_where_godots_do() {
     assert!(near(p, (-0.1840, 10.2228, 1.1113), 0.05), "sphere bouncing off the hole rim at tick 200: {p:?}; Godot (-0.1840, 10.2228, 1.1113)");
     let p = hole_at[1];
     assert!(near(p, (-1.0434, 0.4999, 8.3874), 0.1), "sphere on the outer ground at tick 500: {p:?}; Godot (-1.0434, 0.4999, 8.3874)");
-    // The sloped road: Patina's single-contact solver lets the box settle a
-    // few centimetres off Godot's pose, but it must REST, not slide away (it
-    // slid 4 m while the trimesh contact point sat at a phantom support).
+    // The sloped road. It slid 4 m while the trimesh contact point sat at a
+    // phantom support (pat-l8jg8), then still 0.6 m on one contact point and
+    // the 0.5 default friction; a four-point face manifold and Godot's 1.0
+    // default rest it where Godot does (pat-std5q, pat-uqw01).
     let p = pos(slope_box);
-    assert!((p.y - 9.2836).abs() < 0.05, "box on the sloped road at y {} (Godot 9.2836); at {p:?}", p.y);
+    assert!((p.y - 9.2836).abs() < 0.01, "box on the sloped road at y {} (Godot 9.2836); at {p:?}", p.y);
     let drift = ((p.x - 35.4948).powi(2) + (p.z - 10.0241).powi(2)).sqrt();
-    assert!(drift < 0.75, "box on the sloped road slid {drift} m to {p:?} (Godot 0.03 m)");
+    assert!(drift < 0.06, "box on the sloped road rests {drift} m from Godot's pose: {p:?} vs (35.4948, 9.2836, 10.0241)");
+    let q = gdscene::node3d::get_global_rotation_quaternion(ml.tree(), slope_box);
+    let q = if q.w < 0.0 { gdcore::math3d::Quaternion::new(-q.x, -q.y, -q.z, -q.w) } else { q };
+    // Patina's box settles about 1.5 degrees steeper than Godot's (q x 0.038,
+    // z -0.033); it rests across two road triangles and the position solve
+    // only translates. Held to the direction and rough size of the tilt.
+    assert!(
+        (q.x - 0.0232).abs() < 0.02 && (q.z + 0.0234).abs() < 0.02 && q.y.abs() < 0.005,
+        "box on the sloped road lies turned {q:?}; Godot's lies flat on the road, (0.0232, -0.0005, -0.0234, 0.9995)"
+    );
+    // The tilted box lands on an edge and tips flat.
+    let p = pos(tilted_box);
+    assert!(near(p, (-17.7196, 5.6821, 9.1520), 0.06), "tilted box rests at {p:?}; Godot (-17.7196, 5.6821, 9.1520)");
+    let q = gdscene::node3d::get_global_rotation_quaternion(ml.tree(), tilted_box);
+    let tilt = 2.0 * q.w.abs().min(1.0).acos();
+    let up = gdcore::math3d::Basis::from_quaternion(q).xform(Vector3::new(0.0, 1.0, 0.0));
+    // Any face may end up on top; Godot's ends unrotated.
+    let flat = up.x.abs().max(up.y.abs()).max(up.z.abs());
+    assert!(flat > 0.999, "tilted box rests tipped ({tilt} rad, a face normal {up:?}); Godot's lies flat");
 }
