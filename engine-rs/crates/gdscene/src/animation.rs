@@ -2348,7 +2348,39 @@ fn gltf_float_array(v: Option<&Variant>) -> Vec<f32> {
 /// [`TrackType::Rotation3D`] and [`TrackType::Scale3D`] on the target node's
 /// name; `weights` becomes one [`TrackType::BlendShape`] track per morph target.
 pub fn animations_from_gltf_resource(resource: &gdresource::Resource) -> Vec<Animation> {
-    let names = gltf_node_names(resource);
+    let targets: HashMap<i64, GltfTrackTarget> = gltf_node_names(resource)
+        .into_iter()
+        .map(|(i, name)| (i, GltfTrackTarget::Node(name)))
+        .collect();
+    animations_from_gltf_resource_targeted(resource, &targets)
+}
+
+/// What a glTF animation channel's target node became in the instanced scene
+/// (pat-m2jgd).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GltfTrackTarget {
+    /// An ordinary node, by its path relative to the mixer root.
+    Node(String),
+    /// A JOINT, which Godot's importer turns into a bone of a generated
+    /// `Skeleton3D`: the track keys `<skeleton path>:<bone>`
+    /// (`gltf_document.cpp` `_import_animation`), so it lands on the bone pose
+    /// rather than on a node that does not exist.
+    Bone {
+        /// Path of the `Skeleton3D` relative to the mixer root.
+        skeleton: String,
+        /// The bone's name on that skeleton.
+        bone: String,
+    },
+}
+
+/// [`animations_from_gltf_resource`] with each channel's target resolved by
+/// the caller, which knows the instanced hierarchy: a nested node needs its
+/// full path (not its bare name) and a joint needs its skeleton + bone.
+/// A channel whose target is absent from `targets` is dropped.
+pub fn animations_from_gltf_resource_targeted(
+    resource: &gdresource::Resource,
+    targets: &HashMap<i64, GltfTrackTarget>,
+) -> Vec<Animation> {
     let Some(Variant::Array(clips)) = resource.get_property("animations") else {
         return Vec::new();
     };
@@ -2383,8 +2415,12 @@ pub fn animations_from_gltf_resource(resource: &gdresource::Resource) -> Vec<Ani
             // A channel targeting a node the importer did not build cannot be
             // addressed by path — dropping it beats emitting a track that
             // silently animates nothing.
-            let Some(node_name) = names.get(&target) else {
+            let Some(target) = targets.get(&target) else {
                 continue;
+            };
+            let (node_name, bone) = match target {
+                GltfTrackTarget::Node(path) => (path.clone(), None),
+                GltfTrackTarget::Bone { skeleton, bone } => (skeleton.clone(), Some(bone.clone())),
             };
             let path = match ch.get("path") {
                 Some(Variant::String(s)) => s,
@@ -2423,11 +2459,17 @@ pub fn animations_from_gltf_resource(resource: &gdresource::Resource) -> Vec<Ani
                 // `animation_tscn.rs`: a rotation track drives `quaternion`, not
                 // `rotation` — Godot's `rotation` is Euler `Vector3`, so writing a
                 // quaternion there would set the wrong property with a wrong type.
-                let (track_type, property) = match path {
-                    "translation" => (TrackType::Position3D, "position".to_string()),
-                    "rotation" => (TrackType::Rotation3D, "quaternion".to_string()),
-                    "scale" => (TrackType::Scale3D, "scale".to_string()),
-                    "weights" => (
+                // A bone track's sub-path is the BONE name; the track type alone
+                // says which pose component it drives
+                // (`skeleton3d::apply_animation_bone_tracks`).
+                let (track_type, property) = match (path, &bone) {
+                    ("translation", Some(b)) => (TrackType::Position3D, b.clone()),
+                    ("rotation", Some(b)) => (TrackType::Rotation3D, b.clone()),
+                    ("scale", Some(b)) => (TrackType::Scale3D, b.clone()),
+                    ("translation", None) => (TrackType::Position3D, "position".to_string()),
+                    ("rotation", None) => (TrackType::Rotation3D, "quaternion".to_string()),
+                    ("scale", None) => (TrackType::Scale3D, "scale".to_string()),
+                    ("weights", _) => (
                         TrackType::BlendShape,
                         // Morph-target names are not carried on the document, so
                         // the target is addressed by index.

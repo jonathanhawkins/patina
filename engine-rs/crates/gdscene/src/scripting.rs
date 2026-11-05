@@ -9685,6 +9685,12 @@ impl SceneAccess for SceneTreeAccessor {
         let scene = crate::packed_scene::PackedScene::from_tscn(&source).ok()?;
         // Recursively resolve `instance=ExtResource` sub-scenes the same way.
         let resolve = |sub: &str| -> Option<crate::packed_scene::PackedScene> {
+            // A sub-scene may be an imported `.glb` (a spawned enemy.tscn
+            // instances enemy.glb); it is not `.tscn` text (pat-m2jgd).
+            let lower = sub.to_ascii_lowercase();
+            if lower.ends_with(".glb") || lower.ends_with(".gltf") {
+                return crate::gltf_scene::packed_scene_from_gltf_path(sub);
+            }
             let src = gdcore::file_access::FileAccess::read_file_string(sub).ok()?;
             crate::packed_scene::PackedScene::from_tscn(&src).ok()
         };

@@ -31,12 +31,15 @@
 //! property name is not new — `GLTFDocument.generate_scene` already set it and
 //! nothing ever read it.
 
+use std::collections::HashMap;
+
 use gdcore::math::Vector3;
-use gdcore::math3d::Quaternion;
+use gdcore::math3d::{Basis, Quaternion, Transform3D};
 use gdresource::Resource;
 use gdvariant::Variant;
 
-use crate::node::{Node, NodeId};
+use crate::node::NodeId;
+use crate::packed_scene::{PackedScene, SyntheticNode};
 use crate::scene_tree::SceneTree;
 
 /// Reads a fixed-length float array property off a glTF node dictionary.
@@ -112,82 +115,6 @@ fn node_class(dict: &gdvariant::SharedDictionary, doc: &Resource) -> &'static st
     "Node3D"
 }
 
-/// Applies a glTF node's TRS to a freshly created Node3D-derived node.
-///
-/// ⚠️ glTF rotation is a QUATERNION and Patina stores `rotation` as Godot's
-/// Euler `Vector3`, so it is converted rather than copied componentwise — four
-/// floats written into a three-component property is how a rig ends up subtly
-/// mis-rotated. `Quaternion::to_euler` uses the YXZ convention Godot does.
-fn apply_transform(tree: &mut SceneTree, node_id: NodeId, dict: &gdvariant::SharedDictionary) {
-    let t = floats(dict, "translation", 3).unwrap_or_else(|| vec![0.0, 0.0, 0.0]);
-    let r = floats(dict, "rotation", 4).unwrap_or_else(|| vec![0.0, 0.0, 0.0, 1.0]);
-    let s = floats(dict, "scale", 3).unwrap_or_else(|| vec![1.0, 1.0, 1.0]);
-
-    crate::node3d::set_position(tree, node_id, Vector3::new(t[0], t[1], t[2]));
-    let quat = Quaternion {
-        x: r[0],
-        y: r[1],
-        z: r[2],
-        w: r[3],
-    };
-    crate::node3d::set_rotation(tree, node_id, quat.to_euler());
-    crate::node3d::set_scale(tree, node_id, Vector3::new(s[0], s[1], s[2]));
-}
-
-/// Creates the node for glTF node `index` under `parent`, then its children.
-///
-/// Depth-first in document order, which is the order Godot's importer walks, so
-/// sibling order in the built tree matches the file.
-fn build_node(
-    tree: &mut SceneTree,
-    parent: NodeId,
-    doc: &Resource,
-    nodes: &[Variant],
-    index: usize,
-    depth: usize,
-) -> Option<NodeId> {
-    // A glTF `children` array may contain a cycle, and nothing upstream of here
-    // validates that. Without a bound, a hand-made or corrupt file would recurse
-    // until the stack dies — a hang rather than an import error.
-    const MAX_DEPTH: usize = 256;
-    if depth > MAX_DEPTH {
-        return None;
-    }
-    let dict = match nodes.get(index) {
-        Some(Variant::Dictionary(d)) => d.clone(),
-        _ => return None,
-    };
-    let name = match dict.get("name") {
-        Some(Variant::String(s)) if !s.is_empty() => s,
-        // Godot falls back to a positional name so every node is addressable by
-        // path even when the file left it unnamed.
-        _ => format!("Node{index}"),
-    };
-    let class = node_class(&dict, doc);
-    let node_id = tree.add_child(parent, Node::new(&name, class)).ok()?;
-    apply_transform(tree, node_id, &dict);
-
-    if let Some(mesh_index) = int_of(&dict, "mesh") {
-        if let Some(node) = tree.get_node_mut(node_id) {
-            // `mesh` is what `node3d::get_mesh_path` reads; `gltf_mesh_index`
-            // is what tells the render server WHICH mesh of the file this node
-            // uses. Both are required — see the module header.
-            node.set_property("mesh", Variant::String(doc.path.clone()));
-            node.set_property("gltf_mesh_index", Variant::Int(mesh_index));
-        }
-    }
-
-    if let Some(Variant::Array(kids)) = dict.get("children") {
-        for kid in kids.to_vec() {
-            if let Variant::Int(kid_index) = kid {
-                if kid_index >= 0 {
-                    build_node(tree, node_id, doc, nodes, kid_index as usize, depth + 1);
-                }
-            }
-        }
-    }
-    Some(node_id)
-}
 
 /// Instantiates `doc`'s default scene as a child of `parent`, returning the root
 /// node that was created, or `None` when the document declares no nodes.
@@ -198,15 +125,204 @@ fn build_node(
 /// — always wrapping keeps `instantiate()` returning one node, which is what
 /// both `add_child(scene.instantiate())` and a `.tscn` `instance=ExtResource`
 /// require.
+///
+/// 🔑 Built from [`packed_scene_from_gltf`], the SAME scene a `.tscn`'s
+/// `instance=ExtResource("m.glb")` instances, so a script's
+/// `load("m.glb").instantiate()` and a scene's instance of it cannot disagree
+/// about the hierarchy (pat-m2jgd). This used to build its own tree, with every
+/// joint as a plain `Node3D` and no `Skeleton3D` at all.
 pub fn build_gltf_subtree(tree: &mut SceneTree, parent: NodeId, doc: &Resource) -> Option<NodeId> {
-    let nodes = match doc.get_property("nodes") {
-        Some(Variant::Array(a)) => a.to_vec(),
+    let scene = packed_scene_from_gltf(doc)?;
+    crate::packed_scene::add_packed_scene_to_tree_with_subscenes(tree, parent, &scene, &|_| None)
+        .map_err(|e| tracing::error!("glTF scene '{}' failed to instance: {e}", doc.path))
+        .ok()
+}
+
+/// Builds the imported scene of a glTF document as a [`PackedScene`], the way
+/// Godot's `ResourceImporterScene` does for a `.glb`, so it instances through
+/// the same path as a `.tscn` — including as a `.tscn`'s
+/// `instance=ExtResource("player.glb")` with editable children (pat-m2jgd).
+///
+/// The hierarchy follows `gltf_document.cpp` `_generate_scene_node_tree`:
+///
+/// - a `Node3D` root (named after the glTF scene, else the file stem) holding
+///   the document's root nodes;
+/// - a skin's JOINTS are not nodes: they become the bones of a generated
+///   `Skeleton3D` (named `Skeleton3D`, uniquified against the document's node
+///   names), placed where the skeleton's root joint sits — so the official 3D
+///   platformer's `player.glb` yields `Skeleton/Skeleton3D`, which its
+///   `player.tscn` edits as `parent="Player/Skeleton/Skeleton3D"`;
+/// - a non-joint child of a joint hangs off a `BoneAttachment3D` named after
+///   that bone;
+/// - a skinned mesh is reparented under its skeleton with an identity
+///   transform (`_process_mesh_instances`), carrying the skin's binds;
+/// - an `AnimationPlayer` holds the clips, with joint channels keyed
+///   `<skeleton path>:<bone>` like Godot's `_import_animation`.
+///
+/// Returns `None` when the document has no nodes.
+pub fn packed_scene_from_gltf(doc: &Resource) -> Option<PackedScene> {
+    let nodes: Vec<gdvariant::SharedDictionary> = match doc.get_property("nodes") {
+        Some(Variant::Array(a)) => a
+            .to_vec()
+            .into_iter()
+            .map(|v| match v {
+                Variant::Dictionary(d) => d,
+                _ => gdvariant::SharedDictionary::default(),
+            })
+            .collect(),
         _ => return None,
     };
-    if nodes.is_empty() {
+    let n = nodes.len();
+    if n == 0 {
         return None;
     }
 
+    // -- graph --------------------------------------------------------------
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut parent: Vec<Option<usize>> = vec![None; n];
+    for (i, dict) in nodes.iter().enumerate() {
+        if let Some(Variant::Array(kids)) = dict.get("children") {
+            for kid in kids.to_vec() {
+                if let Variant::Int(k) = kid {
+                    let k = k as usize;
+                    // A node may have ONE parent; a cycle or a second parent
+                    // is a malformed file, and keeping the first edge keeps
+                    // the walk below finite.
+                    if k < n && k != i && parent[k].is_none() {
+                        parent[k] = Some(i);
+                        children[i].push(k);
+                    }
+                }
+            }
+        }
+    }
+
+    // -- skeletons (`_determine_skeletons`) ---------------------------------
+    let skins = read_skins(doc, n);
+    let mut skel_of: Vec<Option<usize>> = vec![None; n];
+    let mut skin_to_skel: Vec<Option<usize>> = vec![None; skins.len()];
+    let mut skel_count = 0usize;
+    for (si, skin) in skins.iter().enumerate() {
+        if skin.joints.is_empty() {
+            continue;
+        }
+        let mut set: std::collections::HashSet<usize> = skin.joints.iter().copied().collect();
+        // Nodes BETWEEN two joints are bones too (`_expand_skin`), or the
+        // bone chain would have a hole.
+        for &j in &skin.joints {
+            let mut walked = Vec::new();
+            let mut cursor = parent[j];
+            while let Some(p) = cursor {
+                if set.contains(&p) {
+                    set.extend(walked.drain(..));
+                    break;
+                }
+                walked.push(p);
+                cursor = parent[p];
+            }
+        }
+        // Skins sharing a joint share ONE skeleton.
+        let existing: Vec<usize> = {
+            let mut v: Vec<usize> = set.iter().filter_map(|&j| skel_of[j]).collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        let id = match existing.first() {
+            Some(&first) => {
+                for other in &existing[1..] {
+                    for s in skel_of.iter_mut().filter(|s| **s == Some(*other)) {
+                        *s = Some(first);
+                    }
+                    for s in skin_to_skel.iter_mut().filter(|s| **s == Some(*other)) {
+                        *s = Some(first);
+                    }
+                }
+                first
+            }
+            None => {
+                skel_count += 1;
+                skel_count - 1
+            }
+        };
+        for &j in &set {
+            skel_of[j] = Some(id);
+        }
+        skin_to_skel[si] = Some(id);
+    }
+
+    // -- names (`_assign_node_names`, then `_create_skeletons`) -------------
+    // Godot keeps ONE unique-name set for the whole document; joints are
+    // skipped (their names are bone names, unique per skeleton instead).
+    let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut node_names: Vec<String> = vec![String::new(); n];
+    for (i, dict) in nodes.iter().enumerate() {
+        if skel_of[i].is_some() {
+            continue;
+        }
+        let raw = match dict.get("name") {
+            Some(Variant::String(s)) if !s.is_empty() => s,
+            _ if int_of(dict, "mesh").is_some() => "Mesh".to_string(),
+            _ if int_of(dict, "camera").is_some() => "Camera".to_string(),
+            _ => "Node".to_string(),
+        };
+        node_names[i] = gen_unique_name(&mut used, &validate_node_name(&raw));
+    }
+    let skel_ids: Vec<usize> = {
+        let mut v: Vec<usize> = skel_of.iter().flatten().copied().collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let mut skel_names: HashMap<usize, String> = HashMap::new();
+    for &k in &skel_ids {
+        skel_names.insert(k, gen_unique_name(&mut used, "Skeleton3D"));
+    }
+
+    // -- bones: depth-first from each sorted root, children in file order ---
+    // (bone order matters: a `.tscn` override addresses `bones/<idx>/…`; the
+    // platformer's enemy.tscn puts `eyes` at bone 2, right after its parent
+    // `body`, which is depth-first, not breadth-first).
+    let mut bone_of: Vec<Option<usize>> = vec![None; n];
+    let mut bone_names: Vec<String> = vec![String::new(); n];
+    let mut skel_props: HashMap<usize, HashMap<String, Variant>> = HashMap::new();
+    for &k in &skel_ids {
+        let mut roots: Vec<usize> = (0..n)
+            .filter(|&i| skel_of[i] == Some(k) && parent[i].map_or(true, |p| skel_of[p] != Some(k)))
+            .collect();
+        roots.sort_unstable();
+        let mut props = HashMap::new();
+        let mut names_used = std::collections::HashSet::new();
+        let mut stack: Vec<usize> = roots.into_iter().rev().collect();
+        let mut next = 0usize;
+        while let Some(i) = stack.pop() {
+            let raw = match nodes[i].get("name") {
+                Some(Variant::String(s)) => s.replace([':', '/'], "_"),
+                _ => String::new(),
+            };
+            let raw = if raw.is_empty() { "bone".to_string() } else { raw };
+            let name = gen_unique_name(&mut names_used, &raw);
+            let bone_parent = parent[i].and_then(|p| bone_of[p]).map_or(-1, |b| b as i64);
+            props.insert(format!("bones/{next}/name"), Variant::String(name.clone()));
+            props.insert(format!("bones/{next}/parent"), Variant::Int(bone_parent));
+            props.insert(
+                format!("bones/{next}/rest"),
+                Variant::Transform3D(local_transform(&nodes[i])),
+            );
+            props.insert(format!("bones/{next}/enabled"), Variant::Bool(true));
+            bone_of[i] = Some(next);
+            bone_names[i] = name;
+            next += 1;
+            for &c in children[i].iter().rev() {
+                if skel_of[c] == Some(k) {
+                    stack.push(c);
+                }
+            }
+        }
+        skel_props.insert(k, props);
+    }
+
+    // -- the node arena -----------------------------------------------------
     let scene_name = match doc.get_property("scene_name") {
         Some(Variant::String(s)) if !s.is_empty() => s.clone(),
         _ => std::path::Path::new(&doc.path)
@@ -215,61 +331,415 @@ pub fn build_gltf_subtree(tree: &mut SceneTree, parent: NodeId, doc: &Resource) 
             .unwrap_or("GltfScene")
             .to_string(),
     };
-    let root = tree
-        .add_child(parent, Node::new(&scene_name, "Node3D"))
-        .ok()?;
+    let mut arena = Arena::default();
+    let root = arena.add(None, scene_name, "Node3D", HashMap::new());
+    let mut skel_node: HashMap<usize, usize> = HashMap::new();
+    let mut gltf_to_arena: HashMap<usize, usize> = HashMap::new();
 
-    // `scene_roots` is the document's default-scene root list. Falling back to
-    // "every node that is nobody's child" matters: a glTF file is allowed to
-    // omit `scenes`, and treating node 0 as the only root would silently drop
-    // the rest of the file.
+    let skinned_mesh = |i: usize| int_of(&nodes[i], "skin").is_some() && int_of(&nodes[i], "mesh").is_some();
+
+    // `_generate_scene_node`, iterative so a deep or hostile file cannot blow
+    // the stack. Each entry: (glTF node, arena parent).
     let roots: Vec<usize> = match doc.get_property("scene_roots") {
         Some(Variant::Array(a)) => a
             .to_vec()
             .into_iter()
             .filter_map(|v| match v {
-                Variant::Int(i) if i >= 0 => Some(i as usize),
+                Variant::Int(i) if i >= 0 && (i as usize) < n => Some(i as usize),
                 _ => None,
             })
             .collect(),
-        _ => {
-            let mut is_child = vec![false; nodes.len()];
-            for entry in &nodes {
-                if let Variant::Dictionary(d) = entry {
-                    if let Some(Variant::Array(kids)) = d.get("children") {
-                        for kid in kids.to_vec() {
-                            if let Variant::Int(i) = kid {
-                                if i >= 0 && (i as usize) < is_child.len() {
-                                    is_child[i as usize] = true;
-                                }
-                            }
-                        }
-                    }
+        // A glTF may omit `scenes`: every node that is nobody's child is a root.
+        _ => (0..n).filter(|&i| parent[i].is_none()).collect(),
+    };
+    let mut work: Vec<(usize, usize)> = roots.into_iter().rev().map(|i| (i, root)).collect();
+    let mut visited = vec![false; n];
+    while let Some((gi, at)) = work.pop() {
+        if std::mem::replace(&mut visited[gi], true) {
+            continue;
+        }
+        let dict = &nodes[gi];
+        let mut pending: Vec<(usize, usize)> = Vec::new();
+        if let Some(k) = skel_of[gi] {
+            let sk = *skel_node.entry(k).or_insert_with(|| {
+                arena.add(
+                    Some(at),
+                    skel_names[&k].clone(),
+                    "Skeleton3D",
+                    skel_props.remove(&k).unwrap_or_default(),
+                )
+            });
+            let bone = bone_names[gi].clone();
+            // A joint that also carries a mesh/camera/light gets that content
+            // on a BoneAttachment3D (`requires_extra_node`).
+            let class = node_class(dict, doc);
+            if class != "Node3D" && !skinned_mesh(gi) {
+                let att = arena.add_bone_attachment(sk, &bone);
+                let content = arena.add(Some(att), bone.clone(), class, content_props(dict, doc));
+                gltf_to_arena.insert(gi, content);
+            }
+            for &c in &children[gi] {
+                if skel_of[c] == Some(k) || skinned_mesh(c) {
+                    pending.push((c, sk));
+                } else {
+                    let att = arena.add_bone_attachment(sk, &bone);
+                    pending.push((c, att));
                 }
             }
-            (0..nodes.len()).filter(|i| !is_child[*i]).collect()
-        }
-    };
-
-    for index in roots {
-        build_node(tree, root, doc, &nodes, index, 0);
-    }
-
-    // The clips live on an AnimationPlayer under the scene root, as Godot's
-    // importer places them. `animations_from_gltf_resource` already built them
-    // and had no non-test caller at all before this.
-    let animations = crate::animation::animations_from_gltf_resource(doc);
-    if !animations.is_empty() {
-        if let Ok(player_node) =
-            tree.add_child(root, Node::new("AnimationPlayer", "AnimationPlayer"))
-        {
-            let mut player = crate::animation::AnimationPlayer::new();
-            for clip in animations {
-                player.add_animation(clip);
+        } else {
+            let mut props = content_props(dict, doc);
+            props.insert("transform".into(), Variant::Transform3D(local_transform(dict)));
+            let id = arena.add(Some(at), node_names[gi].clone(), node_class(dict, doc), props);
+            gltf_to_arena.insert(gi, id);
+            for &c in &children[gi] {
+                pending.push((c, id));
             }
-            let _ = tree.attach_animation_player(player_node, player);
+        }
+        // Reverse so siblings come off the stack in file order.
+        work.extend(pending.into_iter().rev());
+    }
+
+    // -- skinned meshes move under their skeleton (`_process_mesh_instances`)
+    for gi in 0..n {
+        if !skinned_mesh(gi) {
+            continue;
+        }
+        let (Some(&mesh), Some(skin)) = (gltf_to_arena.get(&gi), int_of(&nodes[gi], "skin")) else {
+            continue;
+        };
+        let Some(skin_data) = skins.get(skin.max(0) as usize) else {
+            continue;
+        };
+        let Some(&sk) = skin_to_skel
+            .get(skin.max(0) as usize)
+            .copied()
+            .flatten()
+            .and_then(|k| skel_node.get(&k))
+        else {
+            continue;
+        };
+        arena.reparent(mesh, sk);
+        let props = &mut arena.nodes[mesh].props;
+        props.insert("transform".into(), Variant::Transform3D(Transform3D::IDENTITY));
+        props.insert(
+            "skeleton".into(),
+            Variant::NodePath(gdcore::node_path::NodePath::new("..")),
+        );
+        // The skin's binds, read positionally by the mesh's `bone_indices`
+        // (`render_server_3d.rs` `authored_skin`). Without them the renderer
+        // falls back to rest-derived binds — plausible, but not the rig.
+        props.insert(
+            "__skin__bind_count".into(),
+            Variant::Int(skin_data.joints.len() as i64),
+        );
+        for (bi, &joint) in skin_data.joints.iter().enumerate() {
+            props.insert(
+                format!("__skin__bind/{bi}/name"),
+                Variant::String(bone_names[joint].clone()),
+            );
+            let pose = skin_data
+                .inverse_binds
+                .get(bi)
+                .copied()
+                .unwrap_or(Transform3D::IDENTITY);
+            props.insert(format!("__skin__bind/{bi}/pose"), Variant::Transform3D(pose));
         }
     }
 
-    Some(root)
+    // -- clips --------------------------------------------------------------
+    let mut targets: HashMap<i64, crate::animation::GltfTrackTarget> = HashMap::new();
+    for gi in 0..n {
+        let target = match (skel_of[gi], gltf_to_arena.get(&gi)) {
+            (Some(k), _) => match skel_node.get(&k) {
+                Some(&sk) => crate::animation::GltfTrackTarget::Bone {
+                    skeleton: arena.path_of(sk),
+                    bone: bone_names[gi].clone(),
+                },
+                None => continue,
+            },
+            (None, Some(&id)) => crate::animation::GltfTrackTarget::Node(arena.path_of(id)),
+            (None, None) => continue,
+        };
+        targets.insert(gi as i64, target);
+    }
+    let animations = crate::animation::animations_from_gltf_resource_targeted(doc, &targets);
+    if !animations.is_empty() {
+        let name = arena.unique_child_name(root, "AnimationPlayer");
+        arena.add(Some(root), name, "AnimationPlayer", HashMap::new());
+    }
+
+    Some(PackedScene::from_synthetic_nodes(arena.emit(), animations))
+}
+
+/// [`packed_scene_from_gltf`] for a `res://` (or filesystem) path: a mounted
+/// pack first, then the file under the project root. `None` — reported — when
+/// the file cannot be read or parsed.
+pub fn packed_scene_from_gltf_path(path: &str) -> Option<PackedScene> {
+    let doc = match gdcore::file_access::read_from_packs(path) {
+        Some(bytes) => gdresource::import_gltf_bytes(&bytes, std::path::Path::new(path)),
+        None => match gdcore::file_access::resolve_path(path) {
+            Ok(fs) => gdresource::import_gltf(&fs),
+            Err(e) => Err(e),
+        },
+    };
+    match doc {
+        Ok(doc) => packed_scene_from_gltf(&doc),
+        Err(e) => {
+            tracing::error!("glTF scene '{path}' could not be imported: {e}");
+            None
+        }
+    }
+}
+
+/// Attaches the clips of an imported glTF scene to its `AnimationPlayer` node
+/// (the first one among `own`, the nodes that scene level created).
+///
+/// `root_node` is Godot's default `..` — the imported scene's root, which every
+/// track path (`Skeleton/Skeleton3D:hip`) is relative to.
+pub(crate) fn attach_gltf_animation_player(
+    tree: &mut SceneTree,
+    own: &[NodeId],
+    clips: &[crate::animation::Animation],
+) {
+    let Some(&player_node) = own.iter().find(|&&id| {
+        tree.get_node(id)
+            .is_some_and(|n| n.class_name() == "AnimationPlayer")
+    }) else {
+        return;
+    };
+    let mut player = crate::animation::AnimationPlayer::new();
+    player.root_node = "..".to_string();
+    for clip in clips {
+        player.add_animation(clip.clone());
+    }
+    let _ = tree.attach_animation_player(player_node, player);
+}
+
+/// One skin of the document: its joints (glTF node indices, in bind order)
+/// and the inverse bind matrix of each.
+struct SkinData {
+    joints: Vec<usize>,
+    inverse_binds: Vec<Transform3D>,
+}
+
+fn read_skins(doc: &Resource, node_count: usize) -> Vec<SkinData> {
+    let Some(Variant::Array(skins)) = doc.get_property("skins") else {
+        return Vec::new();
+    };
+    skins
+        .to_vec()
+        .into_iter()
+        .map(|skin| {
+            let Variant::Dictionary(d) = skin else {
+                return SkinData {
+                    joints: Vec::new(),
+                    inverse_binds: Vec::new(),
+                };
+            };
+            let joints = match d.get("joints") {
+                Some(Variant::Array(a)) => a
+                    .to_vec()
+                    .into_iter()
+                    .filter_map(|v| match v {
+                        Variant::Int(i) if i >= 0 && (i as usize) < node_count => Some(i as usize),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let inverse_binds = match d.get("inverse_bind_matrices") {
+                Some(Variant::Array(a)) => a
+                    .to_vec()
+                    .into_iter()
+                    .map(|m| {
+                        let f: Vec<f32> = match m {
+                            Variant::Array(m) => m
+                                .to_vec()
+                                .into_iter()
+                                .map(|x| match x {
+                                    Variant::Float(f) => f as f32,
+                                    Variant::Int(i) => i as f32,
+                                    _ => 0.0,
+                                })
+                                .collect(),
+                            _ => Vec::new(),
+                        };
+                        if f.len() != 16 {
+                            return Transform3D::IDENTITY;
+                        }
+                        // Column-major 4x4; `Basis` stores COLUMNS.
+                        Transform3D {
+                            basis: Basis {
+                                x: Vector3::new(f[0], f[1], f[2]),
+                                y: Vector3::new(f[4], f[5], f[6]),
+                                z: Vector3::new(f[8], f[9], f[10]),
+                            },
+                            origin: Vector3::new(f[12], f[13], f[14]),
+                        }
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            SkinData {
+                joints,
+                inverse_binds,
+            }
+        })
+        .collect()
+}
+
+/// A glTF node's local TRS as a `Transform3D` (rotation is a quaternion).
+fn local_transform(dict: &gdvariant::SharedDictionary) -> Transform3D {
+    let t = floats(dict, "translation", 3).unwrap_or_else(|| vec![0.0, 0.0, 0.0]);
+    let r = floats(dict, "rotation", 4).unwrap_or_else(|| vec![0.0, 0.0, 0.0, 1.0]);
+    let s = floats(dict, "scale", 3).unwrap_or_else(|| vec![1.0, 1.0, 1.0]);
+    let q = Quaternion::new(r[0], r[1], r[2], r[3]);
+    Transform3D {
+        basis: Basis::from_quaternion_scale(q, Vector3::new(s[0], s[1], s[2])),
+        origin: Vector3::new(t[0], t[1], t[2]),
+    }
+}
+
+/// The class-specific properties of a content node (a mesh's addressing).
+fn content_props(dict: &gdvariant::SharedDictionary, doc: &Resource) -> HashMap<String, Variant> {
+    let mut props = HashMap::new();
+    if let Some(mesh_index) = int_of(dict, "mesh") {
+        // `mesh` is what `node3d::get_mesh_path` reads; `gltf_mesh_index` is
+        // what tells the render server WHICH mesh of the file this node uses.
+        // Both are required — see the module header.
+        props.insert("mesh".into(), Variant::String(doc.path.clone()));
+        props.insert("gltf_mesh_index".into(), Variant::Int(mesh_index));
+    }
+    props
+}
+
+/// Godot's `String::validate_node_name`: the characters a NodePath reserves
+/// become `_`.
+fn validate_node_name(name: &str) -> String {
+    name.chars()
+        .map(|c| if matches!(c, '.' | ':' | '@' | '/' | '"' | '%') { '_' } else { c })
+        .collect()
+}
+
+/// Godot's `GLTFDocument::_gen_unique_name`: `name`, then `name2`, `name3`…
+fn gen_unique_name(used: &mut std::collections::HashSet<String>, name: &str) -> String {
+    let mut index = 1;
+    loop {
+        let candidate = if index > 1 {
+            format!("{name}{index}")
+        } else {
+            name.to_string()
+        };
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+#[derive(Default)]
+struct ArenaNode {
+    name: String,
+    class: String,
+    parent: Option<usize>,
+    children: Vec<usize>,
+    props: HashMap<String, Variant>,
+}
+
+/// The imported scene under construction: plain indices, so a skinned mesh
+/// can be reparented after the walk (as Godot does) before paths are fixed.
+#[derive(Default)]
+struct Arena {
+    nodes: Vec<ArenaNode>,
+}
+
+impl Arena {
+    fn add(
+        &mut self,
+        parent: Option<usize>,
+        name: String,
+        class: &str,
+        props: HashMap<String, Variant>,
+    ) -> usize {
+        let id = self.nodes.len();
+        self.nodes.push(ArenaNode {
+            name,
+            class: class.to_string(),
+            parent,
+            children: Vec::new(),
+            props,
+        });
+        if let Some(p) = parent {
+            self.nodes[p].children.push(id);
+        }
+        id
+    }
+
+    fn add_bone_attachment(&mut self, skeleton: usize, bone: &str) -> usize {
+        let name = self.unique_child_name(skeleton, bone);
+        let mut props = HashMap::new();
+        props.insert("bone_name".to_string(), Variant::String(bone.to_string()));
+        self.add(Some(skeleton), name, "BoneAttachment3D", props)
+    }
+
+    fn unique_child_name(&self, parent: usize, base: &str) -> String {
+        let taken = |candidate: &str| {
+            self.nodes[parent]
+                .children
+                .iter()
+                .any(|&c| self.nodes[c].name == candidate)
+        };
+        if !taken(base) {
+            return base.to_string();
+        }
+        (2..)
+            .map(|i| format!("{base}{i}"))
+            .find(|c| !taken(c))
+            .unwrap_or_else(|| base.to_string())
+    }
+
+    fn reparent(&mut self, id: usize, new_parent: usize) {
+        if let Some(old) = self.nodes[id].parent {
+            self.nodes[old].children.retain(|&c| c != id);
+        }
+        // Godot's `add_child(mi, true)`: a clash gets a readable suffix.
+        let name = self.nodes[id].name.clone();
+        let name = self.unique_child_name(new_parent, &name);
+        self.nodes[id].name = name;
+        self.nodes[id].parent = Some(new_parent);
+        self.nodes[new_parent].children.push(id);
+    }
+
+    /// Path of `id` relative to the root (`"."` for the root itself).
+    fn path_of(&self, id: usize) -> String {
+        let mut parts = Vec::new();
+        let mut cursor = id;
+        while let Some(p) = self.nodes[cursor].parent {
+            parts.push(self.nodes[cursor].name.as_str());
+            cursor = p;
+        }
+        if parts.is_empty() {
+            return ".".to_string();
+        }
+        parts.reverse();
+        parts.join("/")
+    }
+
+    /// Depth-first, parents before children, as a `.tscn` lists its nodes.
+    fn emit(mut self) -> Vec<SyntheticNode> {
+        let mut out = Vec::with_capacity(self.nodes.len());
+        let mut stack = vec![0usize];
+        while let Some(id) = stack.pop() {
+            let parent_path = self.nodes[id].parent.map(|p| self.path_of(p));
+            let node = std::mem::take(&mut self.nodes[id].props);
+            out.push(SyntheticNode {
+                name: self.nodes[id].name.clone(),
+                class_name: self.nodes[id].class.clone(),
+                parent_path,
+                properties: node,
+            });
+            stack.extend(self.nodes[id].children.iter().rev().copied());
+        }
+        out
+    }
 }

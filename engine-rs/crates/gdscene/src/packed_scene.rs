@@ -91,6 +91,76 @@ struct NodeTemplate {
     /// indistinguishable from authored overrides and would beat the
     /// sub-scene's own values.
     has_type: bool,
+    /// Godot 4.6's `unique_id=` header attribute: a scene-local id that stays
+    /// put when the node is renamed or moved (pat-m2jgd).
+    unique_id: Option<i64>,
+    /// Godot 4.6's `parent_id_path=PackedInt32Array(..)`: the parent addressed
+    /// by `unique_id`s, one per scene level — the instance node's id in THIS
+    /// scene, then the node's id inside the instanced scene, and so on. Written
+    /// beside `parent=` for every editable-children entry (pat-m2jgd).
+    parent_id_path: Option<Vec<i64>>,
+}
+
+/// Splits a `key = value` property line, decoding a QUOTED key.
+///
+/// Godot quotes a property name that is not a bare identifier path —
+/// `"nodes/Animation 2/node" = SubResource("13")` in every AnimationNodeBlendTree
+/// whose node names have spaces (`variant_parser.cpp`
+/// `property_name_encode`). Keeping the quotes as part of the key meant
+/// `nodes/Animation 2/node` was never found, a Blend2 lost its input, and the
+/// platformer player's whole AnimationTree was dropped (pat-m2jgd). A quoted
+/// key may itself contain `=`, so the split happens after its closing quote.
+fn split_property_line(line: &str) -> Option<(String, &str)> {
+    let trimmed = line.trim_start();
+    if let Some(rest) = trimmed.strip_prefix('"') {
+        let mut key = String::new();
+        let mut chars = rest.char_indices();
+        while let Some((i, c)) = chars.next() {
+            match c {
+                '\\' => {
+                    if let Some((_, escaped)) = chars.next() {
+                        key.push(escaped);
+                    }
+                }
+                '"' => {
+                    let after = rest[i + 1..].trim_start();
+                    let value = after.strip_prefix('=')?;
+                    return Some((key, value));
+                }
+                _ => key.push(c),
+            }
+        }
+        return None;
+    }
+    let (key, value) = line.split_once('=')?;
+    Some((key.trim().to_string(), value))
+}
+
+/// Parses a `PackedInt32Array(1, 2, 3)` header value into its integers.
+fn parse_id_path_attr(raw: &str) -> Option<Vec<i64>> {
+    let inner = raw
+        .trim()
+        .strip_prefix("PackedInt32Array(")?
+        .strip_suffix(')')?;
+    let ids: Option<Vec<i64>> = inner
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<i64>().ok())
+        .collect();
+    ids.filter(|v| !v.is_empty())
+}
+
+/// A node of a scene synthesized in code rather than parsed from `.tscn` — the
+/// imported scene of a `.glb`/`.gltf` (see [`crate::gltf_scene`]). Becomes a
+/// typed template, so it instances through the same path a `.tscn` node does.
+#[derive(Debug, Clone)]
+pub(crate) struct SyntheticNode {
+    pub name: String,
+    pub class_name: String,
+    /// `None` for the root, `"."` for its children, else a root-relative path.
+    pub parent_path: Option<String>,
+    pub properties: HashMap<String, Variant>,
 }
 
 impl NodeTemplate {
@@ -158,6 +228,11 @@ pub struct PackedScene {
     /// Node paths from `[editable path="..."]` sections — sub-scene instances
     /// whose local property/child overrides should be applied on load.
     editable_instances: Vec<String>,
+    /// The clips of a scene synthesized from a glTF document, for its
+    /// `AnimationPlayer` node (pat-m2jgd). A `.tscn` player builds its clips
+    /// from `libraries` sub-resources; an imported scene has none, so they are
+    /// carried here and attached by [`finish_scene_level`].
+    gltf_animations: Option<std::sync::Arc<Vec<crate::animation::Animation>>>,
 }
 
 /// Percent-encodes a marker property value.
@@ -459,7 +534,12 @@ impl PackedScene {
                     // Parse instance_placeholder="res://..." (deferred instancing).
                     let instance_placeholder = attrs.get("instance_placeholder").cloned();
 
+                    let unique_id = attrs.get("unique_id").and_then(|v| v.trim().parse::<i64>().ok());
+                    let parent_id_path = attrs.get("parent_id_path").and_then(|v| parse_id_path_attr(v));
+
                     current = Some(NodeTemplate {
+                        unique_id,
+                        parent_id_path,
                         name,
                         class_name,
                         parent_path,
@@ -506,8 +586,8 @@ impl PackedScene {
 
             // Property line: key = value
             if let Some(ref mut tmpl) = current {
-                if let Some((key, value_str)) = line.split_once('=') {
-                    let key = key.trim();
+                if let Some((key_owned, value_str)) = split_property_line(line) {
+                    let key = key_owned.as_str();
                     let value_str = value_str.trim();
 
                     // Handle ExtResource references (e.g. `script = ExtResource("1_abc")`).
@@ -570,8 +650,8 @@ impl PackedScene {
             } else if let Some(ref sub_id) = current_sub {
                 // Property lines inside a [sub_resource] section (e.g. a
                 // BoxShape3D's `size`), kept so the gizmo can use real extents.
-                if let Some((key, value_str)) = line.split_once('=') {
-                    let key = key.trim();
+                if let Some((key_owned, value_str)) = split_property_line(line) {
+                    let key = key_owned.as_str();
                     let value_str = value_str.trim();
                     // Container values continue onto following lines, exactly as
                     // for node properties above (Animation `tracks/N/keys`,
@@ -2226,7 +2306,48 @@ impl PackedScene {
             sub_resources,
             sub_resource_props,
             editable_instances,
+            gltf_animations: None,
         })
+    }
+
+    /// Builds a scene from code-synthesized nodes (an imported glTF scene;
+    /// pat-m2jgd). `nodes[0]` must be the root. `animations`, when non-empty,
+    /// are the clips of the scene's `AnimationPlayer`.
+    pub(crate) fn from_synthetic_nodes(
+        nodes: Vec<SyntheticNode>,
+        animations: Vec<crate::animation::Animation>,
+    ) -> Self {
+        let templates = nodes
+            .into_iter()
+            .map(|n| NodeTemplate {
+                name: n.name,
+                class_name: n.class_name,
+                parent_path: n.parent_path,
+                properties: n.properties,
+                groups: Vec::new(),
+                unique_name: false,
+                instance: None,
+                script_path: None,
+                instance_placeholder: None,
+                has_type: true,
+                unique_id: None,
+                parent_id_path: None,
+            })
+            .collect();
+        Self {
+            uid: None,
+            templates,
+            connections: Vec::new(),
+            ext_resources: HashMap::new(),
+            sub_resources: HashMap::new(),
+            sub_resource_props: HashMap::new(),
+            editable_instances: Vec::new(),
+            gltf_animations: if animations.is_empty() {
+                None
+            } else {
+                Some(std::sync::Arc::new(animations))
+            },
+        }
     }
 
     /// Returns the class name of the inline sub-resource with `id`, if any
@@ -2430,6 +2551,30 @@ impl PackedScene {
     where
         F: Fn(&str) -> Option<PackedScene>,
     {
+        let mut ids = HashMap::new();
+        let mut player_overrides = Vec::new();
+        self.instance_levels_ex(resolve_scene, levels, &mut ids, &mut player_overrides)
+    }
+
+    /// [`instance_levels`](Self::instance_levels), also filling:
+    ///
+    /// - `ids`: every node's `unique_id` path relative to THIS scene (see
+    ///   [`NodeTemplate::parent_id_path`]) → its index, so a template's
+    ///   `parent_id_path` can be resolved;
+    /// - `player_overrides`: indices of nodes from an INSTANCED scene that this
+    ///   scene's override entries gave their own `libraries` — an editable
+    ///   `AnimationPlayer` whose clips must resolve against THIS scene's
+    ///   sub-resources, not the instanced scene's (pat-m2jgd).
+    fn instance_levels_ex<F>(
+        &self,
+        resolve_scene: &F,
+        levels: &mut Vec<SceneLevel>,
+        ids: &mut HashMap<Vec<i64>, usize>,
+        player_overrides: &mut Vec<usize>,
+    ) -> EngineResult<(Vec<Node>, Vec<usize>)>
+    where
+        F: Fn(&str) -> Option<PackedScene>,
+    {
         let mut own: Vec<usize> = Vec::new();
         if self.templates.is_empty() {
             return Err(EngineError::InvalidOperation(
@@ -2469,13 +2614,18 @@ impl PackedScene {
 
         if let Some(base) = inherited_base {
             let mut base_levels = Vec::new();
-            let (base_nodes, base_own) = base.instance_levels(resolve_scene, &mut base_levels)?;
+            let mut base_overrides = Vec::new();
+            // An inherited scene shares its base's id space: the derived file
+            // addresses base nodes by their own `unique_id`s.
+            let (base_nodes, base_own) =
+                base.instance_levels_ex(resolve_scene, &mut base_levels, ids, &mut base_overrides)?;
             levels.extend(base_levels);
             // The base's nodes come first, so its indices need no offset.
             levels.push(SceneLevel {
                 scene: base,
                 root: 0,
                 own: base_own,
+                player_overrides: base_overrides,
             });
             if base_nodes.is_empty() {
                 return Err(EngineError::InvalidOperation(
@@ -2514,25 +2664,74 @@ impl PackedScene {
             nodes.push(root_node);
             own.push(0);
         }
+        if let Some(uid) = root_tmpl.unique_id {
+            ids.insert(vec![uid], 0);
+        }
         let root_id = nodes[0].id();
 
         for tmpl in &self.templates[1..] {
-            let parent_path = tmpl.parent_path.as_deref().unwrap_or(".");
-            let parent_idx = path_to_index.get(parent_path).copied().ok_or_else(|| {
-                EngineError::Parse(format!(
-                    "parent path '{parent_path}' not found for node '{}'",
-                    tmpl.name
-                ))
-            })?;
+            // Godot 4.6 addresses an editable child's parent by `unique_id`
+            // path first, the NodePath being the fallback: the id path is what
+            // survives a rename inside the instanced scene. A miss (an imported
+            // glTF scene carries no ids) falls back to the path.
+            let by_id = tmpl
+                .parent_id_path
+                .as_ref()
+                .and_then(|path| ids.get(path).copied());
+            let authored_parent = tmpl.parent_path.as_deref().unwrap_or(".");
+            let (parent_idx, parent_path_owned) = match by_id {
+                Some(idx) => (idx, Self::path_of_index(&path_to_index, idx)),
+                None => {
+                    let idx = path_to_index.get(authored_parent).copied().ok_or_else(|| {
+                        let via_ids = match &tmpl.parent_id_path {
+                            Some(p) => format!(" (parent_id_path {p:?} did not resolve either)"),
+                            None => String::new(),
+                        };
+                        EngineError::Parse(format!(
+                            "parent path '{authored_parent}' not found for node '{}'{via_ids}",
+                            tmpl.name
+                        ))
+                    })?;
+                    (idx, authored_parent.to_string())
+                }
+            };
+            let parent_path = parent_path_owned.as_str();
 
             // Check if this node instances a sub-scene.
             if let Some(ref inst_ref) = tmpl.instance {
-                if let Some(scene_path) = self.resolve_ext_resource_path(inst_ref) {
-                    if let Some(sub_scene) = resolve_scene(scene_path) {
+                let scene_path = self.resolve_ext_resource_path(inst_ref);
+                let sub_scene = scene_path.and_then(|p| resolve_scene(p));
+                if sub_scene.is_none() {
+                    // 🔑 Loud, not silent: the node below becomes an EMPTY
+                    // typeless `Node`, so a Player whose scene failed to load
+                    // boots as a nameless husk — no body, no camera — and the
+                    // game silently does nothing (pat-m2jgd).
+                    tracing::error!(
+                        "instanced scene {} for node '{}' could not be loaded (unreadable, \
+                         unparseable or cyclic); the node is left as an empty placeholder",
+                        scene_path.map_or_else(|| format!("{inst_ref} (unknown ext_resource)"), |p| format!("'{p}'")),
+                        tmpl.name
+                    );
+                }
+                if let (Some(scene_path), Some(sub_scene)) = (scene_path, sub_scene) {
+                    {
                         // Recursively instance the sub-scene.
                         let mut sub_levels = Vec::new();
-                        let (sub_nodes, sub_own) =
-                            sub_scene.instance_levels(resolve_scene, &mut sub_levels)?;
+                        let mut sub_ids = HashMap::new();
+                        let mut sub_overrides = Vec::new();
+                        let (sub_nodes, sub_own) = sub_scene
+                            .instance_levels_ex(
+                                resolve_scene,
+                                &mut sub_levels,
+                                &mut sub_ids,
+                                &mut sub_overrides,
+                            )
+                            .map_err(|e| {
+                                EngineError::Parse(format!(
+                                    "instancing '{scene_path}' at node '{}': {e}",
+                                    tmpl.name
+                                ))
+                            })?;
                         if sub_nodes.is_empty() {
                             continue;
                         }
@@ -2551,9 +2750,21 @@ impl PackedScene {
                                 scene: sub_scene,
                                 root: 0,
                                 own: sub_own,
+                                player_overrides: sub_overrides,
                             }
                             .offset_by(sub_root_idx),
                         );
+                        // The instance's nodes are addressed from here as
+                        // `[instance uid, <id path inside the sub-scene>]`.
+                        if let Some(uid) = tmpl.unique_id {
+                            ids.insert(vec![uid], sub_root_idx);
+                            for (sub_path, sub_idx) in sub_ids {
+                                let mut full = Vec::with_capacity(sub_path.len() + 1);
+                                full.push(uid);
+                                full.extend(sub_path);
+                                ids.insert(full, sub_idx + sub_root_idx);
+                            }
+                        }
                         let node_path = if parent_path == "." {
                             tmpl.name.clone()
                         } else {
@@ -2621,6 +2832,16 @@ impl PackedScene {
                 if let Some(ref script_path) = tmpl.script_path {
                     existing.set_property("_script_path", Variant::String(script_path.clone()));
                 }
+                // An editable `AnimationPlayer` given its own libraries here
+                // (`libraries/ = SubResource("..")`): those ids are THIS
+                // scene's, so the player is rebuilt by this level's finish pass
+                // — the instanced scene's level cannot resolve them.
+                if tmpl.properties.keys().any(|k| k == "libraries" || k.starts_with("libraries/")) {
+                    player_overrides.push(existing_idx);
+                }
+                if let Some(uid) = tmpl.unique_id {
+                    ids.entry(vec![uid]).or_insert(existing_idx);
+                }
                 continue;
             }
 
@@ -2654,6 +2875,9 @@ impl PackedScene {
                 node.set_unique_name(tmpl.unique_name);
                 node.set_owner(Some(root_id));
                 let child_id = node.id();
+                if let Some(uid) = tmpl.unique_id {
+                    ids.insert(vec![uid], nodes.len());
+                }
                 path_to_index.insert(node_path, nodes.len());
                 node.set_parent(Some(nodes[parent_idx].id()));
                 nodes[parent_idx].add_child_id(child_id);
@@ -2684,6 +2908,9 @@ impl PackedScene {
             let child_id = node.id();
             let child_idx = nodes.len();
             path_to_index.insert(node_path, child_idx);
+            if let Some(uid) = tmpl.unique_id {
+                ids.insert(vec![uid], child_idx);
+            }
 
             node.set_parent(Some(nodes[parent_idx].id()));
             nodes[parent_idx].add_child_id(child_id);
@@ -2693,6 +2920,24 @@ impl PackedScene {
         }
 
         Ok((nodes, own))
+    }
+
+    /// The scene-local path [`instance_levels_ex`](Self::instance_levels_ex)
+    /// recorded for node `idx` — the inverse of its `path_to_index`, needed
+    /// when a parent was found by `parent_id_path` and its children must still
+    /// be addressable by path. `"."` for the root; the shortest key otherwise
+    /// (the root's name is also a key, so a root child has two spellings).
+    fn path_of_index(path_to_index: &HashMap<String, usize>, idx: usize) -> String {
+        if idx == 0 {
+            return ".".to_string();
+        }
+        path_to_index
+            .iter()
+            .filter(|(_, &i)| i == idx)
+            .map(|(k, _)| k)
+            .min_by_key(|k| (k.len(), (*k).clone()))
+            .cloned()
+            .unwrap_or_else(|| ".".to_string())
     }
 
     /// Maps every descendant of node 0 by the *bare* path a template uses.
@@ -4079,6 +4324,16 @@ fn flatten_tile_set_into(
 }
 
 fn read_scene_file(path: &str) -> Option<PackedScene> {
+    // A `.glb`/`.gltf` is a PackedScene in Godot (its importer's resource
+    // type), so `instance=ExtResource("player.glb")` instances the IMPORTED
+    // scene. Reading it as `.tscn` text failed, the instance fell back to an
+    // empty `Node`, and every editable-children entry under it
+    // (`parent="Player/Skeleton/Skeleton3D"`) failed the whole scene
+    // (pat-m2jgd).
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".glb") || lower.ends_with(".gltf") {
+        return crate::gltf_scene::packed_scene_from_gltf_path(path);
+    }
     // Text `.tscn` or binary `.scn` (pat-33wmr): a `read_to_string` here made
     // every `instance=` of a binary scene come up as an empty `Node`.
     let text = crate::binary_scene::read_scene_source(path)?;
@@ -4133,12 +4388,18 @@ struct SceneLevel {
     scene: PackedScene,
     root: usize,
     own: Vec<usize>,
+    /// Nodes of an INNER level whose `AnimationPlayer` this level's override
+    /// entries re-libraried; see [`PackedScene::instance_levels_ex`].
+    player_overrides: Vec<usize>,
 }
 
 impl SceneLevel {
     fn offset_by(mut self, by: usize) -> Self {
         self.root += by;
         for idx in &mut self.own {
+            *idx += by;
+        }
+        for idx in &mut self.player_overrides {
             *idx += by;
         }
         self
@@ -4179,7 +4440,10 @@ where
     use crate::node::NodeId;
 
     let mut levels = Vec::new();
-    let (nodes, own) = scene.instance_levels(resolve_scene, &mut levels)?;
+    let mut top_ids = HashMap::new();
+    let mut top_overrides = Vec::new();
+    let (nodes, own) =
+        scene.instance_levels_ex(resolve_scene, &mut levels, &mut top_ids, &mut top_overrides)?;
     if nodes.is_empty() {
         return Err(EngineError::InvalidOperation(
             "instanced scene produced no nodes".into(),
@@ -4357,9 +4621,15 @@ where
         indices.iter().filter_map(|&i| final_ids.get(i).copied()).collect()
     };
     for level in &levels {
-        finish_scene_level(tree, &level.scene, final_ids[level.root], &ids_of(&level.own));
+        finish_scene_level(
+            tree,
+            &level.scene,
+            final_ids[level.root],
+            &ids_of(&level.own),
+            &ids_of(&level.player_overrides),
+        );
     }
-    finish_scene_level(tree, scene, root_id, &ids_of(&own));
+    finish_scene_level(tree, scene, root_id, &ids_of(&own), &ids_of(&top_overrides));
 
     // A camera becomes current, and a video player binds, as it ENTERS the
     // tree; a detached build has not entered yet, so its caller runs these
@@ -4442,9 +4712,22 @@ fn finish_scene_level(
     scene: &PackedScene,
     level_root: crate::node::NodeId,
     own: &[crate::node::NodeId],
+    player_overrides: &[crate::node::NodeId],
 ) {
     wire_connections(tree, level_root, &scene.connections);
-    crate::animation_tscn::attach_scene_animation_players_for(tree, own, scene);
+    match &scene.gltf_animations {
+        // An imported glTF scene's player has no `libraries` to resolve; its
+        // clips were built from the document (pat-m2jgd).
+        Some(clips) => crate::gltf_scene::attach_gltf_animation_player(tree, own, clips),
+        None => {
+            crate::animation_tscn::attach_scene_animation_players_for(tree, own, scene);
+        }
+    }
+    // Inner levels finished first, so an editable player this scene
+    // re-libraried replaces the instanced scene's own clips here.
+    if !player_overrides.is_empty() {
+        crate::animation_tscn::attach_scene_animation_players_for(tree, player_overrides, scene);
+    }
     crate::animation_tree_tscn::attach_scene_animation_trees_for(tree, own, scene);
     crate::local_to_scene::setup_local_to_scene_for(tree, scene, own);
 }
@@ -4543,7 +4826,9 @@ where
             _ => continue,
         };
         let Some(sub) = resolve_scene(&path) else {
-            tracing::warn!("instanced scene '{path}' could not be loaded; left as a placeholder");
+            // An error, not a warning: the placeholder is an empty `Node`, so
+            // the game runs without whatever this scene was (pat-m2jgd).
+            tracing::error!("instanced scene '{path}' could not be loaded; left as an empty placeholder");
             continue;
         };
         match mount_packed_scene(tree, MountPoint::Into(id), &sub, resolve_scene) {
@@ -4553,7 +4838,9 @@ where
                 }
                 expanded += 1;
             }
-            Err(e) => tracing::warn!("instanced scene '{path}' failed to expand: {e}"),
+            Err(e) => tracing::error!(
+                "instanced scene '{path}' failed to expand: {e}; left as an empty placeholder"
+            ),
         }
     }
 
