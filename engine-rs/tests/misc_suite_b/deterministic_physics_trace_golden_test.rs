@@ -38,6 +38,10 @@ fn approx_eq(a: f32, b: f32) -> bool {
 /// `process_character_movement`), and 14 tests drive the slide solver that
 /// way — measured 2026-11-03. The golden (regenerated then; the old one matched
 /// neither engine) therefore pins Patina's current behaviour, not Godot's.
+/// Regenerated 2026-11-05 after pat-dt40j ported Godot's 2D motion solver: the
+/// old golden jumped x 23.3 -> 36.7 on the landing frame, the double slide that
+/// made the platformer run at 2x. It now advances 200/60 per frame throughout
+/// and rests within Godot's `safe_margin` (0.08) of the floor contact.
 fn make_character_slide() -> SceneTree {
     let mut tree = SceneTree::new();
     let root = tree.root_id();
