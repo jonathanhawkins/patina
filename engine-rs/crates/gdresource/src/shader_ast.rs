@@ -913,17 +913,40 @@ impl Parser {
 /// Wrapped in a newtype rather than exposed as a bare `Arc<dyn Fn>` so
 /// [`StageContext`] keeps its `Debug` and `Clone` derives; a closure is neither.
 #[derive(Clone)]
-pub struct Sampler(Arc<dyn Fn(&str, [f32; 2]) -> [f32; 4] + Send + Sync>);
+pub struct Sampler(
+    Arc<dyn Fn(&str, [f32; 2]) -> [f32; 4] + Send + Sync>,
+    Option<CubeSampleFn>,
+);
+
+/// A `samplerCube` lookup: sampler name + DIRECTION -> RGBA (pat-cezo4).
+type CubeSampleFn = Arc<dyn Fn(&str, [f32; 3]) -> Option<[f32; 4]> + Send + Sync>;
 
 impl Sampler {
     /// Wraps a sampling closure.
     pub fn new(f: impl Fn(&str, [f32; 2]) -> [f32; 4] + Send + Sync + 'static) -> Self {
-        Self(Arc::new(f))
+        Self(Arc::new(f), None)
+    }
+
+    /// Adds a `samplerCube` lookup (pat-cezo4). `texture(cube, dir)` takes a
+    /// `vec3` DIRECTION, which the 2D closure cannot express: it would get the
+    /// direction's x/y as a UV. The closure answers `None` for a name that is
+    /// not a cubemap, and the 2D lookup then runs as before.
+    pub fn with_cube(
+        mut self,
+        f: impl Fn(&str, [f32; 3]) -> Option<[f32; 4]> + Send + Sync + 'static,
+    ) -> Self {
+        self.1 = Some(Arc::new(f));
+        self
     }
 
     /// Samples `name` at `uv`.
     pub fn sample(&self, name: &str, uv: [f32; 2]) -> [f32; 4] {
         (self.0)(name, uv)
+    }
+
+    /// Samples cubemap `name` along `dir`, or `None` when it is not a cubemap.
+    pub fn sample_cube(&self, name: &str, dir: [f32; 3]) -> Option<[f32; 4]> {
+        self.1.as_ref().and_then(|f| f(name, dir))
     }
 }
 
@@ -1292,6 +1315,11 @@ fn eval_texture_call(
     // expressions) and then ignored, rather than silently unparsed.
     for extra in &args[2..] {
         eval_expr(program, extra, ctx)?;
+    }
+    if let (ShaderValue::Vec3(dir), Some(sampler)) = (&uv, &ctx.sampler) {
+        if let Some(c) = sampler.sample_cube(&sampler_name, *dir) {
+            return Ok(ShaderValue::Vec4(c));
+        }
     }
     let uv = match uv {
         ShaderValue::Vec2(v) => v,

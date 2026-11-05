@@ -854,6 +854,13 @@ struct SkyUniforms {
 };
 @group(0) @binding(0)
 var<uniform> sky: SkyUniforms;
+// pat-cezo4: the equirect panorama (a PanoramaSkyMaterial's texture, or a
+// cubemap shader sky baked on the CPU). A 1x1 black texel when unbound;
+// `sky.params.w > 1.5` says one is bound.
+@group(0) @binding(1)
+var sky_panorama: texture_2d<f32>;
+@group(0) @binding(2)
+var sky_panorama_sampler: sampler;
 
 struct SkyVertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -953,8 +960,12 @@ fn fs_sky(in: SkyVertexOutput) -> @location(0) vec4<f32> {
         let d = normalize(world);
         let u = atan2(d.x, -d.z) / (2.0 * 3.14159265);
         let v = acos(clamp(d.y, -1.0, 1.0)) / 3.14159265;
-        let _u = fract(u + 1.0); // wrap like rem_euclid; keep live for the texture sample
-        let rgb = mix(sky.sky_top.rgb, sky.sky_horizon.rgb, clamp(v, 0.0, 1.0));
+        let uw = fract(u + 1.0); // wrap like rem_euclid
+        let gradient = mix(sky.sky_top.rgb, sky.sky_horizon.rgb, clamp(v, 0.0, 1.0));
+        // `textureSampleLevel`, not `textureSample`: this sits behind a
+        // non-uniform branch, where implicit-derivative sampling is invalid.
+        let texel = textureSampleLevel(sky_panorama, sky_panorama_sampler, vec2<f32>(uw, clamp(v, 0.0, 1.0)), 0.0).rgb;
+        let rgb = select(gradient, texel, sky.params.w > 1.5);
         return vec4<f32>(rgb * sky.sun_params.w, 1.0);
     }
 
@@ -1739,6 +1750,7 @@ impl RenderPipeline3D {
         target_format: wgpu::TextureFormat,
         cull: Option<wgpu::Face>,
         depth_write: bool,
+        blend: wgpu::BlendState,
     ) -> wgpu::RenderPipeline {
         let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("patina-3d-shader-cull-variant"),
@@ -1767,7 +1779,7 @@ impl RenderPipeline3D {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    blend: Some(blend),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),
@@ -2362,16 +2374,35 @@ impl SkyPipeline3D {
 
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("sky-bind-group-layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                // pat-cezo4: the equirect panorama + its sampler.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -3056,7 +3087,8 @@ fn sky_uniform_for_env(
                     lin4(&hor, e),
                     lin4(&bot, e),
                     lin4(&hor, e),
-                    [4.0, 30.0, 1.0, 1.0],
+                    // w = 2 when the panorama is decoded and bound (pat-cezo4).
+                    [4.0, 30.0, 1.0, if mat.texture.is_some() { 2.0 } else { 1.0 }],
                     1.0_f32, // equirect mode flag (sun_params.z)
                 )
             }
@@ -3095,6 +3127,19 @@ fn sky_uniform_for_env(
             // procedural slots from Godot's own ProceduralSkyMaterial defaults so
             // the GPU path shows a plausible sky rather than uninitialized
             // values; it will differ from software until the module lands.
+            // pat-cezo4: a cubemap shader sky the host baked into a panorama
+            // draws through the equirect branch, sampling the bake.
+            SkyMaterial::Shader(m) if m.baked.is_some() => {
+                let hor = Color::new(0.45, 0.48, 0.52, 1.0);
+                (
+                    lin4(&hor, 1.0),
+                    lin4(&hor, 1.0),
+                    lin4(&hor, 1.0),
+                    lin4(&hor, 1.0),
+                    [4.0, 30.0, 1.0, 2.0],
+                    1.0_f32,
+                )
+            }
             SkyMaterial::Shader(_) => {
                 let d = gdserver3d::sky::ProceduralSkyMaterial::default();
                 (
@@ -3206,6 +3251,21 @@ fn mesh_to_gpu_vertices(mesh: &Mesh3D) -> Vec<GpuVertex> {
 
 // ── Draw-entry expansion (multimesh + shader material) ──────────────
 
+/// `BaseMaterial3D.BLEND_MODE_ADD` (pat-cezo4): colour `src * src_alpha + dst`,
+/// destination alpha kept.
+const ADDITIVE_BLEND: wgpu::BlendState = wgpu::BlendState {
+    color: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::SrcAlpha,
+        dst_factor: wgpu::BlendFactor::One,
+        operation: wgpu::BlendOperation::Add,
+    },
+    alpha: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::Zero,
+        dst_factor: wgpu::BlendFactor::One,
+        operation: wgpu::BlendOperation::Add,
+    },
+};
+
 /// A single resolved draw: one mesh + world transform + material parameters,
 /// ready to upload to the GPU. Produced by [`instance_draw_entries`].
 struct GpuDrawEntry<'a> {
@@ -3234,6 +3294,8 @@ struct GpuDrawEntry<'a> {
     /// Godot `depth_draw_mode` (pat-s3rrv.30); decides whether this draw writes
     /// depth once its transparency is known.
     depth_draw_mode: crate::render_modes::DepthDrawMode,
+    /// Godot `blend_mode` (pat-cezo4); `Add` picks the additive pipeline.
+    blend_mode: gdserver3d::material::BlendMode,
     /// `BaseMaterial3D.albedo_texture` for this draw (pat-mgixk.52).
     ///
     /// An owned `Arc` clone rather than a borrow: `instance_draw_entries` reads
@@ -3296,7 +3358,7 @@ fn resolve_shader_albedo(mat: &ShaderMaterial3D) -> Option<Color> {
 /// Returns no entries for an instance with neither a mesh nor a multimesh-with-
 /// mesh — the previous GPU loop silently skipped those; this makes multimesh and
 /// shader-material instances render on the GPU like they already do in software.
-fn instance_draw_entries(inst: &Instance3D) -> Vec<GpuDrawEntry<'_>> {
+fn instance_draw_entries<'a>(inst: &'a Instance3D, surfaces: &'a [Mesh3D]) -> Vec<GpuDrawEntry<'a>> {
     let base = inst.material.clone().unwrap_or_default();
     let base_mode = match base.shading_mode {
         ShadingMode::Unlit => 0u32,
@@ -3357,6 +3419,7 @@ fn instance_draw_entries(inst: &Instance3D) -> Vec<GpuDrawEntry<'_>> {
                     transparency: base.transparency,
                     alpha_scissor_threshold: base.alpha_scissor_threshold,
                     depth_draw_mode: base.depth_draw_mode,
+                    blend_mode: base.blend_mode,
                     albedo_texture: albedo_texture.clone(),
                     normal_texture: normal_texture.clone(),
                     normal_scale: base.normal_scale,
@@ -3379,6 +3442,7 @@ fn instance_draw_entries(inst: &Instance3D) -> Vec<GpuDrawEntry<'_>> {
             transparency: base.transparency,
             alpha_scissor_threshold: base.alpha_scissor_threshold,
             depth_draw_mode: base.depth_draw_mode,
+            blend_mode: base.blend_mode,
             albedo_texture,
             normal_texture,
             normal_scale: base.normal_scale,
@@ -3386,8 +3450,73 @@ fn instance_draw_entries(inst: &Instance3D) -> Vec<GpuDrawEntry<'_>> {
             metallic_texture,
             emission_texture,
         });
+        // pat-zwvgw: the mesh's ADDITIONAL surfaces, each with its own
+        // material — `surface_materials[i]` pairs with `surfaces[i]`, falling
+        // back to the instance material — as the software renderer draws them
+        // (pat-s3rrv.187). The GPU used to draw only the primary surface, so a
+        // multi-material glTF character lost every part after the first.
+        for (i, surface) in surfaces.iter().enumerate() {
+            if surface.indices.is_empty() {
+                continue;
+            }
+            let m = inst
+                .surface_materials
+                .get(i)
+                .cloned()
+                .flatten()
+                .unwrap_or_else(|| base.clone());
+            let shaded = shader_albedo.is_none();
+            let surface_mode = match (shaded, m.shading_mode) {
+                (false, _) | (true, ShadingMode::Unlit) => 0u32,
+                (true, ShadingMode::Lambert) => 1u32,
+                (true, ShadingMode::Phong) => 2u32,
+            };
+            let tex = |t: &Option<std::sync::Arc<gdserver3d::material::TextureImage>>| {
+                if shaded {
+                    t.clone()
+                } else {
+                    None
+                }
+            };
+            entries.push(GpuDrawEntry {
+                mesh: surface,
+                transform: inst.transform,
+                albedo: shader_albedo.unwrap_or(m.albedo),
+                emission: m.emission,
+                roughness: m.roughness,
+                metallic: m.metallic,
+                shading_mode: surface_mode,
+                cull_mode: m.cull_mode,
+                transparency: m.transparency,
+                alpha_scissor_threshold: m.alpha_scissor_threshold,
+                depth_draw_mode: m.depth_draw_mode,
+                blend_mode: m.blend_mode,
+                albedo_texture: tex(&m.albedo_texture),
+                normal_texture: tex(&m.normal_texture),
+                normal_scale: m.normal_scale,
+                roughness_texture: tex(&m.roughness_texture),
+                metallic_texture: tex(&m.metallic_texture),
+                emission_texture: tex(&m.emission_texture),
+            });
+        }
     }
     entries
+}
+
+/// A mesh's additional surfaces as standalone meshes, for
+/// [`instance_draw_entries`] (pat-zwvgw).
+fn split_surface_meshes(mesh: &Mesh3D) -> Vec<Mesh3D> {
+    mesh.surfaces
+        .iter()
+        .map(|s| Mesh3D {
+            vertices: s.vertices.clone(),
+            normals: s.normals.clone(),
+            uvs: s.uvs.clone(),
+            indices: s.indices.clone(),
+            primitive_type: s.primitive_type,
+            ..Default::default()
+        })
+        .collect()
 }
 
 // ── GpuRenderer3D ───────────────────────────────────────────────────
@@ -3427,6 +3556,9 @@ pub struct GpuRenderer3D {
     /// depth, needs its own pipeline. Built once on first use; the default
     /// (Back, writes depth) is `editor_pipeline` itself.
     editor_variants: Vec<(crate::render_modes::CullMode, bool, wgpu::RenderPipeline)>,
+    /// Additive-blend (`BLEND_MODE_ADD`) variants by cull mode (pat-cezo4),
+    /// built with [`Self::editor_variants`].
+    editor_add_variants: Vec<(crate::render_modes::CullMode, wgpu::RenderPipeline)>,
     /// Lazily-built pipeline for the editor color-only path. Uses a **non-sRGB**
     /// (`Bgra8Unorm`) target so shader output is written to bytes linearly,
     /// matching the software rasterizer's `color * 255` — which keeps GPU meshes
@@ -3448,6 +3580,9 @@ pub struct GpuRenderer3D {
     /// `reset_scene` (it's GPU resource state, not scene state); bounded by
     /// [`MESH_CACHE_CAP`] so per-frame-changing geometry can't leak unboundedly.
     mesh_gpu_cache: HashMap<u64, CachedMeshBuffers>,
+    /// Each instance's additional mesh surfaces, split out at `set_mesh`
+    /// (pat-zwvgw), keyed by instance id.
+    surface_meshes: HashMap<u64, Vec<Mesh3D>>,
     /// Cached CPU-rasterized shadow maps + their uploaded depth-array texture,
     /// keyed by a content hash of the shadow-relevant scene state (pat-2be0q).
     /// A static scene re-renders without deep-cloning every instance,
@@ -3463,6 +3598,10 @@ pub struct GpuRenderer3D {
     /// probe's capture changes (keyed by the captures' `Arc` identities), so a
     /// `Once` probe uploads once.
     probe_cube_cache: Option<ProbeCubeArray>,
+    /// The sky pass's equirect panorama (pat-cezo4): (identity key, view,
+    /// sampler), the key being the panorama's address so a persistent sky
+    /// uploads once. Key 0 is the 1x1 black stand-in.
+    sky_panorama: Option<(usize, wgpu::TextureView, wgpu::Sampler)>,
     /// Uploaded `BaseMaterial3D` maps for the editor path, keyed by the
     /// `TextureImage`'s `Arc` identity and the slot's format (pat-p3p1m). The
     /// editor path used to upload EVERY map of EVERY draw on EVERY frame.
@@ -3547,6 +3686,8 @@ struct GpuDrawCall {
     /// Godot `depth_draw_mode` (pat-s3rrv.30); decides whether this draw writes
     /// depth once its transparency is known.
     depth_draw_mode: crate::render_modes::DepthDrawMode,
+    /// Godot `blend_mode` (pat-cezo4); `Add` picks the additive pipeline.
+    blend_mode: gdserver3d::material::BlendMode,
     /// The group-3 uniform block for a custom shader: `time` first, then one
     /// `vec4` per buffer-backed uniform in `custom_uniform_fields` order
     /// (pat-s3rrv.122). Empty when this draw uses no custom module.
@@ -3722,12 +3863,15 @@ impl GpuRenderer3D {
             target_format: format,
             editor_pipeline: None,
             editor_variants: Vec::new(),
+            editor_add_variants: Vec::new(),
             editor_sky_pipeline: None,
             editor_targets: None,
             mesh_gpu_cache: HashMap::new(),
+            surface_meshes: HashMap::new(),
             shadow_atlas_cache: None,
             shadow_atlas_rebuilds: 0,
             probe_cube_cache: None,
+            sky_panorama: None,
             material_tex_cache: HashMap::new(),
             white_tex_cache: HashMap::new(),
             material_sampler_cache: None,
@@ -3743,6 +3887,7 @@ impl GpuRenderer3D {
     /// render list every frame, so its per-frame render calls this first.
     pub fn reset_scene(&mut self) {
         self.instances.clear();
+        self.surface_meshes.clear();
         self.lights.clear();
         self.reflection_probes.clear();
         // Same reason: a stale GI volume would bleed the previous scene's
@@ -3809,7 +3954,7 @@ impl GpuRenderer3D {
             if !inst.visible {
                 continue;
             }
-            for entry in instance_draw_entries(inst) {
+            for entry in instance_draw_entries(inst, self.surface_meshes.get(&inst.id.0).map_or(&[][..], Vec::as_slice)) {
                 let addr = entry.mesh as *const Mesh3D as usize;
                 if !self.editor_frame_mesh_keys.contains_key(&addr) {
                     let key = mesh_content_hash(entry.mesh);
@@ -3874,6 +4019,75 @@ impl GpuRenderer3D {
 
     /// Uploads the probe cubemaps unless the cached upload already holds
     /// exactly these captures (pat-p3p1m).
+    /// Uploads the environment's sky panorama for the sky pass, once per
+    /// distinct panorama (pat-cezo4): a `PanoramaSkyMaterial`'s texture or a
+    /// cubemap shader sky's CPU bake. A 1x1 black texel otherwise.
+    fn ensure_sky_panorama(&mut self, env: Option<&Environment3D>) {
+        let pano = env.and_then(|e| e.sky.as_ref()).and_then(|sky| match &sky.material {
+            SkyMaterial::Panoramic(m) => m.texture.as_ref(),
+            SkyMaterial::Shader(m) => m.baked.as_deref(),
+            _ => None,
+        });
+        let key = pano.map_or(0, |p| p.pixels.as_ptr() as usize);
+        if self.sky_panorama.as_ref().map(|c| c.0) == Some(key) {
+            return;
+        }
+        let black = gdserver3d::sky::PanoramaTexture {
+            width: 1,
+            height: 1,
+            pixels: vec![Color::new(0.0, 0.0, 0.0, 1.0)],
+        };
+        let pano = pano.unwrap_or(&black);
+        let (w, h) = (pano.width.max(1), pano.height.max(1));
+        // Linear texels, stored sRGB-encoded in an sRGB format so the sampler
+        // filters in linear space and 8 bits cover the LDR range evenly.
+        let mut bytes = Vec::with_capacity((w * h * 4) as usize);
+        for c in &pano.pixels {
+            let e = c.linear_to_srgb();
+            for ch in [e.r, e.g, e.b] {
+                bytes.push((ch.clamp(0.0, 1.0) * 255.0).round() as u8);
+            }
+            bytes.push(255);
+        }
+        bytes.resize((w * h * 4) as usize, 0);
+        let device = &self.ctx.device;
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("sky-panorama"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.ctx.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 4),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("sky-panorama-sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        self.sky_panorama = Some((key, view, sampler));
+    }
+
     fn ensure_probe_cubes(&mut self) {
         let key = probe_cube_key(&self.reflection_probes);
         if self.probe_cube_cache.as_ref().map(|c| &c.key) != Some(&key) {
@@ -3985,7 +4199,7 @@ impl GpuRenderer3D {
                     .as_ref()
                     .map(|(_, _, t)| t.clone())
                     .unwrap_or_default();
-            for entry in instance_draw_entries(inst) {
+            for entry in instance_draw_entries(inst, self.surface_meshes.get(&inst.id.0).map_or(&[][..], Vec::as_slice)) {
                 if entry.mesh.indices.is_empty() {
                     continue;
                 }
@@ -4008,6 +4222,7 @@ impl GpuRenderer3D {
                     transparency: entry.transparency,
                     alpha_scissor_threshold: entry.alpha_scissor_threshold,
                     depth_draw_mode: entry.depth_draw_mode,
+                    blend_mode: entry.blend_mode,
                     custom_module: custom_module.clone(),
                     custom_uniforms: custom_uniform_values.clone(),
                     custom_textures: custom_texture_images.clone(),
@@ -4104,9 +4319,26 @@ impl GpuRenderer3D {
             ] {
                 for depth_write in [true, false] {
                     let face = RenderPipeline3D::wgpu_cull_face(cull);
-                    let p = base.build_cull_variant(&self.ctx.device, format, face, depth_write);
+                    let p = base.build_cull_variant(
+                        &self.ctx.device,
+                        format,
+                        face,
+                        depth_write,
+                        wgpu::BlendState::ALPHA_BLENDING,
+                    );
                     built.push((cull, depth_write, p));
                 }
+                // pat-cezo4: BLEND_MODE_ADD (`src * alpha + dst`), never writing
+                // depth — Godot's additive materials are transparent.
+                let face = RenderPipeline3D::wgpu_cull_face(cull);
+                let add = base.build_cull_variant(
+                    &self.ctx.device,
+                    format,
+                    face,
+                    false,
+                    ADDITIVE_BLEND,
+                );
+                self.editor_add_variants.push((cull, add));
             }
             self.editor_variants = built;
         }
@@ -4126,6 +4358,7 @@ impl GpuRenderer3D {
         // static scene reuses the cached maps + texture untouched.
         let light_data = self.ensure_shadow_atlas(viewport.camera_transform.origin);
         self.ensure_probe_cubes();
+        self.ensure_sky_panorama(viewport.environment.as_ref());
         self.prime_editor_draw_caches();
 
         let device = &self.ctx.device;
@@ -4133,6 +4366,7 @@ impl GpuRenderer3D {
         let pipeline = self.editor_pipeline.as_ref().unwrap();
         // pat-s3rrv.30: the (cull, depth-write) variants, ensured above.
         let variants = &self.editor_variants;
+        let add_variants = &self.editor_add_variants;
         let sky_pipeline = self.editor_sky_pipeline.as_ref().unwrap();
         let targets = self.editor_targets.as_ref().unwrap();
 
@@ -4141,6 +4375,10 @@ impl GpuRenderer3D {
         // a fullscreen gradient pass behind the meshes, a custom color clears
         // to it, and anything else clears to the caller-provided backdrop.
         let sky_suns = crate::renderer::sky_suns_from_lights(&self.lights);
+        let sky_panorama_bindings = (
+            &self.sky_panorama.as_ref().expect("ensured above").1,
+            &self.sky_panorama.as_ref().expect("ensured above").2,
+        );
         let sky_bind = viewport
             .environment
             .as_ref()
@@ -4153,13 +4391,24 @@ impl GpuRenderer3D {
                     bytemuck::bytes_of(&data),
                     wgpu::BufferUsages::UNIFORM,
                 );
+                let (pano_view, pano_sampler) = sky_panorama_bindings;
                 let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("editor-sky-bind-group"),
                     layout: &sky_pipeline.layout,
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: buf.as_entire_binding(),
-                    }],
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(pano_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(pano_sampler),
+                        },
+                    ],
                 });
                 (buf, bg)
             });
@@ -4310,7 +4559,7 @@ impl GpuRenderer3D {
                 }
                 // Expand multimesh + shader material into concrete draws (matching
                 // the software renderer), instead of drawing only a single mesh.
-                for entry in instance_draw_entries(inst) {
+                for entry in instance_draw_entries(inst, self.surface_meshes.get(&inst.id.0).map_or(&[][..], Vec::as_slice)) {
                     // Geometry uploaded once by `prime_editor_draw_caches`; a
                     // mesh with no vertices was never cached and draws nothing,
                     // as before.
@@ -4345,10 +4594,21 @@ impl GpuRenderer3D {
                         entry.depth_draw_mode,
                         crate::render_modes::is_transparent(entry.transparency),
                     );
-                    let chosen = variants
-                        .iter()
-                        .find(|(c, d, _)| *c == entry.cull_mode && *d == want_depth)
-                        .map(|(_, _, p)| p)
+                    let additive = (entry.blend_mode == gdserver3d::material::BlendMode::Add)
+                        .then(|| {
+                            add_variants
+                                .iter()
+                                .find(|(c, _)| *c == entry.cull_mode)
+                                .map(|(_, p)| p)
+                        })
+                        .flatten();
+                    let chosen = additive
+                        .or_else(|| {
+                            variants
+                                .iter()
+                                .find(|(c, d, _)| *c == entry.cull_mode && *d == want_depth)
+                                .map(|(_, _, p)| p)
+                        })
                         .unwrap_or(&pipeline.pipeline);
                     pass.set_pipeline(chosen);
                     // Material colors are sRGB authoring values; upload them in
@@ -4759,9 +5019,26 @@ impl GpuRenderer3D {
             ] {
                 for depth_write in [true, false] {
                     let face = RenderPipeline3D::wgpu_cull_face(cull);
-                    let p = base.build_cull_variant(&self.ctx.device, color_format, face, depth_write);
+                    let p = base.build_cull_variant(
+                        &self.ctx.device,
+                        color_format,
+                        face,
+                        depth_write,
+                        wgpu::BlendState::ALPHA_BLENDING,
+                    );
                     built.push((cull, depth_write, p));
                 }
+                // pat-cezo4: BLEND_MODE_ADD (`src * alpha + dst`), never writing
+                // depth — Godot's additive materials are transparent.
+                let face = RenderPipeline3D::wgpu_cull_face(cull);
+                let add = base.build_cull_variant(
+                    &self.ctx.device,
+                    color_format,
+                    face,
+                    false,
+                    ADDITIVE_BLEND,
+                );
+                self.editor_add_variants.push((cull, add));
             }
             self.editor_variants = built;
         }
@@ -4773,12 +5050,14 @@ impl GpuRenderer3D {
         // frames, regenerated only when the shadow-relevant state changes.
         let light_data = self.ensure_shadow_atlas(viewport.camera_transform.origin);
         self.ensure_probe_cubes();
+        self.ensure_sky_panorama(viewport.environment.as_ref());
 
         let device = &self.ctx.device;
         let queue = &self.ctx.queue;
         let pipeline = self.editor_pipeline.as_ref().unwrap();
         // pat-s3rrv.30: the (cull, depth-write) variants, ensured above.
         let variants = &self.editor_variants;
+        let add_variants = &self.editor_add_variants;
         let sky_pipeline = self.editor_sky_pipeline.as_ref().unwrap();
 
         // Build a per-material pipeline for any draw carrying a transpiled custom
@@ -4831,6 +5110,10 @@ impl GpuRenderer3D {
         // Procedural sky background (same as the editor path): a fullscreen pass
         // drawn before the meshes when the environment uses a Sky background.
         let sky_suns = crate::renderer::sky_suns_from_lights(&self.lights);
+        let sky_panorama_bindings = (
+            &self.sky_panorama.as_ref().expect("ensured above").1,
+            &self.sky_panorama.as_ref().expect("ensured above").2,
+        );
         let sky_bind = viewport
             .environment
             .as_ref()
@@ -4843,10 +5126,21 @@ impl GpuRenderer3D {
                     bytemuck::bytes_of(&data),
                     wgpu::BufferUsages::UNIFORM,
                 );
+                let (pano_view, pano_sampler) = sky_panorama_bindings;
                 let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("sky-bind-group"),
                     layout: &sky_pipeline.layout,
-                    entries: &[wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() }],
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(pano_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(pano_sampler),
+                        },
+                    ],
                 });
                 (buf, bg)
             });
@@ -4987,10 +5281,20 @@ impl GpuRenderer3D {
                     call.depth_draw_mode,
                     crate::render_modes::is_transparent(call.transparency),
                 );
-                let mode_pipeline = variants
-                    .iter()
-                    .find(|(c, d, _)| *c == call.cull_mode && *d == want_depth)
-                    .map(|(_, _, p)| p);
+                let additive = (call.blend_mode == gdserver3d::material::BlendMode::Add)
+                    .then(|| {
+                        add_variants
+                            .iter()
+                            .find(|(c, _)| *c == call.cull_mode)
+                            .map(|(_, p)| p)
+                    })
+                    .flatten();
+                let mode_pipeline = additive.or_else(|| {
+                    variants
+                        .iter()
+                        .find(|(c, d, _)| *c == call.cull_mode && *d == want_depth)
+                        .map(|(_, _, p)| p)
+                });
                 let custom_pipeline = call
                     .custom_module
                     .as_deref()
@@ -5367,11 +5671,23 @@ impl RenderingServer3D for GpuRenderer3D {
 
     fn free_instance(&mut self, id: Instance3DId) {
         self.instances.remove(&id.0);
+        self.surface_meshes.remove(&id.0);
     }
 
     fn set_mesh(&mut self, id: Instance3DId, mesh: Mesh3D) {
         if let Some(inst) = self.instances.get_mut(&id.0) {
+            if mesh.surfaces.is_empty() {
+                self.surface_meshes.remove(&id.0);
+            } else {
+                self.surface_meshes.insert(id.0, split_surface_meshes(&mesh));
+            }
             inst.mesh = Some(mesh);
+        }
+    }
+
+    fn set_surface_materials(&mut self, id: Instance3DId, materials: Vec<Option<Material3D>>) {
+        if let Some(inst) = self.instances.get_mut(&id.0) {
+            inst.surface_materials = materials;
         }
     }
 
@@ -6723,5 +7039,76 @@ mod tests {
         assert!((fade(-90.0) - 0.5).abs() < 1e-6, "midpoint");
         assert_eq!(fade(-100.0), 1.0, "at max_distance the shadow is gone");
         assert_eq!(fade(-500.0), 1.0, "and it stays clamped");
+    }
+
+    /// pat-zwvgw: a mesh's additional surfaces become draws of their own,
+    /// each with its `surface_materials` entry (or the instance material), and
+    /// a `BLEND_MODE_ADD` material says so on its draw (pat-cezo4).
+    ///
+    /// Before this the GPU drew only the primary surface, so the platformer's
+    /// three-material enemy lost two of its parts.
+    #[test]
+    fn additional_surfaces_draw_with_their_own_materials() {
+        use gdserver3d::material::BlendMode;
+        let mut mesh = Mesh3D::cube(1.0);
+        let extra = Mesh3D::cube(0.5);
+        mesh.surfaces.push(gdserver3d::mesh::Surface3D {
+            vertices: extra.vertices.clone(),
+            normals: extra.normals.clone(),
+            uvs: extra.uvs.clone(),
+            indices: extra.indices.clone(),
+            primitive_type: extra.primitive_type,
+            lods: Vec::new(),
+        });
+        let mut inst = Instance3D::new(gdserver3d::instance::Instance3DId(1));
+        inst.material = Some(Material3D {
+            albedo: Color::new(1.0, 0.0, 0.0, 1.0),
+            ..Default::default()
+        });
+        inst.surface_materials = vec![Some(Material3D {
+            albedo: Color::new(0.0, 0.0, 1.0, 1.0),
+            blend_mode: BlendMode::Add,
+            ..Default::default()
+        })];
+        let surfaces = split_surface_meshes(&mesh);
+        inst.mesh = Some(mesh);
+        let entries = instance_draw_entries(&inst, &surfaces);
+        assert_eq!(entries.len(), 2, "primary + one extra surface");
+        assert_eq!(entries[0].albedo, Color::new(1.0, 0.0, 0.0, 1.0));
+        assert_eq!(entries[0].blend_mode, BlendMode::Mix);
+        assert_eq!(entries[1].albedo, Color::new(0.0, 0.0, 1.0, 1.0));
+        assert_eq!(entries[1].blend_mode, BlendMode::Add);
+        assert_eq!(entries[1].mesh.vertices, extra.vertices);
+
+        // No override for the extra surface: it falls back to the instance's.
+        inst.surface_materials.clear();
+        let entries = instance_draw_entries(&inst, &surfaces);
+        assert_eq!(entries[1].albedo, Color::new(1.0, 0.0, 0.0, 1.0));
+    }
+
+    /// pat-cezo4: a cubemap shader sky that the host baked into a panorama
+    /// draws through the sky pass's equirect branch with the bake bound
+    /// (`params.w = 2`), instead of the default procedural stand-in.
+    #[test]
+    fn a_baked_shader_sky_uses_the_textured_equirect_pass() {
+        use gdserver3d::sky::{PanoramaTexture, ShaderSkyMaterial, Sky, SkyMaterial};
+        let mut mat = ShaderSkyMaterial::new(gdserver3d::shader::ShaderMaterial3D::new());
+        mat.baked = Some(std::sync::Arc::new(PanoramaTexture {
+            width: 2,
+            height: 1,
+            pixels: vec![Color::new(0.0, 0.0, 1.0, 1.0); 2],
+        }));
+        let mut env = Environment3D::default();
+        env.background_mode = BackgroundMode::Sky;
+        env.sky = Some(Sky {
+            material: SkyMaterial::Shader(mat),
+            ..Default::default()
+        });
+        let vp = Viewport3D::new(32, 32);
+        let data = sky_uniform_for_env(&env, &vp, 32, 32, &[]).expect("sky pass");
+        assert!(data.sun_params[2] >= 1000.0, "equirect mode");
+        assert_eq!(data.params[3], 2.0, "panorama bound");
+        assert!(SKY_WGSL.contains("textureSampleLevel(sky_panorama"));
+        assert!(wgpu::naga::front::wgsl::parse_str(SKY_WGSL).is_ok());
     }
 }

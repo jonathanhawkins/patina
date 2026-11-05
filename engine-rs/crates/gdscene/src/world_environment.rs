@@ -132,33 +132,224 @@ pub fn environment_from_tres(text: &str, path: &str) -> Option<Environment3D> {
     // `sky = SubResource("Sky_x")` → the `[sub_resource type="Sky"]` section,
     // whose `sky_material` names the material section in turn.
     if let Some(sky_res) = resource.resolve_subresource("sky") {
-        let material = match sky_res.resolve_subresource("sky_material") {
+        let mut material = match sky_res.resolve_subresource("sky_material") {
             Some(mat) => {
-                let props = mat.properties().map(|(k, v)| (k.as_str(), v));
-                match mat.class_name.as_str() {
-                    "PhysicalSkyMaterial" => SkyMaterial::Physical(
-                        gdserver3d::sky::PhysicalSkyMaterial::from_properties(props),
-                    ),
-                    "PanoramaSkyMaterial" => SkyMaterial::Panoramic(
-                        gdserver3d::sky::PanoramicSkyMaterial::from_properties(props),
-                    ),
-                    // Procedural is Godot's default sky material and the
-                    // fallback for anything this loader does not model (a
-                    // `ShaderMaterial` sky, say), which renders a plain gradient
-                    // rather than black.
-                    _ => SkyMaterial::Procedural(
-                        gdserver3d::sky::ProceduralSkyMaterial::from_properties(props),
-                    ),
-                }
+                let props: std::collections::HashMap<String, Variant> = mat
+                    .properties()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                let ext = |id: &str| resource.ext_resources.get(id).map(|e| e.path.clone());
+                sky_material_from_props(&mat.class_name, &props, &ext, &|_| None)
             }
             None => SkyMaterial::Procedural(gdserver3d::sky::ProceduralSkyMaterial::default()),
         };
+        let ext = |id: &str| resource.ext_resources.get(id).map(|e| e.path.clone());
+        load_sky_textures(&mut material, &ext);
         env.sky = Some(Sky {
             material,
             ..Sky::default()
         });
     }
 
+    Some(env)
+}
+
+/// Builds a `Sky.sky_material` from its class and property bag.
+///
+/// `ext` resolves an `ExtResource` id to its `res://` path and `sub` a
+/// `SubResource` id to that sub-resource's properties (an inline `Shader`).
+///
+/// 🔑 A `ShaderMaterial` sky (pat-cezo4) becomes [`SkyMaterial::Shader`] with
+/// its shader source -- read from the `.gdshader` file an `ExtResource` shader
+/// names -- and its `shader_parameter/*` values, any resource reference among
+/// them turned into a path. It used to fall to the default procedural sky.
+fn sky_material_from_props(
+    class: &str,
+    props: &std::collections::HashMap<String, Variant>,
+    ext: &dyn Fn(&str) -> Option<String>,
+    sub: &dyn Fn(&str) -> Option<std::collections::HashMap<String, Variant>>,
+) -> SkyMaterial {
+    let pairs = || props.iter().map(|(k, v)| (k.as_str(), v));
+    match class {
+        "PhysicalSkyMaterial" => {
+            SkyMaterial::Physical(gdserver3d::sky::PhysicalSkyMaterial::from_properties(pairs()))
+        }
+        "PanoramaSkyMaterial" => {
+            SkyMaterial::Panoramic(gdserver3d::sky::PanoramicSkyMaterial::from_properties(pairs()))
+        }
+        "ShaderMaterial" => {
+            let code = match props.get("shader") {
+                Some(Variant::String(r)) => {
+                    if let Some(id) = r.strip_prefix("ExtResource:") {
+                        ext(id).and_then(|path| FileAccess::read_file_string(&path).ok())
+                    } else if let Some(id) = r.strip_prefix("SubResource:") {
+                        sub(id).and_then(|p| match p.get("code") {
+                            Some(Variant::String(c)) => Some(c.clone()),
+                            _ => None,
+                        })
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+            .unwrap_or_default();
+            let mut m = gdserver3d::shader::ShaderMaterial3D::new();
+            m.shader = Some(gdserver3d::shader::Shader3D::new(
+                gdserver3d::shader::ShaderType3D::Sky,
+                &code,
+            ));
+            for (k, v) in props {
+                let Some(name) = k.strip_prefix("shader_parameter/") else {
+                    continue;
+                };
+                let v = match v {
+                    Variant::String(r) if r.starts_with("ExtResource:") => {
+                        match ext(&r["ExtResource:".len()..]) {
+                            Some(path) => Variant::String(path),
+                            None => continue,
+                        }
+                    }
+                    Variant::Nil => continue,
+                    other => other.clone(),
+                };
+                m.set_shader_parameter(name, v);
+            }
+            SkyMaterial::Shader(gdserver3d::sky::ShaderSkyMaterial::new(m))
+        }
+        // Procedural is Godot's default sky material and the fallback for
+        // anything this loader does not model, which renders a plain gradient
+        // rather than black.
+        _ => SkyMaterial::Procedural(gdserver3d::sky::ProceduralSkyMaterial::from_properties(
+            pairs(),
+        )),
+    }
+}
+
+/// Decodes the textures a sky material references (panorama, sky cover,
+/// night sky, a shader sky's cubemaps), and bakes a cubemap shader sky into
+/// the equirect panorama the GPU sky pass samples (pat-cezo4).
+fn load_sky_textures(material: &mut SkyMaterial, ext: &dyn Fn(&str) -> Option<String>) {
+    gdserver3d::sky::resolve_sky_material_textures(material, |reference| {
+        let path = match reference.strip_prefix("ExtResource:") {
+            Some(id) => ext(id)?,
+            None => reference.to_string(),
+        };
+        let resolved = if path.starts_with("res://") || path.starts_with("user://") {
+            gdcore::resolve_path(&path).ok()?
+        } else {
+            std::path::PathBuf::from(&path)
+        };
+        let (width, height, pixels) =
+            gdresource::importers::load_color_texture_linear(&resolved).ok()?;
+        Some(gdserver3d::sky::PanoramaTexture {
+            width,
+            height,
+            pixels,
+        })
+    });
+    if let SkyMaterial::Shader(m) = material {
+        if !m.cubemaps.is_empty() {
+            m.bake_panorama(SKY_BAKE_WIDTH, SKY_BAKE_WIDTH / 2);
+        }
+    }
+}
+
+/// Width of the equirect panorama a cubemap shader sky is baked into. A
+/// 512-texel cube face spans a quarter turn, so 1024 keeps about half a texel per
+/// face texel at the horizon.
+const SKY_BAKE_WIDTH: u32 = 1024;
+
+thread_local! {
+    /// Resolved inline environments by (scene file, sub-resource id). Parsing
+    /// the scene and baking its sky every frame would dominate the frame; the
+    /// `Arc`'d sky bake is also what lets the GPU keep its upload.
+    static INLINE_ENV_CACHE: std::cell::RefCell<
+        std::collections::HashMap<(String, String), Option<Environment3D>>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// The scene file a node was authored in: the `_instance_path` of the node
+/// that owns it (an instanced sub-scene's root), else the project's main scene.
+fn authoring_scene_path(tree: &SceneTree, id: NodeId) -> Option<String> {
+    let node = tree.get_node(id)?;
+    let owner = node.owner().and_then(|o| tree.get_node(o)).unwrap_or(node);
+    match owner.get_property("_instance_path") {
+        Variant::String(s) if !s.is_empty() => Some(s),
+        _ => {
+            let main = project_setting_string("application/run/main_scene");
+            (!main.is_empty()).then_some(main)
+        }
+    }
+}
+
+/// The environment an inline `environment = SubResource("Environment_x")`
+/// describes, on the camera or the first `WorldEnvironment` (pat-cezo4).
+///
+/// 🔑 By render time the `PackedScene` is gone; the node keeps only
+/// `__resref__environment = "Environment::<id>"`. So the scene the node was
+/// authored in is read again (once, cached) to resolve the Environment, its
+/// Sky and the sky material. Before this a scene with an inline environment
+/// -- the official 3D platformer's `stage.tscn` -- played with the project
+/// clear colour: no sky, no fog, no AgX, no ambient colour.
+fn inline_scene_environment(tree: &SceneTree, camera: Option<NodeId>) -> Option<Environment3D> {
+    let candidates = camera.into_iter().chain(
+        tree.all_nodes_in_tree_order()
+            .into_iter()
+            .filter(|id| tree.get_node(*id).is_some_and(|n| n.is_class("WorldEnvironment"))),
+    );
+    for id in candidates {
+        let Some(node) = tree.get_node(id) else {
+            continue;
+        };
+        let sub_id = match node.get_property("__resref__environment") {
+            Variant::String(s) => match s.rsplit_once("::") {
+                Some((_, sid)) if !sid.is_empty() => sid.to_string(),
+                _ => continue,
+            },
+            _ => continue,
+        };
+        let Some(scene_path) = authoring_scene_path(tree, id) else {
+            continue;
+        };
+        let key = (scene_path.clone(), sub_id.clone());
+        if let Some(hit) = INLINE_ENV_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+            return hit;
+        }
+        let env = environment_from_scene_file(&scene_path, &sub_id);
+        INLINE_ENV_CACHE.with(|c| c.borrow_mut().insert(key, env.clone()));
+        return env;
+    }
+    None
+}
+
+/// Builds the Environment sub-resource `env_id` of the scene file at `path`.
+fn environment_from_scene_file(path: &str, env_id: &str) -> Option<Environment3D> {
+    let text = crate::binary_scene::read_scene_source(path)?;
+    let scene = crate::packed_scene::PackedScene::from_tscn(&text).ok()?;
+    let props = scene.sub_resource_props(env_id)?;
+    let mut env = Environment3D::from_properties(props.iter().map(|(k, v)| (k.as_str(), v)));
+    let sub_id = |v: Option<&Variant>| match v {
+        Some(Variant::String(s)) => s.strip_prefix("SubResource:").map(str::to_string),
+        _ => None,
+    };
+    let ext = |id: &str| scene.ext_resources().get(id).map(|e| e.path.clone());
+    let sub = |id: &str| scene.sub_resource_props(id).cloned();
+    if let Some(sky_props) = sub_id(props.get("sky")).and_then(|id| scene.sub_resource_props(&id))
+    {
+        let mut material = match sub_id(sky_props.get("sky_material")) {
+            Some(mid) => match (scene.sub_resource_type(&mid), scene.sub_resource_props(&mid)) {
+                (Some(class), Some(mp)) => sky_material_from_props(class, mp, &ext, &sub),
+                _ => SkyMaterial::Procedural(gdserver3d::sky::ProceduralSkyMaterial::default()),
+            },
+            None => SkyMaterial::Procedural(gdserver3d::sky::ProceduralSkyMaterial::default()),
+        };
+        load_sky_textures(&mut material, &ext);
+        env.sky = Some(Sky {
+            material,
+            ..Sky::default()
+        });
+    }
     Some(env)
 }
 
@@ -202,6 +393,12 @@ pub fn runtime_environment_3d(tree: &SceneTree, camera: Option<NodeId>) -> Optio
                  falling back to the project clear colour"
             ),
         }
+    }
+
+    // An inline `environment = SubResource(..)` on a WorldEnvironment
+    // (pat-cezo4) -- the form the official 3D platformer ships.
+    if let Some(env) = inline_scene_environment(tree, camera) {
+        return Some(env);
     }
 
     // No authored environment: Godot clears to the project's

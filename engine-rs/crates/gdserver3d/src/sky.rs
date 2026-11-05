@@ -4,7 +4,7 @@
 //! resource types. A [`Sky`] holds a [`SkyMaterial`] that defines how the
 //! sky dome is rendered, and is consumed by an [`Environment3D`](super::environment::Environment3D).
 
-use gdcore::math::Color;
+use gdcore::math::{Color, Vector3};
 use gdvariant::Variant;
 
 /// The processing mode for sky rendering.
@@ -222,6 +222,138 @@ pub struct ShaderSkyMaterial {
     /// direction would make a custom sky cost orders of magnitude more than a
     /// built-in one for identical output.
     pub body: Vec<crate::shader::FragmentInstruction3D>,
+    /// The whole program, for skies that sample a `samplerCube` (pat-cezo4).
+    ///
+    /// The line matcher behind [`Self::body`] has no notion of a cube sampler,
+    /// so a sky that reads `texture(cube, EYEDIR)` -- the shape every
+    /// cubemap/skybox sky has, the official 3D platformer's included -- came out
+    /// black. Set only when the source declares a `uniform samplerCube`, so
+    /// every other shader sky keeps the matcher path it had.
+    pub program: Option<std::sync::Arc<gdresource::shader_ast::ShaderProgram>>,
+    /// The decoded cubemaps bound to the shader's `samplerCube` uniforms, by
+    /// uniform name. Filled by [`resolve_sky_material_textures`].
+    pub cubemaps: std::collections::HashMap<String, std::sync::Arc<CubemapTexture>>,
+    /// The sky evaluated once into an equirect panorama, for a backend that
+    /// cannot run the shader per pixel (the wgpu sky pass) -- see
+    /// [`Self::bake_panorama`]. An `Arc` so a renderer can key its upload by
+    /// identity across frames.
+    pub baked: Option<std::sync::Arc<PanoramaTexture>>,
+}
+
+/// A cubemap's six faces, **linear** colour, in Godot's layer order
+/// `+X, -X, +Y, -Y, +Z, -Z` (pat-cezo4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CubemapTexture {
+    /// Edge length of each square face, in texels.
+    pub size: u32,
+    /// The faces, each `size * size` row-major texels.
+    pub faces: [Vec<Color>; 6],
+}
+
+impl CubemapTexture {
+    /// Slices an image holding the six faces in a grid into a cubemap, the way
+    /// Godot's cubemap importer does with `slices/arrangement`: 1x6, 2x3, 3x2
+    /// or 6x1, read row-major. The arrangement is inferred from the aspect
+    /// ratio, since a shipped project may carry no `.import` file. `None` for
+    /// an image whose shape fits none of them.
+    pub fn from_grid(image: &PanoramaTexture) -> Option<Self> {
+        let (w, h) = (image.width, image.height);
+        let (cols, rows) = if w * 3 == h * 2 {
+            (2, 3)
+        } else if w * 2 == h * 3 {
+            (3, 2)
+        } else if w * 6 == h {
+            (1, 6)
+        } else if w == h * 6 {
+            (6, 1)
+        } else {
+            return None;
+        };
+        let size = w / cols;
+        if size == 0 || size * rows != h || image.pixels.len() != (w * h) as usize {
+            return None;
+        }
+        let face = |i: u32| -> Vec<Color> {
+            let (fx, fy) = ((i % cols) * size, (i / cols) * size);
+            let mut out = Vec::with_capacity((size * size) as usize);
+            for y in 0..size {
+                let row = ((fy + y) * w + fx) as usize;
+                out.extend_from_slice(&image.pixels[row..row + size as usize]);
+            }
+            out
+        };
+        Some(Self {
+            size,
+            faces: [face(0), face(1), face(2), face(3), face(4), face(5)],
+        })
+    }
+
+    /// Bilinear sample along `dir` (not necessarily normalized), with the
+    /// standard cube-map face selection and orientation (the one Vulkan and
+    /// OpenGL share, which Godot's `samplerCube` uses).
+    pub fn sample(&self, dir: Vector3) -> Color {
+        let (ax, ay, az) = (dir.x.abs(), dir.y.abs(), dir.z.abs());
+        // (face, sc, tc, major axis)
+        let (face, sc, tc, ma) = if ax >= ay && ax >= az {
+            if dir.x > 0.0 {
+                (0, -dir.z, -dir.y, ax)
+            } else {
+                (1, dir.z, -dir.y, ax)
+            }
+        } else if ay >= az {
+            if dir.y > 0.0 {
+                (2, dir.x, dir.z, ay)
+            } else {
+                (3, dir.x, -dir.z, ay)
+            }
+        } else if dir.z > 0.0 {
+            (4, dir.x, -dir.y, az)
+        } else {
+            (5, -dir.x, -dir.y, az)
+        };
+        if ma <= 0.0 || self.size == 0 {
+            return Color::BLACK;
+        }
+        let u = (sc / ma + 1.0) * 0.5;
+        let v = (tc / ma + 1.0) * 0.5;
+        let n = self.size as f32;
+        let px = (u * n - 0.5).clamp(0.0, n - 1.0);
+        let py = (v * n - 0.5).clamp(0.0, n - 1.0);
+        let (x0, y0) = (px.floor() as u32, py.floor() as u32);
+        let (x1, y1) = ((x0 + 1).min(self.size - 1), (y0 + 1).min(self.size - 1));
+        let (fx, fy) = (px - x0 as f32, py - y0 as f32);
+        let texels = &self.faces[face];
+        let at = |x: u32, y: u32| texels[(y * self.size + x) as usize];
+        let lerp = |a: Color, b: Color, t: f32| {
+            Color::new(
+                a.r + (b.r - a.r) * t,
+                a.g + (b.g - a.g) * t,
+                a.b + (b.b - a.b) * t,
+                a.a + (b.a - a.a) * t,
+            )
+        };
+        lerp(
+            lerp(at(x0, y0), at(x1, y0), fx),
+            lerp(at(x0, y1), at(x1, y1), fx),
+            fy,
+        )
+    }
+}
+
+/// The names of the `uniform samplerCube` declarations in `source`.
+fn sampler_cube_uniforms(source: &str) -> Vec<String> {
+    source
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("uniform ")?.trim_start();
+            let rest = rest.strip_prefix("samplerCube")?.trim_start();
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            (!name.is_empty()).then_some(name)
+        })
+        .collect()
 }
 
 impl ShaderSkyMaterial {
@@ -232,7 +364,98 @@ impl ShaderSkyMaterial {
             .as_ref()
             .map(|s| crate::shader::parse_sky_body_3d(&s.source_code))
             .unwrap_or_default();
-        Self { material, body }
+        let program = material
+            .shader
+            .as_ref()
+            .filter(|s| !sampler_cube_uniforms(&s.source_code).is_empty())
+            .and_then(|s| gdresource::shader_ast::parse_shader(&s.source_code).ok())
+            .filter(|p| p.function("sky").is_some())
+            .map(std::sync::Arc::new);
+        Self {
+            material,
+            body,
+            program,
+            cubemaps: std::collections::HashMap::new(),
+            baked: None,
+        }
+    }
+
+    /// The `samplerCube` uniforms this sky declares.
+    pub fn cube_uniform_names(&self) -> Vec<String> {
+        self.material
+            .shader
+            .as_ref()
+            .map(|s| sampler_cube_uniforms(&s.source_code))
+            .unwrap_or_default()
+    }
+
+    /// Runs the whole program's `sky()` for one direction, or `None` when this
+    /// sky has no program (the matcher [`Self::body`] then applies) or the
+    /// evaluation fails. `dir` is `EYEDIR`; `COLOR` starts black, as in Godot.
+    pub fn eval_program(&self, dir: Vector3) -> Option<Color> {
+        use gdresource::shader_ast::{eval_function, Sampler, ShaderValue as SV, StageContext};
+        let program = self.program.as_ref()?;
+        let uniforms: std::collections::HashMap<String, SV> = self
+            .material
+            .parameters
+            .iter()
+            .filter_map(|(k, v)| {
+                crate::shader::uniform_to_shader_value_3d(v).map(|sv| (k.clone(), sv))
+            })
+            .collect();
+        let mut builtins: std::collections::HashMap<String, SV> = std::collections::HashMap::new();
+        let d = dir.normalized();
+        builtins.insert("EYEDIR".into(), SV::Vec3([d.x, d.y, d.z]));
+        builtins.insert("COLOR".into(), SV::Vec3([0.0, 0.0, 0.0]));
+        builtins.insert("ALPHA".into(), SV::Float(1.0));
+        builtins.insert("TIME".into(), SV::Float(0.0));
+        let cubes = self.cubemaps.clone();
+        let sampler = Sampler::new(|_, _| [0.0, 0.0, 0.0, 0.0]).with_cube(move |name, dir| {
+            // An unbound sampler reads its hint default; `hint_default_black`
+            // is the common one, and black is also what an unset one gives.
+            let Some(cube) = cubes.get(name) else {
+                return Some([0.0, 0.0, 0.0, 1.0]);
+            };
+            let c = cube.sample(Vector3::new(dir[0], dir[1], dir[2]));
+            Some([c.r, c.g, c.b, c.a])
+        });
+        let mut stage = StageContext::new(uniforms, builtins).with_sampler(sampler);
+        eval_function(program, "sky", &mut stage).ok()?;
+        let c = stage.builtins.get("COLOR")?.components();
+        Some(Color::new(
+            c.first().copied().unwrap_or(0.0),
+            c.get(1).copied().unwrap_or(0.0),
+            c.get(2).copied().unwrap_or(0.0),
+            1.0,
+        ))
+    }
+
+    /// Evaluates the program over an equirect grid (`u = atan2(x, -z) / 2pi`,
+    /// `v = acos(y) / pi`, the mapping the panorama sky uses) and stores it in
+    /// [`Self::baked`]. A no-op without a program, or when already baked.
+    pub fn bake_panorama(&mut self, width: u32, height: u32) {
+        if self.baked.is_some() || self.program.is_none() {
+            return;
+        }
+        let mut pixels = Vec::with_capacity((width * height) as usize);
+        for y in 0..height {
+            let theta = (y as f32 + 0.5) / height as f32 * std::f32::consts::PI;
+            for x in 0..width {
+                let phi = (x as f32 + 0.5) / width as f32 * std::f32::consts::TAU;
+                // Inverse of u = atan2(x, -z) / 2pi, v = acos(y) / pi.
+                let dir = Vector3::new(
+                    theta.sin() * phi.sin(),
+                    theta.cos(),
+                    -theta.sin() * phi.cos(),
+                );
+                pixels.push(self.eval_program(dir).unwrap_or(Color::BLACK));
+            }
+        }
+        self.baked = Some(std::sync::Arc::new(PanoramaTexture {
+            width,
+            height,
+            pixels,
+        }));
     }
 
     /// Whether the shader yielded no usable instructions — no shader attached, no
@@ -305,7 +528,23 @@ pub fn resolve_sky_material_textures(
         // an explicit arm rather than a catch-all so that adding sky samplers
         // later fails to compile here instead of silently loading nothing
         // (pat-0q2kx.224).
-        SkyMaterial::Shader(_) => {}
+        // A shader sky's cube samplers (pat-cezo4): each `uniform samplerCube`
+        // whose shader parameter names an image is loaded and sliced into
+        // faces.
+        SkyMaterial::Shader(m) => {
+            for name in m.cube_uniform_names() {
+                if m.cubemaps.contains_key(&name) {
+                    continue;
+                }
+                let path = match m.material.parameters.get(&name) {
+                    Some(gdvariant::Variant::String(p)) if !p.is_empty() => p.clone(),
+                    _ => continue,
+                };
+                if let Some(cube) = load(&path).as_ref().and_then(CubemapTexture::from_grid) {
+                    m.cubemaps.insert(name, std::sync::Arc::new(cube));
+                }
+            }
+        }
     }
 }
 
@@ -974,5 +1213,86 @@ mod tests {
             matches!(&sky, SkyMaterial::Procedural(m) if m.sky_cover.is_none()),
             "a failed load must leave the layer unset, not crash"
         );
+    }
+
+    /// A 2x3 grid image whose face `i` is the flat colour (i/5, 0, 1 - i/5).
+    fn six_face_grid(face: u32) -> PanoramaTexture {
+        let (w, h) = (2 * face, 3 * face);
+        let mut pixels = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y / face) * 2 + x / face;
+                pixels.push(Color::new(i as f32 / 5.0, 0.0, 1.0 - i as f32 / 5.0, 1.0));
+            }
+        }
+        PanoramaTexture {
+            width: w,
+            height: h,
+            pixels,
+        }
+    }
+
+    /// pat-cezo4: a 2x3 cubemap image (the platformer's `skybox.webp` layout)
+    /// slices row-major into +X, -X, +Y, -Y, +Z, -Z, and each axis direction
+    /// samples its own face.
+    #[test]
+    fn a_grid_image_slices_into_cube_faces_and_each_axis_reads_its_face() {
+        let cube = CubemapTexture::from_grid(&six_face_grid(4)).expect("2x3 grid");
+        assert_eq!(cube.size, 4);
+        let dirs = [
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(-1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(0.0, -1.0, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(0.0, 0.0, -1.0),
+        ];
+        for (i, d) in dirs.iter().enumerate() {
+            let c = cube.sample(*d);
+            assert!(
+                (c.r - i as f32 / 5.0).abs() < 1e-5,
+                "{d:?} read {c:?}, want face {i}"
+            );
+        }
+        // Not a grid shape: no cubemap.
+        assert!(CubemapTexture::from_grid(&PanoramaTexture {
+            width: 3,
+            height: 3,
+            pixels: vec![Color::BLACK; 9],
+        })
+        .is_none());
+    }
+
+    /// pat-cezo4: a `shader_type sky` that samples a `samplerCube` runs as a
+    /// whole program and reads the bound cubemap along EYEDIR, times its
+    /// uniform — the platformer's `skybox.gdshader`, verbatim. The line
+    /// matcher alone produced black for it.
+    #[test]
+    fn a_cubemap_sky_shader_samples_its_cube_along_eyedir() {
+        let source = "shader_type sky;\n\nuniform samplerCube source_panorama : filter_linear, source_color, hint_default_black;\nuniform float exposure : hint_range(0, 128) = 1.0;\n\nvoid sky() {\n    vec3 eyedir = vec3(EYEDIR.x, EYEDIR.y, EYEDIR.z);\n    COLOR = texture(source_panorama, eyedir).rgb * exposure;\n}\n";
+        let mut m = crate::shader::ShaderMaterial3D::new();
+        m.shader = Some(crate::shader::Shader3D::new(
+            crate::shader::ShaderType3D::Sky,
+            source,
+        ));
+        m.set_shader_parameter("source_panorama", Variant::String("grid.png".into()));
+        m.set_shader_parameter("exposure", Variant::Float(0.5));
+        let mut sky = SkyMaterial::Shader(ShaderSkyMaterial::new(m));
+        resolve_sky_material_textures(&mut sky, |path| {
+            assert_eq!(path, "grid.png");
+            Some(six_face_grid(4))
+        });
+        let SkyMaterial::Shader(mut mat) = sky else {
+            unreachable!()
+        };
+        assert!(mat.program.is_some(), "a samplerCube sky runs as a program");
+        // +Z is face 4: r = 0.8, times exposure 0.5.
+        let c = mat.eval_program(Vector3::new(0.0, 0.0, 1.0)).expect("runs");
+        assert!((c.r - 0.4).abs() < 1e-4 && (c.b - 0.1).abs() < 1e-4, "{c:?}");
+        // The bake covers every direction; its middle row at u = 0.5 is +Z.
+        mat.bake_panorama(8, 4);
+        let pano = mat.baked.as_ref().expect("baked");
+        let mid = pano.pixels[2 * 8 + 4];
+        assert!((mid.r - 0.4).abs() < 0.05, "equirect u=0.5 is +Z: {mid:?}");
     }
 }

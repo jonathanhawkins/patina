@@ -29,6 +29,7 @@ pub mod autoload;
 pub mod behavioral_2d;
 pub mod bezier_bake;
 pub mod binary_scene;
+pub mod gradient_texture;
 pub mod bone_map;
 pub mod camera3d;
 // ⚠️ `canvas_layer.rs` existed since the HUD work but was **never declared**, so

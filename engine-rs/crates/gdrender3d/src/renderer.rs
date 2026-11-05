@@ -1879,6 +1879,12 @@ fn sample_shader_sky(
 ) -> Color {
     use gdserver3d::shader::{execute_fragment_3d, FragmentContext3D};
 
+    // A sky that samples a cubemap runs as a whole program (pat-cezo4); the
+    // line matcher below cannot read a `samplerCube`.
+    if let Some(c) = mat.eval_program(*dir) {
+        return Color::new(c.r * energy, c.g * energy, c.b * energy, c.a);
+    }
+
     if mat.is_inert() {
         return sample_procedural_sky(
             &gdserver3d::sky::ProceduralSkyMaterial::default(),

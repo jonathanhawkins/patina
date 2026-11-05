@@ -1642,7 +1642,7 @@ pub fn execute_fragment_3d(
 }
 
 /// Converts a material parameter into a shader value (pat-s3rrv.36).
-fn uniform_to_shader_value_3d(v: &Variant) -> Option<gdresource::shader_ast::ShaderValue> {
+pub(crate) fn uniform_to_shader_value_3d(v: &Variant) -> Option<gdresource::shader_ast::ShaderValue> {
     use gdresource::shader_ast::ShaderValue as SV;
     Some(match v {
         Variant::Bool(b) => SV::Bool(*b),
