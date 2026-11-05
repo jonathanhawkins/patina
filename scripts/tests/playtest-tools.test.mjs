@@ -11,7 +11,10 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkExpect, judge } from '../playtest-gate.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import { checkExpect, judge, validateScenario, loadScenarios } from '../playtest-gate.mjs';
+import { editorAxisLines, watchVerdict } from '../lib/playtest-checks.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const PLAYTEST = path.join(ROOT, 'scripts', 'browser-playtest.mjs');
@@ -145,4 +148,118 @@ test('judge splits functional from perf, honours allow_findings and the baseline
   // Allowed findings and in-budget numbers are not failures.
   const ok = judge({ ...sc, allow_findings: ['render-bound'], max_audio_underruns: 5 }, { ...r, problems: [] }, { render_ms: 18 });
   assert.deepEqual(ok, { functional: [], perf: [] });
+});
+
+// --- scenarios, watched values, editor overlays (pat-iawbc) ------------------
+
+test('every checked-in scenario validates, platformer_3d included', () => {
+  const all = loadScenarios(null);
+  assert.ok(all.some((s) => s.game === 'platformer_3d'), 'games/platformer_3d/playtest.json is loaded');
+  for (const sc of all) assert.equal(sc.invalid, undefined, `${sc.game}: ${sc.invalid}`);
+});
+
+test('validateScenario names what is wrong instead of letting the gate crash', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-scenario-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'main.tscn'), '[gd_scene format=3]\n');
+    const ok = { dir, scene: 'main.tscn', keys: 'wait:500,KeyW:1000,down:ShiftLeft,up:ShiftLeft', watch: ['/root/P:position'],
+      expect: [{ watch: '/root/P:position', after: 'KeyW:1000', change: 'change' }] };
+    assert.deepEqual(validateScenario(ok), []);
+    const bad = validateScenario({ ...ok, scene: 'nope.tscn', keys: 'wait:500,KeyW-1000',
+      expect: [{ watch: '/root/Q:position', after: 'Space:300', change: 'grow' }] });
+    assert.ok(bad.includes('scene nope.tscn does not exist'), bad.join('; '));
+    assert.ok(bad.some((b) => b.includes('"KeyW-1000"')), bad.join('; '));
+    assert.ok(bad.some((b) => b.includes('after "Space:300"')), bad.join('; '));
+    assert.ok(bad.some((b) => b.includes('watch "/root/Q:position"')), bad.join('; '));
+    assert.ok(bad.some((b) => b.includes('change "grow"')), bad.join('; '));
+    // A playtest.json that does not parse is that game's error, not a throw.
+    fs.mkdirSync(path.join(dir, 'broken'));
+    fs.writeFileSync(path.join(dir, 'broken', 'playtest.json'), '{ "scene": ');
+    const [sc] = loadScenarios(null, dir);
+    assert.equal(sc.game, 'broken');
+    assert.match(sc.invalid[0], /does not parse/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a watched value that never moved: warning normally, problem when the scenario expects movement', () => {
+  const still = [{ watch: '/root/Game/Player:position', values: [
+    { after: 'wait:1500', value: '[1,2,3]' }, { after: 'KeyW:1500', value: '[1,2,3]' }] }];
+  const never = [{ watch: '/root/Game/Player:position', values: [{ after: 'KeyW:1500', value: '(no position: not on /root/Game/Player, a Node)' }] }];
+  const moved = [{ watch: '/root/Game/Player:position', values: [
+    { after: 'wait:1500', value: '[1,2,3]' }, { after: 'KeyW:1500', value: '[1,2,4]' }] }];
+  assert.deepEqual(watchVerdict(still, false).problems, []);
+  assert.equal(watchVerdict(still, false).warnings.length, 1);
+  assert.match(watchVerdict(still, true).problems[0], /stayed \[1,2,3\] through every step/);
+  assert.match(watchVerdict(never, true).problems[0], /never readable: \(no position: not on \/root\/Game\/Player, a Node\)/);
+  assert.deepEqual(watchVerdict(moved, true), { problems: [], warnings: [] });
+});
+
+test('the gate passes --expect-move for a scenario with expect rules, and an unreadable value names itself', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'scripts', 'playtest-gate.mjs'), 'utf8');
+  assert.match(src, /if \(\(sc\.expect \|\| \[\]\)\.length\) args\.push\('--expect-move'\)/);
+  const r = report({ watch: [{ watch: '/root/P:position', values: [
+    { after: 'wait:500', value: '(no position: not on /root/P, a Node)' }, { after: 'ArrowRight:1000', value: '(no position: not on /root/P, a Node)' }] }] });
+  assert.match(checkExpect(r, { watch: '/root/P:position', after: 'ArrowRight:1000', change: 'change' }), /not readable around ArrowRight:1000: \(no position: not on \/root\/P, a Node\)/);
+  // The overlay and never-moved problems are FUNCTIONAL failures, not perf.
+  const v = judge({ expect: [] }, report({ problems: ['editor overlay in the Play view: x', '/root/P:position stayed [1,1] through every step: do the controls reach the game?'] }), null);
+  assert.equal(v.functional.length, 2);
+  assert.deepEqual(v.perf, []);
+});
+
+/// A w x h RGBA frame of the 3D editor backdrop, with `draw(set)` on top.
+function frame(w, h, draw) {
+  const d = new Uint8Array(w * h * 4);
+  for (let i = 0; i < d.length; i += 4) { d[i] = 62; d[i + 1] = 51; d[i + 2] = 40; d[i + 3] = 255; }
+  const set = (x, y, [r, g, b]) => {
+    if (x < 0 || y < 0 || x >= w || y >= h) return;
+    const i = (y * w + x) * 4; d[i] = r; d[i + 1] = g; d[i + 2] = b;
+  };
+  draw(set);
+  return d;
+}
+const AXIS_RED = [160, 70, 70]; // measured on platformer_3d's Play frame
+const AXIS_BLUE = [84, 140, 224];
+
+test('editor axis lines: a long oblique thin red or blue line is the editor overlay', () => {
+  const W = 400, H = 300;
+  // The X axis as platformer_3d's camera sees it: ~18 degrees off horizontal.
+  const red = editorAxisLines(frame(W, H, (set) => { for (let x = 0; x < W; x++) set(x, Math.round(60 + x * 0.33), AXIS_RED); }), W, H);
+  assert.equal(red.overlay, true, JSON.stringify(red));
+  const blue = editorAxisLines(frame(W, H, (set) => { for (let x = 40; x < 300; x++) set(x, Math.round(280 - x * 0.9), AXIS_BLUE); }), W, H);
+  assert.equal(blue.overlay, true, JSON.stringify(blue));
+});
+
+test('editor axis lines: no false positive on 2D art — borders, filled sprites, scattered dashes', () => {
+  const W = 400, H = 300;
+  // spark_keeper's Line2D border: long, thin, blue-violet — but axis-aligned.
+  const border = editorAxisLines(frame(W, H, (set) => {
+    for (let x = 20; x < 380; x++) { set(x, 20, [90, 80, 200]); set(x, 280, [90, 80, 200]); }
+    for (let y = 20; y < 280; y++) { set(20, y, [90, 80, 200]); set(380, y, [90, 80, 200]); }
+  }), W, H);
+  assert.equal(border.overlay, false, JSON.stringify(border));
+  // A big red sprite: red, but not thin.
+  const blob = editorAxisLines(frame(W, H, (set) => { for (let y = 50; y < 250; y++) for (let x = 50; x < 350; x++) set(x, y, [220, 40, 40]); }), W, H);
+  assert.equal(blob.overlay, false, JSON.stringify(blob));
+  // Many short oblique red strokes (bricks, foliage): thin, but no ONE line holds a share.
+  const dashes = editorAxisLines(frame(W, H, (set) => {
+    for (let k = 0; k < 60; k++) { const ox = (k * 53) % 380, oy = (k * 37) % 280; for (let t = 0; t < 12; t++) set(ox + t, oy + Math.round(t * 0.5), AXIS_RED); }
+  }), W, H);
+  assert.equal(dashes.overlay, false, JSON.stringify(dashes));
+  // A short oblique line: real, but too short to be an axis across the view.
+  const short = editorAxisLines(frame(W, H, (set) => { for (let x = 100; x < 180; x++) set(x, Math.round(100 + x * 0.33), AXIS_RED); }), W, H);
+  assert.equal(short.overlay, false, JSON.stringify(short));
+  // A hatched texture: twenty long oblique strokes — each one long enough, but
+  // an editor axis is ONE line holding most of the colour, not one of many.
+  const hatch = editorAxisLines(frame(W, H, (set) => {
+    for (let k = 0; k < 20; k++) for (let x = 0; x < 260; x++) set(x + k * 7, Math.round(10 + k * 14 + x * 0.3), AXIS_RED);
+  }), W, H);
+  assert.equal(hatch.overlay, false, JSON.stringify(hatch));
+  // A 6 px wide oblique red bar (a laser, a ramp): long and straight, but not
+  // a 1-2 px line, so not the editor axis.
+  const bar = editorAxisLines(frame(W, H, (set) => {
+    for (let x = 0; x < W; x++) for (let o = 0; o < 6; o++) set(x, Math.round(60 + x * 0.33) + o, AXIS_RED);
+  }), W, H);
+  assert.equal(bar.overlay, false, JSON.stringify(bar));
 });

@@ -28,6 +28,13 @@ What it catches, from real incidents:
 - **Invisible UI**: the FPS counter attached to a hidden container.
 - **Bad audio**: `--audio 8` measures what the sound device played (underruns,
   clicks, gaps, clipping) and saves `audio.wav`; see the `audio-debug` skill.
+- **Editor chrome in the game**: 3D Play showed the editor viewport (grid,
+  origin axes, gizmos) instead of the game camera. The report flags the
+  editor's origin axis in the Play frame as a problem (`editor overlay in the
+  Play view`).
+- **A player that never instanced**: `Player` came out as an empty `Node`, so
+  its position never moved. With `--expect-move` that is a problem, and the
+  watch line says what the node IS (`not on /root/Game/Player, a Node`).
 
 ## Steps
 
@@ -72,6 +79,17 @@ scripts/browser-playtest.mjs --url http://localhost:9400/editor \
 - `--soak 180` keeps playing for that long after the steps and samples memory
   and render time every 10 s. Growth above 10 MB/min, or render time up by
   30% and 3 ms, is a problem. It caught two leaks the 5 s runs never could.
+- `--watch /root/Main/Player:position` reads a property after every step.
+  A value that never changes is a warning. Add `--expect-move` when the keys
+  should move it: then it is a problem. The gate adds it for any scenario with
+  `expect` rules.
+- The Play frame is checked for the editor's origin axes: a long, thin,
+  OBLIQUE red or blue line holding most of that colour's thin pixels
+  (`report.page.editor_axes`, `scripts/lib/playtest-checks.mjs`). Axis-aligned
+  lines are skipped, because 2D borders and tile rows are axis-aligned. It was
+  checked on all four 2D games with no false positives. It cannot see an axis
+  that is off-screen or exactly horizontal or vertical, so treat a clean
+  result as "no axis seen", not "no overlay".
 - A 4xx from the editor's own `/api/` is a problem, not a warning.
 - The report records the editor's age and memory and the host load. It warns
   when the editor is older than 1 h, holds more than 1.5 GB, or the load
@@ -88,7 +106,12 @@ against `scripts/playtest-baselines.json`. Busy-host perf failures are re-run
 once, then reported INCONCLUSIVE (exit 3). `--file-beads` files one `br` bug
 per failing game; `--soak 180` adds the soak. Results go to
 `.playtest-gate/latest.json`, which the planner reads. Add a `playtest.json`
-to every new game in `games/`.
+to every new game in `games/` (see the `real-game-import` skill). The gate
+validates each scenario first. The scene must exist, every step must parse,
+and every `expect` rule must name a step in `keys` and a value in `watch`.
+An invalid scenario is that game's ERROR, not a crash. Never run the gate on
+someone else's ports: it uses `--port-base` + game index, so pass
+`--port-base <yours> --games <one>` to stay on one port.
 
 - It launches its own headless Chrome (throwaway profile, free port) and kills
   only that one. The person's Chrome is never touched, and no extension is

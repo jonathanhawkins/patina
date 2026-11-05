@@ -1,0 +1,12 @@
+{
+  "scene": "game.tscn",
+  "keys": "wait:1500,KeyW:1500,KeyA:1000,KeyD:1000,Space:300,wait:500",
+  "watch": ["/root/Game/Player:position"],
+  "min_fps": 30,
+  "expect": [
+    { "watch": "/root/Game/Player:position", "after": "KeyW:1500", "change": "change" },
+    { "watch": "/root/Game/Player:position", "after": "KeyA:1000", "change": "change" },
+    { "watch": "/root/Game/Player:position", "after": "KeyD:1000", "change": "change" },
+    { "watch": "/root/Game/Player:position", "after": "Space:300", "axis": 1, "change": "increase" }
+  ]
+}

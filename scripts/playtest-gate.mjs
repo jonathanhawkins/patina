@@ -30,6 +30,11 @@
 //   --update-baselines   record this run's render times as the new baselines
 //                        (scripts/playtest-baselines.json)
 //
+// A scenario is validated first (scene exists, steps parse, every `expect`
+// names a step and a watched value): an invalid one is that game's ERROR.
+// A scenario with `expect` rules runs browser-playtest with --expect-move, so a
+// watched value that never changes is a functional failure.
+//
 // Writes .playtest-gate/latest.json (and a timestamped copy): the planner reads
 // it. Exit 0 = all green, 1 = a failure, 2 = could not run, 3 = only
 // inconclusive results.
@@ -75,13 +80,40 @@ export function parseArgs(argv) {
   return o;
 }
 
-export function loadScenarios(only) {
-  const dir = path.join(ROOT, 'games');
+export function loadScenarios(only, dir = path.join(ROOT, 'games')) {
   return fs.readdirSync(dir)
     .filter((g) => fs.existsSync(path.join(dir, g, 'playtest.json')))
     .filter((g) => !only || only.includes(g))
     .sort()
-    .map((g) => ({ game: g, dir: path.join(dir, g), ...JSON.parse(fs.readFileSync(path.join(dir, g, 'playtest.json'), 'utf8')) }));
+    .map((g) => {
+      const base = { game: g, dir: path.join(dir, g) };
+      // A broken scenario file is that game's ERROR, not a crash of the gate.
+      let sc;
+      try { sc = { ...base, ...JSON.parse(fs.readFileSync(path.join(dir, g, 'playtest.json'), 'utf8')) }; } catch (e) { return { ...base, invalid: [`playtest.json does not parse: ${e.message}`] }; }
+      const invalid = validateScenario(sc);
+      return invalid.length ? { ...sc, invalid } : sc;
+    });
+}
+
+const STEP = /^(wait:\d+|(down|up):[A-Za-z0-9]+|[A-Za-z0-9]+:\d+)$/;
+
+/// What is wrong with a scenario before anything runs: the scene must exist,
+/// every key step must parse, and every `expect` rule must name a step the
+/// keys run and a value the scenario watches.
+export function validateScenario(sc) {
+  const bad = [];
+  if (!sc.scene) bad.push('no "scene"');
+  else if (sc.dir && !fs.existsSync(path.join(sc.dir, sc.scene))) bad.push(`scene ${sc.scene} does not exist`);
+  if (typeof sc.keys !== 'string' || !sc.keys.trim()) bad.push('no "keys"');
+  const steps = String(sc.keys || '').split(',').map((x) => x.trim()).filter(Boolean);
+  for (const st of steps) if (!STEP.test(st)) bad.push(`key step "${st}" is not Code:ms, down:Code, up:Code or wait:ms`);
+  if (sc.watch != null && !Array.isArray(sc.watch)) bad.push('"watch" must be a list');
+  for (const r of sc.expect || []) {
+    if (!steps.includes(r.after)) bad.push(`expect after "${r.after}": no such step in keys`);
+    if (!(sc.watch || []).includes(r.watch)) bad.push(`expect watch "${r.watch}" is not in "watch"`);
+    if (!['increase', 'decrease', 'change'].includes(r.change)) bad.push(`expect change "${r.change}" is not increase/decrease/change`);
+  }
+  return bad;
 }
 
 /// The watched value after step number `i`, as numbers ([x, y] or a
@@ -102,7 +134,12 @@ export function checkExpect(report, rule) {
   if (i < 0) return `expect: no step "${rule.after}" ran`;
   const now = watchedAt(report, rule.watch, i);
   const before = i > 0 ? watchedAt(report, rule.watch, i - 1) : null;
-  if (now == null || before == null) return `expect: ${rule.watch} was not readable around ${rule.after}`;
+  if (now == null || before == null) {
+    // Name what WAS read: "(no position: not on /root/Game/Player, a Node)"
+    // says the player never instanced, which "not readable" alone hid.
+    const raw = (report.watch || []).find((x) => x.watch === rule.watch)?.values[i]?.value;
+    return `expect: ${rule.watch} was not readable around ${rule.after}${raw ? `: ${raw}` : ''}`;
+  }
   const pick = (x) => (Array.isArray(x) ? x[rule.axis ?? 0] : x);
   const a = pick(before), b = pick(now);
   const ok = rule.change === 'increase' ? b > a : rule.change === 'decrease' ? b < a : JSON.stringify(now) !== JSON.stringify(before);
@@ -143,6 +180,9 @@ function runOne(sc, port, soak) {
   if (sc.edit_steps) args.push('--edit-steps', sc.edit_steps);
   if (sc.audio) args.push('--audio', String(sc.audio));
   if (soak) args.push('--soak', String(soak));
+  // The scenario expects the game to react: a watched value that never moves
+  // is a functional failure, not a warning.
+  if ((sc.expect || []).length) args.push('--expect-move');
   const r = sh('node', args, { timeout: 15 * 60 * 1000, maxBuffer: 64 << 20 });
   try {
     return { report: JSON.parse(r.stdout) };
@@ -189,6 +229,13 @@ async function main() {
   const results = [];
   for (const [i, sc] of scenarios.entries()) {
     const port = o.portBase + i;
+    if (sc.invalid) {
+      const res = { game: sc.game, port, status: 'error', error: `invalid scenario: ${sc.invalid.join('; ')}`, functional: [], perf: [] };
+      if (o.fileBeads) { try { res.bead = fileBead(sc.game, res); } catch (e) { res.bead = `could not file: ${e.message}`; } }
+      results.push(res);
+      if (!o.json) console.log(`${'ERROR'.padEnd(12)} ${sc.game}\n             - ${res.error}`);
+      continue;
+    }
     let attempt = runOne(sc, port, o.soak);
     let verdict = attempt.report ? judge(sc, attempt.report, baselines[sc.game]) : null;
     let rerun = false;

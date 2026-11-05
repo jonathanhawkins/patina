@@ -28,6 +28,10 @@
 //                         `<node>:#children` reads how many children the node
 //                         has — spawned mobs, bullets, pickups — so a cleanup
 //                         (`call_group(..., "queue_free")`) shows as a drop
+//   --expect-move         the scenario expects the game to react: a --watch value
+//                         that never changes (or is never readable) is a
+//                         PROBLEM, not a warning (the gate passes it whenever a
+//                         scenario has `expect` rules)
 //   --min-fps <n>         frames shown per second below this is a problem (45)
 //   --profile <seconds>   also sample the editor process while playing and list
 //                         its hottest functions (macOS `sample`)
@@ -50,11 +54,16 @@
 // profile on a free port, and kills only that Chrome: your own browser is
 // never touched. Needs Node 22+ (built-in WebSocket); no npm packages.
 //
+// Also a problem: the editor's origin axes visible in the Play frame (a long
+// straight thin red/blue line, scripts/lib/playtest-checks.mjs) — Play showing
+// the editor viewport's grid and gizmos instead of the game camera.
+//
 // Exit status: 0 no problems · 1 problems found · 2 could not run.
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { editorAxisLines, watchVerdict } from './lib/playtest-checks.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -77,6 +86,7 @@ function parseArgs(argv) {
     audio: 0,
     json: false,
     watch: [],
+    expectMove: false,
     editSteps: '',
     soak: 0,
     budgetMs: 0,
@@ -90,6 +100,7 @@ function parseArgs(argv) {
     if (a === '--url') opts.url = value();
     else if (a === '--keys') opts.keys = value();
     else if (a === '--watch') opts.watch.push(value());
+    else if (a === '--expect-move') opts.expectMove = true;
     else if (a === '--min-fps') opts.minFps = Number(value());
     else if (a === '--profile') opts.profile = Number(value());
     else if (a === '--out') opts.out = value();
@@ -527,7 +538,9 @@ async function main() {
       try {
         const d = await (await fetch(`${api}/api/runtime/node?path=${encodeURIComponent(node)}`)).json();
         const found = (d.properties || []).find((p) => p.name === prop);
-        return found ? JSON.stringify(found.value?.value ?? found.value) : `(no ${prop}: ${d.error?.message || 'not on the node'})`;
+        // Say WHAT the node is: a `Player` that came out as a bare `Node` (its
+        // scene failed to instance) has no position, and that is the bug.
+        return found ? JSON.stringify(found.value?.value ?? found.value) : `(no ${prop}: ${d.error?.message || `not on ${node}, a ${d.class || 'node'}`})`;
       } catch (e) {
         return `(unreadable: ${e.message})`;
       }
@@ -594,13 +607,10 @@ async function main() {
         }
       }
     }
-    for (const w of report.watch) {
-      const readable = w.values.map((v) => v.value).filter((v) => !v.startsWith('('));
-      if (readable.length >= 2 && new Set(readable).size === 1) {
-        report.warnings.push(`${w.watch} stayed ${readable[0]} through every step: do the controls reach the game?`);
-      } else if (!readable.length) {
-        report.warnings.push(`${w.watch} was never readable: ${w.values[0]?.value ?? 'no steps ran'}`);
-      }
+    {
+      const v = watchVerdict(report.watch, opts.expectMove);
+      report.problems.push(...v.problems);
+      report.warnings.push(...v.warnings);
     }
     if (sampler) await sampler;
 
@@ -649,6 +659,7 @@ async function main() {
           }
         }
         page.content = x1 < 0 ? null : [x0, y0, Math.min(c.width, x1 + 2) - x0, Math.min(c.height, y1 + 2) - y0];
+        page.editor_axes = (${editorAxisLines.toString()})(d, c.width, c.height);
       }
       return page;
     })()`);
@@ -731,6 +742,11 @@ async function main() {
       report.warnings.push(`could not read the editor log: ${e.message}`);
     }
     if (report.page && !report.page.overlay_visible) report.warnings.push('the FPS counter is not visible over the game');
+    if (report.page?.editor_axes?.overlay) {
+      const { red, blue } = report.page.editor_axes;
+      const ax = red.line >= blue.line ? `red X axis, ${red.line} px` : `blue Z axis, ${blue.line} px`;
+      report.problems.push(`editor overlay in the Play view: the editor's origin axis is drawn over the game (${ax} straight line) — Play shows the editor viewport (grid, gizmos), not the game camera`);
+    }
     if (report.page?.frame && report.page.content) {
       const [w, h] = report.page.frame;
       const share = (report.page.content[2] * report.page.content[3]) / (w * h);

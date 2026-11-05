@@ -90,6 +90,19 @@ struct Args {
     /// canvas item list, `--render-to` drives the 3D `RenderServer3DAdapter`
     /// from the scene's `Camera3D`. A project can want either or both.
     render_to: Option<PathBuf>,
+    /// Whether to report what the game's scripts printed and raised
+    /// (`--script-output`): `script_errors` and `script_prints` in the JSON.
+    /// Without it a scene whose script calls a missing native method every
+    /// frame loaded "fine" here — the failures were buffered and never read,
+    /// so `scripts/scene-audit.mjs` could not see them.
+    script_output: bool,
+    /// `--class-list`: print every class registered in ClassDB as a JSON array
+    /// and exit, so a tool can tell a type the engine does not know (a
+    /// `[sub_resource type="…"]` it will drop) without loading anything.
+    class_list: bool,
+    /// `--res-root DIR`: the `res://` root for a loose scene, instead of the
+    /// scene's own folder (pass the game's project directory).
+    res_root: Option<PathBuf>,
 }
 
 /// Parses command-line arguments manually (no extra dependency).
@@ -101,7 +114,7 @@ fn parse_args() -> Result<Args, String> {
             "Usage: {} <scene.tscn|project.godot|game.pck> [--main-pack PACK] \
              [--frames N] [--delta D] [--trace-out FILE] \
              [--frame-out FILE.png|FILE.ppm] [--render-to FILE.png] \
-             [--frame-size WxH]",
+             [--frame-size WxH] [--script-output] [--res-root DIR] | --class-list",
             args[0]
         ));
     }
@@ -128,6 +141,9 @@ fn parse_args() -> Result<Args, String> {
     // matches what the project would open at.
     let mut frame_size: (u32, u32) = (1152, 648);
     let mut debug = patina_runner::debug_flags::DebugFlags::default();
+    let mut script_output = false;
+    let mut class_list = false;
+    let mut res_root: Option<PathBuf> = None;
 
     let mut i = if starts_with_flag { 1 } else { 2 };
     while i < args.len() {
@@ -154,6 +170,17 @@ fn parse_args() -> Result<Args, String> {
             }
             "--event-trace" => {
                 event_trace = true;
+            }
+            "--script-output" => {
+                script_output = true;
+            }
+            "--class-list" => {
+                class_list = true;
+            }
+            "--res-root" => {
+                i += 1;
+                let dir = PathBuf::from(args.get(i).ok_or("--res-root requires a directory")?);
+                res_root = Some(dir.canonicalize().unwrap_or(dir));
             }
             "--trace-out" => {
                 i += 1;
@@ -213,7 +240,7 @@ fn parse_args() -> Result<Args, String> {
         i += 1;
     }
 
-    if scene_path.is_empty() {
+    if scene_path.is_empty() && !class_list {
         return Err("no scene, project or pack given (pass a path or --main-pack)".to_string());
     }
 
@@ -229,6 +256,9 @@ fn parse_args() -> Result<Args, String> {
         frame_out,
         frame_size,
         render_to,
+        script_output,
+        class_list,
+        res_root,
     })
 }
 
@@ -682,6 +712,13 @@ fn run_booted_project(booted: project_boot::BootedProject, project_dir: &Path, a
     if args.event_trace {
         output["event_trace"] = serialize_event_trace(main_loop.tree());
     }
+    // Emitted ONLY with the flag, like the debug blocks above: no existing
+    // run's output changes.
+    if args.script_output {
+        let drained = main_loop.tree_mut().drain_script_output();
+        output["script_errors"] = json!(drained.errors);
+        output["script_prints"] = json!(drained.prints);
+    }
     println!(
         "{}",
         serde_json::to_string_pretty(&output).expect("JSON serialization failed")
@@ -706,6 +743,16 @@ fn main() {
             process::exit(1);
         }
     };
+
+    if args.class_list {
+        gdobject::class_db::register_all_classes();
+        println!(
+            "{}",
+            serde_json::to_string(&gdobject::class_db::get_class_list())
+                .expect("JSON serialization failed")
+        );
+        return;
+    }
 
     tracing::info!(
         scene = %args.scene_path,
@@ -790,10 +837,22 @@ fn main() {
     let resolved_scene_path = Path::new(&args.scene_path)
         .canonicalize()
         .unwrap_or_else(|_| PathBuf::from(&args.scene_path));
-    let project_dir = resolved_scene_path
-        .parent()
-        .unwrap_or(Path::new("."))
-        .to_path_buf();
+    // `--res-root DIR` overrides the default (the scene's own folder). A loose
+    // run of `scenes/main.tscn` otherwise resolves `res://scenes/player.tscn`
+    // to `scenes/scenes/player.tscn`, and the loader silently puts an empty
+    // `Node` where every instanced sub-scene should be (`scripts/scene-audit.mjs`
+    // found it on spark_keeper, platformer and platformer_3d, pat-iawbc).
+    //
+    // ⚠️ Opt-in rather than "nearest project.godot", which is what Godot does:
+    // `engine-rs/fixtures/project.godot` sits above `fixtures/scenes/`, whose
+    // scenes reference `res://sprite_fixture.png` as if their own folder were
+    // the root — switching the default turned `runner_2d_frame_output_test` red.
+    let project_dir = args.res_root.clone().unwrap_or_else(|| {
+        resolved_scene_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf()
+    });
     // The same directory is the `res://` root: scripts and autoloads already
     // resolve against it, and without it `res://` instanced sub-scenes (and any
     // `load("res://…")`) could not be read in a loose-scene run.
@@ -934,6 +993,13 @@ fn main() {
     }
     if args.event_trace {
         output["event_trace"] = serialize_event_trace(main_loop.tree());
+    }
+    // Emitted ONLY with the flag, like the debug blocks above: no existing
+    // run's output changes.
+    if args.script_output {
+        let drained = main_loop.tree_mut().drain_script_output();
+        output["script_errors"] = json!(drained.errors);
+        output["script_prints"] = json!(drained.prints);
     }
 
     println!(
