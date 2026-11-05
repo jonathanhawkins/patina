@@ -5,35 +5,35 @@
       "scenario_key": "7e09d6176af7888a",
       "godot_version": "4.6.1.stable.official.14d19694e",
       "recorded": "2026-11-05",
-      "commit": "371fb43",
+      "commit": "df3fbd3",
       "traces": {
         "/root/Main/Player:position": {
           "compared": 319,
-          "first_divergence": 1,
-          "max_error": 510,
-          "max_error_frame": 170
+          "first_divergence": null,
+          "max_error": 0,
+          "max_error_frame": 192
         }
       },
       "images": {
         "f18": {
-          "mismatch_pct": 8.781,
-          "mean_delta": 14.361,
-          "coarse_mismatch_pct": 9.63
+          "mismatch_pct": 2.045,
+          "mean_delta": 6.747,
+          "coarse_mismatch_pct": 2.759
         },
         "f168": {
-          "mismatch_pct": 9.075,
-          "mean_delta": 13.159,
-          "coarse_mismatch_pct": 9.87
+          "mismatch_pct": 1.409,
+          "mean_delta": 2.973,
+          "coarse_mismatch_pct": 1.37
         },
         "f258": {
-          "mismatch_pct": 12.199,
-          "mean_delta": 15.601,
-          "coarse_mismatch_pct": 12.611
+          "mismatch_pct": 10.712,
+          "mean_delta": 10.414,
+          "coarse_mismatch_pct": 9.944
         },
         "f318": {
-          "mismatch_pct": 15.519,
-          "mean_delta": 19.672,
-          "coarse_mismatch_pct": 15.444
+          "mismatch_pct": 15.618,
+          "mean_delta": 18.397,
+          "coarse_mismatch_pct": 15.63
         }
       }
     },
@@ -41,40 +41,40 @@
       "scenario_key": "eab60a154d4a7143",
       "godot_version": "4.6.1.stable.official.14d19694e",
       "recorded": "2026-11-05",
-      "commit": "371fb43",
+      "commit": "df3fbd3",
       "traces": {
         "/root/Game/Level/Player:position": {
           "compared": 301,
-          "first_divergence": 1,
-          "max_error": 276.359,
-          "max_error_frame": 281
+          "first_divergence": null,
+          "max_error": 0,
+          "max_error_frame": 153
         }
       },
       "images": {
         "f60": {
-          "mismatch_pct": 46.401,
-          "mean_delta": 90.778,
-          "coarse_mismatch_pct": 49.5
+          "mismatch_pct": 4.477,
+          "mean_delta": 7.022,
+          "coarse_mismatch_pct": 0.467
         },
         "f150": {
-          "mismatch_pct": 57.85,
-          "mean_delta": 116.279,
-          "coarse_mismatch_pct": 61.85
+          "mismatch_pct": 8.264,
+          "mean_delta": 12.898,
+          "coarse_mismatch_pct": 0.733
         },
         "f168": {
-          "mismatch_pct": 58.987,
-          "mean_delta": 118.389,
-          "coarse_mismatch_pct": 63.367
+          "mismatch_pct": 2.205,
+          "mean_delta": 3.698,
+          "coarse_mismatch_pct": 0.75
         },
         "f210": {
-          "mismatch_pct": 59.221,
-          "mean_delta": 118.414,
-          "coarse_mismatch_pct": 63.4
+          "mismatch_pct": 4.209,
+          "mean_delta": 6.606,
+          "coarse_mismatch_pct": 0.65
         },
         "f300": {
-          "mismatch_pct": 57.442,
-          "mean_delta": 112.968,
-          "coarse_mismatch_pct": 59
+          "mismatch_pct": 12.995,
+          "mean_delta": 22.062,
+          "coarse_mismatch_pct": 5.15
         }
       }
     },
@@ -82,45 +82,45 @@
       "scenario_key": "f2736ee492903c6f",
       "godot_version": "4.6.1.stable.official.14d19694e",
       "recorded": "2026-11-05",
-      "commit": "371fb43",
+      "commit": "df3fbd3",
       "traces": {
         "/root/Game/Player:position": {
           "compared": 349,
-          "first_divergence": 5,
-          "max_error": 8.7046,
+          "first_divergence": 237,
+          "max_error": 0.0895,
           "max_error_frame": 348
         }
       },
       "images": {
         "f90": {
-          "mismatch_pct": 17.266,
-          "mean_delta": 32.014,
-          "coarse_mismatch_pct": 11.205
+          "mismatch_pct": 13.491,
+          "mean_delta": 30.367,
+          "coarse_mismatch_pct": 6.027
         },
         "f180": {
-          "mismatch_pct": 8.396,
-          "mean_delta": 28.762,
-          "coarse_mismatch_pct": 3.549
+          "mismatch_pct": 19.091,
+          "mean_delta": 30.299,
+          "coarse_mismatch_pct": 9.396
         },
         "f240": {
-          "mismatch_pct": 42.55,
-          "mean_delta": 43.179,
-          "coarse_mismatch_pct": 38.855
+          "mismatch_pct": 16.212,
+          "mean_delta": 27.096,
+          "coarse_mismatch_pct": 10.751
         },
         "f300": {
-          "mismatch_pct": 48.476,
-          "mean_delta": 46.864,
-          "coarse_mismatch_pct": 46.708
+          "mismatch_pct": 19.369,
+          "mean_delta": 30.449,
+          "coarse_mismatch_pct": 13.246
         },
         "f318": {
-          "mismatch_pct": 43.428,
-          "mean_delta": 49.78,
-          "coarse_mismatch_pct": 40.604
+          "mismatch_pct": 16.504,
+          "mean_delta": 29.706,
+          "coarse_mismatch_pct": 11.866
         },
         "f348": {
-          "mismatch_pct": 43.189,
-          "mean_delta": 40.732,
-          "coarse_mismatch_pct": 41.135
+          "mismatch_pct": 15.103,
+          "mean_delta": 25.86,
+          "coarse_mismatch_pct": 10.88
         }
       }
     },
@@ -128,7 +128,7 @@
       "scenario_key": "8048329905e3a83f",
       "godot_version": "4.6.1.stable.official.14d19694e",
       "recorded": "2026-11-05",
-      "commit": "371fb43",
+      "commit": "df3fbd3",
       "traces": {
         "/root/Pong/Left:position": {
           "compared": 229,
@@ -144,9 +144,9 @@
         },
         "/root/Pong/Ball:position": {
           "compared": 229,
-          "first_divergence": 186,
-          "max_error": 1.6905,
-          "max_error_frame": 228
+          "first_divergence": null,
+          "max_error": 0,
+          "max_error_frame": 24
         }
       },
       "images": {
@@ -166,9 +166,9 @@
           "coarse_mismatch_pct": 0
         },
         "f228": {
-          "mismatch_pct": 0.013,
-          "mean_delta": 1.456,
-          "coarse_mismatch_pct": 0.05
+          "mismatch_pct": 0,
+          "mean_delta": 1.409,
+          "coarse_mismatch_pct": 0
         }
       }
     },
@@ -176,13 +176,13 @@
       "scenario_key": "f86827054863d476",
       "godot_version": "4.6.1.stable.official.14d19694e",
       "recorded": "2026-11-05",
-      "commit": "371fb43",
+      "commit": "df3fbd3",
       "traces": {
         "/root/Main/Player:position": {
           "compared": 235,
-          "first_divergence": null,
-          "max_error": 0,
-          "max_error_frame": 179
+          "first_divergence": 49,
+          "max_error": null,
+          "max_error_frame": 49
         }
       },
       "images": {
