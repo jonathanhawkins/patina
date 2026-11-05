@@ -120,6 +120,13 @@ someone else's ports: it uses `--port-base` + game index, so pass
 part. `--update-baselines` and `--update-godot-baselines` are for a person or
 the coordinator only, never an agent.
 
+The quick check with no browser is `node scripts/scene-audit.mjs games/<game>`.
+It runs every scene through the release runner AND headless Godot 4.6.1
+(cached), and reports only what differs from Godot. Errors both engines raise
+(a sub-scene run standalone, missing what its parent sets) are listed under
+`matches Godot (expected)` and are not failures. A finding there is a real
+difference; do not argue it away. See the `real-game-import` skill, step 2.
+
 - It launches its own headless Chrome (throwaway profile, free port) and kills
   only that one. The person's Chrome is never touched, and no extension is
   needed, which matters when Claude in Chrome isn't connected.

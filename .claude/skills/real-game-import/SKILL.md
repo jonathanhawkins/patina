@@ -49,7 +49,34 @@ The audit loads every `.tscn`/`.scn` through the release runner, with
 - types ClassDB does not register
 
 Exit 1 means there is a finding. Binary resources are listed as notes.
-On platformer_3d:
+
+🔑 **The audit compares against REAL Godot** (Godot.app 4.6.1, headless,
+same frames, from a temp copy of the game) and reports only what DIFFERS:
+
+- **script error … (Godot does not raise it)**: Patina-only
+- **missed check: Godot raises …; Patina does not**: a check Patina skips
+- **different error**: same script and function, a different error
+- **node count** / **instance class**: the trees differ (with the paths)
+
+Errors BOTH engines raise are listed under `matches Godot (expected)`. They
+are not findings. A sub-scene run standalone raises them in Godot too:
+truck_town's `vehicles/*.tscn` fail `assert(turbometer)` (vehicle.gd:22)
+because `town_scene` sets it. Do not argue a FAIL away by hand: if it is
+listed as a finding, Godot did not raise it. Errors are matched by meaning
+(assert / access `x` on Nil / no method `x` / index / node not found / ...),
+script and function, not by text. The normaliser is
+`canonical()` in `scripts/lib/scene-audit-godot.mjs`. If a new pair of
+wordings fails to match, add the pair to `SAME` in
+`scripts/tests/scene-audit-godot.test.mjs` with real output from both
+engines.
+
+The Godot side is cached by content hash in
+`.playtest-gate/godot-cache/<game>/scene-audit-<key>.json`. A re-run with the
+same game files, frames and Godot takes about a second. `--no-godot` gives
+the old Patina-only audit (every script error is a finding). With no Godot
+binary the audit warns and falls back to that.
+
+Before the Godot side existed, platformer_3d looked like this:
 
 ```
   FAIL  stage/grid_map.scn  did not load

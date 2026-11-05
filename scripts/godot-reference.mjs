@@ -115,12 +115,13 @@ export function parseGodotVersion(text) {
  * - when `config/features` names a Godot newer than the one running (the 3D
  *   platformer declares "4.7" on 4.6.1), lowers it to the running version, so
  *   the editor import does not stop at the "made with a newer version" prompt.
+ * `autoloadName`/`autoloadFile` name another capture autoload (scene-audit's).
  * Returns {text, notes}.
  */
-export function patchProjectGodot(text, { godotVersion = null } = {}) {
+export function patchProjectGodot(text, { godotVersion = null, autoloadName = AUTOLOAD_NAME, autoloadFile = AUTOLOAD_FILE } = {}) {
   const notes = [];
   let out = text.replace(/\r\n/g, '\n');
-  const line = `${AUTOLOAD_NAME}="*res://${AUTOLOAD_FILE}"`;
+  const line = `${autoloadName}="*res://${autoloadFile}"`;
   if (/^\[autoload\]\s*$/m.test(out)) {
     out = out.replace(/^\[autoload\]\s*\n(\n?)/m, `[autoload]\n\n${line}\n`);
   } else {
