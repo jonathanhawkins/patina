@@ -3391,8 +3391,21 @@ impl SceneAccess for SceneTreeAccessor {
             }
         }
         // Then try node property
-        if let Some(n) = self.tree_mut().get_node_mut(nid) {
-            n.set_property(prop, value);
+        let path_follow = match self.tree_mut().get_node_mut(nid) {
+            Some(n) => {
+                n.set_property(prop, value);
+                matches!(n.class_name(), "PathFollow2D" | "PathFollow3D")
+            }
+            None => false,
+        };
+        // Godot's `PathFollow2D::set_progress` (and `set_progress_ratio`, which
+        // calls it) runs `_update_transform()` AT ONCE, so the very next line
+        // of the script reads the new `position` (pat-y2ylj: Dodge the Creeps
+        // places each mob at `mob_spawn_location.position` right after setting
+        // `progress_ratio = randf()`, and every mob spawned at the previous
+        // spawn's point).
+        if path_follow && (prop == "progress" || prop == "progress_ratio") {
+            crate::main_loop::process_path_follows_in(self.tree_mut(), 0.0, Some(nid));
         }
     }
 

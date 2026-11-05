@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  DEFAULT_MARGINS, hashGameFiles, scenarioKey, captureCacheKey, captureComplete,
+  DEFAULT_MARGINS, hashGameFiles, scenarioKey, captureCacheKey, captureComplete, compareCaptures,
   parityScores, compareParity, baselineEntry, regressionBeadTitle, renderParityReport,
 } from '../lib/godot-parity.mjs';
 import { readBaselines, writeParityReport } from '../parity-report.mjs';
@@ -265,4 +265,36 @@ test('writeParityReport writes the file and readBaselines reads the games map', 
   writeParityReport({ latest: { at: 'T', results: [run(s, compareParity(baselines.pong, s))] }, baselines, out });
   assert.match(fs.readFileSync(out, 'utf8'), /^# Godot parity report/);
   assert.deepEqual(readBaselines(path.join(d, 'missing.json')), {});
+});
+
+// --- reference stability (pat-y2ylj) ------------------------------------------
+
+test('two captures compare equal only when every value and picture is the same', async () => {
+  const { makeImage, encodePng } = await import('../lib/godot-reference-lib.mjs');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'capture-stability-'));
+  const capture = (name, ratio, px) => {
+    const d = path.join(root, name);
+    fs.mkdirSync(path.join(d, 'frames'), { recursive: true });
+    const frames = [0, 1, 2].map((f) => ({ frame: f, values: { '/root/Main/MobPath/MobSpawnLocation:progress_ratio': [f === 2 ? ratio : 0] } }));
+    fs.writeFileSync(path.join(d, 'trace.json'), JSON.stringify({ frames, meta: { shots: [2] } }));
+    const img = makeImage(4, 4, [10, 20, 30, 255]);
+    img.data[0] = px;
+    fs.writeFileSync(path.join(d, 'frames', 'f00002.png'), encodePng(img));
+    return d;
+  };
+  try {
+    const a = capture('a', 0.829341, 10);
+    assert.deepEqual(compareCaptures(a, capture('b', 0.829341, 10)), { stable: true, differences: [] });
+    assert.equal(compareCaptures(a, capture('noise', 0.829341, 12)).stable, true, 'GPU rounding of 2 per channel is noise');
+
+    const rng = compareCaptures(a, capture('rng', 0.114713, 10));
+    assert.equal(rng.stable, false, 'an unseeded RNG moving a value is unstable');
+    assert.match(rng.differences[0], /^f2 \/root\/Main\/MobPath\/MobSpawnLocation:progress_ratio: \[0\.829341\] vs \[0\.114713\]$/);
+
+    const pic = compareCaptures(a, capture('pic', 0.829341, 200));
+    assert.equal(pic.stable, false, 'a picture that moved is unstable even when the trace agrees');
+    assert.match(pic.differences[0], /^picture f00002\.png differs \(1 channel values beyond 2, up to 190 apart\)$/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

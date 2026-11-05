@@ -439,7 +439,8 @@ fn tool_definitions() -> Vec<Value> {
                 "screenshots": {"type": "array", "items": {"type": "integer"}, "description": "Frames to capture (0 = before stepping). At most 8."},
                 "width": {"type": "integer"}, "height": {"type": "integer"},
                 "keep_running": {"type": "boolean", "description": "Leave the game paused at the last frame instead of stopping it (play only; continue with `step`)."},
-                "audio": {"type": "boolean", "description": "Open the real audio device for this run (play only), so `audio` can measure what it sounds like. Off by default."}
+                "audio": {"type": "boolean", "description": "Open the real audio device for this run (play only), so `audio` can measure what it sounds like. Off by default."},
+                "seed": {"type": "integer", "description": "Random seed the run is pinned to (play only; default 42): the global RNG starts at it and every randomize() / RandomNumberGenerator.new() reseeds from it, by the rule scripts/godot-reference.mjs applies to real Godot."}
             }
         })
     };
@@ -2329,12 +2330,17 @@ fn tool_play(ctx: &Ctx, args: &Value) -> Result<Output, String> {
     let log_start = ctx.state.lock().unwrap().game_log.next_seq();
     // A fixed seed: an agent's playtest is frame-exact, and that includes the
     // random stream — the same timeline must replay the same game. (A human's
-    // Play is randomized at startup, as Godot's is.)
+    // Play is randomized at startup, as Godot's is.) `seed` picks it, so a
+    // comparison can pass the one its Godot reference ran with (pat-y2ylj).
     // `audio: true` opens the real output device, so `audio` can measure what
     // the game sounds like; off by default, so a playtest stays silent.
     let started = ctx.api.post(
         "/api/runtime/play",
-        json!({"paused": true, "seed": 42, "audio": arg_bool(args, "audio", false)}),
+        json!({
+            "paused": true,
+            "seed": args.get("seed").and_then(Value::as_i64).unwrap_or(42),
+            "audio": arg_bool(args, "audio", false),
+        }),
     )?;
     if started.get("ok").and_then(Value::as_bool) == Some(false) {
         return Err(format!("play refused: {started}"));

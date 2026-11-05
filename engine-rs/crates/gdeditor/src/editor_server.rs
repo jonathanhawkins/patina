@@ -18153,11 +18153,19 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     // so a game that never calls `randomize()` still differs run to run; a
     // `{"seed": n}` request pins it instead, which is what a reproducible
     // playtest (the agent interface's frame-exact `play`) asks for.
-    match parse_json_body(body).and_then(|v| v.get("seed").and_then(|s| s.as_i64())) {
-        Some(seed) => gdscript_interop::interpreter::set_random_seed(seed),
-        None => {
-            gdscript_interop::interpreter::randomize_global_rng();
-        }
+    //
+    // 🔑 pat-y2ylj: a seed PINS the run, not just its start: the game's own
+    // `randomize()` calls and every `RandomNumberGenerator.new()` reseed from
+    // values derived from it, by the same rule the Godot reference capture
+    // (scripts/lib/godot-reference-capture.gd) applies, so a comparison run
+    // draws Godot's numbers. `PATINA_RNG_SEED` pins the editor's own Play
+    // button the same way (a browser playtest compared against a reference).
+    let pinned = parse_json_body(body)
+        .and_then(|v| v.get("seed").and_then(|s| s.as_i64()))
+        .or_else(|| std::env::var("PATINA_RNG_SEED").ok().and_then(|s| s.trim().parse().ok()));
+    gdscript_interop::interpreter::pin_random_seed(pinned);
+    if pinned.is_none() {
+        gdscript_interop::interpreter::randomize_global_rng();
     }
     // The run's game log starts BEFORE the tree is built: building attaches the
     // scripts, and a script that fails to load is reported into it.
@@ -18175,7 +18183,11 @@ fn api_runtime_play(state: &Arc<Mutex<EditorState>>, body: &str, stream: &mut Tc
     let main_swap = if want_main {
         project_settings
             .as_ref()
-            .and_then(|ps| main_scene_for_play(&state, ps.main_scene()))
+            .and_then(|ps| {
+                // Its constructor draws are made by `build_play_tree`, once.
+                let _no_ctor_draws = gdscene::construction_randomness::suppress();
+                main_scene_for_play(&state, ps.main_scene())
+            })
     } else {
         None
     };
@@ -18328,6 +18340,14 @@ pub fn build_play_tree(
 ) -> SceneTree {
     use gdscene::lifecycle::LifecycleManager;
 
+    // 🔑 pat-y2ylj: Godot CONSTRUCTS the played scene, and some constructors
+    // draw from the global RNG (a GPUParticles2D takes two numbers), which
+    // shifts every random number the game draws after. This tree is a clone of
+    // one loaded earlier — when the edited scene was opened, before the run's
+    // seed was pinned — plus instances expanded below, so the per-node draws
+    // are suppressed here and made once, in construction order, before any
+    // script of the scene runs.
+    let no_ctor_draws = gdscene::construction_randomness::suppress();
     let mut cloned = clone_scene_tree(&state.scene_tree);
     // The project's stretch, before any `_ready` reads the viewport rect.
     if let Some(settings) = settings {
@@ -18418,6 +18438,17 @@ pub fn build_play_tree(
             &gdscene::packed_scene::load_scene_from_res,
         );
     }
+
+    // The scene's constructor draws (see the top of this function): every
+    // child of /root is the played scene here, autoloads come after.
+    let scene_children: Vec<NodeId> = cloned
+        .get_node(cloned.root_id())
+        .map(|n| n.children().to_vec())
+        .unwrap_or_default();
+    for id in scene_children {
+        gdscene::construction_randomness::draw_for_subtree(&cloned, id);
+    }
+    drop(no_ctor_draws);
 
     // Attach GDScripts to nodes that have a `_script_path` property. Done before
     // any dispatch below, so every script is present for its own `_enter_tree`.

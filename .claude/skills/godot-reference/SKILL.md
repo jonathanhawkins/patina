@@ -95,6 +95,19 @@ command.
   2D Platformer's first jump frame moved one tick instead of two.)
 - Godot runs with `--fixed-fps 60 --disable-vsync`. Every run is
   deterministic: two runs give byte-identical PNGs.
+- Random numbers are PINNED (pat-y2ylj). Godot seeds its RNG from the clock
+  at startup, in `randomize()` and in `RandomNumberGenerator.new()`, so a game
+  using randomness (Dodge the Creeps' mobs) recorded a different reference
+  every run. The capture calls `seed(--seed)` before any other autoload
+  exists (default: playtest.json `seed`, else 42, the MCP `play` default),
+  and the temp copy's scripts are rewritten so the k-th `randomize()` seeds
+  `seed + k` and the j-th `RandomNumberGenerator.new()` / `rng.randomize()`
+  gets `seed + 1000000 + j`. Patina's MCP `play` takes the same `seed` and
+  pins the same three by the same rule (`gdcore::rng::pin_seed`), with a
+  bit-exact port of Godot's PCG32, `randf`/`randf_range`/`randi_range`/
+  `randfn`/`pick_random`/`shuffle`, and the draws Godot's constructors make
+  (a GPUParticles2D takes two). Dodge the Creeps' mobs now match frame for
+  frame. `PATINA_RNG_SEED=<n>` pins the editor's Play button the same way.
 
 ## Godot on this Mac: what works
 
@@ -127,6 +140,10 @@ under another scenario or Godot version reads `stale` and is not compared.
 - The Godot capture is cached in `.playtest-gate/godot-cache/<g>/<key>/`. The
   key hashes the game files (minus hidden `.godot/` and `.editor/`), the resolved scenario, `godot
   --version` and the capture tool, so a second run only plays Patina.
+- On a cache miss Godot captures TWICE and the reference is cached only when
+  both agree (every watched value; every picture within 2 per channel). An
+  unstable reference is refused with the differing frames named — it would
+  report regressions that are only Godot disagreeing with itself.
   `--godot-cache DIR` shares one cache between worktrees.
 - 3D captures need the real off-screen window (above). Run the gate from a
   logged-in macOS session, never `--headless`.

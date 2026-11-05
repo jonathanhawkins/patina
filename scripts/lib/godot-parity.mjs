@@ -13,6 +13,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { decodePng } from './godot-reference-lib.mjs';
 
 /**
  * How far a score may move before it counts. Every metric gets
@@ -68,6 +69,9 @@ export function scenarioIdentity(sc) {
     size: sc.size,
     shots: sc.shots,
     watches: (sc.watches || []).map((w) => w.id ?? w),
+    // Only a NON-default seed is part of the identity, so every baseline
+    // recorded before seeds existed (all at the default) keeps its key.
+    ...(sc.seed !== undefined && sc.seed !== 42 ? { seed: sc.seed } : {}),
   };
 }
 
@@ -95,6 +99,76 @@ export function captureComplete(dir) {
   } catch {
     return false;
   }
+}
+
+/**
+ * Whether two Godot captures of one scenario recorded the same thing
+ * (pat-y2ylj): every watched value of every frame, and every picture byte for
+ * byte. A reference that differs between two runs cannot judge Patina — the
+ * gate once flagged dodge_the_creeps f258 10.414 -> 15.050 when Patina's frame
+ * was pixel-identical and only Godot's own unseeded RNG had moved. Returns
+ * {stable, differences: [string]} (at most `limit` differences).
+ */
+export function compareCaptures(dirA, dirB, { limit = 8, pixelNoise = 2 } = {}) {
+  const differences = [];
+  const read = (d) => JSON.parse(fs.readFileSync(path.join(d, 'trace.json'), 'utf8'));
+  let a;
+  let b;
+  try {
+    a = read(dirA);
+    b = read(dirB);
+  } catch (e) {
+    return { stable: false, differences: [`unreadable trace: ${e.message}`] };
+  }
+  const fa = a.frames || [];
+  const fb = b.frames || [];
+  if (fa.length !== fb.length) differences.push(`recorded ${fa.length} vs ${fb.length} frames`);
+  for (let i = 0; i < Math.min(fa.length, fb.length) && differences.length < limit; i++) {
+    const va = fa[i].values || {};
+    const vb = fb[i].values || {};
+    for (const id of new Set([...Object.keys(va), ...Object.keys(vb)])) {
+      if (JSON.stringify(va[id]) !== JSON.stringify(vb[id])) {
+        differences.push(`f${fa[i].frame} ${id}: ${JSON.stringify(va[id])} vs ${JSON.stringify(vb[id])}`);
+        break;
+      }
+    }
+  }
+  const pngs = (d) => {
+    try {
+      return fs.readdirSync(path.join(d, 'frames')).filter((f) => f.endsWith('.png')).sort();
+    } catch {
+      return [];
+    }
+  };
+  const pa = pngs(dirA);
+  const pb = pngs(dirB);
+  if (pa.join() !== pb.join()) differences.push(`pictures ${pa.join(',') || 'none'} vs ${pb.join(',') || 'none'}`);
+  for (const f of pa.filter((x) => pb.includes(x))) {
+    if (differences.length >= limit) break;
+    const x = fs.readFileSync(path.join(dirA, 'frames', f));
+    const y = fs.readFileSync(path.join(dirB, 'frames', f));
+    if (x.equals(y)) continue;
+    // Same pixels in a different encoding still count as the same picture,
+    // and so does GPU rounding noise up to `pixelNoise` per channel.
+    let worst = Infinity;
+    let off = 0;
+    try {
+      const ia = decodePng(x);
+      const ib = decodePng(y);
+      if (ia.width === ib.width && ia.height === ib.height) {
+        worst = 0;
+        for (let i = 0; i < ia.data.length; i++) {
+          const d = Math.abs(ia.data[i] - ib.data[i]);
+          if (d > pixelNoise) off++;
+          if (d > worst) worst = d;
+        }
+      }
+    } catch {
+      // undecodable: counts as different
+    }
+    if (worst > pixelNoise) differences.push(`picture ${f} differs (${Number.isFinite(worst) ? `${off} channel values beyond ${pixelNoise}, up to ${worst} apart` : 'another size or undecodable'})`);
+  }
+  return { stable: differences.length === 0, differences };
 }
 
 const finiteOrNull = (x) => (typeof x === 'number' && Number.isFinite(x) ? x : null);

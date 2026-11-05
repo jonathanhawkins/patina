@@ -74,7 +74,7 @@ import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import { resolveScenario, runGodotReference, defaultGodot } from './godot-reference.mjs';
 import {
-  hashGameFiles, captureCacheKey, captureComplete, scenarioKey, parityScores,
+  hashGameFiles, captureCacheKey, captureComplete, compareCaptures, scenarioKey, parityScores,
   compareParity, baselineEntry, regressionBeadTitle,
 } from './lib/godot-parity.mjs';
 import { PARITY_BASELINES, readBaselines, writeParityReport } from './parity-report.mjs';
@@ -229,9 +229,39 @@ export function prepareReference(gameDir, cacheRoot, { godot = defaultGodot() } 
   const tmp = `${dir}.tmp-${process.pid}`;
   fs.rmSync(tmp, { recursive: true, force: true });
   runGodotReference(gameDir, { out: tmp, godot });
+  // 🔑 A reference is cached only once Godot has recorded it TWICE the same
+  // (pat-y2ylj). An unstable one (randomness the seed pinning did not reach,
+  // a clock read, threading) would make the gate report a regression that is
+  // only Godot disagreeing with itself — and the cache would hide that until
+  // its key changed.
+  const again = `${dir}.check-${process.pid}`;
+  fs.rmSync(again, { recursive: true, force: true });
+  try {
+    runGodotReference(gameDir, { out: again, godot });
+    const check = compareCaptures(tmp, again);
+    if (!check.stable) {
+      fs.rmSync(tmp, { recursive: true, force: true });
+      throw new UnstableReferenceError(gameDir, check.differences);
+    }
+  } finally {
+    fs.rmSync(again, { recursive: true, force: true });
+  }
   fs.rmSync(dir, { recursive: true, force: true });
   fs.renameSync(tmp, dir);
   return { dir, key, hit: false, scenario, version };
+}
+
+/** Two Godot captures of one scenario disagreed; the reference is refused. */
+export class UnstableReferenceError extends Error {
+  constructor(gameDir, differences) {
+    super(
+      `the Godot reference for ${path.basename(gameDir)} is UNSTABLE — two captures of the same scenario differ, ` +
+        `so it cannot judge Patina and was not cached: ${differences.join('; ')}. ` +
+        'Find what Godot does differently run to run (randomness the seed pinning in scripts/godot-reference.mjs ' +
+        'does not reach, a clock read, a thread) and pin it.',
+    );
+    this.differences = differences;
+  }
 }
 
 /** compare-to-godot on the running editor against the (cached) reference; the scores and their comparison. */

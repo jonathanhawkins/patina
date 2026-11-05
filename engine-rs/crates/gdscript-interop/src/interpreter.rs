@@ -5927,13 +5927,27 @@ impl Interpreter {
                 // loading screen, then do the slow work" idiom (truck_town's
                 // car_select.gd `_load_scene`). `RenderingServer` is not a
                 // variable, so this used to raise "undefined variable" and the
-                // chosen car never loaded. Patina has no draw-signal emitter,
-                // so it is a one-frame await — the same resume point
-                // `poll_coroutines` already documents for it.
+                // chosen car never loaded.
+                //
+                // 🔑 pat-9s7yp: Godot emits both signals from
+                // `RenderingServer::draw`, AFTER the frame's process phase and
+                // its deferred calls — so the awaiting code runs between this
+                // frame and the next, never inside a process phase. This was a
+                // one-frame await resumed in the coroutine phase right after
+                // `_process`, which put truck_town's car in the tree one frame
+                // EARLY (f109 against Godot's f110). It now parks on a signal
+                // the main loop emits at the frame boundary
+                // (`MainLoop::step`, `SceneTree::emit_frame_draw_signals`).
                 if matches!(object.as_ref(), Expr::Ident(n) if n == "RenderingServer")
                     && matches!(member.as_str(), "frame_post_draw" | "frame_pre_draw")
                 {
-                    return Ok(crate::coroutine::AwaitTarget::frames_variant(1));
+                    return Ok(crate::coroutine::AwaitTarget::signal_variant(
+                        if member == "frame_post_draw" {
+                            crate::coroutine::FRAME_POST_DRAW_SIGNAL
+                        } else {
+                            crate::coroutine::FRAME_PRE_DRAW_SIGNAL
+                        },
+                    ));
                 }
                 let obj = self.eval_expr(object)?;
                 // ObjectId property access via scene_access
@@ -8442,7 +8456,9 @@ impl Interpreter {
                 }
                 Ok(Some(Variant::Float(to_float(&args[0])?.cos())))
             }
-            "randi" => Ok(Some(Variant::Int(deterministic_randi()))),
+            // pat-y2ylj: every global random builtin draws from gdcore's
+            // Godot-exact `default_rand` port, so a seed gives Godot's numbers.
+            "randi" => Ok(Some(Variant::Int(gdcore::rng::randi() as i64))),
             // Godot's seedable-RNG surface (pat-0q2kx.152). Without these,
             // `seed()` was undefined and no script could make its sequence
             // reproducible.
@@ -8452,7 +8468,13 @@ impl Interpreter {
                         "seed() takes 1 argument".into(),
                     )));
                 }
-                set_random_seed(to_float(&args[0])? as i64);
+                // Godot's parameter is an int64, reinterpreted as uint64; going
+                // through f64 lost the low bits of a large seed.
+                let s = match &args[0] {
+                    Variant::Int(i) => *i,
+                    other => to_float(other)? as i64,
+                };
+                set_random_seed(s);
                 Ok(Some(Variant::Nil))
             }
             // `error_string(code)` — Godot's `variant_utility.cpp` maps an Error
@@ -8560,13 +8582,9 @@ impl Interpreter {
                 // a tick the way a clock read can). See gdcore/src/rng.rs
                 // (pat-mgixk.40).
                 //
-                // 🔑 The returned seed is fed to `set_random_seed` deliberately.
-                // `gdcore::rng` and this interpreter keep SEPARATE generators —
-                // GDScript's `randi()` runs off `RNG_STATE` here — so calling
-                // `gdcore::rng::randomize()` for its side effect alone would
-                // reseed the wrong one and leave the script-visible stream
-                // unchanged, which is the whole observable behaviour of
-                // `randomize()`.
+                // pat-y2ylj: while a seed is pinned (the agent `play` tool, a
+                // Godot reference run) this seeds `base + k` for the k-th call,
+                // the rule the Godot capture applies too.
                 randomize_global_rng();
                 Ok(Some(Variant::Nil))
             }
@@ -8576,15 +8594,17 @@ impl Interpreter {
                         "rand_from_seed() takes 1 argument".into(),
                     )));
                 }
-                // Godot returns `[value, next_seed]` and does NOT disturb the
-                // global RNG — it is a pure function of the seed, which is what
-                // makes it usable for reproducible per-object randomness.
-                let seed = to_float(&args[0])? as i64;
-                let value = lcg_step(seed);
-                Ok(Some(Variant::PackedInt64Array(vec![
-                    value,
-                    seed.wrapping_add(1),
-                ])))
+                // Godot returns `[value, seed]` and does NOT disturb the global
+                // RNG — it is a pure function of the seed. ⚠️ The second entry
+                // is the seed it STARTED from (`RandomPCG::get_seed`), not an
+                // advanced one: Godot 4.6.1 answers `[1321476956, 12345]` for
+                // `rand_from_seed(12345)` (pat-y2ylj).
+                let mut seed = match &args[0] {
+                    Variant::Int(i) => *i as u64,
+                    other => to_float(other)? as i64 as u64,
+                };
+                let value = gdcore::rng::rand_from_seed(&mut seed);
+                Ok(Some(Variant::PackedInt64Array(vec![value as i64, seed as i64])))
             }
             "randfn" => {
                 // Godot: `randfn(mean = 0.0, deviation = 1.0)`.
@@ -8596,24 +8616,10 @@ impl Interpreter {
                     Some(v) => to_float(v)?,
                     None => 1.0,
                 };
-                // Box-Muller. `u1` must be strictly positive or `ln` is -inf, so
-                // a zero draw is nudged to the smallest usable value rather than
-                // producing a NaN the caller would have to discover at runtime.
-                let u1 = {
-                    let u = (deterministic_randi() as f64) / (i64::MAX as f64);
-                    if u <= f64::EPSILON {
-                        f64::EPSILON
-                    } else {
-                        u
-                    }
-                };
-                let u2 = (deterministic_randi() as f64) / (i64::MAX as f64);
-                let z = (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
-                Ok(Some(Variant::Float(mean + deviation * z)))
+                // Godot `Math::randfn` (Box-Muller on the double `randd`).
+                Ok(Some(Variant::Float(gdcore::rng::randfn(mean, deviation))))
             }
-            "randf" => Ok(Some(Variant::Float(
-                (deterministic_randi() as f64) / (i64::MAX as f64),
-            ))),
+            "randf" => Ok(Some(Variant::Float(gdcore::rng::randf()))),
             "randi_range" => {
                 if args.len() != 2 {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
@@ -8621,14 +8627,10 @@ impl Interpreter {
                     )));
                 }
                 match (&args[0], &args[1]) {
+                    // Godot `Math::random((int32_t)from, (int32_t)to)`: either
+                    // order, inclusive (a reversed range used to return `from`).
                     (Variant::Int(lo), Variant::Int(hi)) => {
-                        if hi < lo {
-                            return Ok(Some(Variant::Int(*lo)));
-                        }
-                        let r = (hi - lo + 1) as u64;
-                        Ok(Some(Variant::Int(
-                            lo + ((deterministic_randi().unsigned_abs()) % r) as i64,
-                        )))
+                        Ok(Some(Variant::Int(gdcore::rng::randi_range(*lo, *hi))))
                     }
                     _ => Err(RuntimeError::new(RuntimeErrorKind::TypeError(
                         "randi_range() arguments must be int".into(),
@@ -8643,8 +8645,7 @@ impl Interpreter {
                 }
                 let lo = to_float(&args[0])?;
                 let hi = to_float(&args[1])?;
-                let t = (deterministic_randi() as f64) / (i64::MAX as f64);
-                Ok(Some(Variant::Float(lo + (hi - lo) * t.abs())))
+                Ok(Some(Variant::Float(gdcore::rng::randf_range(lo, hi))))
             }
             "get_node" => {
                 if args.len() != 1 {
@@ -15063,18 +15064,13 @@ impl Interpreter {
                     if arr.is_empty() {
                         Ok(Variant::Nil)
                     } else {
-                        let idx = (deterministic_randi().unsigned_abs() as usize) % arr.len();
-                        Ok(arr[idx].clone())
+                        // Godot `Array::pick_random`: `Math::rand() % size`.
+                        Ok(arr[gdcore::rng::pick_index(arr.len())].clone())
                     }
                 }
                 "shuffle" => Self::array_mutate(arr, |a| {
-                    let n = a.len();
-                    if n > 1 {
-                        for i in (1..n).rev() {
-                            let j = (deterministic_randi().unsigned_abs() as usize) % (i + 1);
-                            a.swap(i, j);
-                        }
-                    }
+                    // Godot `Array::shuffle`: `Math::rand() % (i + 1)`.
+                    gdcore::rng::shuffle(a);
                     Variant::Nil
                 }),
                 "slice" => {
@@ -24397,56 +24393,42 @@ fn type_code_to_name(code: i64) -> &'static str {
     }
 }
 
-/// The RNG state behind every `randi`/`randf`/`randi_range`/`randf_range`,
-/// `pick_random` and `shuffle` (pat-0q2kx.152).
-///
-/// Godot's global RNG is SEEDABLE: `seed(n)` makes the whole sequence
-/// reproducible, which is what deterministic replays and procedural generation
-/// rely on. This was a fixed-start counter with no way to set it, so `seed()`
-/// did not exist and every run produced the same unchangeable sequence.
-///
-/// Starts at 42, the value the old counter used, so a run that never calls
-/// `seed()` produces exactly the sequence it always did.
-static RNG_STATE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(42);
+// The global RNG (pat-0q2kx.152, pat-y2ylj).
+//
+// Every `randi`/`randf`/`randi_range`/`randf_range`/`randfn`, `pick_random`
+// and `shuffle` draws from `gdcore::rng`'s process-wide generator — a
+// bit-exact port of Godot's `default_rand` — so `seed(n)` gives Godot's own
+// sequence. This used to be a separate counter-LCG starting at 42, which
+// matched nothing Godot draws: Dodge the Creeps' mobs could never spawn where
+// the Godot reference put them.
 
-/// Advances `state` one step of the LCG and returns a non-negative value.
-///
-/// Extracted so `rand_from_seed` can run the SAME generator without touching
-/// the global state — Godot's `rand_from_seed` is a pure function of its seed.
-fn lcg_step(state: i64) -> i64 {
-    (state
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(1442695040888963407))
-        & i64::MAX
-}
-
-/// Reseeds the script-visible global RNG from entropy — what Godot 4 does at
-/// startup (`Main::setup` randomizes the global generator), and what
-/// `randomize()` does from a script. Returns the seed it chose.
+/// Reseeds the script-visible global RNG — what Godot 4 does at startup
+/// (`SceneTree::SceneTree` calls `Math::randomize()`), and what `randomize()`
+/// does from a script. Returns the seed it chose.
 ///
 /// 🔑 Patina's generator started at a fixed 42 and nothing randomized it at
 /// boot, so every run of every game drew the SAME sequence: Dodge the Creeps
 /// spawned identical enemies in identical places every time it was played.
 pub fn randomize_global_rng() -> i64 {
-    let seed = (gdcore::rng::randomize() & i64::MAX as u64) as i64;
-    set_random_seed(seed);
-    seed
+    gdcore::rng::randomize() as i64
 }
 
-/// Sets the global RNG seed (Godot `seed()`).
+/// Sets the global RNG seed (Godot `seed()`; the int64 is read as uint64).
 pub fn set_random_seed(seed: i64) {
-    RNG_STATE.store(seed, std::sync::atomic::Ordering::Relaxed);
+    gdcore::rng::seed(seed as u64);
 }
 
-/// The current global RNG seed, for hosts that want to save/restore it.
+/// Pins a run's random seeding to `seed` (`Some`): the global generator starts
+/// at it, and every `randomize()` and `RandomNumberGenerator.new()` reseeds
+/// from a value derived from it (see `gdcore::rng::pin_seed`), by the rule the
+/// Godot reference capture uses. `None` restores clock seeding.
+pub fn pin_random_seed(seed: Option<i64>) {
+    gdcore::rng::pin_seed(seed.map(|s| s as u64));
+}
+
+/// The global RNG's current PCG state, for hosts that want to save/restore it.
 pub fn random_seed() -> i64 {
-    RNG_STATE.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-fn deterministic_randi() -> i64 {
-    use std::sync::atomic::Ordering;
-    let c = RNG_STATE.fetch_add(1, Ordering::Relaxed);
-    lcg_step(c)
+    gdcore::rng::global_state() as i64
 }
 /// Godot's `String % args` operator (`String::sprintf`).
 ///
@@ -29222,7 +29204,9 @@ fn new_rng_handle() -> gdcore::id::ObjectId {
         v
     });
     RNG_INSTANCES.with(|m| {
-        m.borrow_mut().insert(seq, gdcore::rng::Rng::new());
+        // Godot's constructor randomizes (`randbase.randomize()`); a pinned
+        // run gets the next pinned instance seed instead (pat-y2ylj).
+        m.borrow_mut().insert(seq, gdcore::rng::Rng::new_for_script());
     });
     gdcore::id::ObjectId::from_raw(RNG_HANDLE_TAG | seq)
 }

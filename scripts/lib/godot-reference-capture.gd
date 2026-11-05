@@ -34,7 +34,29 @@
 ## ours runs before the first iteration but `_ready`, which is before the main
 ## scene's own `_ready`), so they keep the old in-tick press: for them alone
 ## `is_action_just_pressed` in `_physics_process` is one tick late.
+##
+## 🔑 Random numbers are PINNED (pat-y2ylj). Godot seeds its global RNG from
+## the clock at startup (`SceneTree::SceneTree` calls `Math::randomize()`), and
+## again in every `randomize()` and every `RandomNumberGenerator.new()`, so a
+## game that uses randomness (Dodge the Creeps' mob spawns) recorded a
+## different reference every run — the parity gate flagged a regression on a
+## frame Patina drew pixel-identically. Here:
+## - `_init` (the FIRST autoload, so before every other autoload's field
+##   initializers and the main scene) calls `seed(cfg.seed)`;
+## - godot-reference.mjs rewrites the temp copy's scripts so the k-th bare
+##   `randomize()` becomes `pinned_randomize()` (seed + k), and every
+##   `RandomNumberGenerator.new()` / `rng.randomize()` takes
+##   `next_instance_seed()` (seed + 1000000 + j).
+## Patina pins the same three by the same rule (`gdcore::rng::pin_seed`, the
+## MCP `play` tool's `seed`), and its generator is a bit-exact port of
+## Godot's PCG32, so both engines draw the same numbers.
 extends Node
+
+const PINNED_INSTANCE_OFFSET := 1000000
+
+static var pin_base := 42
+static var pin_global_reseeds := 0
+static var pin_instance_reseeds := 0
 
 var cfg: Dictionary = {}
 var out_dir := ""
@@ -45,10 +67,30 @@ var written := false
 var finished := false
 
 
-func _ready() -> void:
-	process_mode = Node.PROCESS_MODE_ALWAYS
-	process_physics_priority = -2147483000
-	process_priority = 2147483000
+## The k-th bare `randomize()` of a pinned run (the rewrite in
+## godot-reference.mjs calls this instead): seeds the global RNG `base + k`.
+static func pinned_randomize() -> void:
+	pin_global_reseeds += 1
+	seed(pin_base + pin_global_reseeds)
+
+
+## The seed of the j-th RandomNumberGenerator reseed (construction or its own
+## `randomize()`): `base + 1000000 + j`.
+static func next_instance_seed() -> int:
+	pin_instance_reseeds += 1
+	return pin_base + PINNED_INSTANCE_OFFSET + pin_instance_reseeds
+
+
+## `RandomNumberGenerator.new()` in a pinned run.
+static func pinned_rng() -> RandomNumberGenerator:
+	var r := RandomNumberGenerator.new()
+	r.seed = next_instance_seed()
+	return r
+
+
+func _init() -> void:
+	# Read the config here, not in `_ready`: the seed has to be in before any
+	# other autoload is even instantiated (their field initializers run then).
 	var path := ""
 	var args := OS.get_cmdline_user_args()
 	for i in range(args.size()):
@@ -56,10 +98,22 @@ func _ready() -> void:
 			path = args[i + 1]
 	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null:
-		printerr("godot-reference: cannot read config ", path)
-		get_tree().quit(3)
 		return
 	cfg = JSON.parse_string(f.get_as_text())
+	pin_base = int(cfg.get("seed", 42))
+	pin_global_reseeds = 0
+	pin_instance_reseeds = 0
+	seed(pin_base)
+
+
+func _ready() -> void:
+	process_mode = Node.PROCESS_MODE_ALWAYS
+	process_physics_priority = -2147483000
+	process_priority = 2147483000
+	if cfg.is_empty():
+		printerr("godot-reference: cannot read the config (--godot-reference-config)")
+		get_tree().quit(3)
+		return
 	out_dir = cfg["out_dir"]
 	for s in cfg.get("shots", []):
 		shots[int(s)] = true
@@ -207,6 +261,8 @@ func _write() -> void:
 		"window": [get_viewport().size.x, get_viewport().size.y],
 		"physics_ticks_per_second": Engine.physics_ticks_per_second,
 		"physics_interpolation": ProjectSettings.get_setting("physics/common/physics_interpolation", false),
+		"seed": pin_base,
+		"pinned_reseeds": {"global": pin_global_reseeds, "instance": pin_instance_reseeds},
 		"frames": samples,
 		"quit_early": not finished,
 	}

@@ -42,6 +42,7 @@ pub mod canvas_render;
 pub mod char_fx;
 pub mod character3d;
 pub mod collision;
+pub mod construction_randomness;
 pub mod color_picker;
 pub mod control;
 pub mod control_render;
