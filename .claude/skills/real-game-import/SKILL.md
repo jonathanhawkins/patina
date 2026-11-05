@@ -98,6 +98,17 @@ br create -t bug -p 1 -l real-game,<game> \
 
 Put the exact audit or gate line and a one-command reproduction in the body.
 
+**Attach a Godot reference picture/trace to every visual or behaviour bead.**
+Judge against what real Godot does, not against the upstream screenshot by eye.
+Use the `godot-reference` skill (`.claude/skills/godot-reference/SKILL.md`):
+
+```bash
+node scripts/compare-to-godot.mjs games/<game> --port <yours> --out .scratch/cmp-<game>
+```
+
+Paste the trace table (first divergence frame, max error) and the
+`diff/fNNNNN-side.png` path (Godot | Patina | heat map) into the bead.
+
 ## 5. Fix in parallel: worktree subagents, one port each
 
 Dispatch one subagent per bead with `isolation: "worktree"`. Give each one its

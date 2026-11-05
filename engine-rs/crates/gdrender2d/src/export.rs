@@ -152,25 +152,6 @@ pub fn encode_png_fast(fb: &FrameBuffer) -> Vec<u8> {
 /// PNG encoder with an explicit deflate `level` (0 = store … 9/10 = max). Shared
 /// by [`encode_png`] (level 6, small files) and [`encode_png_fast`] (level 1).
 fn encode_png_level(fb: &FrameBuffer, level: u8) -> Vec<u8> {
-    use miniz_oxide::deflate::compress_to_vec_zlib;
-
-    let mut buf = Vec::new();
-
-    // -- PNG signature --
-    buf.extend_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
-
-    // -- IHDR --
-    let mut ihdr_data = Vec::with_capacity(13);
-    ihdr_data.extend_from_slice(&fb.width.to_be_bytes());
-    ihdr_data.extend_from_slice(&fb.height.to_be_bytes());
-    ihdr_data.push(8); // bit depth
-    ihdr_data.push(6); // color type: RGBA
-    ihdr_data.push(0); // compression
-    ihdr_data.push(0); // filter
-    ihdr_data.push(0); // interlace
-    write_png_chunk(&mut buf, b"IHDR", &ihdr_data);
-
-    // -- IDAT --
     // Build raw scanline data: filter byte (0) + RGBA pixels per row. Iterate each
     // row as a slice (avoids get_pixel's per-pixel index recompute + bounds check)
     // and write whole 4-byte pixels — this runs on every interactive frame.
@@ -189,7 +170,48 @@ fn encode_png_level(fb: &FrameBuffer, level: u8) -> Vec<u8> {
             ]);
         }
     }
-    let compressed = compress_to_vec_zlib(&raw, level);
+    encode_png_scanlines(fb.width, fb.height, &raw, level)
+}
+
+/// Encodes a byte-native BGRA raster (the GPU 3D Play frame) as an RGBA PNG.
+///
+/// The bytes are copied exactly, with no float round trip, so the PNG holds
+/// what the renderer wrote.
+pub fn encode_png_bgra(img: &crate::renderer::Bgra8Image) -> Vec<u8> {
+    let w = img.width as usize;
+    let mut raw = Vec::with_capacity((1 + w * 4) * img.height as usize);
+    for row in img.data.chunks_exact(w * 4).take(img.height as usize) {
+        raw.push(0); // filter type: None
+        for px in row.chunks_exact(4) {
+            raw.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+        }
+    }
+    encode_png_scanlines(img.width, img.height, &raw, 6)
+}
+
+/// Wraps already-built RGBA8 scanlines (filter byte + `width * 4` bytes per
+/// row) in a PNG container.
+fn encode_png_scanlines(width: u32, height: u32, raw: &[u8], level: u8) -> Vec<u8> {
+    use miniz_oxide::deflate::compress_to_vec_zlib;
+
+    let mut buf = Vec::new();
+
+    // -- PNG signature --
+    buf.extend_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
+
+    // -- IHDR --
+    let mut ihdr_data = Vec::with_capacity(13);
+    ihdr_data.extend_from_slice(&width.to_be_bytes());
+    ihdr_data.extend_from_slice(&height.to_be_bytes());
+    ihdr_data.push(8); // bit depth
+    ihdr_data.push(6); // color type: RGBA
+    ihdr_data.push(0); // compression
+    ihdr_data.push(0); // filter
+    ihdr_data.push(0); // interlace
+    write_png_chunk(&mut buf, b"IHDR", &ihdr_data);
+
+    // -- IDAT --
+    let compressed = compress_to_vec_zlib(raw, level);
     write_png_chunk(&mut buf, b"IDAT", &compressed);
 
     // -- IEND --
@@ -430,6 +452,25 @@ mod tests {
         );
         // Still a valid PNG (intact signature).
         assert_eq!(&fast[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+    }
+
+    /// The 3D Play frame is BGRA; its PNG must carry the bytes unchanged, in
+    /// RGBA order — a swapped encoder turns the platformer's green grass blue.
+    #[test]
+    fn encode_png_bgra_writes_rgba_bytes_exactly() {
+        use crate::renderer::Bgra8Image;
+        use miniz_oxide::inflate::decompress_to_vec_zlib;
+        // 2x1: pixel 0 is B=10 G=128 R=250 A=255, pixel 1 is B=1 G=2 R=3 A=77.
+        let img = Bgra8Image::from_bgra(2, 1, vec![10, 128, 250, 255, 1, 2, 3, 77]);
+        let png = encode_png_bgra(&img);
+        assert_eq!(&png[..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+        assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 2);
+        assert_eq!(u32::from_be_bytes(png[20..24].try_into().unwrap()), 1);
+        let off = 8 + 25;
+        let len = u32::from_be_bytes(png[off..off + 4].try_into().unwrap()) as usize;
+        assert_eq!(&png[off + 4..off + 8], b"IDAT");
+        let raw = decompress_to_vec_zlib(&png[off + 8..off + 8 + len]).expect("inflate");
+        assert_eq!(raw, vec![0, 250, 128, 10, 255, 3, 2, 1, 77]);
     }
 
     // -- Save to temp file tests --
