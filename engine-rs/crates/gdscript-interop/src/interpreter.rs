@@ -2791,6 +2791,35 @@ impl Interpreter {
     /// that `self.grid[i] = x`, `arr[i][j] = x`, and `self.items.append(x)` all
     /// persist to the underlying variable / instance property.
     fn write_place(&mut self, target: &Expr, value: Variant) -> Result<(), RuntimeError> {
+        // A mutating method on a scene-bound sub-resource (pat-nyn3w) —
+        // `gradient.set_color(1, c)`, `res.set("k", v)`, `mat["k"] = v` — writes
+        // a changed copy back through its receiver. The receiver is a VIEW of
+        // the node companions, so the change is applied to them field by field;
+        // assigning the copy to the place would replace the node's
+        // `SubResource` reference with a detached value the saver and the
+        // renderers cannot read.
+        if let Variant::Resource(res) = &value {
+            if let Some(binding) = crate::bindings::resource_binding(res) {
+                let binding = binding.to_string();
+                if let Some(access) = self.scene_access.as_mut() {
+                    if let Some(current) = access.bound_resource_snapshot(&binding) {
+                        let changed: Vec<(String, Variant)> = res
+                            .properties
+                            .iter()
+                            .filter(|(k, v)| {
+                                k.as_str() != crate::bindings::BOUND_RESOURCE_KEY
+                                    && current.properties.get(k.as_str()) != Some(*v)
+                            })
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        for (k, v) in changed {
+                            access.bound_resource_set(&binding, &k, v);
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
         match target {
             Expr::Index { object, index } => {
                 let idx = self.eval_expr(index)?;
@@ -2985,6 +3014,47 @@ impl Interpreter {
                         format!("Engine.{member}"),
                     )));
                 }
+                // `<resource>.<field> = v` on a scene-bound sub-resource
+                // (pat-nyn3w): `$WorldEnvironment.environment.fog_light_color =
+                // c`, `var e = we.environment; e.fog_density = 0.01`,
+                // `env.sky.sky_material = preload(..)`. The write lands on the
+                // node companions every holder of that sub-resource reads —
+                // never on the receiver's own copy, which would make the write
+                // invisible to the node, the renderers and the saver.
+                //
+                // The receiver is evaluated ONCE here and the value reused by
+                // the compound path below, so this check adds no evaluation to
+                // the hot `self.velocity.x = 0` shape.
+                let receiver = (self.scene_access.is_some()
+                    && matches!(
+                        object.as_ref(),
+                        Expr::Ident(_) | Expr::MemberAccess { .. } | Expr::Index { .. }
+                    ))
+                .then(|| self.eval_expr(object));
+                if let Some(Ok(Variant::Resource(res))) = &receiver {
+                    {
+                        if let Some(binding) = crate::bindings::resource_binding(res) {
+                            let binding = binding.to_string();
+                            let final_val = if matches!(op, AssignOp::Assign) {
+                                rhs.clone()
+                            } else {
+                                let cur = self
+                                    .scene_access
+                                    .as_ref()
+                                    .and_then(|a| a.bound_resource_get(&binding, member))
+                                    .unwrap_or(Variant::Nil);
+                                self.apply_assign_op(op, &cur, &rhs)?
+                            };
+                            if self
+                                .scene_access
+                                .as_mut()
+                                .is_some_and(|a| a.bound_resource_set(&binding, member, final_val))
+                            {
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
                 if self.try_exec_value_member_assignment(object, member, op, rhs.clone())? {
                     return Ok(());
                 }
@@ -3001,7 +3071,10 @@ impl Interpreter {
                     member: prop,
                 } = object.as_ref()
                 {
-                    let holds_object = matches!(self.eval_expr(object), Ok(Variant::ObjectId(_)));
+                    let holds_object = match &receiver {
+                        Some(evaluated) => matches!(evaluated, Ok(Variant::ObjectId(_))),
+                        None => matches!(self.eval_expr(object), Ok(Variant::ObjectId(_))),
+                    };
                     if !holds_object {
                         return self
                             .exec_compound_member_assignment(inner_obj, prop, member, op, rhs);
@@ -5882,6 +5955,19 @@ impl Interpreter {
                 // carries. Godot's `Object::get` answers Nil for a name the
                 // resource does not have, rather than erroring (pat-0q2kx.144).
                 if let Variant::Resource(res) = &obj {
+                    // A scene-bound sub-resource reads its member LIVE off the
+                    // node companions (pat-nyn3w), so a value captured in a
+                    // variable sees every write made through any other path.
+                    if let Some(live) = crate::bindings::resource_binding(res)
+                        .and_then(|b| self.scene_access.as_ref()?.bound_resource_get(b, member))
+                    {
+                        return Ok(live);
+                    }
+                    // `resource_path` is the ref's own `path` (what
+                    // `get_path()` answers) unless the bag stores one.
+                    if member == "resource_path" && !res.properties.contains_key(member) {
+                        return Ok(Variant::String(res.path.clone()));
+                    }
                     return Ok(res.properties.get(member).cloned().unwrap_or(Variant::Nil));
                 }
                 match &obj {
@@ -13365,6 +13451,37 @@ impl Interpreter {
             }
         }
 
+        // -- Gradient (pat-nyn3w): truck_town's speedometer samples one every
+        //    frame. Writes go back through the receiver like `set_code`.
+        if class == "Gradient" {
+            match crate::gradient_resource::call(res_ref, method, args)? {
+                Ok(crate::gradient_resource::GradientCall::Value(v)) => return Some(Ok(v)),
+                Ok(crate::gradient_resource::GradientCall::ValueAndWrite(v, offsets, colors)) => {
+                    // Best effort: a receiver that is not a place
+                    // (`make_gradient().sample(t)`) has nowhere to keep the
+                    // sort, and the sample is right either way.
+                    let _ = self.write_resource_back(res_ref, object_expr, |r| {
+                        r.properties
+                            .insert("offsets".to_string(), Variant::PackedFloat32Array(offsets));
+                        r.properties
+                            .insert("colors".to_string(), Variant::PackedColorArray(colors));
+                    });
+                    return Some(Ok(v));
+                }
+                Ok(crate::gradient_resource::GradientCall::Write(offsets, colors)) => {
+                    return Some(self.write_resource_back(res_ref, object_expr, |r| {
+                        r.properties
+                            .insert("offsets".to_string(), Variant::PackedFloat32Array(offsets));
+                        r.properties
+                            .insert("colors".to_string(), Variant::PackedColorArray(colors));
+                    }));
+                }
+                Err(msg) => {
+                    return Some(Err(RuntimeError::new(RuntimeErrorKind::TypeError(msg))));
+                }
+            }
+        }
+
         if gdobject::class_db::is_parent_class(&class, "BitMap") {
             if let Some(result) = self.bitmap_resource_method(res_ref, method, args, object_expr) {
                 return Some(result);
@@ -14061,6 +14178,35 @@ impl Interpreter {
         if let Variant::StringName(sn) = obj {
             let as_string = Variant::String(sn.as_str().to_string());
             return self.call_method_on(&as_string, method, args, object_expr);
+        }
+        // 🔑 A scene-bound sub-resource (pat-nyn3w) answers from the node
+        // companions as they are NOW, not from the copy the variable captured:
+        // `var g = tint_gradient` read once, then sampled every frame, must see
+        // a write another script made in between — Godot's resource is one
+        // shared object. The refreshed copy still carries the binding, so a
+        // mutating method's write-back (`write_place`) lands on the companions.
+        let refreshed;
+        let obj = match obj {
+            Variant::Resource(r) => match crate::bindings::resource_binding(r)
+                .and_then(|b| self.scene_access.as_ref()?.bound_resource_snapshot(b))
+            {
+                Some(fresh) => {
+                    refreshed = Variant::Resource(Box::new(fresh));
+                    &refreshed
+                }
+                None => obj,
+            },
+            _ => obj,
+        };
+        if let (Variant::Resource(r), "duplicate") = (obj, method) {
+            if crate::bindings::resource_binding(r).is_some() {
+                // `duplicate()` makes an UNSHARED copy, so it drops the binding
+                // and becomes an ordinary script-built resource.
+                let mut copy = (**r).clone();
+                copy.properties.remove(crate::bindings::BOUND_RESOURCE_KEY);
+                copy.path = String::new();
+                return Ok(Variant::Resource(Box::new(copy)));
+            }
         }
         // 🔑 The Object/Node methods whose FIRST parameter Godot types as a
         // `StringName` (or a `NodePath`) take a literal of that type in idiomatic

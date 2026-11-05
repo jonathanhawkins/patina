@@ -5838,7 +5838,7 @@ impl SceneTree {
                 .filter(|info| node.has_property(&info.name))
                 .filter(|info| !dropped.contains(&info.name))
                 .map(|info| {
-                    let value = scene_value_for_script(node, &info.name);
+                    let value = scene_value_for_script(self, node_id, node, &info.name);
                     (info.name, value)
                 })
                 .collect();
@@ -9762,8 +9762,19 @@ impl Default for SceneTree {
 /// `mob_scene.instantiate()` failed — the official Dodge the Creeps demo could
 /// not spawn a single enemy. The resource is built by the same
 /// `load_resource_value` a script's own `preload` uses, so the two agree.
-fn scene_value_for_script(node: &Node, name: &str) -> Variant {
+fn scene_value_for_script(tree: &SceneTree, node_id: NodeId, node: &Node, name: &str) -> Variant {
     let value = node.get_property(name);
+    // An inline `SubResource` (`tint_gradient = SubResource("Gradient_nng2a")`)
+    // is handed over as the resource object, bound to the node companions
+    // (pat-nyn3w): truck_town's speedometer read the reference TEXT and raised
+    // `String.sample` every frame.
+    if matches!(&value, Variant::String(s) if s.starts_with("SubResource")) {
+        if let Some(resource) =
+            crate::script_subresource::script_resource_value(tree, node_id, name)
+        {
+            return resource;
+        }
+    }
     let is_ext_ref = match &value {
         Variant::String(s) => s.starts_with("ExtResource(") || s.starts_with("ExtResource:"),
         _ => false,

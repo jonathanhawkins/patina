@@ -525,6 +525,32 @@ pub fn is_scene_tree_handle(id: u64) -> bool {
 /// emitter.
 pub const SCENE_TREE_SIGNALS: &[&str] = &["process_frame", "physics_frame", "node_added"];
 
+/// The property a scene-read `Variant::Resource` carries to say which node
+/// companions back it: `"<node raw id>|<property path>"` (pat-nyn3w).
+///
+/// 🔑 A `ResourceRef` is a VALUE, but a Godot resource is a shared reference:
+/// `$WorldEnvironment.environment` read twice is ONE object, and a write
+/// through either reaches the node, the renderer and the saver. The node's
+/// `__subres__<prop>__<key>` companions are the single store every one of those
+/// consumers reads, so a scene-read resource is a *view* of them: the
+/// interpreter reads its members live through
+/// [`SceneAccess::bound_resource_get`] and writes them through
+/// [`SceneAccess::bound_resource_set`], never into its own copy.
+///
+/// The property path names a nested sub-resource with `:` (Godot's own
+/// sub-name separator in a `NodePath`), e.g. `environment:sky`, because a
+/// top-level property name may itself contain `/`
+/// (`surface_material_override/0`).
+pub const BOUND_RESOURCE_KEY: &str = "__bound__";
+
+/// The binding a scene-read resource carries, if any (pat-nyn3w).
+pub fn resource_binding(res: &gdvariant::ResourceRef) -> Option<&str> {
+    match res.properties.get(BOUND_RESOURCE_KEY) {
+        Some(Variant::String(s)) => Some(s.as_str()),
+        _ => None,
+    }
+}
+
 pub trait SceneAccess {
     /// Resolve a node by path relative to `from`.
     fn get_node(&self, from: u64, path: &str) -> Option<u64>;
@@ -1477,6 +1503,27 @@ pub trait SceneAccess {
         _values: &[(String, Variant)],
     ) -> Option<u64> {
         None
+    }
+
+    /// A fresh snapshot of the scene-bound sub-resource `binding` names (the
+    /// [`BOUND_RESOURCE_KEY`] value a scene-read `Variant::Resource` carries),
+    /// or `None` when the binding no longer resolves (pat-nyn3w).
+    fn bound_resource_snapshot(&self, _binding: &str) -> Option<gdvariant::ResourceRef> {
+        None
+    }
+
+    /// One live property of a scene-bound sub-resource, or `None` when the
+    /// binding does not resolve (pat-nyn3w).
+    fn bound_resource_get(&self, _binding: &str, _field: &str) -> Option<Variant> {
+        None
+    }
+
+    /// Writes one property of a scene-bound sub-resource onto the node
+    /// companions every holder of that sub-resource reads; `false` when the
+    /// binding does not resolve, so the caller keeps its value-type fallback
+    /// (pat-nyn3w).
+    fn bound_resource_set(&mut self, _binding: &str, _field: &str, _value: Variant) -> bool {
+        false
     }
 
     /// The path of the `.gd` file backing `node`'s script, if any — the value

@@ -739,6 +739,19 @@ impl PackedScene {
                         for (key, value) in copied {
                             tmpl.properties.insert(key, value);
                         }
+                        // The sub-resources THIS body references, flattened the
+                        // same way under a `:`-joined path (pat-nyn3w) so a
+                        // script can reach them once the scene is gone:
+                        // truck_town's `set_mood` writes
+                        // `$WorldEnvironment.environment.sky.sky_material`.
+                        flatten_nested_sub_resources(
+                            &mut tmpl.properties,
+                            &prop,
+                            body,
+                            &sub_resources,
+                            &sub_resource_props,
+                            0,
+                        );
                     }
                 }
 
@@ -3937,6 +3950,67 @@ fn flatten_modification_stack(
     }
     if count > 0 {
         out.insert("__skelmod_count__".into(), Variant::Int(count as i64));
+    }
+}
+
+/// The key that names a NESTED sub-resource's class and id on its node:
+/// `__subres__<path>__::resref` = `"<class>::<id>"`, the nested twin of a
+/// top-level `__resref__<prop>` (pat-nyn3w).
+///
+/// ⚠️ Spelled under `__subres__` on purpose: the saver and the inspector treat
+/// every `__subres__*` key as internal, while a new prefix would be written back
+/// into the `.tscn` as a node property. `::` cannot occur in a property name, so
+/// it cannot collide with a body key.
+pub fn nested_resref_key(path: &str) -> String {
+    format!("__subres__{path}__::resref")
+}
+
+/// Flattens the sub-resources a `[sub_resource]` body references onto the node,
+/// recursively: a body key `k` holding `SubResource("id")` becomes the body
+/// `__subres__<path>:<k>__<key>` plus its [`nested_resref_key`] (pat-nyn3w).
+///
+/// `:` joins the path (Godot's own sub-name separator in a `NodePath`) because a
+/// top-level property name may contain `/` (`surface_material_override/0`).
+/// Bounded in depth so a self-referencing resource cannot recurse forever.
+fn flatten_nested_sub_resources(
+    out: &mut HashMap<String, Variant>,
+    path: &str,
+    body: &HashMap<String, Variant>,
+    sub_resources: &HashMap<String, String>,
+    sub_resource_props: &HashMap<String, HashMap<String, Variant>>,
+    depth: usize,
+) {
+    if depth >= 4 {
+        return;
+    }
+    for (key, value) in body {
+        let Variant::String(text) = value else {
+            continue;
+        };
+        let Some(id) = text.strip_prefix("SubResource:") else {
+            continue;
+        };
+        let Some(class) = sub_resources.get(id) else {
+            continue;
+        };
+        let nested = format!("{path}:{key}");
+        out.insert(
+            nested_resref_key(&nested),
+            Variant::String(format!("{class}::{id}")),
+        );
+        if let Some(nested_body) = sub_resource_props.get(id) {
+            for (k, v) in nested_body {
+                out.insert(format!("__subres__{nested}__{k}"), v.clone());
+            }
+            flatten_nested_sub_resources(
+                out,
+                &nested,
+                nested_body,
+                sub_resources,
+                sub_resource_props,
+                depth + 1,
+            );
+        }
     }
 }
 

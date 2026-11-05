@@ -30707,7 +30707,42 @@ pub fn register_core_object_classes() {
     register_class(ClassRegistration::new("GDScript").parent("Script"));
     register_class(ClassRegistration::new("Geometry2D").parent("Object"));
     register_class(ClassRegistration::new("Geometry3D").parent("Object"));
-    register_class(ClassRegistration::new("Gradient").parent("Resource"));
+    // Godot's defaults (`scene/resources/gradient.cpp`): a new Gradient is
+    // black at 0 and white at 1, LINEAR in sRGB (pat-nyn3w).
+    register_class(
+        ClassRegistration::new("Gradient")
+            .parent("Resource")
+            .property(
+                PropertyInfo::new("interpolation_mode", Variant::Int(0))
+                    .with_accessors("get_interpolation_mode", "set_interpolation_mode"),
+            )
+            .property(
+                PropertyInfo::new("interpolation_color_space", Variant::Int(0)).with_accessors(
+                    "get_interpolation_color_space",
+                    "set_interpolation_color_space",
+                ),
+            )
+            .property(
+                PropertyInfo::new("offsets", Variant::PackedFloat32Array(vec![0.0, 1.0]))
+                    .with_accessors("get_offsets", "set_offsets"),
+            )
+            .property(
+                PropertyInfo::new(
+                    "colors",
+                    Variant::PackedColorArray(vec![
+                        gdcore::math::Color::new(0.0, 0.0, 0.0, 1.0),
+                        gdcore::math::Color::new(1.0, 1.0, 1.0, 1.0),
+                    ]),
+                )
+                .with_accessors("get_colors", "set_colors"),
+            )
+            .constant("GRADIENT_INTERPOLATE_LINEAR", 0)
+            .constant("GRADIENT_INTERPOLATE_CONSTANT", 1)
+            .constant("GRADIENT_INTERPOLATE_CUBIC", 2)
+            .constant("GRADIENT_COLOR_SPACE_SRGB", 0)
+            .constant("GRADIENT_COLOR_SPACE_LINEAR_SRGB", 1)
+            .constant("GRADIENT_COLOR_SPACE_OKLAB", 2),
+    );
     register_class(ClassRegistration::new("GradientTexture1D").parent("Texture2D"));
     register_class(ClassRegistration::new("GradientTexture2D").parent("Texture2D"));
     register_class(

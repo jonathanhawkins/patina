@@ -2853,8 +2853,14 @@ impl SceneAccess for SceneTreeAccessor {
                 return value;
             }
             let value = n.get_property(prop);
-            if let Some(resource) = sub_resource_value(n, prop, &value) {
-                return resource;
+            // An inline `SubResource` reads as the resource object, a view of
+            // the node companions every consumer reads (pat-nyn3w).
+            if matches!(&value, Variant::String(s) if s.starts_with("SubResource")) {
+                if let Some(resource) =
+                    crate::script_subresource::script_resource_value(self.tree(), nid, prop)
+                {
+                    return resource;
+                }
             }
             if !value.is_nil() {
                 return value;
@@ -2886,6 +2892,19 @@ impl SceneAccess for SceneTreeAccessor {
     }
 
     fn set_node_property(&mut self, node: u64, prop: &str, value: Variant) {
+        // `a.shape = b.shape` with a scene-bound sub-resource (pat-nyn3w): `a`
+        // becomes another HOLDER of that sub-resource — its reference text and
+        // companions copied from `b` — so the two share it as in Godot, and the
+        // renderers and saver read a valid `SubResource` on `a`.
+        if let Variant::Resource(r) = &value {
+            if let Some(binding) = gdscript_interop::bindings::resource_binding(r) {
+                let binding = binding.to_string();
+                let nid = NodeId::from_object_id(ObjectId::from_raw(node));
+                if crate::script_subresource::adopt(self.tree_mut(), nid, prop, &binding) {
+                    return;
+                }
+            }
+        }
         // `viewport_2.world_2d = viewport_1.world_2d` (pat-8mb8y). Recorded as
         // the OWNER of the shared world, which the Play frame reads to draw
         // Viewport1's level in Viewport2 too. The root's `get_world_2d()`
@@ -6107,6 +6126,41 @@ impl SceneAccess for SceneTreeAccessor {
                     self.tree_mut().release_focus();
                 }
                 Some(Variant::Nil)
+            }
+
+            // -- Control/Window theme overrides (pat-nyn3w) --------------------
+            // `add_theme_<kind>_override(name, value)` is the property
+            // `theme_override_<group>/<name>` the `.tscn` authors and every
+            // theme resolver reads (`control::resolve_theme_color`). truck_town's
+            // speedometer tints its label with it every frame; it was unbound.
+            m if theme_override_group(m).is_some()
+                && self
+                    .tree()
+                    .get_node(nid)
+                    .is_some_and(|n| n.is_class("Control") || n.is_class("Window")) =>
+            {
+                let (op, group) = theme_override_group(m)?;
+                let key = format!("theme_override_{group}/{}", arg_str(0)?);
+                match op {
+                    "add" => {
+                        let value = args.get(1)?.clone();
+                        if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                            n.set_property(&key, value);
+                        }
+                        Some(Variant::Nil)
+                    }
+                    "remove" => {
+                        if let Some(n) = self.tree_mut().get_node_mut(nid) {
+                            n.remove_property(&key);
+                        }
+                        Some(Variant::Nil)
+                    }
+                    _ => Some(Variant::Bool(
+                        self.tree()
+                            .get_node(nid)
+                            .is_some_and(|n| !n.get_property(&key).is_nil()),
+                    )),
+                }
             }
 
             // -- Node groups --------------------------------------------------
@@ -9988,6 +10042,18 @@ impl SceneAccess for SceneTreeAccessor {
         values: &[(String, Variant)],
     ) -> Option<u64> {
         self.instantiate_script_with_values(script_path, values)
+    }
+
+    fn bound_resource_snapshot(&self, binding: &str) -> Option<gdvariant::ResourceRef> {
+        crate::script_subresource::bound_snapshot(self.tree(), binding)
+    }
+
+    fn bound_resource_get(&self, binding: &str, field: &str) -> Option<Variant> {
+        crate::script_subresource::bound_get(self.tree(), binding, field)
+    }
+
+    fn bound_resource_set(&mut self, binding: &str, field: &str, value: Variant) -> bool {
+        crate::script_subresource::bound_set(self.tree_mut(), binding, field, value)
     }
 
     fn get_script_path(&self, node: u64) -> Option<String> {
@@ -14921,43 +14987,27 @@ impl SceneTreeAccessor {
     }
 }
 
-/// A node property that holds an inline `SubResource` as the script sees it:
-/// the resource object, rebuilt from the `__subres__<prop>__*` companions the
-/// loader keeps (the scene's sub-resource table is gone by run time).
-///
-/// The stored value is the reference TEXT (`"SubResource:1"`), so a script
-/// reading `$AnimatedSprite2D.sprite_frames` got a String and every method on
-/// it failed — Dodge the Creeps' mobs died in `_ready` on
-/// `sprite_frames.get_animation_names()`.
-///
-/// ⚠️ Scoped to the classes whose methods the interpreter implements on a
-/// `Resource` value (SpriteFrames). Wrapping any other class would hand
-/// scripts an object with no methods, AND would change what a write-back
-/// (`a.shape = b.shape`) stores — that path relies on the raw text so the
-/// node's companions stay valid.
-fn sub_resource_value(node: &crate::node::Node, prop: &str, value: &Variant) -> Option<Variant> {
-    const SCRIPT_VISIBLE: &[&str] = &["SpriteFrames"];
-    let Variant::String(text) = value else {
+
+/// `(add|remove|has)_theme_<kind>_override` -> `(op, property group)`, the
+/// group being the `theme_override_<group>/<name>` spelling a `.tscn` uses.
+fn theme_override_group(method: &str) -> Option<(&'static str, &'static str)> {
+    let (op, rest) = if let Some(r) = method.strip_prefix("add_theme_") {
+        ("add", r)
+    } else if let Some(r) = method.strip_prefix("remove_theme_") {
+        ("remove", r)
+    } else if let Some(r) = method.strip_prefix("has_theme_") {
+        ("has", r)
+    } else {
         return None;
     };
-    if !text.starts_with("SubResource") {
-        return None;
-    }
-    let Variant::String(meta) = node.get_property(&format!("__resref__{prop}")) else {
-        return None;
+    let group = match rest.strip_suffix("_override")? {
+        "color" => "colors",
+        "constant" => "constants",
+        "font_size" => "font_sizes",
+        "font" => "fonts",
+        "stylebox" => "styles",
+        "icon" => "icons",
+        _ => return None,
     };
-    let class = meta.rsplit_once("::").map(|(c, _)| c)?;
-    if !SCRIPT_VISIBLE.contains(&class) {
-        return None;
-    }
-    let prefix = format!("__subres__{prop}__");
-    let properties = node
-        .properties()
-        .filter_map(|(k, v)| k.strip_prefix(&prefix).map(|k| (k.to_string(), v.clone())))
-        .collect();
-    Some(Variant::Resource(Box::new(gdvariant::variant::ResourceRef {
-        path: String::new(),
-        class_name: class.to_string(),
-        properties,
-    })))
+    Some((op, group))
 }

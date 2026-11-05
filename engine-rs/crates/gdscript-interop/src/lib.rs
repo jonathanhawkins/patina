@@ -19,6 +19,7 @@ pub mod debug_session;
 pub mod editor_commands;
 pub mod fuzz_gdscript;
 pub mod global_constants;
+pub mod gradient_resource;
 pub mod interpreter;
 pub mod midi_ports;
 // pat-mgixk.7: the three tables that say which ClassDB registrations the

@@ -309,6 +309,14 @@ fn inline_scene_environment(tree: &SceneTree, camera: Option<NodeId>) -> Option<
             },
             _ => continue,
         };
+        // 🔑 The node's own companions first (pat-nyn3w): they are the single
+        // store a script writes through (`environment.fog_light_color = c`,
+        // `environment.sky.sky_material = preload(..)` in truck_town's
+        // `set_mood`), so reading the scene FILE again rendered the authored
+        // environment no matter what the game had changed.
+        if let Some(env) = environment_from_node(node) {
+            return Some(env);
+        }
         let Some(scene_path) = authoring_scene_path(tree, id) else {
             continue;
         };
@@ -323,8 +331,157 @@ fn inline_scene_environment(tree: &SceneTree, camera: Option<NodeId>) -> Option<
     None
 }
 
+thread_local! {
+    /// Built skies by the fingerprint of the companions they came from. A sky
+    /// can bake a cubemap into a panorama, far too slow to redo every frame,
+    /// while the Environment's own scalars are cheap to re-read. Bounded: a
+    /// script that rewrites the sky every frame must not grow this forever.
+    static NODE_SKY_CACHE: std::cell::RefCell<std::collections::HashMap<String, Sky>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// `ExtResource` id -> `res://` path, from the `__extres__<key>` companions
+/// the loader resolved for the node's own (flattened) properties.
+fn node_ext_paths(node: &Node) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for (k, v) in node.properties() {
+        let (Some(target), Variant::String(path)) = (k.strip_prefix("__extres__"), v) else {
+            continue;
+        };
+        if let Variant::String(r) = node.get_property(target) {
+            if let Some(id) = r.strip_prefix("ExtResource:") {
+                out.insert(id.to_string(), path.clone());
+            }
+        }
+    }
+    out
+}
+
+/// A flattened sub-resource body on `node`: `__subres__<path>__<key>`.
+fn node_body(node: &Node, path: &str) -> std::collections::HashMap<String, Variant> {
+    let prefix = format!("__subres__{path}__");
+    node.properties()
+        .filter_map(|(k, v)| {
+            let key = k.strip_prefix(prefix.as_str())?;
+            (!key.starts_with("::")).then(|| (key.to_string(), v.clone()))
+        })
+        .collect()
+}
+
+/// The class a nested flattened sub-resource was declared as.
+fn node_nested_class(node: &Node, path: &str) -> Option<String> {
+    match node.get_property(&crate::packed_scene::nested_resref_key(path)) {
+        Variant::String(meta) => meta.rsplit_once("::").map(|(c, _)| c.to_string()),
+        _ => None,
+    }
+}
+
+/// A sky material held in a `.tres` file (`sky_material = ExtResource(..)`, or
+/// `preload("res://town/sky_day.tres")` written by a script), textures loaded.
+fn sky_material_from_tres_path(path: &str) -> Option<SkyMaterial> {
+    let text = FileAccess::read_file_string(path).ok()?;
+    let resource = gdresource::loader::TresLoader::new()
+        .parse_str(&text, path)
+        .ok()?;
+    let props: std::collections::HashMap<String, Variant> = resource
+        .properties()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let ext = |id: &str| resource.ext_resources.get(id).map(|e| e.path.clone());
+    let mut material = sky_material_from_props(&resource.class_name, &props, &ext, &|_| None);
+    load_sky_textures(&mut material, &ext);
+    Some(material)
+}
+
+/// The Sky of `environment` on `node`, from its flattened companions.
+fn sky_from_node(node: &Node) -> Option<Sky> {
+    const SKY: &str = "environment:sky";
+    node_nested_class(node, SKY)?;
+    let sky_props = node_body(node, SKY);
+    let ext_map = node_ext_paths(node);
+    let ext = |id: &str| ext_map.get(id).cloned();
+    let mat_path = format!("{SKY}:sky_material");
+    let material = match sky_props.get("sky_material") {
+        Some(Variant::String(r)) if r.starts_with("SubResource") => {
+            let class = node_nested_class(node, &mat_path).unwrap_or_default();
+            let props = node_body(node, &mat_path);
+            // An inline Shader the material names, flattened one level deeper.
+            let shader_body = node_body(node, &format!("{mat_path}:shader"));
+            let sub = |_: &str| (!shader_body.is_empty()).then(|| shader_body.clone());
+            let mut m = sky_material_from_props(&class, &props, &ext, &sub);
+            load_sky_textures(&mut m, &ext);
+            m
+        }
+        Some(Variant::String(r)) if r.starts_with("ExtResource:") => {
+            let path = ext(&r["ExtResource:".len()..])?;
+            sky_material_from_tres_path(&path)?
+        }
+        // A script assigned a loaded resource (`preload("res://x.tres")`).
+        Some(Variant::Resource(r)) if !r.path.is_empty() && !r.path.contains("::") => {
+            sky_material_from_tres_path(&r.path)?
+        }
+        // A script-built material (`ProceduralSkyMaterial.new()`).
+        Some(Variant::Resource(r)) => {
+            let mut m = sky_material_from_props(&r.class_name, &r.properties, &ext, &|_| None);
+            load_sky_textures(&mut m, &ext);
+            m
+        }
+        _ => SkyMaterial::Procedural(gdserver3d::sky::ProceduralSkyMaterial::default()),
+    };
+    Some(Sky {
+        material,
+        ..Sky::default()
+    })
+}
+
+/// The inline Environment of a `WorldEnvironment`/`Camera3D` built from the
+/// node's own companions (pat-nyn3w), or `None` when it carries none.
+fn environment_from_node(node: &Node) -> Option<Environment3D> {
+    match node.get_property("__resref__environment") {
+        Variant::String(meta) if meta.starts_with("Environment::") => {}
+        _ => return None,
+    }
+    let props = node_body(node, "environment");
+    if props.is_empty() {
+        return None;
+    }
+    let mut env = Environment3D::from_properties(props.iter().map(|(k, v)| (k.as_str(), v)));
+    if matches!(props.get("sky"), Some(Variant::String(s)) if s.starts_with("SubResource")) {
+        // Fingerprint everything the sky is built from.
+        let mut parts: Vec<String> = node
+            .properties()
+            .filter(|(k, _)| {
+                k.starts_with("__subres__environment:sky")
+                    || k.starts_with("__extres____subres__environment:sky")
+            })
+            .map(|(k, v)| format!("{k}={v:?}"))
+            .collect();
+        parts.sort();
+        let key = parts.join(";");
+        let cached = NODE_SKY_CACHE.with(|c| c.borrow().get(&key).cloned());
+        let sky = match cached {
+            Some(sky) => Some(sky),
+            None => {
+                let built = sky_from_node(node);
+                if let Some(sky) = &built {
+                    NODE_SKY_CACHE.with(|c| {
+                        let mut c = c.borrow_mut();
+                        if c.len() >= 16 {
+                            c.clear();
+                        }
+                        c.insert(key, sky.clone());
+                    });
+                }
+                built
+            }
+        };
+        env.sky = sky;
+    }
+    Some(env)
+}
+
 /// Builds the Environment sub-resource `env_id` of the scene file at `path`.
-fn environment_from_scene_file(path: &str, env_id: &str) -> Option<Environment3D> {
+pub fn environment_from_scene_file(path: &str, env_id: &str) -> Option<Environment3D> {
     let text = crate::binary_scene::read_scene_source(path)?;
     let scene = crate::packed_scene::PackedScene::from_tscn(&text).ok()?;
     let props = scene.sub_resource_props(env_id)?;

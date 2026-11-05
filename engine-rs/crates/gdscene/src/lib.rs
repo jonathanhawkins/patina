@@ -101,6 +101,7 @@ pub mod scene_tree;
 pub mod script_mesh;
 pub mod softbody_sync_3d;
 pub mod scripting;
+pub mod script_subresource;
 pub mod shapecast2d;
 pub mod shapecast3d;
 pub mod shortcut;
