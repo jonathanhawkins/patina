@@ -111,3 +111,40 @@ test('randomize() and RandomNumberGenerator are pinned by the rule Patina applie
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('a key held by the timeline survives the window losing it (focus out / move)', { skip }, () => {
+  // pat-kiuul: macOS Godot releases every pressed key when its window resigns
+  // key status or MOVES (`godot_window_delegate.mm`). Another Godot window
+  // taking the focus mid-capture dropped the platformer's held W, so two
+  // captures of the same scenario disagreed from f96. Moving our own window
+  // fires the same release, deterministically.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'held-key-'));
+  const game = path.join(tmp, 'game');
+  try {
+    fs.mkdirSync(game);
+    fs.writeFileSync(path.join(game, 'project.godot'), 'config_version=5\n\n[application]\n\nconfig/name="held key"\nrun/main_scene="res://main.tscn"\n');
+    fs.writeFileSync(path.join(game, 'main.tscn'), '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n[node name="Main" type="Node"]\nscript = ExtResource("1")\n');
+    fs.writeFileSync(path.join(game, 'main.gd'), [
+      'extends Node',
+      'var held_ticks := 0',
+      'var frames := 0',
+      'func _physics_process(_d):',
+      '\tif Input.is_key_pressed(KEY_W):',
+      '\t\theld_ticks += 1',
+      'func _process(_d):',
+      '\tframes += 1',
+      '\tif frames == 6 or frames == 12:',
+      '\t\tget_window().position += Vector2i(7, 3)',
+      '',
+    ].join('\n'));
+    // W held for 18 frames after a 2-frame wait (ms at 60 fps).
+    const cap = runGodotReference(game, { watch: ['/root/Main:held_ticks'], keys: 'wait:33,KeyW:300,wait:50', out: path.join(tmp, 'a') });
+    const values = cap.trace.frames.map((s) => s.values['/root/Main:held_ticks']);
+    const held = values[values.length - 1];
+    // One physics tick per frame (60 ticks/s): W reads pressed on every tick it is held.
+    assert.equal(held, 18, `W must read pressed on all 18 of its ticks, got ${held} (${values.join(',')})`);
+    assert.ok(cap.trace.held_keys_reasserted >= 1, 'the move released the key and the capture pressed it again');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
