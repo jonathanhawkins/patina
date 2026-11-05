@@ -95,6 +95,42 @@ impl AmbientSource {
     }
 }
 
+/// Where specular reflections come from (pat-h7sz7).
+///
+/// Maps to Godot's `Environment.ReflectionSource` enum
+/// (`reflected_light_source`, default `BG`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ReflectionSource {
+    /// The background: the sky's radiance map when the background is a sky,
+    /// nothing otherwise.
+    #[default]
+    Background,
+    /// No environment reflections.
+    Disabled,
+    /// The sky's radiance map, whatever the background.
+    Sky,
+}
+
+impl ReflectionSource {
+    /// Converts from the Godot integer representation.
+    pub fn from_godot_int(v: i64) -> Self {
+        match v {
+            1 => Self::Disabled,
+            2 => Self::Sky,
+            _ => Self::Background,
+        }
+    }
+
+    /// Converts to the Godot integer representation.
+    pub fn to_godot_int(self) -> i64 {
+        match self {
+            Self::Background => 0,
+            Self::Disabled => 1,
+            Self::Sky => 2,
+        }
+    }
+}
+
 /// Tone-mapping mode.
 ///
 /// Maps to Godot's `Environment.ToneMapper` enum.
@@ -200,6 +236,8 @@ pub struct Environment3D {
     pub sky_custom_fov: f32,
     /// Ambient light source.
     pub ambient_source: AmbientSource,
+    /// Specular reflection source (Godot `reflected_light_source`).
+    pub reflection_source: ReflectionSource,
     /// Ambient light color.
     pub ambient_color: Color,
     /// Ambient light energy.
@@ -346,6 +384,7 @@ impl Default for Environment3D {
             sky: None,
             sky_custom_fov: 0.0,
             ambient_source: AmbientSource::Background,
+            reflection_source: ReflectionSource::Background,
             ambient_color: Color::BLACK,
             ambient_energy: 1.0,
             tone_mapper: ToneMapper::Linear,
@@ -447,6 +486,11 @@ impl Environment3D {
                 "ambient_light_source" => {
                     if let Variant::Int(v) = value {
                         env.ambient_source = AmbientSource::from_godot_int(*v);
+                    }
+                }
+                "reflected_light_source" => {
+                    if let Variant::Int(v) = value {
+                        env.reflection_source = ReflectionSource::from_godot_int(*v);
                     }
                 }
                 "ambient_light_color" => {
@@ -662,6 +706,12 @@ impl Environment3D {
             props.push((
                 "ambient_light_source".into(),
                 Variant::Int(self.ambient_source.to_godot_int()),
+            ));
+        }
+        if self.reflection_source != def.reflection_source {
+            props.push((
+                "reflected_light_source".into(),
+                Variant::Int(self.reflection_source.to_godot_int()),
             ));
         }
         if self.ambient_color != def.ambient_color {

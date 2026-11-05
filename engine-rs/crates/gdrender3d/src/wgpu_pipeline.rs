@@ -95,23 +95,22 @@ struct ModelUniforms {
     // probe is chosen per INSTANCE at its world origin, exactly as the software
     // renderer does (`renderer.rs`: `sample_probes_at` / `probe_reflection_at`
     // at `entry.transform.origin`).
-    // `probe_ambient_mode` 0 (no captured probe): the summed uncaptured-probe
-    // ambient (`sample_probes_at`), ADDED to the camera ambient. Modes 1..3
-    // (captured): the ConstantColor ambient (linear * energy) (pat-t42ca).
+    // The summed UNCAPTURED-probe ambient (`sample_probes_at`) at the
+    // instance origin, ADDED to the camera ambient; zero when a captured
+    // probe covers the origin, as in the software `entry_ambient`.
     probe_ambient: vec4<f32>,
-    // xyz = influence box min, w = intensity.
-    probe_box_min: vec4<f32>,
-    // xyz = influence box max, w = blend_distance.
-    probe_box_max: vec4<f32>,
-    // xyz = capture origin, w = box_projection (1.0 = on).
-    probe_origin: vec4<f32>,
-    // Base layer of the probe's six faces in `probe_cubes`, PLUS ONE; 0 = this
-    // draw has no captured probe (so a zeroed uniform means "none").
-    probe_layer: u32,
-    probe_resolution: u32,
-    // pat-t42ca: 0 = no captured probe; 1 = Disabled, 2 = Environment,
-    // 3 = ConstantColor (`ReflectionProbeAmbientMode` + 1).
-    probe_ambient_mode: u32,
+    // pat-h7sz7: the per-instance box/origin fields are gone — probes are
+    // blended per FRAGMENT from `probe_array`. Kept as padding so the struct
+    // size and every later offset are unchanged.
+    _probe_unused0: vec4<f32>,
+    _probe_unused1: vec4<f32>,
+    _probe_unused2: vec4<f32>,
+    // Bit i = `probe_array.probes[i]` may cover this draw.
+    probe_mask: u32,
+    _probe_unused3: u32,
+    // 1 = run `env_indirect` (a captured probe or the sky radiance exists);
+    // 0 = no image-based light, exactly the old probe-less path.
+    probe_env: u32,
     _probe_pad1: u32,
 };
 @group(1) @binding(0)
@@ -261,6 +260,38 @@ var omni_shadow_depth: texture_2d_array<f32>;
 @group(2) @binding(3)
 var probe_cubes: texture_2d_array<f32>;
 
+// pat-h7sz7: every captured probe of the frame, smallest box first (Godot's
+// processing order), plus the sky radiance map, for PER-FRAGMENT blending.
+// Mirrors `ProbeArrayData` / `gdserver3d::reflection_probe::ProbeSet`.
+struct ProbeEntry {
+    // xyz = influence box min, w = intensity.
+    box_min: vec4<f32>,
+    // xyz = influence box max, w = blend_distance.
+    box_max: vec4<f32>,
+    // xyz = capture origin, w = box_projection (1.0 = on).
+    origin: vec4<f32>,
+    // rgb = ConstantColor ambient (linear * energy).
+    ambient: vec4<f32>,
+    // x = base layer of the six faces in `probe_cubes`, PLUS ONE;
+    // y = ambient mode (0 Disabled, 1 Environment, 2 ConstantColor).
+    info: vec4<u32>,
+};
+struct ProbeArray {
+    // x = probe count, y = sky base layer PLUS ONE (0 = no sky), z = face
+    // resolution of every layer.
+    header: vec4<u32>,
+    // x = sky energy (`background_energy_multiplier`).
+    sky: vec4<f32>,
+    probes: array<ProbeEntry, 16>,
+};
+@group(2) @binding(4)
+var<uniform> probe_array: ProbeArray;
+
+// pat-h7sz7: Godot's baked split-sum DFG table (`shader::dfg_lut`): texel
+// (i, j) = (A, B) at NdotV (i + 0.5) / N, roughness (j + 0.5) / N.
+@group(2) @binding(5)
+var dfg_lut: texture_2d<f32>;
+
 // Port of `gdserver3d::box_projection::axis_exit`; 3e38 stands in for +inf.
 fn probe_axis_exit(p: f32, r: f32, lo: f32, hi: f32) -> f32 {
     if (abs(r) < 1e-9) {
@@ -274,7 +305,7 @@ fn probe_axis_exit(p: f32, r: f32, lo: f32, hi: f32) -> f32 {
 // level k >= 1 (`roughness_level_resolution`) at (res, sum of the sizes of
 // levels 1..k-1). Mirrors `probe_atlas_layout` on the Rust side.
 fn probe_level_size(k: i32) -> i32 {
-    let res = i32(model.probe_resolution);
+    let res = i32(probe_array.header.z);
     if (k == 0) {
         return res;
     }
@@ -289,7 +320,7 @@ fn probe_level_origin(k: i32) -> vec2<i32> {
     for (var j = 1; j < k; j = j + 1) {
         y = y + probe_level_size(j);
     }
-    return vec2<i32>(i32(model.probe_resolution), y);
+    return vec2<i32>(i32(probe_array.header.z), y);
 }
 
 // Face index + [0,1] uv, the conventions of `ReflectionCubemap::sample_direction`.
@@ -315,49 +346,83 @@ fn probe_face_uv(dir: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(face, 0.5 * (sc / ma + 1.0), 0.5 * (tc / ma + 1.0));
 }
 
-// `bilinear_face`: texel centres, clamped at the face edge.
-fn probe_bilinear(layer: i32, k: i32, uv: vec2<f32>) -> vec3<f32> {
+// Inverse of `probe_face_uv` (`cube_face_dir`): the direction through (u, v)
+// of `face`.
+fn probe_face_dir(face: i32, u: f32, v: f32) -> vec3<f32> {
+    let sc = 2.0 * u - 1.0;
+    let tc = 2.0 * v - 1.0;
+    switch face {
+        case 0: { return vec3<f32>(1.0, -tc, -sc); }
+        case 1: { return vec3<f32>(-1.0, -tc, sc); }
+        case 2: { return vec3<f32>(sc, 1.0, tc); }
+        case 3: { return vec3<f32>(sc, -1.0, -tc); }
+        case 4: { return vec3<f32>(sc, -tc, 1.0); }
+        default: { return vec3<f32>(-sc, -tc, -1.0); }
+    }
+}
+
+// One texel of roughness level `k` of `face`; a texel ONE past the face edge
+// is fetched from the neighbouring face (`seamless_texel_index`, pat-h7sz7).
+fn probe_tap(base: i32, face: i32, size: i32, origin: vec2<i32>, x: i32, y: i32) -> vec3<f32> {
+    var f = face;
+    var tx = x;
+    var ty = y;
+    if (x < 0 || y < 0 || x >= size || y >= size) {
+        let d = probe_face_dir(face, (f32(x) + 0.5) / f32(size), (f32(y) + 0.5) / f32(size));
+        let fuv = probe_face_uv(d);
+        f = i32(fuv.x);
+        tx = clamp(i32(floor(fuv.y * f32(size))), 0, size - 1);
+        ty = clamp(i32(floor(fuv.z * f32(size))), 0, size - 1);
+    }
+    return textureLoad(probe_cubes, origin + vec2<i32>(tx, ty), base + f, 0).rgb;
+}
+
+// `CubeLevel::sample`: bilinear across face seams.
+fn probe_bilinear(base: i32, face: i32, k: i32, uv: vec2<f32>) -> vec3<f32> {
     let size = probe_level_size(k);
     let o = probe_level_origin(k);
     let p = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * f32(size) - vec2<f32>(0.5);
     let p0 = floor(p);
     let f = p - p0;
-    let x0 = clamp(i32(p0.x), 0, size - 1);
-    let x1 = clamp(i32(p0.x) + 1, 0, size - 1);
-    let y0 = clamp(i32(p0.y), 0, size - 1);
-    let y1 = clamp(i32(p0.y) + 1, 0, size - 1);
-    let a = textureLoad(probe_cubes, o + vec2<i32>(x0, y0), layer, 0).rgb;
-    let b = textureLoad(probe_cubes, o + vec2<i32>(x1, y0), layer, 0).rgb;
-    let c = textureLoad(probe_cubes, o + vec2<i32>(x0, y1), layer, 0).rgb;
-    let d = textureLoad(probe_cubes, o + vec2<i32>(x1, y1), layer, 0).rgb;
+    let x0 = i32(p0.x);
+    let y0 = i32(p0.y);
+    let a = probe_tap(base, face, size, o, x0, y0);
+    let b = probe_tap(base, face, size, o, x0 + 1, y0);
+    let c = probe_tap(base, face, size, o, x0, y0 + 1);
+    let d = probe_tap(base, face, size, o, x0 + 1, y0 + 1);
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-// `RoughnessChain::sample_lod`: trilinear between two roughness levels.
-fn probe_sample_lod(dir: vec3<f32>, lod_in: f32) -> vec3<f32> {
+// `RoughnessChain::sample_lod`: trilinear between two roughness levels of the
+// cubemap whose +X face is layer `base`.
+fn probe_sample_lod(base: i32, dir: vec3<f32>, lod_in: f32) -> vec3<f32> {
     let a = abs(dir);
     if (a.x + a.y + a.z <= 0.0) {
         return vec3<f32>(0.0);
     }
     let fuv = probe_face_uv(dir);
-    let layer = i32(model.probe_layer) - 1 + i32(fuv.x);
+    let face = i32(fuv.x);
     let lod = clamp(lod_in, 0.0, 7.0);
     let i = i32(floor(lod));
     let t = lod - f32(i);
-    let ca = probe_bilinear(layer, i, fuv.yz);
+    let ca = probe_bilinear(base, face, i, fuv.yz);
     if (t <= 0.0 || i >= 7) {
         return ca;
     }
-    let cb = probe_bilinear(layer, i + 1, fuv.yz);
+    let cb = probe_bilinear(base, face, i + 1, fuv.yz);
     return mix(ca, cb, t);
 }
 
-// `ReflectionProbe::blend_weight`.
-fn probe_blend(world_pos: vec3<f32>) -> f32 {
-    let box_min = model.probe_box_min.xyz;
-    let box_max = model.probe_box_max.xyz;
+fn probe_contains(p: ProbeEntry, pos: vec3<f32>) -> bool {
+    return all(pos >= p.box_min.xyz) && all(pos <= p.box_max.xyz);
+}
+
+// `ProbeReflection::blend_weight`.
+fn probe_blend(p: ProbeEntry, world_pos: vec3<f32>) -> f32 {
+    let box_min = p.box_min.xyz;
+    let box_max = p.box_max.xyz;
     var blend = 1.0;
-    let bd = model.probe_box_max.w;
+    let bd = p.box_max.w;
     if (bd > 0.0) {
         let center = (box_min + box_max) * 0.5;
         let extents = (box_max - box_min) * 0.5;
@@ -375,51 +440,104 @@ fn probe_blend(world_pos: vec3<f32>) -> f32 {
     return blend;
 }
 
-// Port of `ProbeReflection::sample_rough` (box projection, roughness-filtered
-// lookup at `sqrt(roughness) * MAX_ROUGHNESS_LOD`, intensity * blend weight).
-fn probe_sample(world_pos: vec3<f32>, reflection: vec3<f32>, roughness: f32) -> vec3<f32> {
-    let box_min = model.probe_box_min.xyz;
-    let box_max = model.probe_box_max.xyz;
-    var dir = reflection;
-    if (model.probe_origin.w > 0.5 && length(reflection) >= 1e-9) {
-        let ex = probe_axis_exit(world_pos.x, reflection.x, box_min.x, box_max.x);
-        let ey = probe_axis_exit(world_pos.y, reflection.y, box_min.y, box_max.y);
-        let ez = probe_axis_exit(world_pos.z, reflection.z, box_min.z, box_max.z);
+// `ProbeReflection::lookup_dir`: box projection when enabled.
+fn probe_lookup_dir(p: ProbeEntry, world_pos: vec3<f32>, reflection: vec3<f32>) -> vec3<f32> {
+    if (p.origin.w > 0.5 && length(reflection) >= 1e-9) {
+        let ex = probe_axis_exit(world_pos.x, reflection.x, p.box_min.x, p.box_max.x);
+        let ey = probe_axis_exit(world_pos.y, reflection.y, p.box_min.y, p.box_max.y);
+        let ez = probe_axis_exit(world_pos.z, reflection.z, p.box_min.z, p.box_max.z);
         let dist = min(ex, min(ey, ez));
         if (dist >= 1.0e38 || dist <= 0.0) {
-            dir = normalize(reflection);
-        } else {
-            dir = normalize(world_pos + reflection * dist - model.probe_origin.xyz);
+            return normalize(reflection);
+        }
+        return normalize(world_pos + reflection * dist - p.origin.xyz);
+    }
+    return reflection;
+}
+
+struct EnvIndirect {
+    ambient: vec3<f32>,
+    specular: vec3<f32>,
+};
+
+// Port of `ProbeSet::indirect` (pat-h7sz7), Godot's cluster loop
+// (`scene_forward_clustered.glsl` 2027-2099 + `reflection_process`): every
+// probe holding the fragment, smallest first, accumulates reflection and
+// ambient by its fade weight until both reach 1; the sky radiance and the
+// environment ambient take what is left.
+fn env_indirect(world_pos: vec3<f32>, n: vec3<f32>, v: vec3<f32>, roughness: f32, base_ambient: vec3<f32>) -> EnvIndirect {
+    let r = clamp(roughness, 0.0, 1.0);
+    var refl = vec4<f32>(0.0);
+    var amb = vec4<f32>(0.0);
+    let count = min(probe_array.header.x, 16u);
+    if (count > 0u) {
+        let mirror = normalize(n * (2.0 * dot(n, v)) - v);
+        let r2 = r * r;
+        let ref_vec = mix(mirror, n, r2 * r2);
+        let lod = sqrt(r) * 7.0;
+        for (var i = 0u; i < count; i = i + 1u) {
+            if ((model.probe_mask & (1u << i)) == 0u) {
+                continue;
+            }
+            // Box test on two fields before touching the rest of the entry.
+            if (any(world_pos < probe_array.probes[i].box_min.xyz)
+                || any(world_pos > probe_array.probes[i].box_max.xyz)) {
+                continue;
+            }
+            let p = probe_array.probes[i];
+            if (refl.a >= 1.0 && amb.a >= 1.0) {
+                break;
+            }
+            let blend = probe_blend(p, world_pos);
+            let base = i32(p.info.x) - 1;
+            if (p.box_min.w > 0.0 && refl.a < 1.0) {
+                let rb = max(blend - refl.a, 0.0);
+                let c = probe_sample_lod(base, probe_lookup_dir(p, world_pos, ref_vec), lod);
+                refl = refl + vec4<f32>(c * (p.box_min.w * rb), rb);
+            }
+            if (amb.a < 1.0 && p.info.y != 0u) {
+                let ab = max(blend - amb.a, 0.0);
+                var c = p.ambient.rgb;
+                if (p.info.y == 1u) {
+                    c = probe_sample_lod(base, n, 7.0);
+                }
+                amb = amb + vec4<f32>(c * ab, ab);
+            }
         }
     }
-    let c = probe_sample_lod(dir, sqrt(clamp(roughness, 0.0, 1.0)) * 7.0);
-    return c * (model.probe_box_min.w * probe_blend(world_pos));
+    var out: EnvIndirect;
+    out.ambient = amb.rgb + base_ambient * max(1.0 - amb.a, 0.0);
+    out.specular = refl.rgb;
+    if (refl.a < 1.0 && probe_array.header.y != 0u) {
+        // `SkyRadiance::specular`: mix by roughness² (not ⁴) and horizon².
+        let rv = mix(n * (2.0 * dot(n, v)) - v, n, r * r);
+        let horizon = min(1.0 + dot(rv, n), 1.0);
+        let s = probe_sample_lod(i32(probe_array.header.y) - 1, rv, sqrt(r) * 7.0)
+            * (horizon * horizon * probe_array.sky.x);
+        out.specular = refl.rgb + s * (1.0 - refl.a);
+    }
+    return out;
 }
 
-// Port of `ProbeReflection::ambient` (pat-t42ca): inside a captured probe the
-// ambient is REPLACED by the fade weight.
-fn probe_ambient_at(world_pos: vec3<f32>, normal: vec3<f32>, base: vec3<f32>) -> vec3<f32> {
-    let mode = model.probe_ambient_mode;
-    if (mode <= 1u) {
-        return base;
-    }
-    var amb = model.probe_ambient.rgb;
-    if (mode == 2u) {
-        amb = probe_sample_lod(normal, 7.0);
-    }
-    let b = probe_blend(world_pos);
-    return amb * b + base * (1.0 - b);
-}
-
-// `shader::env_brdf` (Karis' fit of Godot's `prefiltered_dfg`): (f90 term, total).
+// `shader::env_brdf`: bilinear, edge-clamped lookup of Godot's baked DFG
+// table: (f90 term, total).
 fn env_brdf(roughness: f32, n_dot_v: f32) -> vec2<f32> {
-    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
-    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
-    let r = roughness * c0 + c1;
-    let a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
-    let scale = -1.04 * a004 + r.z;
-    let bias = max(1.04 * a004 + r.w, 0.0);
-    return vec2<f32>(bias, max(scale + bias, 1e-4));
+    let n = textureDimensions(dfg_lut).x;
+    let nf = f32(n);
+    let fx = clamp(clamp(n_dot_v, 0.0, 1.0) * nf - 0.5, 0.0, nf - 1.0);
+    let fy = clamp(clamp(roughness, 0.0, 1.0) * nf - 0.5, 0.0, nf - 1.0);
+    let x0 = i32(floor(fx));
+    let y0 = i32(floor(fy));
+    let x1 = min(x0 + 1, i32(n) - 1);
+    let y1 = min(y0 + 1, i32(n) - 1);
+    let tx = fx - f32(x0);
+    let ty = fy - f32(y0);
+    let a = textureLoad(dfg_lut, vec2<i32>(x0, y0), 0).xy;
+    let b = textureLoad(dfg_lut, vec2<i32>(x1, y0), 0).xy;
+    let c = textureLoad(dfg_lut, vec2<i32>(x0, y1), 0).xy;
+    let d = textureLoad(dfg_lut, vec2<i32>(x1, y1), 0).xy;
+    let v = mix(mix(a, b, tx), mix(c, d, tx), ty);
+    return vec2<f32>(v.x, max(v.y, 1e-4));
 }
 
 // ── Vertex stage ────────────────────────────────────────────────────
@@ -877,15 +995,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // An UNCAPTURED probe's ambient is per INSTANCE and adds to the
     // environment ambient, as in the software `entry_ambient` (pat-p3p1m). A
     // CAPTURED probe replaces it per fragment (`probe_ambient_at`, pat-t42ca).
-    let base_ambient = camera.ambient.rgb
-        + select(vec3<f32>(0.0), model.probe_ambient.rgb, model.probe_ambient_mode == 0u);
-    let has_capture = model.probe_layer != 0u;
-    var ambient = base_ambient;
-    if (has_capture) {
-        ambient = probe_ambient_at(in.world_position, normal, base_ambient);
-    }
+    let base_ambient = camera.ambient.rgb + model.probe_ambient.rgb;
     let probe_roughness = clamp(model.roughness * roughness_map, 0.0, 1.0);
     let probe_metallic = clamp(model.metallic * metallic_map, 0.0, 1.0);
+    // pat-h7sz7: probes blended per fragment, the sky radiance behind them.
+    let has_env = model.probe_env != 0u;
+    var ambient = base_ambient;
+    var env_specular = vec3<f32>(0.0);
+    if (has_env) {
+        let ev = normalize(camera.camera_position - in.world_position);
+        let e = env_indirect(in.world_position, normal, ev, probe_roughness, base_ambient);
+        ambient = e.ambient;
+        env_specular = e.specular;
+    }
     // Ambient is DIFFUSE light, so in PBR (mode 2) a metal takes none of it:
     // Godot multiplies it by albedo and then by `1.0 - metallic`, which is what
     // the software `pbr_shade` does (`albedo_lin`). The GPU used the raw
@@ -908,22 +1030,16 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var probe_env = vec3<f32>(0.0);
     // Lambert (mode 1) keeps its sharpness-weighted mirror term, now
     // roughness-filtered (pat-9gjpr).
-    let has_probe = has_capture && probe_sharpness > 0.0;
+    let has_probe = has_env && probe_sharpness > 0.0;
     if (has_probe && model.shading_mode == 1u) {
-        let v = normalize(camera.camera_position - in.world_position);
-        let n_dot_v = max(dot(normal, v), 1e-4);
-        let reflection = normal * (2.0 * n_dot_v) - v;
         let f0 = mix(vec3<f32>(0.04), albedo_tex.rgb, probe_metallic);
-        probe_env = probe_sample(in.world_position, reflection, probe_roughness) * f0 * probe_sharpness;
+        probe_env = env_specular * f0 * probe_sharpness;
     }
     // PBR (mode 2): `shader::probe_indirect`, Godot's IBL specular — any
     // roughness, specular occlusion from the ambient, split-sum env BRDF.
-    if (has_capture && model.shading_mode == 2u) {
+    if (has_env && model.shading_mode == 2u) {
         let v = normalize(camera.camera_position - in.world_position);
-        let mirror = normalize(normal * (2.0 * dot(normal, v)) - v);
-        let r2 = probe_roughness * probe_roughness;
-        let ref_vec = mix(mirror, normal, r2 * r2);
-        let env = probe_sample(in.world_position, ref_vec, probe_roughness);
+        let env = env_specular;
         let lum = dot(ambient, vec3<f32>(0.3, 0.59, 0.11)) * 2.0;
         var so = min(lum * 4.0, 1.0);
         let reflective_f = (1.0 - probe_roughness) * probe_metallic;
@@ -1325,50 +1441,104 @@ pub struct ModelUniformData {
     /// bytes and no existing offset moved (`layers` stays at 112, which
     /// `cull_mask_gpu_*` pins).
     pub _model_pad: u32,
-    /// Summed ReflectionProbe ambient at the instance origin (linear RGB),
-    /// added to the camera ambient (pat-p3p1m). Appended after the original
-    /// 128 bytes so no earlier offset moves.
+    /// Summed UNCAPTURED ReflectionProbe ambient at the instance origin
+    /// (linear RGB), added to the camera ambient (pat-p3p1m); zero when a
+    /// captured probe covers the origin. Appended after the original 128
+    /// bytes so no earlier offset moves.
     pub probe_ambient: [f32; 4],
-    /// The covering probe's influence box min (xyz) and `intensity` (w).
-    pub probe_box_min: [f32; 4],
-    /// The covering probe's influence box max (xyz) and `blend_distance` (w).
-    pub probe_box_max: [f32; 4],
-    /// The covering probe's capture origin (xyz) and `box_projection` (w, 1/0).
-    pub probe_origin: [f32; 4],
-    /// Base layer of the probe's faces in the probe cube array PLUS ONE; `0`
-    /// means no captured probe covers this draw (so a zeroed struct is "none").
-    pub probe_layer: u32,
-    /// Edge length of each probe cubemap face, in texels.
-    pub probe_resolution: u32,
-    /// The covering captured probe's ambient mode PLUS ONE (1 Disabled,
-    /// 2 Environment, 3 ConstantColor); `0` = no captured probe (pat-t42ca).
-    pub probe_ambient_mode: u32,
+    /// Unused since pat-h7sz7 (probes are read per fragment from the probe
+    /// array); kept so the struct layout is unchanged.
+    pub _probe_unused0: [f32; 4],
+    /// Unused (see `_probe_unused0`).
+    pub _probe_unused1: [f32; 4],
+    /// Unused (see `_probe_unused0`).
+    pub _probe_unused2: [f32; 4],
+    /// Bit `i` set = entry `i` of the frame's probe array may cover this draw
+    /// (pat-h7sz7).
+    pub probe_mask: u32,
+    /// Unused (see `_probe_unused0`).
+    pub _probe_unused3: u32,
+    /// `1` = image-based light (captured probes and/or sky radiance) is
+    /// evaluated for this draw; `0` = the old probe-less path, bit for bit.
+    pub probe_env: u32,
     /// Padding to a multiple of 16 bytes.
     pub _probe_pad1: u32,
 }
 
-/// The captured reflection probes uploaded for one frame (pat-p3p1m): a
-/// `Rgba32Float` 2D array, six consecutive layers per probe in `CubeFace`
-/// order, plus each probe's base layer (+1; 0 = not uploaded).
+/// Most probes the GPU path blends per fragment (pat-h7sz7). Godot's default
+/// `max_cluster_elements` is far higher, but a uniform array has a fixed
+/// size; the smallest 16 boxes win, which is Godot's own priority order.
+pub const MAX_GPU_PROBES: usize = 16;
+
+/// One probe of [`ProbeArrayData`] (WGSL `ProbeEntry`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuProbeEntry {
+    /// Influence box min (xyz), `intensity` (w).
+    pub box_min: [f32; 4],
+    /// Influence box max (xyz), `blend_distance` (w).
+    pub box_max: [f32; 4],
+    /// Capture origin (xyz), `box_projection` (w, 1/0).
+    pub origin: [f32; 4],
+    /// ConstantColor ambient (linear * energy).
+    pub ambient: [f32; 4],
+    /// x = base layer + 1, y = ambient mode (0 Disabled, 1 Environment,
+    /// 2 ConstantColor).
+    pub info: [u32; 4],
+}
+
+/// The frame's probes + sky radiance, uniform at group 2 binding 4
+/// (WGSL `ProbeArray`, pat-h7sz7).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ProbeArrayData {
+    /// x = probe count, y = sky base layer + 1 (0 = no sky), z = face
+    /// resolution.
+    pub header: [u32; 4],
+    /// x = sky energy.
+    pub sky: [f32; 4],
+    /// Probes, smallest box first.
+    pub probes: [GpuProbeEntry; MAX_GPU_PROBES],
+}
+
+impl Default for ProbeArrayData {
+    fn default() -> Self {
+        bytemuck::Zeroable::zeroed()
+    }
+}
+
+/// The captured reflection probes and the sky radiance map uploaded for one
+/// frame (pat-p3p1m, pat-h7sz7): a `Rgba32Float` 2D array, six consecutive
+/// layers per cubemap in `CubeFace` order (each layer an atlas of the GGX
+/// roughness chain), the per-probe uniform array, and Godot's DFG table.
 struct ProbeCubeArray {
     _texture: wgpu::Texture,
     view: wgpu::TextureView,
-    /// Parallel to the renderer's `reflection_probes`.
-    layer_plus_one: Vec<u32>,
-    resolution: u32,
-    /// The `Arc` identities of the uploaded captures: the cache key.
+    _dfg_texture: wgpu::Texture,
+    dfg_view: wgpu::TextureView,
+    /// The probe array uniform (WGSL `probe_array`).
+    data: ProbeArrayData,
+    /// The cache key (see [`probe_cube_key`]).
     key: Vec<usize>,
 }
 
-fn probe_cube_key(probes: &[ReflectionProbe]) -> Vec<usize> {
-    probes
+/// The `Arc` identities of the uploaded captures and sky radiance plus the
+/// sky energy: what decides a re-upload.
+fn probe_cube_key(
+    probes: &[ReflectionProbe],
+    sky: Option<&gdserver3d::reflection_probe::SkyRadiance>,
+) -> Vec<usize> {
+    let mut key: Vec<usize> = probes
         .iter()
         .map(|p| {
             p.captured
                 .as_ref()
                 .map_or(0, |c| std::sync::Arc::as_ptr(c) as usize)
         })
-        .collect()
+        .collect();
+    key.push(sky.map_or(0, |s| std::sync::Arc::as_ptr(&s.cubemap) as usize));
+    key.push(sky.map_or(0, |s| s.energy.to_bits() as usize));
+    key
 }
 
 /// The per-face roughness atlas for a capture of `res` texels (pat-9gjpr):
@@ -1386,53 +1556,96 @@ pub fn probe_atlas_layout(res: u32) -> (u32, u32, Vec<(u32, u32)>) {
     (res + roughness_level_resolution(res, 1), res.max(y), origins)
 }
 
-/// Uploads every captured probe cubemap. Probes without a capture (or whose
-/// resolution differs from the first capture's) are left out and draw without
-/// a reflection, exactly like an uncaptured probe on the software path.
+/// The uniform the probe loop reads (pat-h7sz7): up to [`MAX_GPU_PROBES`]
+/// captured probes in Godot's processing order (smallest box first), each
+/// with the base layer its six faces will have in the cube array, then the
+/// sky. Also returns the cubemaps to upload, in layer order. A capture whose
+/// resolution differs from the first one's is left out (one atlas layout per
+/// array), as is a sky radiance of another resolution.
+pub fn build_probe_array_data<'a>(
+    probes: &'a [ReflectionProbe],
+    sky: Option<&'a gdserver3d::reflection_probe::SkyRadiance>,
+) -> (ProbeArrayData, Vec<&'a gdserver3d::reflection_probe::ReflectionCubemap>) {
+    use gdserver3d::reflection_probe::probe_processing_order;
+    let resolution = probes
+        .iter()
+        .find_map(|p| p.captured.as_ref().map(|c| c.resolution))
+        .or(sky.map(|s| s.cubemap.resolution))
+        .unwrap_or(1)
+        .max(1);
+    let mut data = ProbeArrayData::default();
+    let mut cubes = Vec::new();
+    let mut count = 0usize;
+    for i in probe_processing_order(probes) {
+        if count >= MAX_GPU_PROBES {
+            break;
+        }
+        let p = &probes[i];
+        let Some(c) = p.captured.as_deref() else {
+            continue;
+        };
+        if c.resolution != resolution {
+            continue;
+        }
+        let (bmin, bmax) = p.world_aabb_min_max();
+        let o = p.capture_origin();
+        let ac = p.ambient_color.srgb_to_linear();
+        let e = p.ambient_color_energy;
+        data.probes[count] = GpuProbeEntry {
+            box_min: [bmin.x, bmin.y, bmin.z, p.intensity],
+            box_max: [bmax.x, bmax.y, bmax.z, p.blend_distance],
+            origin: [o.x, o.y, o.z, if p.box_projection { 1.0 } else { 0.0 }],
+            ambient: [ac.r * e, ac.g * e, ac.b * e, 0.0],
+            info: [cubes.len() as u32 * 6 + 1, p.ambient_mode as u32, 0, 0],
+        };
+        cubes.push(c);
+        count += 1;
+    }
+    data.header = [count as u32, 0, resolution, 0];
+    if let Some(s) = sky.filter(|s| s.cubemap.resolution == resolution) {
+        data.header[1] = cubes.len() as u32 * 6 + 1;
+        data.sky = [s.energy, 0.0, 0.0, 0.0];
+        cubes.push(&s.cubemap);
+    }
+    (data, cubes)
+}
+
+/// Uploads every captured probe cubemap and the sky radiance map
+/// ([`build_probe_array_data`]).
 fn upload_probe_cube_array(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     probes: &[ReflectionProbe],
+    sky: Option<&gdserver3d::reflection_probe::SkyRadiance>,
 ) -> ProbeCubeArray {
-    let resolution = probes
-        .iter()
-        .find_map(|p| p.captured.as_ref().map(|c| c.resolution))
-        .unwrap_or(1)
-        .max(1);
-    let mut layer_plus_one = Vec::with_capacity(probes.len());
+    let (data, cubes) = build_probe_array_data(probes, sky);
+    let resolution = data.header[2];
     let mut bytes: Vec<u8> = Vec::new();
     let mut layers = 0u32;
     // pat-9gjpr: one layer per face holds that face's whole GGX roughness
     // chain as an atlas (`probe_atlas_layout`, mirrored by the WGSL
     // `probe_level_origin`).
     let (atlas_w, atlas_h, origins) = probe_atlas_layout(resolution);
-    for p in probes {
-        match p.captured.as_ref() {
-            Some(c) if c.resolution == resolution => {
-                layer_plus_one.push(layers + 1);
-                let chain = c.roughness_chain();
-                for face in 0..6 {
-                    let mut texels = vec![[0.0f32; 4]; (atlas_w * atlas_h) as usize];
-                    for (level, &(ox, oy)) in chain.levels.iter().zip(origins.iter()) {
-                        let lr = level.resolution;
-                        for y in 0..lr {
-                            for x in 0..lr {
-                                let c = level.faces[face][(y * lr + x) as usize];
-                                texels[((oy + y) * atlas_w + ox + x) as usize] =
-                                    [c.r, c.g, c.b, c.a];
-                            }
-                        }
-                    }
-                    for t in texels {
-                        for v in t {
-                            bytes.extend_from_slice(&v.to_le_bytes());
-                        }
+    for c in &cubes {
+        let chain = c.roughness_chain();
+        for face in 0..6 {
+            let mut texels = vec![[0.0f32; 4]; (atlas_w * atlas_h) as usize];
+            for (level, &(ox, oy)) in chain.levels.iter().zip(origins.iter()) {
+                let lr = level.resolution;
+                for y in 0..lr {
+                    for x in 0..lr {
+                        let c = level.faces[face][(y * lr + x) as usize];
+                        texels[((oy + y) * atlas_w + ox + x) as usize] = [c.r, c.g, c.b, c.a];
                     }
                 }
-                layers += 6;
             }
-            _ => layer_plus_one.push(0),
+            for t in texels {
+                for v in t {
+                    bytes.extend_from_slice(&v.to_le_bytes());
+                }
+            }
         }
+        layers += 6;
     }
     let (side_w, side_h) = if layers == 0 {
         bytes = vec![0u8; 16];
@@ -1482,51 +1695,99 @@ fn upload_probe_cube_array(
         array_layer_count: Some(layers),
         usage: None,
     });
+
+    // pat-h7sz7: Godot's baked DFG table, the same numbers `shader::env_brdf`
+    // reads on the software path.
+    let n = crate::shader::DFG_LUT_SIZE as u32;
+    let mut dfg_bytes = Vec::with_capacity((n * n * 16) as usize);
+    for ab in crate::shader::dfg_lut() {
+        for v in [ab[0], ab[1], 0.0, 1.0] {
+            dfg_bytes.extend_from_slice(&f32::to_le_bytes(v));
+        }
+    }
+    let dfg_size = wgpu::Extent3d { width: n, height: n, depth_or_array_layers: 1 };
+    let dfg_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("dfg-lut"),
+        size: dfg_size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &dfg_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &dfg_bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(n * 16),
+            rows_per_image: Some(n),
+        },
+        dfg_size,
+    );
+    let dfg_view = dfg_texture.create_view(&wgpu::TextureViewDescriptor::default());
     ProbeCubeArray {
         _texture: texture,
         view,
-        layer_plus_one,
-        resolution,
-        key: probe_cube_key(probes),
+        _dfg_texture: dfg_texture,
+        dfg_view,
+        data,
+        key: probe_cube_key(probes, sky),
     }
 }
 
-/// Fills a draw's probe fields from the probe covering `origin`: the same
-/// per-instance point query the software renderer makes (`sample_probes_at`
-/// for ambient, the first CAPTURED containing probe for the reflection).
+/// Fills a draw's probe fields (pat-h7sz7): the uncaptured-probe ambient at
+/// `origin` (the software `entry_ambient` rule: only when no CAPTURED probe
+/// covers the origin), the mask of probe-array entries whose box may touch
+/// the draw, and whether image-based light runs at all.
+///
+/// With `bounds` (the draw's world-space bounding sphere), the mask keeps
+/// only the probes whose box the sphere touches, so the fragment loop skips
+/// the rest; without it every probe stays in (the loop tests each box
+/// itself, so the mask only ever saves work, never changes a pixel).
 fn apply_probe_fields(
     model: &mut ModelUniformData,
     probes: &[ReflectionProbe],
     cubes: &ProbeCubeArray,
     origin: Vector3,
+    bounds: Option<(Vector3, f32)>,
 ) {
+    let count = cubes.data.header[0] as usize;
+    if count > 0 || cubes.data.header[1] != 0 {
+        model.probe_env = 1;
+        let mut mask = 0u32;
+        for (i, p) in cubes.data.probes.iter().take(count.min(32)).enumerate() {
+            let touches = match bounds {
+                None => true,
+                Some((c, r)) => {
+                    let d2: f32 = (0..3)
+                        .map(|a| {
+                            let v = [c.x, c.y, c.z][a];
+                            let q = v.clamp(p.box_min[a], p.box_max[a]);
+                            (v - q) * (v - q)
+                        })
+                        .sum();
+                    !(d2 > r * r)
+                }
+            };
+            if touches {
+                mask |= 1 << i;
+            }
+        }
+        model.probe_mask = mask;
+    }
     if probes.is_empty() {
         return;
     }
-    let amb = sample_probes_at(probes, origin);
-    model.probe_ambient = [amb.r, amb.g, amb.b, 0.0];
-    // The same probe the software path binds (`probe_reflection_at`: the
-    // smallest captured box containing the origin).
-    let found = gdserver3d::reflection_probe::probe_index_at(probes, origin).map(|i| (i, &probes[i]));
-    if let Some((i, p)) = found {
-        let layer = cubes.layer_plus_one.get(i).copied().unwrap_or(0);
-        if layer == 0 {
-            return;
-        }
-        // pat-t42ca: a captured probe REPLACES the ambient in the shader, so
-        // the additive uncaptured-probe sum no longer applies; `probe_ambient`
-        // carries the ConstantColor ambient instead.
-        let ac = p.ambient_color.srgb_to_linear();
-        let e = p.ambient_color_energy;
-        model.probe_ambient = [ac.r * e, ac.g * e, ac.b * e, 0.0];
-        model.probe_ambient_mode = p.ambient_mode as u32 + 1;
-        let (bmin, bmax) = p.world_aabb_min_max();
-        let o = p.capture_origin();
-        model.probe_box_min = [bmin.x, bmin.y, bmin.z, p.intensity];
-        model.probe_box_max = [bmax.x, bmax.y, bmax.z, p.blend_distance];
-        model.probe_origin = [o.x, o.y, o.z, if p.box_projection { 1.0 } else { 0.0 }];
-        model.probe_layer = layer;
-        model.probe_resolution = cubes.resolution;
+    if gdserver3d::reflection_probe::probe_index_at(probes, origin).is_none() {
+        let amb = sample_probes_at(probes, origin);
+        model.probe_ambient = [amb.r, amb.g, amb.b, 0.0];
     }
 }
 
@@ -1960,6 +2221,28 @@ impl RenderPipeline3D {
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: false },
                         view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // pat-h7sz7: the frame's probe array + sky radiance header.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // pat-h7sz7: Godot's DFG table (Rgba32Float, textureLoad).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
                     count: None,
@@ -3525,7 +3808,7 @@ fn create_light_bind_group(
     light_data: &LightArrayData,
     shadow_view: &wgpu::TextureView,
     omni_view: &wgpu::TextureView,
-    probe_view: &wgpu::TextureView,
+    probes: &ProbeCubeArray,
     label: &str,
 ) -> (wgpu::BindGroup, wgpu::Buffer) {
     let light_buf = create_buffer_init(
@@ -3533,6 +3816,13 @@ fn create_light_bind_group(
         queue,
         &format!("{label}-light-uniform"),
         bytemuck::bytes_of(light_data),
+        wgpu::BufferUsages::UNIFORM,
+    );
+    let probe_buf = create_buffer_init(
+        device,
+        queue,
+        &format!("{label}-probe-uniform"),
+        bytemuck::bytes_of(&probes.data),
         wgpu::BufferUsages::UNIFORM,
     );
     let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -3553,7 +3843,15 @@ fn create_light_bind_group(
             },
             wgpu::BindGroupEntry {
                 binding: 3,
-                resource: wgpu::BindingResource::TextureView(probe_view),
+                resource: wgpu::BindingResource::TextureView(&probes.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: probe_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: wgpu::BindingResource::TextureView(&probes.dfg_view),
             },
         ],
     });
@@ -5014,11 +5312,24 @@ impl GpuRenderer3D {
         self.sky_panorama = Some((key, view, sampler));
     }
 
-    fn ensure_probe_cubes(&mut self) {
-        let key = probe_cube_key(&self.reflection_probes);
+    /// Uploads the frame's probe captures and the environment's sky radiance
+    /// map (pat-h7sz7) when either changed.
+    fn ensure_probe_cubes(&mut self, env: Option<&Environment3D>) {
+        let sky = env.and_then(|e| {
+            crate::renderer::sky_radiance_for(
+                e,
+                &crate::renderer::sky_suns_from_lights(&self.lights),
+                crate::renderer::SKY_RADIANCE_RESOLUTION,
+            )
+        });
+        let key = probe_cube_key(&self.reflection_probes, sky.as_ref());
         if self.probe_cube_cache.as_ref().map(|c| &c.key) != Some(&key) {
-            let cubes =
-                upload_probe_cube_array(&self.ctx.device, &self.ctx.queue, &self.reflection_probes);
+            let cubes = upload_probe_cube_array(
+                &self.ctx.device,
+                &self.ctx.queue,
+                &self.reflection_probes,
+                sky.as_ref(),
+            );
             self.probe_cube_cache = Some(cubes);
         }
     }
@@ -5375,7 +5686,7 @@ impl GpuRenderer3D {
         let light_data =
             self.ensure_shadow_atlas_with(viewport, Some(&mesh_keys));
         self.editor_frame_mesh_keys = mesh_keys;
-        self.ensure_probe_cubes();
+        self.ensure_probe_cubes(viewport.environment.as_ref());
         self.ensure_sky_panorama(viewport.environment.as_ref());
 
         // pat-9gjpr: the keyed pipeline / custom-shader caches are filled while
@@ -5500,7 +5811,7 @@ impl GpuRenderer3D {
             &light_data,
             &atlas.view,
             &atlas.omni_view,
-            &probe_cubes.view,
+            probe_cubes,
             "editor-light-bind-group",
         );
 
@@ -5758,13 +6069,20 @@ impl GpuRenderer3D {
                         model_data.shading_mode = if m.render_modes.unshaded { 0 } else { 2 };
                         model_data.has_normal_map = 0;
                     }
-                    // Probes are resolved per draw at its origin, like the
-                    // software renderer's `entry.transform.origin` (pat-p3p1m).
+                    // pat-h7sz7: probes blend per fragment; the draw's world
+                    // bounding sphere only narrows which ones the loop visits.
+                    let b = &entry.transform.basis;
+                    let stretch =
+                        (b.x.length_squared() + b.y.length_squared() + b.z.length_squared()).sqrt();
                     apply_probe_fields(
                         &mut model_data,
                         &self.reflection_probes,
                         probe_cubes,
                         entry.transform.origin,
+                        Some((
+                            entry.transform.xform(cached_mesh.bounds.center),
+                            cached_mesh.bounds.radius * stretch + 1e-3,
+                        )),
                     );
                     let mut uniform = [0u8; MODEL_UNIFORM_STRIDE];
                     uniform[..std::mem::size_of::<ModelUniformData>()]
@@ -6272,7 +6590,7 @@ impl GpuRenderer3D {
         // Shadow atlas + light uniforms (pat-32edz / pat-2be0q): cached across
         // frames, regenerated only when the shadow-relevant state changes.
         let light_data = self.ensure_shadow_atlas(viewport);
-        self.ensure_probe_cubes();
+        self.ensure_probe_cubes(viewport.environment.as_ref());
         self.ensure_sky_panorama(viewport.environment.as_ref());
 
         let device = &self.ctx.device;
@@ -6429,7 +6747,7 @@ impl GpuRenderer3D {
             &light_data,
             &atlas.view,
             &atlas.omni_view,
-            &probe_cubes.view,
+            probe_cubes,
             "light-bind-group",
         );
         let num_lights = self.lights.len().min(gdserver3d::light::MAX_SCENE_LIGHTS) as u32;
@@ -6617,6 +6935,7 @@ impl GpuRenderer3D {
                     &self.reflection_probes,
                     probe_cubes,
                     call.transform.origin,
+                    None,
                 );
                 let model_buf = create_buffer_init(
                     device,

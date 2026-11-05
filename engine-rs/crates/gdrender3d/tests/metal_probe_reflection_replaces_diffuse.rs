@@ -80,7 +80,7 @@ fn shade(metallic: f32, roughness: f32, probe: Option<ProbeReflection>) -> Color
         metallic,
         // Directly above the fragment, so the reflected ray is well-defined.
         camera_position: Vector3::new(0.0, 1.0, 0.0),
-        probe,
+        probe: probe.map(Into::into),
         layers: 1,
         lights: Vec::new(),
         directional_shadow_maps: Vec::new(),
