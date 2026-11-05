@@ -167,7 +167,7 @@ pub(crate) fn store_local_transform(node: &mut crate::node::Node, t: Transform3D
 /// 3D. The whole-property cases need no guard, because `Vector3`, `Quaternion`,
 /// `Basis` and `Transform3D` are 3D-only payloads: a Node2D writes `position` as
 /// a `Vector2` and so falls through untouched.
-fn looks_like_node3d(node: &crate::node::Node) -> bool {
+pub(crate) fn looks_like_node3d(node: &crate::node::Node) -> bool {
     matches!(node.get_property("transform"), Variant::Transform3D(_))
         || matches!(node.get_property("position"), Variant::Vector3(_))
         || matches!(node.get_property("scale"), Variant::Vector3(_))

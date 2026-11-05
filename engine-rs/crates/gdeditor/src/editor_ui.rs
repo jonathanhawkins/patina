@@ -44,6 +44,13 @@ input, select {
   padding: 3px 6px; font: inherit; font-size: 12px; border-radius: 2px; outline: none;
 }
 input:focus, select:focus { border-color: var(--accent); }
+/* Project Settings > Description is multi-line, as Godot's
+   application/config/description (PROPERTY_HINT_MULTILINE_TEXT) is (pat-xtwz2). */
+#pset-desc {
+  background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  padding: 3px 6px; font: inherit; font-size: 12px; border-radius: 2px; outline: none;
+}
+#pset-desc:focus { border-color: var(--accent); }
 input[type="checkbox"] { accent-color: var(--accent); width: 14px; height: 14px; }
 input[type="color"] { padding: 1px 2px; height: 24px; width: 48px; cursor: pointer; }
 
@@ -638,7 +645,12 @@ select.renderer-indicator option { color: var(--text); background: var(--panel);
 .insp-revert:hover { color: var(--accent); background: var(--hover); }
 
 .insp-value .vec-label { font-size: 11px; color: var(--text-dim); min-width: 10px; }
-.insp-value .vec-input { flex: 1; min-width: 40px; }
+.insp-value .vec-input { flex: 1; min-width: 40px; padding-left: 3px; padding-right: 3px; font-size: 11px; text-overflow: ellipsis; -moz-appearance: textfield; appearance: textfield; }
+/* Godot's vector fields are EditorSpinSliders: no spin arrows, the whole width
+   is the value. Chrome's arrows took ~15px of a ~50px field and cut a rounded
+   "18.531" to "18." (pat-skh4t). */
+.insp-value .vec-input::-webkit-inner-spin-button,
+.insp-value .vec-input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 .insp-readonly { color: var(--text-dim); font-style: italic; font-size: 12px; }
 .insp-empty { color: var(--text-dim); font-style: italic; padding: 20px 0; text-align: center; }
 
@@ -3793,7 +3805,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         <div class="pset-section" data-cat="application">
           <div class="settings-row"><span class="settings-label">Project Name</span><div class="settings-value"><input type="text" id="pset-name" data-key="project_name" style="width:100%"></div></div>
           <div class="settings-row"><span class="settings-label">Main Scene</span><div class="settings-value"><input type="text" id="pset-main-scene" data-key="main_scene" placeholder="res://..." style="width:100%"></div></div>
-          <div class="settings-row"><span class="settings-label">Description</span><div class="settings-value"><input type="text" id="pset-desc" data-key="description" style="width:100%"></div></div>
+          <div class="settings-row"><span class="settings-label">Description</span><div class="settings-value"><textarea id="pset-desc" data-key="description" rows="3" style="width:100%;resize:vertical;box-sizing:border-box"></textarea></div></div>
           <div class="settings-row"><span class="settings-label">Icon Path</span><div class="settings-value"><input type="text" id="pset-icon" data-key="icon" placeholder="res://icon.svg" style="width:100%"></div></div>
         </div>
         <!-- pat-db37w: Input Map (live: backed by /api/input_map) -->
@@ -6101,6 +6113,35 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
   }
 
   // "0,16,0.01,or_greater,exp,suffix:m" -> {min,max,step,orGreater,…,suffix}.
+  // pat-skh4t: a float is SHOWN rounded to its step, as Godot's
+  // EditorSpinSlider does (`String::num(value, Math::range_step_decimals(step))`,
+  // trailing zeros dropped); an unhinted float uses the editor setting
+  // interface/inspector/default_float_step = 0.001. The raw f64 printed as
+  // "18.531099319458008" and overflowed every inspector field. Only the text
+  // is rounded; Godot's Range also snaps its value to the step.
+  function inspectorFloatText(v, step) {
+    var n = Number(v);
+    if (!isFinite(n)) return String(v);
+    var s = Math.abs(step != null ? Number(step) : 0.001);
+    var decs = 16; // range_step_decimals: a zero step keeps every digit
+    if (s >= 1e-13) {
+      // Math::step_decimals
+      var frac = s - Math.floor(s);
+      var sd = [0.9999, 0.09999, 0.009999, 0.0009999, 0.00009999, 0.000009999,
+        0.0000009999, 0.00000009999, 0.000000009999, 0.0000000009999];
+      decs = 0;
+      for (var i = 0; i < sd.length; i++) { if (frac >= sd[i]) { decs = i; break; } }
+    }
+    return String(+n.toFixed(decs));
+  }
+
+  // The step of a range-hinted float property, or undefined (=> 0.001).
+  function inspectorFloatStep(prop) {
+    if ((prop.hint | 0) !== HINT_RANGE || !prop.hint_string) return undefined;
+    var r = parseRangeHint(prop.hint_string);
+    return r.step != null ? r.step : undefined;
+  }
+
   function parseRangeHint(hintString) {
     var r = { min: null, max: null, step: null, orGreater: false, orLess: false, exp: false, degrees: false, suffix: '' };
     if (!hintString) return r;
@@ -6152,7 +6193,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
     if (range.min != null && !range.orLess) input.min = String(range.min);
     if (range.max != null && !range.orGreater) input.max = String(range.max);
     var v = prop.value && prop.value.value;
-    input.value = v != null ? v : 0;
+    input.value = v != null ? (isInt ? v : inspectorFloatText(v, range.step != null ? range.step : undefined)) : 0;
     input.addEventListener('change', function() {
       var n = isInt ? parseInt(input.value, 10) : parseFloat(input.value);
       if (isNaN(n)) n = 0;
@@ -6404,7 +6445,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
       } else {
         var input = document.createElement('input');
         input.type = 'number'; input.step = '0.1';
-        input.value = v != null ? v : 0;
+        input.value = v != null ? inspectorFloatText(v) : 0;
         input.addEventListener('change', function() {
           setProperty(nodeId, prop.name, { type: 'Float', value: parseFloat(input.value) || 0 });
         });
@@ -6447,7 +6488,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         lbl.textContent = axis.toUpperCase();
         var inp = document.createElement('input');
         inp.type = 'number'; inp.step = '0.1'; inp.className = 'vec2-input';
-        inp.value = arr[idx] != null ? arr[idx] : 0;
+        inp.value = arr[idx] != null ? inspectorFloatText(arr[idx], inspectorFloatStep(prop)) : 0;
         field.appendChild(lbl); field.appendChild(inp);
         if (unit) { var u = document.createElement('span'); u.className = 'insp-unit'; u.textContent = unit; field.appendChild(u); }
         return { field: field, input: inp };
@@ -6491,7 +6532,7 @@ body.anim-recording #viewport-container { box-shadow: inset 0 0 0 2px #e05050; }
         al.className = 'vec-label'; al.textContent = axis;
         var ai = document.createElement('input');
         ai.type = 'number'; ai.step = '0.1'; ai.className = 'vec-input';
-        ai.value = arr[i] != null ? arr[i] : 0;
+        ai.value = arr[i] != null ? inspectorFloatText(arr[i], inspectorFloatStep(prop)) : 0;
         ai.addEventListener('change', function() {
           var vals = [];
           val.querySelectorAll('.vec-input').forEach(function(inp) { vals.push(parseFloat(inp.value)||0); });

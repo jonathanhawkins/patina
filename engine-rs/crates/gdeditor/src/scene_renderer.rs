@@ -51,7 +51,6 @@ const COLOR_DEFAULT: Color = Color::new(0.8, 0.8, 0.8, 1.0); // white-ish
 const COLOR_SELECTED: Color = Color::new(1.0, 0.85, 0.0, 1.0); // bright amber
 const COLOR_NODE_DOT: Color = Color::new(0.5, 0.5, 0.5, 1.0); // gray
 const COLOR_PARTICLES: Color = Color::new(0.9, 0.6, 1.0, 1.0); // violet emitter glyph
-const COLOR_LABEL_TEXT: Color = Color::new(0.85, 0.85, 0.85, 0.9); // label text
 
 /// Gizmo colors for the transform arrows.
 const GIZMO_X_COLOR: Color = Color::new(1.0, 0.2, 0.2, 1.0); // red
@@ -993,15 +992,30 @@ fn render_scene_inner_with_previews(
         }
 
         // Draw selection highlight.
+        //
+        // ⚠️ No node NAMES are drawn (pat-uipye). Godot's 2D editor never
+        // labels nodes in the canvas (canvas_item_editor_plugin.cpp draws
+        // rects, pivots, anchors and gizmos, no names); Patina drew every
+        // node's name cut at 12 characters ("CollisionSha"), centred under the
+        // node's ORIGIN — so a Control's label sat left of the control and
+        // over its text.
         if is_selected {
-            draw_selection_highlight(&mut fb, pos, class, z);
-            // Draw transform gizmo at node position.
-            draw_move_gizmo(&mut fb, pos, z);
-            // Draw node label for selected node.
-            draw_node_label(&mut fb, pos, node.name(), COLOR_SELECTED);
-        } else if class != "Node" || node.parent().is_some() {
-            // Draw node label for non-root nodes.
-            draw_node_label(&mut fb, pos, node.name(), COLOR_LABEL_TEXT);
+            if gdscene::control_render::is_control(tree, node_id) {
+                // A Control is outlined as its whole RECT, as Godot's
+                // `_draw_selection` does (`get_anchorable_rect` through the
+                // item's global transform), not as a fixed-size marker box at
+                // its origin: a full-rect Title showed as an 8px square in the
+                // corner (pat-5puo3). The rect was resolved by the Control
+                // layout pass the edit view ran above.
+                let r = gdscene::control::get_global_rect(tree, node_id);
+                let tl = Vector2::new(r.position.x * z + offset_x, r.position.y * z + offset_y);
+                draw_selection_rect(&mut fb, tl, Vector2::new(r.size.x * z, r.size.y * z));
+                draw_move_gizmo(&mut fb, tl, z);
+            } else {
+                draw_selection_highlight(&mut fb, pos, class, z);
+                // Draw transform gizmo at node position.
+                draw_move_gizmo(&mut fb, pos, z);
+            }
         }
     }
 
@@ -1897,6 +1911,26 @@ fn draw_control_rect(fb: &mut FrameBuffer, pos: Vector2, size: Vector2, color: C
 }
 
 /// Draws a selection highlight around a node (zoom-aware).
+/// Outlines a selected Control's screen-space rect, with Godot's corner
+/// handles.
+fn draw_selection_rect(fb: &mut FrameBuffer, tl: Vector2, size: Vector2) {
+    let tr = Vector2::new(tl.x + size.x, tl.y);
+    let br = Vector2::new(tl.x + size.x, tl.y + size.y);
+    let bl = Vector2::new(tl.x, tl.y + size.y);
+    draw::draw_line(fb, tl, tr, COLOR_SELECTED, 1.0);
+    draw::draw_line(fb, tr, br, COLOR_SELECTED, 1.0);
+    draw::draw_line(fb, br, bl, COLOR_SELECTED, 1.0);
+    draw::draw_line(fb, bl, tl, COLOR_SELECTED, 1.0);
+    let cs = 2.0;
+    for corner in &[tl, tr, br, bl] {
+        draw::fill_rect(
+            fb,
+            Rect2::new(Vector2::new(corner.x - cs, corner.y - cs), Vector2::new(cs * 2.0, cs * 2.0)),
+            COLOR_SELECTED,
+        );
+    }
+}
+
 fn draw_selection_highlight(fb: &mut FrameBuffer, pos: Vector2, class: &str, zoom: f32) {
     let (hw, hh) = match class {
         "Sprite2D" => ((18.0 * zoom).max(10.0), (18.0 * zoom).max(10.0)),
@@ -2074,36 +2108,6 @@ fn draw_bitmap_string(fb: &mut FrameBuffer, x: f32, y: f32, s: &str, color: Colo
 /// `u8` holds one row, low 5 bits, MSB = leftmost column.
 fn char_bitmap(ch: char) -> [u8; 7] {
     gdrender2d::font::char_bitmap(ch)
-}
-
-// ---------------------------------------------------------------------------
-// Node labels
-// ---------------------------------------------------------------------------
-
-/// Draws a node name label below the node position.
-fn draw_node_label(fb: &mut FrameBuffer, pos: Vector2, name: &str, color: Color) {
-    if name.is_empty() {
-        return;
-    }
-    // Truncate to 12 chars to avoid very long labels.
-    let display: &str = if name.len() > 12 { &name[..12] } else { name };
-    let text_w = bitmap_string_width(display);
-    let lx = pos.x - text_w / 2.0;
-    let ly = pos.y + 14.0; // Below the node icon.
-
-    // Draw a small dark background behind the text for readability.
-    let bg = Color::new(0.0, 0.0, 0.0, 0.5);
-    let pad = 2.0;
-    draw::fill_rect_blended(
-        fb,
-        Rect2::new(
-            Vector2::new(lx - pad, ly - pad),
-            Vector2::new(text_w + pad * 2.0, 7.0 + pad * 2.0),
-        ),
-        bg,
-    );
-
-    draw_bitmap_string(fb, lx, ly, display, color);
 }
 
 // ---------------------------------------------------------------------------
@@ -3285,22 +3289,20 @@ mod tests {
         };
         assert!(
             count_label(&fb_sel) > count_label(&fb_no),
-            "selected node should show name label"
+            "a selected node shows its selection highlight"
         );
     }
 
+    /// Godot's 2D editor draws no node names (pat-uipye; the real-game
+    /// differential is `tests/edit_view_2d_selection_and_no_node_names.rs`).
     #[test]
-    fn non_selected_nodes_show_labels() {
+    fn non_selected_nodes_draw_no_name_labels() {
         gdobject::class_db::clear_for_testing();
-        let (tree, _) = make_tree_with_node2d();
-        let fb = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
-        // Non-root nodes get labels too (in gray/white).
-        // The label background is a dark blended rect; text is light colored.
-        let has_label_text = fb
-            .pixels
-            .iter()
-            .any(|p| p.r > 0.7 && p.g > 0.7 && p.b > 0.7 && p.a > 0.8);
-        assert!(has_label_text, "non-selected nodes should show name labels");
+        let (mut tree, node_id) = make_tree_with_node2d();
+        let before = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
+        tree.get_node_mut(node_id).unwrap().set_name("SomeOtherLongName");
+        let after = render_scene_with_zoom_pan(&tree, None, 200, 200, 1.0, (0.0, 0.0));
+        assert!(before.pixels == after.pixels, "a node's name must not change the canvas");
     }
 
     // -- bitmap font tests ------------------------------------------------
