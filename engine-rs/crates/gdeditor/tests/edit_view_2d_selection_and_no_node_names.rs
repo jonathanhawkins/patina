@@ -102,10 +102,13 @@ fn a_selected_container_child_is_outlined_at_its_laid_out_rect() {
     let menu = tree.get_node_relative(title, "Menu").unwrap();
     let fb = render(&mut tree, &dir, Some(menu));
     let (x0, y0, x1, y1, _) = selection_box(&fb);
-    // Menu: centre-anchored, offsets -150..150 x -110..110 => a 300x220 rect.
+    // Menu: centre-anchored, offsets -150..150 x -110..110, but its combined
+    // minimum width is 314, so Godot grows it: real Godot 4.6.1 reports
+    // size (314, 220) at (163, 70). (The 300x220 the offsets alone give was
+    // this test's first expectation, before pat-9ww3e's container minimums.)
     let (w, h) = (x1 - x0, y1 - y0);
     assert!(
-        (298..=306).contains(&w) && (218..=226).contains(&h),
+        (312..=320).contains(&w) && (218..=226).contains(&h),
         "Menu outline is {w}x{h}"
     );
     // And it sits inside the Title's outline, centred: Title-relative centre.
