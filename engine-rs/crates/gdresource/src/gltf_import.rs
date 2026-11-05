@@ -390,6 +390,11 @@ fn build_document(
         if let Some(camera) = node.get("camera").and_then(|v| v.as_u64()) {
             d.insert("camera", Variant::Int(camera as i64));
         }
+        // A skinned mesh node names its skin; Godot reparents such a mesh
+        // under the skin's generated Skeleton3D (pat-m2jgd).
+        if let Some(skin) = node.get("skin").and_then(|v| v.as_u64()) {
+            d.insert("skin", Variant::Int(skin as i64));
+        }
         // KHR_lights_punctual: node references a light via extensions.
         if let Some(light) = node
             .get("extensions")
@@ -526,6 +531,58 @@ fn build_document(
     // `subs[0]` as the primary surface, aborting on a missing `vertices`. An
     // `animation_*` key sorts before `mesh_0_prim_0`, so adding clips as
     // subresources would silently break mesh loading for every animated .glb.
+    // --- skins (pat-m2jgd) ---
+    //
+    // `parse_skins` had no non-test caller, so an imported scene could not
+    // know which nodes are JOINTS. Godot's importer turns a skin's joints into
+    // the bones of a generated `Skeleton3D` (`gltf_document.cpp`
+    // `_determine_skeletons` / `_create_skeletons`) — that node is what a
+    // scene with editable children addresses as `Player/Skeleton/Skeleton3D`.
+    // Published as plain properties for the same reason as the animations
+    // below: `subresources` are mesh primitives.
+    let skins = parse_skins(json, &buffers)?;
+    if !skins.is_empty() {
+        let skin_dicts: Vec<Variant> = skins
+            .iter()
+            .map(|skin| {
+                let mut d = Dictionary::new();
+                d.insert(
+                    "joints",
+                    Variant::Array(
+                        skin.joints
+                            .iter()
+                            .map(|j| Variant::Int(*j as i64))
+                            .collect::<Vec<_>>()
+                            .into(),
+                    ),
+                );
+                // One 16-float column-major matrix per joint, in joint order.
+                d.insert(
+                    "inverse_bind_matrices",
+                    Variant::Array(
+                        skin.inverse_bind_matrices
+                            .iter()
+                            .map(|m| {
+                                Variant::Array(
+                                    m.iter()
+                                        .map(|f| Variant::Float(*f as f64))
+                                        .collect::<Vec<_>>()
+                                        .into(),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .into(),
+                    ),
+                );
+                if let Some(root) = skin.skeleton_root {
+                    d.insert("skeleton", Variant::Int(root as i64));
+                }
+                Variant::Dictionary(d.into())
+            })
+            .collect();
+        doc.set_property("skins", Variant::Array(skin_dicts.into()));
+    }
+
     let animations = parse_animations(json, &buffers)?;
     if !animations.is_empty() {
         let clips: Vec<Variant> = animations

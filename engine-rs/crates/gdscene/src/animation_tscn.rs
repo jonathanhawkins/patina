@@ -738,10 +738,16 @@ pub fn build_animation_player(
         return None;
     }
 
-    if let Some(Variant::String(autoplay)) = props.get("autoplay") {
-        if !autoplay.is_empty() {
-            player.autoplay = Some(autoplay.clone());
-        }
+    // Godot 4 saves `autoplay = &"walk"` — a StringName — so reading only the
+    // String form left every 4.x-saved autoplay unset and the player idle
+    // (pat-m2jgd, the platformer's enemy.tscn).
+    let autoplay = match props.get("autoplay") {
+        Some(Variant::String(s)) => s.clone(),
+        Some(Variant::StringName(s)) => s.as_str().to_string(),
+        _ => String::new(),
+    };
+    if !autoplay.is_empty() {
+        player.autoplay = Some(autoplay);
     }
 
     Some(player)

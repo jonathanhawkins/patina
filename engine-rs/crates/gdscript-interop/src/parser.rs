@@ -2005,9 +2005,38 @@ impl Parser {
                 self.advance();
                 Ok(Expr::SuperRef)
             }
+            // `%Name` (and `%Name/Child`) is shorthand for
+            // `get_node("%Name")` — a scene-unique node (GDScript 2.0). In
+            // PRIMARY position a `%` can only be this; the modulo operator is
+            // consumed by the binary-operator loop. Unparsed, it failed the
+            // whole script: the official 3D platformer's player.gd
+            // (`%CoinCount.text = ...`) loaded with no script at all.
+            Token::Percent => {
+                self.advance();
+                let mut full = String::from("%");
+                full.push_str(&self.eat_ident()?);
+                while self.check(&Token::Slash) {
+                    self.advance();
+                    full.push('/');
+                    full.push_str(&self.eat_ident()?);
+                }
+                Ok(Expr::GetNode(full))
+            }
             Token::Dollar => {
                 self.advance();
                 let path = match self.peek().clone() {
+                    // `$%Name`: the same unique-name lookup through `$`.
+                    Token::Percent => {
+                        self.advance();
+                        let mut full = String::from("%");
+                        full.push_str(&self.eat_ident()?);
+                        while self.check(&Token::Slash) {
+                            self.advance();
+                            full.push('/');
+                            full.push_str(&self.eat_ident()?);
+                        }
+                        full
+                    }
                     Token::Ident(name) => {
                         self.advance();
                         let mut full = name;
@@ -3093,6 +3122,26 @@ mod tests {
         } else {
             panic!("expected VarDecl with @onready");
         }
+    }
+
+    /// pat-m2jgd: `%Name` is a unique-node lookup, and modulo still works.
+    #[test]
+    fn parse_unique_node_shorthand() {
+        let stmts = parse("var a = %CoinCount\nvar b = $%CoinCount/Parallax\nvar c = 7 % 3\n");
+        let value = |i: usize| match &stmts[i] {
+            Stmt::VarDecl { value, .. } => value.clone(),
+            other => panic!("expected VarDecl, got {other:?}"),
+        };
+        assert!(matches!(value(0), Some(Expr::GetNode(ref p)) if p == "%CoinCount"));
+        assert!(matches!(value(1), Some(Expr::GetNode(ref p)) if p == "%CoinCount/Parallax"));
+        assert!(!matches!(value(2), Some(Expr::GetNode(_))), "`7 % 3` stays a modulo");
+    }
+
+    /// The statement form from the official 3D platformer's player.gd.
+    #[test]
+    fn parse_unique_node_at_statement_start() {
+        let stmts = parse("func f():\n\t%CoinCount.text = str(1)\n\t%CoinCount.get_node(^\"Parallax\").text = \"x\"\n");
+        assert_eq!(stmts.len(), 1);
     }
 
     #[test]
