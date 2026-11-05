@@ -1,0 +1,49 @@
+[gd_scene load_steps=6 format=3]
+
+[ext_resource type="Shader" path="res://stripes.gdshader" id="1_stripes"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_1"]
+shader = ExtResource("1_stripes")
+shader_parameter/stripe_color = Color(1, 0.5, 0, 1)
+shader_parameter/stripes = 4.0
+
+[sub_resource type="QuadMesh" id="QuadMesh_1"]
+size = Vector2(2, 2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_1"]
+size = Vector3(1.4, 1.4, 0.2)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_1"]
+shading_mode = 0
+albedo_color = Color(0.5, 0.5, 0.5, 1)
+
+[node name="Main" type="Node3D"]
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 5)
+current = true
+fov = 60.0
+
+[node name="Stripes" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.2, 0, 0)
+mesh = SubResource("QuadMesh_1")
+surface_material_override/0 = SubResource("ShaderMaterial_1")
+
+[node name="Wall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.3, 0, 1)
+mesh = SubResource("BoxMesh_1")
+surface_material_override/0 = SubResource("StandardMaterial3D_1")
+
+[node name="XRay" type="Label3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.3, 0, 0)
+no_depth_test = true
+modulate = Color(1, 0.1, 0.1, 1)
+text = "XRAY"
+font_size = 64
+
+[node name="Backface" type="Label3D" parent="."]
+transform = Transform3D(-1, 0, 0, 0, 1, 0, 0, 0, -1, 0, 1.6, 0)
+double_sided = false
+modulate = Color(0.2, 1, 0.2, 1)
+text = "HIDDEN"
+font_size = 64

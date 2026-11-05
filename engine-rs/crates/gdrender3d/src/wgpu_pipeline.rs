@@ -1727,6 +1727,30 @@ impl GpuContext3D {
 // ── Render pipeline ─────────────────────────────────────────────────
 
 /// A compiled 3D render pipeline with bind group layouts.
+/// Pipeline state of one editor/Play draw (pat-9gjpr) — the cache key of
+/// `GpuRenderer3D::editor_pipe_cache`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EditorPipelineKey {
+    /// Face culling.
+    pub cull: crate::render_modes::CullMode,
+    /// Whether the draw writes depth.
+    pub depth_write: bool,
+    /// Whether the draw depth-TESTS (`false` = Godot `no_depth_test`).
+    pub depth_test: bool,
+    /// `BLEND_MODE_ADD` instead of mix.
+    pub additive: bool,
+    /// The custom module's identity (its `Arc` address), `0` for the base
+    /// module.
+    pub module: usize,
+}
+
+// By hand: `CullMode` lives in gdserver3d and derives no `Hash`.
+impl std::hash::Hash for EditorPipelineKey {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        (self.cull as u8, self.depth_write, self.depth_test, self.additive, self.module).hash(h);
+    }
+}
+
 pub struct RenderPipeline3D {
     /// The wgpu render pipeline.
     pub pipeline: wgpu::RenderPipeline,
@@ -2073,6 +2097,90 @@ impl RenderPipeline3D {
                 // one behind it, so "see-through" would depend on draw order.
                 depth_write_enabled: Some(depth_write),
                 depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        })
+    }
+
+    /// Builds the editor/Play pipeline for `key` (pat-9gjpr): every pipeline-
+    /// state axis a draw can ask for — cull, depth write, depth TEST, blend —
+    /// over either the base module or a transpiled custom spatial module.
+    ///
+    /// `custom_wgsl` adds group 3 (`custom_layout`); the camera/model/light
+    /// layouts are shared, so the frame's bind groups stay valid across a
+    /// pipeline switch.
+    pub fn build_editor_pipeline(
+        &self,
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        key: EditorPipelineKey,
+        custom_wgsl: Option<&str>,
+    ) -> wgpu::RenderPipeline {
+        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("patina-3d-editor-keyed"),
+            source: wgpu::ShaderSource::Wgsl(custom_wgsl.unwrap_or(SHADER_3D_WGSL).into()),
+        });
+        let mut layouts = vec![
+            Some(&self.camera_layout),
+            Some(&self.model_layout),
+            Some(&self.light_layout),
+        ];
+        if custom_wgsl.is_some() {
+            layouts.push(Some(&self.custom_layout));
+        }
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("patina-3d-editor-keyed-layout"),
+            bind_group_layouts: &layouts,
+            immediate_size: 0,
+        });
+        let blend = if key.additive {
+            ADDITIVE_BLEND
+        } else {
+            wgpu::BlendState::ALPHA_BLENDING
+        };
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("patina-3d-editor-keyed-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader_module,
+                entry_point: Some("vs_main"),
+                buffers: &[GpuVertex::layout()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_module,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(blend),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Cw,
+                cull_mode: Self::wgpu_cull_face(key.cull),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(key.depth_write),
+                // Godot `no_depth_test` / `depth_test_disabled`: the
+                // comparison always passes (the write is decided separately,
+                // as in the software rasterizer).
+                depth_compare: Some(if key.depth_test {
+                    wgpu::CompareFunction::Less
+                } else {
+                    wgpu::CompareFunction::Always
+                }),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -3820,6 +3928,10 @@ struct GpuDrawEntry<'a> {
     depth_draw_mode: crate::render_modes::DepthDrawMode,
     /// Godot `blend_mode` (pat-cezo4); `Add` picks the additive pipeline.
     blend_mode: gdserver3d::material::BlendMode,
+    /// Godot `no_depth_test` (pat-9gjpr): the editor path depth-tested every
+    /// draw, so a Label3D authored to draw over everything was hidden behind
+    /// whatever stood in front of it.
+    no_depth_test: bool,
     /// `BaseMaterial3D.albedo_texture` for this draw (pat-mgixk.52).
     ///
     /// An owned `Arc` clone rather than a borrow: `instance_draw_entries` reads
@@ -3947,6 +4059,7 @@ fn instance_draw_entries<'a>(inst: &'a Instance3D, surfaces: &'a [Mesh3D]) -> Ve
                     alpha_scissor_threshold: base.alpha_scissor_threshold,
                     depth_draw_mode: base.depth_draw_mode,
                     blend_mode: base.blend_mode,
+                    no_depth_test: base.no_depth_test,
                     albedo_texture: albedo_texture.clone(),
                     normal_texture: normal_texture.clone(),
                     normal_scale: base.normal_scale,
@@ -3971,6 +4084,7 @@ fn instance_draw_entries<'a>(inst: &'a Instance3D, surfaces: &'a [Mesh3D]) -> Ve
             alpha_scissor_threshold: base.alpha_scissor_threshold,
             depth_draw_mode: base.depth_draw_mode,
             blend_mode: base.blend_mode,
+            no_depth_test: base.no_depth_test,
             albedo_texture,
             normal_texture,
             normal_scale: base.normal_scale,
@@ -4020,6 +4134,7 @@ fn instance_draw_entries<'a>(inst: &'a Instance3D, surfaces: &'a [Mesh3D]) -> Ve
                 alpha_scissor_threshold: m.alpha_scissor_threshold,
                 depth_draw_mode: m.depth_draw_mode,
                 blend_mode: m.blend_mode,
+                no_depth_test: m.no_depth_test,
                 albedo_texture: tex(&m.albedo_texture),
                 normal_texture: tex(&m.normal_texture),
                 normal_scale: m.normal_scale,
@@ -4031,6 +4146,127 @@ fn instance_draw_entries<'a>(inst: &'a Instance3D, surfaces: &'a [Mesh3D]) -> Ve
         }
     }
     entries
+}
+
+/// The group-3 bind group of one custom spatial shader draw (pat-9gjpr): the
+/// `time` slot, one `vec4` per buffer uniform in [`CustomSpatialModule`]
+/// order, and every sampler slot of `custom_layout` (unused ones on a 1x1
+/// stand-in — a bind group must fill each entry its layout declares).
+#[allow(clippy::too_many_arguments)]
+fn custom_bind_group(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    module: &crate::spatial_wgsl::CustomSpatialModule,
+    material: &ShaderMaterial3D,
+    time: f32,
+    (w, h): (u32, u32),
+    tex_cache: &mut HashMap<
+        (usize, bool),
+        (std::sync::Arc<gdserver3d::material::TextureImage>, wgpu::TextureView),
+    >,
+    unbound_cache: &mut HashMap<[u32; 4], wgpu::TextureView>,
+    sampler_cache: &mut HashMap<(bool, bool), wgpu::Sampler>,
+) -> wgpu::BindGroup {
+    let mut values: Vec<[f32; 4]> = vec![[time, w as f32, h as f32, 0.0]];
+    for slot in &module.uniforms {
+        values.push(crate::spatial_wgsl::slot_value(
+            slot,
+            material.get_shader_parameter(&slot.name),
+        ));
+    }
+    let buf = create_buffer_init(
+        device,
+        queue,
+        "custom-spatial-uniforms",
+        bytemuck::cast_slice(&values),
+        wgpu::BufferUsages::UNIFORM,
+    );
+    // Images may be evicted only when their source is gone, so a cached view
+    // never outlives the address it is keyed by.
+    if tex_cache.len() > 256 {
+        tex_cache.retain(|_, (img, _)| std::sync::Arc::strong_count(img) > 1);
+    }
+    let mut views: Vec<wgpu::TextureView> = Vec::new();
+    let mut samplers: Vec<wgpu::Sampler> = Vec::new();
+    for i in 0..CUSTOM_SAMPLER_SLOTS as usize {
+        let slot = module.samplers.get(i);
+        let bound = slot.and_then(|s| material.get_texture(&s.name).map(|img| (s, img)));
+        let view = match bound {
+            Some((s, img)) => {
+                let key = (std::sync::Arc::as_ptr(img) as usize, s.source_color);
+                tex_cache
+                    .entry(key)
+                    .or_insert_with(|| {
+                        let t = upload_custom_texture(device, queue, img, s.source_color);
+                        (img.clone(), t.create_view(&wgpu::TextureViewDescriptor::default()))
+                    })
+                    .1
+                    .clone()
+            }
+            None => {
+                let c = slot.map_or([1.0; 4], |s| s.unbound);
+                unbound_cache
+                    .entry(c.map(f32::to_bits))
+                    .or_insert_with(|| {
+                        let img = gdserver3d::material::TextureImage::new(
+                            1,
+                            1,
+                            vec![Color::new(c[0], c[1], c[2], c[3])],
+                        );
+                        upload_custom_texture(device, queue, &img, false)
+                            .create_view(&wgpu::TextureViewDescriptor::default())
+                    })
+                    .clone()
+            }
+        };
+        views.push(view);
+        let (nearest, repeat) = slot.map_or((false, false), |s| (s.nearest, s.repeat));
+        let sampler = sampler_cache
+            .entry((nearest, repeat))
+            .or_insert_with(|| {
+                let filter = if nearest {
+                    wgpu::FilterMode::Nearest
+                } else {
+                    wgpu::FilterMode::Linear
+                };
+                let address = if repeat {
+                    wgpu::AddressMode::Repeat
+                } else {
+                    wgpu::AddressMode::ClampToEdge
+                };
+                device.create_sampler(&wgpu::SamplerDescriptor {
+                    label: Some("custom-spatial-sampler"),
+                    mag_filter: filter,
+                    min_filter: filter,
+                    address_mode_u: address,
+                    address_mode_v: address,
+                    address_mode_w: address,
+                    ..Default::default()
+                })
+            })
+            .clone();
+        samplers.push(sampler);
+    }
+    let mut entries = vec![wgpu::BindGroupEntry {
+        binding: 0,
+        resource: buf.as_entire_binding(),
+    }];
+    for i in 0..CUSTOM_SAMPLER_SLOTS {
+        entries.push(wgpu::BindGroupEntry {
+            binding: custom_texture_binding(i),
+            resource: wgpu::BindingResource::TextureView(&views[i as usize]),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: custom_sampler_binding(i),
+            resource: wgpu::BindingResource::Sampler(&samplers[i as usize]),
+        });
+    }
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("custom-spatial-bind-group"),
+        layout,
+        entries: &entries,
+    })
 }
 
 /// A mesh's additional surfaces as standalone meshes, for
@@ -4089,6 +4325,23 @@ pub struct GpuRenderer3D {
     /// Additive-blend (`BLEND_MODE_ADD`) variants by cull mode (pat-cezo4),
     /// built with [`Self::editor_variants`].
     editor_add_variants: Vec<(crate::render_modes::CullMode, wgpu::RenderPipeline)>,
+    /// Every pipeline `render_editor_color_bgra` has needed, by state
+    /// (pat-9gjpr), built on first use. Holds the custom modules' `Arc`s too
+    /// so a key's module address cannot be reused by another module.
+    editor_pipe_cache: HashMap<EditorPipelineKey, wgpu::RenderPipeline>,
+    editor_pipe_modules: Vec<std::sync::Arc<crate::spatial_wgsl::CustomSpatialModule>>,
+    /// Custom-shader sampler textures by (image address, sRGB), with the image
+    /// kept alive so the address stays unique (pat-9gjpr).
+    custom_tex_cache: HashMap<
+        (usize, bool),
+        (std::sync::Arc<gdserver3d::material::TextureImage>, wgpu::TextureView),
+    >,
+    /// 1x1 stand-ins for unbound custom samplers, by their linear RGBA bits.
+    custom_unbound_cache: HashMap<[u32; 4], wgpu::TextureView>,
+    /// Custom-shader samplers by (nearest, repeat).
+    custom_sampler_cache: HashMap<(bool, bool), wgpu::Sampler>,
+    /// Shader `TIME` in seconds for custom spatial shaders (pat-9gjpr).
+    shader_time: f32,
     /// Lazily-built pipeline for the editor color-only path. Uses a **non-sRGB**
     /// (`Bgra8Unorm`) target so shader output is written to bytes linearly,
     /// matching the software rasterizer's `color * 255` — which keeps GPU meshes
@@ -4503,6 +4756,12 @@ impl GpuRenderer3D {
             editor_pipeline: None,
             editor_variants: Vec::new(),
             editor_add_variants: Vec::new(),
+            editor_pipe_cache: HashMap::new(),
+            editor_pipe_modules: Vec::new(),
+            custom_tex_cache: HashMap::new(),
+            custom_unbound_cache: HashMap::new(),
+            custom_sampler_cache: HashMap::new(),
+            shader_time: 0.0,
             editor_sky_pipeline: None,
             editor_targets: None,
             mesh_gpu_cache: HashMap::new(),
@@ -4527,6 +4786,18 @@ impl GpuRenderer3D {
     /// repopulated for a fresh frame, while keeping the expensive-to-create GPU
     /// state (device, pipelines, cached targets) alive. The editor rebuilds its
     /// render list every frame, so its per-frame render calls this first.
+    /// Sets the `TIME` custom spatial shaders read (pat-9gjpr) — the scene
+    /// tree's shader clock, as the software renderer's `set_shader_time`.
+    pub fn set_shader_time(&mut self, seconds: f32) {
+        self.shader_time = seconds;
+    }
+
+    /// The pipeline keys `render_editor_color_bgra` built so far (pat-9gjpr),
+    /// for tests that assert which state a draw asked for.
+    pub fn editor_pipeline_keys(&self) -> Vec<EditorPipelineKey> {
+        self.editor_pipe_cache.keys().copied().collect()
+    }
+
     pub fn reset_scene(&mut self) {
         self.instances.clear();
         self.surface_meshes.clear();
@@ -5107,12 +5378,19 @@ impl GpuRenderer3D {
         self.ensure_probe_cubes();
         self.ensure_sky_panorama(viewport.environment.as_ref());
 
+        // pat-9gjpr: the keyed pipeline / custom-shader caches are filled while
+        // the loop below holds `&self`, so they are moved out for the frame and
+        // put back after the pass.
+        let mut pipe_cache = std::mem::take(&mut self.editor_pipe_cache);
+        let mut pipe_modules = std::mem::take(&mut self.editor_pipe_modules);
+        let mut custom_tex_cache = std::mem::take(&mut self.custom_tex_cache);
+        let mut custom_unbound_cache = std::mem::take(&mut self.custom_unbound_cache);
+        let mut custom_sampler_cache = std::mem::take(&mut self.custom_sampler_cache);
+        let shader_time = self.shader_time;
+
         let device = &self.ctx.device;
         let queue = &self.ctx.queue;
         let pipeline = self.editor_pipeline.as_ref().unwrap();
-        // pat-s3rrv.30: the (cull, depth-write) variants, ensured above.
-        let variants = &self.editor_variants;
-        let add_variants = &self.editor_add_variants;
         let sky_pipeline = self.editor_sky_pipeline.as_ref().unwrap();
         let targets = self.editor_targets.as_ref().unwrap();
 
@@ -5231,7 +5509,11 @@ impl GpuRenderer3D {
         // queue write per draw — with a few thousand GridMap cells, buffer
         // creation, staging and release were over half the frame.
         struct EditorDraw<'a> {
-            pipeline: &'a wgpu::RenderPipeline,
+            /// Owned: a `wgpu::RenderPipeline` is a refcounted handle, and the
+            /// keyed cache it comes from is mutated during this loop.
+            pipeline: wgpu::RenderPipeline,
+            /// Group 3 for a custom spatial shader draw (pat-9gjpr).
+            custom_bg: Option<wgpu::BindGroup>,
             maps: CachedSlotViews<'a>,
             mesh: &'a CachedMeshBuffers,
             sampler: MaterialSamplerKey,
@@ -5328,6 +5610,15 @@ impl GpuRenderer3D {
                 {
                     continue;
                 }
+                // pat-9gjpr: a custom `shader_type spatial` material runs as a
+                // transpiled WGSL module. One that cannot be transpiled keeps
+                // the old flat-albedo draw here; the editor entry point routes
+                // such a frame to the software renderer before reaching this.
+                let custom = inst
+                    .shader_material
+                    .as_ref()
+                    .and_then(crate::spatial_wgsl::module_for)
+                    .and_then(Result::ok);
                 // Expand multimesh + shader material into concrete draws (matching
                 // the software renderer), instead of drawing only a single mesh.
                 for entry in instance_draw_entries(inst, self.surface_meshes.get(&inst.id.0).map_or(&[][..], Vec::as_slice)) {
@@ -5350,11 +5641,13 @@ impl GpuRenderer3D {
                     // pat-s3rrv.30: AlphaScissor. Same helper the software
                     // rasterizer uses, so both backends make the identical
                     // decision from the identical enum.
-                    if crate::render_modes::alpha_scissor_discard(
-                        entry.transparency,
-                        entry.albedo.a,
-                        entry.alpha_scissor_threshold,
-                    ) {
+                    if custom.is_none()
+                        && crate::render_modes::alpha_scissor_discard(
+                            entry.transparency,
+                            entry.albedo.a,
+                            entry.alpha_scissor_threshold,
+                        )
+                    {
                         continue;
                     }
                     // pat-s3rrv.30: bind the pipeline whose cull state matches
@@ -5367,26 +5660,65 @@ impl GpuRenderer3D {
                     // depth-reject the one behind it and nothing would show
                     // through — an order-dependent result from a HashMap
                     // iteration, i.e. a coin flip.
-                    let want_depth = crate::render_modes::writes_depth(
-                        entry.depth_draw_mode,
-                        crate::render_modes::is_transparent(entry.transparency),
-                    );
-                    let additive = (entry.blend_mode == gdserver3d::material::BlendMode::Add)
-                        .then(|| {
-                            add_variants
-                                .iter()
-                                .find(|(c, _)| *c == entry.cull_mode)
-                                .map(|(_, p)| p)
+                    //
+                    // pat-9gjpr: and its depth TEST. Godot `no_depth_test` puts
+                    // the draw in the alpha pass (`uses_alpha_pass` in
+                    // scene_shader_forward_clustered.h), sorted far-first and
+                    // drawn over whatever is already there.
+                    let key = match &custom {
+                        Some(m) => {
+                            let r = m.render_modes;
+                            let transparent = m.writes_alpha
+                                || r.blend_add
+                                || r.depth_test_disabled
+                                || r.depth_draw == crate::render_modes::DepthDrawMode::Never;
+                            EditorPipelineKey {
+                                cull: r.cull,
+                                depth_write: crate::render_modes::writes_depth(
+                                    r.depth_draw,
+                                    transparent,
+                                ),
+                                depth_test: !r.depth_test_disabled,
+                                additive: r.blend_add,
+                                module: std::sync::Arc::as_ptr(m) as usize,
+                            }
+                        }
+                        None => {
+                            let additive =
+                                entry.blend_mode == gdserver3d::material::BlendMode::Add;
+                            let transparent =
+                                crate::render_modes::is_transparent(entry.transparency);
+                            EditorPipelineKey {
+                                cull: entry.cull_mode,
+                                // Additive draws never write depth (pat-cezo4).
+                                depth_write: !additive
+                                    && crate::render_modes::writes_depth(
+                                        entry.depth_draw_mode,
+                                        transparent || entry.no_depth_test,
+                                    ),
+                                depth_test: !entry.no_depth_test,
+                                additive,
+                                module: 0,
+                            }
+                        }
+                    };
+                    let chosen = pipe_cache
+                        .entry(key)
+                        .or_insert_with(|| {
+                            if let Some(m) = &custom {
+                                if !pipe_modules.iter().any(|k| std::sync::Arc::ptr_eq(k, m)) {
+                                    pipe_modules.push(m.clone());
+                                }
+                            }
+                            pipeline.build_editor_pipeline(
+                                device,
+                                format,
+                                key,
+                                custom.as_deref().map(|m| m.wgsl.as_str()),
+                            )
                         })
-                        .flatten();
-                    let chosen = additive
-                        .or_else(|| {
-                            variants
-                                .iter()
-                                .find(|(c, d, _)| *c == entry.cull_mode && *d == want_depth)
-                                .map(|(_, _, p)| p)
-                        })
-                        .unwrap_or(&pipeline.pipeline);
+                        .clone();
+                    let additive = key.additive.then_some(());
                     // Material colors are sRGB authoring values; upload them in
                     // linear so the WGSL shades in linear (the HDR target + camera
                     // post-process encode back to sRGB), matching the software path.
@@ -5412,6 +5744,20 @@ impl GpuRenderer3D {
                         ..bytemuck::Zeroable::zeroed()
                     };
                     let mut model_data = model_data;
+                    if let Some(m) = &custom {
+                        // The shader replaces the material: its outputs reach
+                        // `fs_main` through `cs.*`, and these are the identities
+                        // the remaining `model.*` multiplies need. Godot's
+                        // spatial defaults are ROUGHNESS 1, METALLIC 0, which
+                        // the module seeds itself.
+                        model_data.albedo = [1.0; 4];
+                        model_data.emission = [0.0; 4];
+                        model_data.roughness = 1.0;
+                        model_data.metallic =
+                            if m.wgsl.contains("let metallic_map = cs.metallic;") { 1.0 } else { 0.0 };
+                        model_data.shading_mode = if m.render_modes.unshaded { 0 } else { 2 };
+                        model_data.has_normal_map = 0;
+                    }
                     // Probes are resolved per draw at its origin, like the
                     // software renderer's `entry.transform.origin` (pat-p3p1m).
                     apply_probe_fields(
@@ -5444,6 +5790,32 @@ impl GpuRenderer3D {
                             .map(|c| &c.view)
                             .unwrap_or_else(|| &self.white_tex_cache[&format].1)
                     };
+                    // A custom shader binds none of the base material's maps.
+                    let slot = |img: &Option<
+                        std::sync::Arc<gdserver3d::material::TextureImage>,
+                    >,
+                                format: wgpu::TextureFormat|
+                     -> &wgpu::TextureView {
+                        if custom.is_some() {
+                            &self.white_tex_cache[&format].1
+                        } else {
+                            slot(img, format)
+                        }
+                    };
+                    let custom_bg = custom.as_ref().map(|m| {
+                        custom_bind_group(
+                            device,
+                            queue,
+                            &pipeline.custom_layout,
+                            m,
+                            inst.shader_material.as_ref().expect("custom implies a material"),
+                            shader_time,
+                            (w, h),
+                            &mut custom_tex_cache,
+                            &mut custom_unbound_cache,
+                            &mut custom_sampler_cache,
+                        )
+                    });
                     let maps = CachedSlotViews {
                         albedo: slot(&entry.albedo_texture, MATERIAL_COLOR_FORMAT),
                         normal: slot(&entry.normal_texture, MATERIAL_RAW_FORMAT),
@@ -5451,10 +5823,19 @@ impl GpuRenderer3D {
                         metallic: slot(&entry.metallic_texture, MATERIAL_RAW_FORMAT),
                         emission: slot(&entry.emission_texture, MATERIAL_COLOR_FORMAT),
                     };
-                    let blends = crate::render_modes::is_transparent(entry.transparency)
-                        || additive.is_some();
+                    // Everything that does not write depth draws in the sorted
+                    // transparent pass, as in Godot.
+                    let blends = match &custom {
+                        Some(_) => !key.depth_write || !key.depth_test || additive.is_some(),
+                        None => {
+                            crate::render_modes::is_transparent(entry.transparency)
+                                || additive.is_some()
+                                || entry.no_depth_test
+                        }
+                    };
                     draws.push(EditorDraw {
                         pipeline: chosen,
+                        custom_bg,
                         maps,
                         mesh: cached_mesh,
                         sampler: entry.sampler,
@@ -5498,7 +5879,10 @@ impl GpuRenderer3D {
                 let maps = &draw.maps;
                 // pat-3u1wu: the sampler THIS material asks for.
                 let albedo_sampler = &samplers[draw.sampler.index()];
-                pass.set_pipeline(draw.pipeline);
+                pass.set_pipeline(&draw.pipeline);
+                if let Some(bg) = &draw.custom_bg {
+                    pass.set_bind_group(3, bg, &[]);
+                }
                 let model_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("editor-model-bind-group"),
                     layout: &pipeline.model_layout,
@@ -5617,6 +6001,12 @@ impl GpuRenderer3D {
             None
         };
         queue.submit(std::iter::once(encoder.finish()));
+        // pat-9gjpr: the caches moved out before the pass come back.
+        self.editor_pipe_cache = pipe_cache;
+        self.editor_pipe_modules = pipe_modules;
+        self.custom_tex_cache = custom_tex_cache;
+        self.custom_unbound_cache = custom_unbound_cache;
+        self.custom_sampler_cache = custom_sampler_cache;
 
         // Map, sync once, de-pad each row into a tight top-down BGRA buffer, then
         // unmap so the cached buffer can be mapped again next frame. This is a

@@ -18,6 +18,7 @@ webgl = ["gpu", "wgpu/webgl"]
 
 [dependencies]
 gdcore = { path = "../gdcore" }
+gdresource = { path = "../gdresource" }
 gdserver3d = { path = "../gdserver3d" }
 gdvariant = { path = "../gdvariant" }
 thiserror.workspace = true

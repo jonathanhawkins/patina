@@ -208,6 +208,7 @@ pub fn sprite3d_geometry(
     cache: &mut MaterialTextureCache,
 ) -> Option<(Mesh3D, Material3D)> {
     let node = tree.get_node(nid)?;
+    let double_sided = double_sided_of(node);
     // ⚠️ CLASS GUARD FIRST. `texture` is a common property name — MeshInstance3D
     // and Decal both carry one — so without this any textured node in the scene
     // would be replaced by a flat quad. Declining by class is what keeps this
@@ -323,8 +324,10 @@ pub fn sprite3d_geometry(
         // handed to the renderer correctly, and then discarded by
         // `render_modes::should_cull` before it shaded a single pixel
         // (pat-mgixk.34).
-        double_sided: true,
-        cull_mode: CullMode::Disabled,
+        // pat-9gjpr: `double_sided` (default TRUE) decides it, as Godot's
+        // SpriteBase3D does (`CULL_DISABLED` when set, `CULL_BACK` otherwise).
+        double_sided,
+        cull_mode: double_sided_cull(double_sided),
         ..Default::default()
     };
     Some((mesh, material))
@@ -674,8 +677,26 @@ pub fn label3d_transparency(alpha_cut: i64) -> Transparency {
     }
 }
 
+/// `SpriteBase3D.double_sided` / `Label3D.double_sided`, defaulting to TRUE
+/// (`doc/classes/SpriteBase3D.xml`, `doc/classes/Label3D.xml`).
+fn double_sided_of(node: &gdscene::node::Node) -> bool {
+    !matches!(node.get_property("double_sided"), Variant::Bool(false))
+}
+
+/// The cull mode Godot gives a sprite/label material: `CULL_DISABLED` when
+/// double-sided, `CULL_BACK` otherwise (`SpriteBase3D::_draw` /
+/// `Label3D::_generate_glyph_surfaces`, via `get_material_for_2d`).
+pub fn double_sided_cull(double_sided: bool) -> CullMode {
+    if double_sided {
+        CullMode::Disabled
+    } else {
+        CullMode::Back
+    }
+}
+
 pub fn label3d_geometry(tree: &SceneTree, nid: NodeId) -> Option<(Mesh3D, Material3D)> {
     let node = tree.get_node(nid)?;
+    let double_sided = double_sided_of(node);
     let text = match node.get_property("text") {
         Variant::String(t) if !t.is_empty() => t,
         _ => return None,
@@ -771,8 +792,12 @@ pub fn label3d_geometry(tree: &SceneTree, nid: NodeId) -> Option<(Mesh3D, Materi
         // ⚠️ `cull_mode` is what the rasterizer actually honours — see the note
         // on the Sprite3D material above. Without it the label's quad is culled
         // by winding and the text never reaches a pixel (pat-mgixk.34).
-        double_sided: true,
-        cull_mode: CullMode::Disabled,
+        //
+        // pat-9gjpr: and only by DEFAULT. Both were forced on, so a label
+        // authored `double_sided = false` (the 3D platformer's coin counter)
+        // still drew from behind, where Godot culls it.
+        double_sided,
+        cull_mode: double_sided_cull(double_sided),
         // pat-wyei2: Godot's label material (`get_material_for_2d`) is
         // transparent per `alpha_cut`, honours `no_depth_test`, and samples
         // with the label's own `texture_filter`.
