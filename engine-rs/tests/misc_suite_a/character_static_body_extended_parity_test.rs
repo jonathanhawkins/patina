@@ -427,6 +427,9 @@ fn character_and_rigid_body_coexist() {
     tree.add_child(ball_id, sb).unwrap();
 
     let mut ml = make_mainloop(tree);
+    // Two ticks: a rigid body's first step reaches its node at the next tick's
+    // flush, as in Godot 4.6.1 (pat-29zst).
+    ml.step(1.0 / 60.0);
     ml.step(1.0 / 60.0);
 
     let player_pos = vec2_prop(ml.tree(), player_id, "position");

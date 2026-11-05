@@ -81,6 +81,7 @@ struct Sample {
     velocity: Vector3,
     camera: Vector3,
     enemy: Vector3,
+    enemy_velocity: Vector3,
     enemy_turn: f32,
     air_dir_blend: f64,
 }
@@ -119,6 +120,10 @@ fn sample(ml: &MainLoop) -> Sample {
         enemy: {
             let id = ml.tree().get_node_by_path(ENEMY).unwrap();
             gdscene::node3d::get_position(ml.tree(), id)
+        },
+        enemy_velocity: match prop(ml, ENEMY, "linear_velocity") {
+            Variant::Vector3(v) => v,
+            _ => Vector3::ZERO,
         },
         enemy_turn,
         air_dir_blend,
@@ -167,13 +172,23 @@ fn player_camera_and_enemy_follow_godot_frame_by_frame() {
     assert_near(s[1].velocity, [0.0, -0.183333, 0.0], 1e-4, "f1 player velocity");
     assert_near(s[1].player, [-9.49833, -3.843418, 3.9334], 1e-4, "f1 player");
     assert_near(s[1].camera, [-10.75505, 0.109022, 3.9334], 1e-4, "f1 camera");
-    // The enemy's `_integrate_forces` ran twice (two 4/120 rad turns) but its
-    // velocity moves it from the NEXT step, so it fell by one tick only.
-    assert_near(s[1].enemy, [18.3062, 5.406742, 5.96938], 1e-4, "f1 enemy");
+    // pat-29zst: Godot copies a rigid body's solved state onto the node at the
+    // NEXT tick's flush, and has no step before the first tick. So after two
+    // ticks the enemy has had ONE `_integrate_forces` (one 4/120 rad turn,
+    // velocity -0.1833) and still reads its authored height; after four it has
+    // three callbacks and has moved by two steps. (The d4ghb numbers here,
+    // 5.406742 and two turns, were one tick ahead of Godot.)
+    assert_near(s[1].enemy, [18.3062, 5.40827, 5.96938], 1e-5, "f1 enemy (not yet moved)");
     assert!(
-        (s[1].enemy_turn - 0.066667).abs() < 1e-4,
-        "f1 enemy turn: Patina {}, Godot 0.066667",
+        (s[1].enemy_turn - 0.033333).abs() < 1e-4,
+        "f1 enemy turn: Patina {}, Godot 0.033333",
         s[1].enemy_turn
+    );
+    assert_near(s[2].enemy, [18.3062, 5.403687, 5.96938], 1e-5, "f2 enemy");
+    assert!(
+        (s[2].enemy_turn - 0.1).abs() < 1e-4,
+        "f2 enemy turn: Patina {}, Godot 0.1",
+        s[2].enemy_turn
     );
 
     // -- frame 8: landed exactly when Godot lands, not snapped early ---------
@@ -182,7 +197,7 @@ fn player_camera_and_enemy_follow_godot_frame_by_frame() {
     assert_near(s[8].camera, [-10.75505, -0.046525, 3.9334], 1e-3, "f8 camera");
 
     // -- frame 30: standing; the enemy's whole fall matches ------------------
-    assert_near(s[30].enemy, [18.3062, 2.704103, 5.96938], 1e-4, "f30 enemy falling");
+    assert_near(s[30].enemy, [18.3062, 2.794241, 5.96938], 1e-4, "f30 enemy falling");
 
     // -- walking forward ------------------------------------------------------
     assert_near(s[60].player, [-7.754435, -3.999599, 3.9334], 1e-3, "f60 player");
@@ -207,16 +222,28 @@ fn player_camera_and_enemy_follow_godot_frame_by_frame() {
     assert_near(s[198].velocity, [0.610251, 0.0, 1.220503], 1e-3, "f198 velocity");
     assert_near(s[204].velocity, [0.0, 0.0, 0.0], 1e-4, "f204 velocity");
 
+    // -- the enemy lands and rests where Jolt rests it (pat-29zst) ----------
+    // Jolt corrects only the penetration beyond its `penetration_slop` (0.02),
+    // so the enemy, which falls 0.0101 m into the floor on landing, stays that
+    // deep: Godot y = 1.92799 from f35. A full push-out rested it on the
+    // surface at 1.9381.
+    assert_near(s[34].enemy, [18.30708, 2.03035, 5.96882], 1e-3, "f34 enemy, last frame airborne");
+    for f in [35, 40, 50] {
+        let y = s[f].enemy.y;
+        assert!((y - 1.92799).abs() < 2e-4, "f{f} enemy rest height: Patina {y}, Godot 1.92799");
+    }
+
     // -- the enemy walks Godot's path ----------------------------------------
-    // x/z within 1e-3. y is 0.0103 higher: Jolt rests a body inside its
-    // `penetration_slop` (0.02); with the project's slop set to 0 Godot rests
-    // it at 1.9381, exactly where Patina does.
-    let e = s[60].enemy;
-    assert!(
-        (e.x - 18.750597).abs() < 1e-3 && (e.z - 5.689173).abs() < 1e-3,
-        "f60 enemy x/z: Patina {e:?}, Godot (18.750597, _, 5.689173)"
-    );
-    assert!((e.y - 1.9381).abs() < 1e-3, "f60 enemy rest height {}", e.y);
+    // Frame-exact (1e-4) through f56, including over the seam between two
+    // GridMap cells at f51, which a slop-deep body used to climb (see
+    // `internal_edge_ghosts` in gdphysics3d). From f57 Jolt reports one more
+    // contact event on the next cell (velocity 1.727 -> 1.694, y dips 0.0009)
+    // that is not modelled, so later frames are only within 2e-3.
+    assert_near(s[45].enemy, [18.394316, 1.927991, 5.913824], 1e-4, "f45 enemy walking");
+    assert_near(s[45].enemy_velocity, [0.881151, -0.183333, -0.555556], 1e-4, "f45 enemy velocity");
+    assert_near(s[56].enemy, [18.623709, 1.927991, 5.769195], 1e-4, "f56 enemy over the seam");
+    assert_near(s[56].enemy_velocity, [1.656563, -0.183333, -1.044446], 1e-4, "f56 enemy velocity");
+    assert_near(s[60].enemy, [18.736485, 1.927502, 5.69806], 2e-3, "f60 enemy");
 }
 
 /// pat-hwhbj: the player script's line right after `move_and_slide()` —

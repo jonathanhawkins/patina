@@ -340,6 +340,9 @@ fn area2d_rotation_queries_and_angular_damp() {
         // Registers bodies AND areas -- see the note at the first call site.
         ml.register_physics_bodies();
         ml.step(1.0 / 60.0);
+        // pat-29zst: the first step's velocity reaches the node at the next
+        // tick's flush, as in Godot.
+        ml.step(1.0 / 60.0);
         // The attractor sits at the area's origin, so a body above it is pulled
         // DOWN (+y).
         assert!(

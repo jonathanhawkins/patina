@@ -115,12 +115,15 @@ func _integrate_forces(state):
         "the loop must have run physics ticks for this to mean anything"
     );
     match prop(&ml, body, "calls") {
+        // pat-29zst: once per tick from the body's SECOND tick. Godot calls
+        // `_integrate_forces` from the flush that follows a step, and a body
+        // that entered with the scene has no step before its first tick.
         Variant::Int(n) => assert_eq!(
-            n, ticks,
-            "_integrate_forces must run exactly once per physics tick — got \
-             {n} calls across {ticks} ticks. Fewer means it is gated on \
-             something extra; more means it is being dispatched per frame AND \
-             per tick"
+            n, ticks - 1,
+            "_integrate_forces must run exactly once per physics tick after the \
+             body's first — got {n} calls across {ticks} ticks. Fewer means it \
+             is gated on something extra; more means it is being dispatched per \
+             frame AND per tick, or before the body's first step"
         ),
         other => panic!("`calls` must be an int, got {other:?}"),
     }

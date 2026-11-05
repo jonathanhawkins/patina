@@ -286,6 +286,9 @@ fn rigid_body_position_advances_per_tick() {
 
     // Run 1 frame (1 physics tick).
     ml.step(physics_dt);
+    // pat-29zst: a rigid body's step reaches its node at the NEXT tick's flush,
+    // as in Godot 4.6.1, so the node shows the first step after the second tick.
+    ml.step(physics_dt);
 
     let new_pos = match ml
         .tree()
@@ -534,6 +537,9 @@ fn sync_from_physics_updates_scene_node() {
         _ => panic!("expected Vector2"),
     };
 
+    ml.step(1.0 / 60.0);
+    // pat-29zst: a rigid body's step reaches its node at the NEXT tick's flush,
+    // as in Godot 4.6.1, so the node shows the first step after the second tick.
     ml.step(1.0 / 60.0);
 
     // Position should be updated in the scene tree.

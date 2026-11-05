@@ -401,6 +401,15 @@ fn mainloop_gravity_per_tick() {
     // Run exactly 1 frame at 60 TPS with dt = 1/60 → 1 physics tick
     let output = ml.step(1.0 / 60.0);
     assert_eq!(output.physics_steps, 1, "should run exactly 1 physics tick");
+    // pat-29zst: Godot 4.6.1 publishes a step at the NEXT tick's flush, so
+    // after one tick the node still reads its start (measured: a falling
+    // RigidBody2D has not moved after one tick and has fallen 0.2722 px
+    // after two).
+    assert!(
+        get_pos(ml.tree(), ball).y.abs() < 1e-6,
+        "after 1 tick the node still holds its pre-step position"
+    );
+    ml.step(1.0 / 60.0);
 
     let pos = get_pos(ml.tree(), ball);
     // After 1 tick at 1/60s with gravity 980:
