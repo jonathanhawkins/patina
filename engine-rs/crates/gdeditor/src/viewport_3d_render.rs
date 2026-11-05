@@ -3184,10 +3184,18 @@ pub fn render_editor_3d_frame_gpu(
 
     // Per-thread persistent GPU renderer. `Failed` means adapter init returned
     // None (no GPU) → use the software path forever.
+    //
+    // ⚠️ `ManuallyDrop`: the renderer is deliberately LEAKED when its thread
+    // exits. Dropping wgpu buffers from a thread-local destructor touches
+    // wgpu-core's own thread-locals (`snatch::LockTrace`), which may already be
+    // destroyed by then, and that panics with "cannot access a Thread Local
+    // Storage value during or after destruction" (pat-p3p1m: every test thread
+    // that rendered a frame through here died at exit). The editor renders on
+    // its main thread for the process's whole life, so nothing is lost.
     enum GpuSlot {
         Uninit,
         Failed,
-        Ready(GpuRenderer3D),
+        Ready(std::mem::ManuallyDrop<GpuRenderer3D>),
     }
     thread_local! {
         static GPU: RefCell<GpuSlot> = RefCell::new(GpuSlot::Uninit);
@@ -3241,13 +3249,13 @@ pub fn render_editor_3d_frame_gpu(
             let mut slot = cell.borrow_mut();
             if matches!(&*slot, GpuSlot::Uninit) {
                 *slot = match GpuRenderer3D::new() {
-                    Some(r) => GpuSlot::Ready(r),
+                    Some(r) => GpuSlot::Ready(std::mem::ManuallyDrop::new(r)),
                     None => GpuSlot::Failed,
                 };
             }
         }
         let mut slot = cell.borrow_mut();
-        let renderer = match &mut *slot {
+        let renderer: &mut GpuRenderer3D = match &mut *slot {
             GpuSlot::Ready(r) => r,
             // No GPU adapter → software reference path, converted to bytes (the
             // software path doesn't touch this thread-local, so the borrow is fine).
