@@ -1063,6 +1063,13 @@ pub struct CameraUniformData {
     pub ambient: [f32; 4],
 }
 
+/// Byte stride of one draw's [`ModelUniformData`] in the editor path's shared
+/// per-frame uniform buffer (pat-414k3): the struct rounded up to wgpu's
+/// default `min_uniform_buffer_offset_alignment`, which every offset a bind
+/// group names must be a multiple of.
+const MODEL_UNIFORM_STRIDE: usize = 256;
+const _: () = assert!(std::mem::size_of::<ModelUniformData>() <= MODEL_UNIFORM_STRIDE);
+
 /// Per-object model + material uniform data (bind group 1).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -2702,6 +2709,17 @@ fn shadow_state_key<'a>(
     lights: &[Light3D],
     instances: impl Iterator<Item = &'a Instance3D>,
 ) -> u64 {
+    let (sig, any_shadow) = shadow_light_signature(lights);
+    let keys: Vec<u64> = if any_shadow {
+        instances.map(shadow_caster_key).collect()
+    } else {
+        Vec::new()
+    };
+    combine_shadow_key(sig, any_shadow, &keys)
+}
+
+/// The light half of [`shadow_state_key`], and whether any light casts.
+fn shadow_light_signature(lights: &[Light3D]) -> (u64, bool) {
     use std::hash::Hasher;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     let mut any_shadow = false;
@@ -2737,26 +2755,50 @@ fn shadow_state_key<'a>(
             h.write_u32(f.to_bits());
         }
     }
-    if !any_shadow {
-        // No caster → occluders can't matter; every no-shadow scene shares
-        // one cached (empty) atlas.
-        return h.finish();
+    (h.finish(), any_shadow)
+}
+
+/// Everything one instance contributes to a shadow map: visibility,
+/// transform, geometry, and the `cast_shadow` / `layers` settings
+/// `casts_into_shadow` reads. The per-caster half of [`shadow_state_key`], and
+/// the identity [`crate::shadow_map::generate_shadow_maps_incremental`] uses
+/// to tell a static caster from a moving one (pat-414k3).
+fn shadow_caster_key(inst: &Instance3D) -> u64 {
+    shadow_caster_key_with(inst, inst.mesh.as_ref().map(mesh_content_hash))
+}
+
+/// [`shadow_caster_key`] with the mesh's `mesh_content_hash` already known.
+fn shadow_caster_key_with(inst: &Instance3D, mesh_hash: Option<u64>) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    h.write_u8(inst.visible as u8);
+    h.write_u8(inst.casts_shadow() as u8);
+    h.write_u32(inst.geometry.layers);
+    let t = &inst.transform;
+    for f in [
+        t.basis.x.x, t.basis.x.y, t.basis.x.z,
+        t.basis.y.x, t.basis.y.y, t.basis.y.z,
+        t.basis.z.x, t.basis.z.y, t.basis.z.z,
+        t.origin.x, t.origin.y, t.origin.z,
+    ] {
+        h.write_u32(f.to_bits());
     }
-    for inst in instances {
-        h.write_u8(inst.visible as u8);
-        let t = &inst.transform;
-        for f in [
-            t.basis.x.x, t.basis.x.y, t.basis.x.z,
-            t.basis.y.x, t.basis.y.y, t.basis.y.z,
-            t.basis.z.x, t.basis.z.y, t.basis.z.z,
-            t.origin.x, t.origin.y, t.origin.z,
-        ] {
-            h.write_u32(f.to_bits());
-        }
-        match &inst.mesh {
-            Some(m) => h.write_u64(mesh_content_hash(m)),
-            None => h.write_u64(0),
-        }
+    h.write_u64(mesh_hash.unwrap_or(0));
+    h.finish()
+}
+
+/// Folds the light signature and the per-caster keys into one atlas key.
+/// No caster → occluders can't matter; every no-shadow scene shares one
+/// cached (empty) atlas.
+fn combine_shadow_key(light_sig: u64, any_shadow: bool, caster_keys: &[u64]) -> u64 {
+    use std::hash::Hasher;
+    if !any_shadow {
+        return light_sig;
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    h.write_u64(light_sig);
+    for k in caster_keys {
+        h.write_u64(*k);
     }
     h.finish()
 }
@@ -2968,6 +3010,34 @@ fn bytes_per_pixel(format: wgpu::TextureFormat) -> u32 {
 
 /// Decodes an IEEE-754 binary16 (half) bit pattern to `f32`. Used to unpack the
 /// `Rgba16Float` HDR readback buffer.
+/// Calls `f(row, row_slice)` for every `row_len`-long row of `out`, in bands on
+/// up to 8 worker threads (pat-414k3). For per-pixel readback conversions,
+/// whose result does not depend on which thread computes it.
+fn par_rows<T: Send>(out: &mut [T], row_len: usize, f: impl Fn(usize, &mut [T]) + Sync) {
+    let rows = if row_len == 0 { 0 } else { out.len() / row_len };
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .clamp(1, 8)
+        .min(rows.max(1));
+    if threads <= 1 || rows < 64 {
+        for (r, row) in out.chunks_mut(row_len.max(1)).enumerate() {
+            f(r, row);
+        }
+        return;
+    }
+    let band_rows = rows.div_ceil(threads);
+    let f = &f;
+    std::thread::scope(|scope| {
+        for (b, band) in out.chunks_mut(band_rows * row_len).enumerate() {
+            scope.spawn(move || {
+                for (r, row) in band.chunks_mut(row_len).enumerate() {
+                    f(b * band_rows + r, row);
+                }
+            });
+        }
+    });
+}
+
 fn f16_to_f32(bits: u16) -> f32 {
     let sign = (bits >> 15) & 0x1;
     let exp = (bits >> 10) & 0x1f;
@@ -3594,6 +3664,9 @@ pub struct GpuRenderer3D {
     /// How many times the shadow atlas was (re)built. Instrumentation for the
     /// cache-reuse tests; also a useful perf probe.
     shadow_atlas_rebuilds: u64,
+    /// The static shadow casters, rasterized once and reused while the moving
+    /// ones are redrawn each frame (pat-414k3).
+    shadow_casters: crate::shadow_map::ShadowCasterCache,
     /// The uploaded reflection-probe cubemaps (pat-p3p1m), rebuilt only when a
     /// probe's capture changes (keyed by the captures' `Arc` identities), so a
     /// `Once` probe uploads once.
@@ -3619,6 +3692,11 @@ pub struct GpuRenderer3D {
     /// Instrumentation for the reuse tests (pat-p3p1m).
     editor_mesh_uploads: u64,
     editor_texture_uploads: u64,
+    /// Draw calls the editor color path issued on its last frame, after
+    /// frustum culling (pat-414k3). Instrumentation for the culling tests.
+    editor_last_draws: usize,
+    /// The linear HDR frame the readback decodes into, kept between frames.
+    editor_hdr_scratch: Vec<Color>,
 }
 
 /// One uploaded material map (see `GpuRenderer3D::material_tex_cache`).
@@ -3652,6 +3730,94 @@ struct CachedMeshBuffers {
     vertex_buf: wgpu::Buffer,
     index_buf: wgpu::Buffer,
     index_count: u32,
+    /// A sphere enclosing every vertex, in mesh space (pat-414k3): what the
+    /// editor colour pass frustum-culls against.
+    bounds: MeshBounds,
+}
+
+/// A mesh-space sphere enclosing every vertex of a mesh (pat-414k3).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeshBounds {
+    /// The sphere's centre (the vertex AABB's centre).
+    pub center: Vector3,
+    /// The largest vertex distance from `center`.
+    pub radius: f32,
+}
+
+impl MeshBounds {
+    /// The enclosing sphere of `mesh`'s vertices.
+    pub fn of(mesh: &Mesh3D) -> Self {
+        let Some(first) = mesh.vertices.first() else {
+            return Self { center: Vector3::ZERO, radius: 0.0 };
+        };
+        let (mut lo, mut hi) = (*first, *first);
+        for v in &mesh.vertices {
+            lo = Vector3::new(lo.x.min(v.x), lo.y.min(v.y), lo.z.min(v.z));
+            hi = Vector3::new(hi.x.max(v.x), hi.y.max(v.y), hi.z.max(v.z));
+        }
+        let center = (lo + hi) * 0.5;
+        let radius = mesh
+            .vertices
+            .iter()
+            .map(|v| (*v - center).length())
+            .fold(0.0f32, f32::max);
+        Self { center, radius }
+    }
+}
+
+/// The six planes of a view-projection's clip volume, in world space, each
+/// normalised so `dot(n, p) + d` is a signed distance (pat-414k3).
+///
+/// Built only from tests a point must pass to be drawn under EITHER depth
+/// convention (`-w <= x, y <= w`, `z <= w`, and `z >= -w`, which every point
+/// with `z >= 0` also passes), so a sphere outside any one plane produces no
+/// fragment at all — culling it leaves the frame bit-identical.
+pub struct ClipPlanes([[f32; 4]; 6]);
+
+impl ClipPlanes {
+    /// Planes of the column-major `view_proj` (`clip = view_proj * world`).
+    pub fn from_view_proj(m: &[[f32; 4]; 4]) -> Self {
+        let row = |r: usize| [m[0][r], m[1][r], m[2][r], m[3][r]];
+        let (x, y, z, w) = (row(0), row(1), row(2), row(3));
+        let add = |a: [f32; 4], b: [f32; 4], s: f32| {
+            [a[0] + s * b[0], a[1] + s * b[1], a[2] + s * b[2], a[3] + s * b[3]]
+        };
+        let mut planes = [
+            add(w, x, 1.0),
+            add(w, x, -1.0),
+            add(w, y, 1.0),
+            add(w, y, -1.0),
+            add(w, z, 1.0),
+            add(w, z, -1.0),
+        ];
+        for p in &mut planes {
+            let len = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+            if len > 0.0 {
+                for c in p.iter_mut() {
+                    *c /= len;
+                }
+            }
+        }
+        Self(planes)
+    }
+
+    /// `true` when `bounds` placed by `transform` lies wholly outside one
+    /// plane. Conservative: the radius grows by the basis' Frobenius norm,
+    /// which bounds any stretch the transform applies, plus a margin for the
+    /// rounding of the plane maths.
+    pub fn culls(&self, bounds: &MeshBounds, transform: &Transform3D) -> bool {
+        let c = transform.xform(bounds.center);
+        let b = &transform.basis;
+        let stretch = (b.x.length_squared() + b.y.length_squared() + b.z.length_squared()).sqrt();
+        let r = bounds.radius * stretch;
+        if !(r.is_finite() && c.x.is_finite() && c.y.is_finite() && c.z.is_finite()) {
+            return false;
+        }
+        let margin = r * 1e-3 + 1e-3;
+        self.0
+            .iter()
+            .any(|p| p[0] * c.x + p[1] * c.y + p[2] * c.z + p[3] < -(r + margin))
+    }
 }
 
 /// A resolved draw for the buffer-cached render path: references cached geometry
@@ -3736,20 +3902,30 @@ fn mesh_content_hash(mesh: &Mesh3D) -> u64 {
     h.write_usize(mesh.normals.len());
     h.write_usize(mesh.uvs.len());
     h.write_usize(mesh.indices.len());
-    for v in &mesh.vertices {
-        h.write_u32(v.x.to_bits());
-        h.write_u32(v.y.to_bits());
-        h.write_u32(v.z.to_bits());
-    }
-    for n in &mesh.normals {
-        h.write_u32(n.x.to_bits());
-        h.write_u32(n.y.to_bits());
-        h.write_u32(n.z.to_bits());
+    // The same attribute bits as before, fed in blocks: one `write` per few
+    // KB instead of one per float. The per-call overhead was the cost — the
+    // editor hashes every instance's mesh every frame (pat-414k3).
+    let mut block = [0u32; 1024];
+    let mut n = 0;
+    let mut push = |h: &mut std::collections::hash_map::DefaultHasher, bits: u32| {
+        block[n] = bits;
+        n += 1;
+        if n == block.len() {
+            h.write(bytemuck::cast_slice::<u32, u8>(&block));
+            n = 0;
+        }
+    };
+    for v in mesh.vertices.iter().chain(&mesh.normals) {
+        push(&mut h, v.x.to_bits());
+        push(&mut h, v.y.to_bits());
+        push(&mut h, v.z.to_bits());
     }
     for uv in &mesh.uvs {
-        h.write_u32(uv[0].to_bits());
-        h.write_u32(uv[1].to_bits());
+        push(&mut h, uv[0].to_bits());
+        push(&mut h, uv[1].to_bits());
     }
+    drop(push);
+    h.write(bytemuck::cast_slice::<u32, u8>(&block[..n]));
     h.write(bytemuck::cast_slice::<u32, u8>(&mesh.indices));
     h.finish()
 }
@@ -3870,6 +4046,7 @@ impl GpuRenderer3D {
             surface_meshes: HashMap::new(),
             shadow_atlas_cache: None,
             shadow_atlas_rebuilds: 0,
+            shadow_casters: Default::default(),
             probe_cube_cache: None,
             sky_panorama: None,
             material_tex_cache: HashMap::new(),
@@ -3878,6 +4055,8 @@ impl GpuRenderer3D {
             editor_frame_mesh_keys: HashMap::new(),
             editor_mesh_uploads: 0,
             editor_texture_uploads: 0,
+            editor_last_draws: 0,
+            editor_hdr_scratch: Vec::new(),
         })
     }
 
@@ -3914,6 +4093,12 @@ impl GpuRenderer3D {
     /// mesh and each map once.
     pub fn editor_upload_counts(&self) -> (u64, u64) {
         (self.editor_mesh_uploads, self.editor_texture_uploads)
+    }
+
+    /// Draw calls the editor color path issued on its last frame — what was
+    /// left after frustum culling (pat-414k3).
+    pub fn editor_last_draw_count(&self) -> usize {
+        self.editor_last_draws
     }
 
     /// Ensures `shadow_atlas_cache` matches the current shadow-relevant scene
@@ -4004,7 +4189,12 @@ impl GpuRenderer3D {
             );
             self.mesh_gpu_cache.insert(
                 key,
-                CachedMeshBuffers { vertex_buf, index_buf, index_count: mesh.indices.len() as u32 },
+                CachedMeshBuffers {
+                    vertex_buf,
+                    index_buf,
+                    index_count: mesh.indices.len() as u32,
+                    bounds: MeshBounds::of(&mesh),
+                },
             );
             self.editor_mesh_uploads += 1;
         }
@@ -4098,12 +4288,68 @@ impl GpuRenderer3D {
     }
 
     fn ensure_shadow_atlas(&mut self, camera: Vector3) -> LightArrayData {
-        let key = shadow_state_key(&self.lights, self.instances.values());
+        self.ensure_shadow_atlas_with(camera, None)
+    }
+
+    /// [`Self::ensure_shadow_atlas`], looking each instance's mesh fingerprint
+    /// up in `mesh_keys` (mesh address -> `mesh_content_hash`) first.
+    ///
+    /// ⚠️ `mesh_keys` must have been filled from THIS frame's instances (as
+    /// `prime_editor_draw_caches` just did): an address from an earlier frame
+    /// can belong to a different mesh by now.
+    fn ensure_shadow_atlas_with(
+        &mut self,
+        camera: Vector3,
+        mesh_keys: Option<&HashMap<usize, u64>>,
+    ) -> LightArrayData {
+        // In id order, so the key and the caster list are the same every frame
+        // for the same scene.
+        let mut ordered: Vec<(&u64, &Instance3D)> = self.instances.iter().collect();
+        ordered.sort_unstable_by_key(|(id, _)| **id);
+        let (light_sig, any_shadow) = shadow_light_signature(&self.lights);
+        let caster_keys: Vec<u64> = if any_shadow {
+            ordered
+                .iter()
+                .map(|(_, inst)| {
+                    let mesh_hash = inst.mesh.as_ref().map(|m| {
+                        mesh_keys
+                            .and_then(|k| k.get(&(m as *const Mesh3D as usize)).copied())
+                            .unwrap_or_else(|| mesh_content_hash(m))
+                    });
+                    shadow_caster_key_with(inst, mesh_hash)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let key = combine_shadow_key(light_sig, any_shadow, &caster_keys);
         if self.shadow_atlas_cache.as_ref().map(|c| c.key) != Some(key) {
-            // Miss: the deep clone + rasterization only happen when the scene
-            // actually changed (they're dwarfed by the re-raster itself).
-            let instance_list: Vec<Instance3D> = self.instances.values().cloned().collect();
-            let maps = crate::shadow_map::generate_shadow_maps(&self.lights, &instance_list);
+            // Miss: only the casters that changed since the last frame are
+            // rasterized again (pat-414k3) — a running game moves a handful of
+            // bodies over thousands of static tiles.
+            let casters: Vec<&Instance3D> = if any_shadow {
+                ordered.iter().map(|(_, inst)| *inst).collect()
+            } else {
+                Vec::new()
+            };
+            let maps = crate::shadow_map::generate_shadow_maps_incremental(
+                &self.lights,
+                &casters,
+                &caster_keys,
+                light_sig,
+                &mut self.shadow_casters,
+            );
+            // The omni cubemaps still take owned instances; clone them only
+            // when a point light actually casts.
+            let omni_casts = self
+                .lights
+                .iter()
+                .any(|l| l.shadow_enabled && l.light_type == LightType::Point);
+            let instance_list: Vec<Instance3D> = if omni_casts {
+                ordered.iter().map(|(_, inst)| (*inst).clone()).collect()
+            } else {
+                Vec::new()
+            };
             let omni = pack_omni_cubemaps(&self.lights, &instance_list);
             let (texture, view) =
                 upload_shadow_depth_array(&self.ctx.device, &self.ctx.queue, &maps);
@@ -4256,7 +4502,12 @@ impl GpuRenderer3D {
             );
             self.mesh_gpu_cache.insert(
                 key,
-                CachedMeshBuffers { vertex_buf, index_buf, index_count: mesh.indices.len() as u32 },
+                CachedMeshBuffers {
+                    vertex_buf,
+                    index_buf,
+                    index_count: mesh.indices.len() as u32,
+                    bounds: MeshBounds::of(&mesh),
+                },
             );
         }
         calls
@@ -4356,10 +4607,16 @@ impl GpuRenderer3D {
         // Shadow atlas + light uniforms (pat-32edz / pat-2be0q) — needs
         // `&mut self`, so it runs before the immutable borrows below; a
         // static scene reuses the cached maps + texture untouched.
-        let light_data = self.ensure_shadow_atlas(viewport.camera_transform.origin);
+        // Prime first: it fingerprints every mesh of this frame once, and the
+        // shadow atlas key reuses those fingerprints instead of hashing every
+        // instance's geometry a second time (pat-414k3).
+        self.prime_editor_draw_caches();
+        let mesh_keys = std::mem::take(&mut self.editor_frame_mesh_keys);
+        let light_data =
+            self.ensure_shadow_atlas_with(viewport.camera_transform.origin, Some(&mesh_keys));
+        self.editor_frame_mesh_keys = mesh_keys;
         self.ensure_probe_cubes();
         self.ensure_sky_panorama(viewport.environment.as_ref());
-        self.prime_editor_draw_caches();
 
         let device = &self.ctx.device;
         let queue = &self.ctx.queue;
@@ -4480,6 +4737,20 @@ impl GpuRenderer3D {
             "editor-light-bind-group",
         );
 
+        // pat-414k3: resolve every draw BEFORE recording, so the per-draw model
+        // uniforms go up in ONE buffer instead of one buffer allocation and one
+        // queue write per draw — with a few thousand GridMap cells, buffer
+        // creation, staging and release were over half the frame.
+        struct EditorDraw<'a> {
+            pipeline: &'a wgpu::RenderPipeline,
+            maps: CachedSlotViews<'a>,
+            mesh: &'a CachedMeshBuffers,
+        }
+        let clip_planes = ClipPlanes::from_view_proj(&mul_mat4(&projection_matrix, &view_matrix));
+        let mut draws: Vec<EditorDraw<'_>> = Vec::new();
+        let mut model_bytes: Vec<u8> = Vec::new();
+        let mut draw_count = 0;
+
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("editor-3d-encoder"),
         });
@@ -4524,7 +4795,13 @@ impl GpuRenderer3D {
             pass.set_bind_group(0, &camera_bg, &[]);
             pass.set_bind_group(2, &light_bg, &[]);
 
-            for inst in self.instances.values() {
+            // 🔑 In creation order (pat-414k3), not HashMap order. Draw order
+            // decides which of two coplanar surfaces wins the depth test, and
+            // a HashMap's order is seeded per process: the same scene drew a
+            // different picture in every editor run.
+            let mut ordered: Vec<(&u64, &Instance3D)> = self.instances.iter().collect();
+            ordered.sort_unstable_by_key(|(id, _)| **id);
+            for (_, inst) in ordered {
                 if !inst.visible {
                     continue;
                 }
@@ -4570,6 +4847,12 @@ impl GpuRenderer3D {
                     let Some(cached_mesh) = cached_mesh else {
                         continue;
                     };
+                    // pat-414k3: a draw wholly outside the camera's clip volume
+                    // rasterizes no fragment, so skipping it changes no pixel —
+                    // and most of a level is off screen at any moment.
+                    if clip_planes.culls(&cached_mesh.bounds, &entry.transform) {
+                        continue;
+                    }
                     // pat-s3rrv.30: AlphaScissor. Same helper the software
                     // rasterizer uses, so both backends make the identical
                     // decision from the identical enum.
@@ -4610,7 +4893,6 @@ impl GpuRenderer3D {
                                 .map(|(_, _, p)| p)
                         })
                         .unwrap_or(&pipeline.pipeline);
-                    pass.set_pipeline(chosen);
                     // Material colors are sRGB authoring values; upload them in
                     // linear so the WGSL shades in linear (the HDR target + camera
                     // post-process encode back to sRGB), matching the software path.
@@ -4644,13 +4926,10 @@ impl GpuRenderer3D {
                         probe_cubes,
                         entry.transform.origin,
                     );
-                    let model_buf = create_buffer_init(
-                        device,
-                        queue,
-                        "editor-model-uniform",
-                        bytemuck::bytes_of(&model_data),
-                        wgpu::BufferUsages::UNIFORM,
-                    );
+                    let mut uniform = [0u8; MODEL_UNIFORM_STRIDE];
+                    uniform[..std::mem::size_of::<ModelUniformData>()]
+                        .copy_from_slice(bytemuck::bytes_of(&model_data));
+                    model_bytes.extend_from_slice(&uniform);
                     // pat-mgixk.52: this draw's material maps, or a 1x1 white texel per
                     // slot that has none. A bind group must fill EVERY entry its layout
                     // declares, so there is no "bind nothing" option — white is the
@@ -4678,52 +4957,73 @@ impl GpuRenderer3D {
                         metallic: slot(&entry.metallic_texture, MATERIAL_RAW_FORMAT),
                         emission: slot(&entry.emission_texture, MATERIAL_COLOR_FORMAT),
                     };
-                    let albedo_sampler = self
-                        .material_sampler_cache
-                        .as_ref()
-                        .expect("prime_editor_draw_caches ran above");
-                    let model_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("editor-model-bind-group"),
-                        layout: &pipeline.model_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: model_buf.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::TextureView(&maps.albedo),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: wgpu::BindingResource::Sampler(&albedo_sampler),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 3,
-                                resource: wgpu::BindingResource::TextureView(&maps.normal),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 4,
-                                resource: wgpu::BindingResource::TextureView(&maps.roughness),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 5,
-                                resource: wgpu::BindingResource::TextureView(&maps.metallic),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 6,
-                                resource: wgpu::BindingResource::TextureView(&maps.emission),
-                            },
-                        ],
-                    });
-                    pass.set_bind_group(1, &model_bg, &[]);
-                    pass.set_vertex_buffer(0, cached_mesh.vertex_buf.slice(..));
-                    pass.set_index_buffer(
-                        cached_mesh.index_buf.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
-                    pass.draw_indexed(0..cached_mesh.index_count, 0, 0..1);
+                    draws.push(EditorDraw { pipeline: chosen, maps, mesh: cached_mesh });
                 }
+            }
+
+            draw_count = draws.len();
+            // One buffer for every draw's model block, bound at its offset.
+            let model_buf = (!draws.is_empty()).then(|| {
+                create_buffer_init(
+                    device,
+                    queue,
+                    "editor-model-uniforms",
+                    &model_bytes,
+                    wgpu::BufferUsages::UNIFORM,
+                )
+            });
+            let albedo_sampler = self
+                .material_sampler_cache
+                .as_ref()
+                .expect("prime_editor_draw_caches ran above");
+            for (i, draw) in draws.iter().enumerate() {
+                let model_buf = model_buf.as_ref().expect("non-empty draws");
+                let maps = &draw.maps;
+                pass.set_pipeline(draw.pipeline);
+                let model_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("editor-model-bind-group"),
+                    layout: &pipeline.model_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: model_buf,
+                                offset: (i * MODEL_UNIFORM_STRIDE) as u64,
+                                size: std::num::NonZeroU64::new(
+                                    std::mem::size_of::<ModelUniformData>() as u64,
+                                ),
+                            }),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&maps.albedo),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&albedo_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(&maps.normal),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(&maps.roughness),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::TextureView(&maps.metallic),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::TextureView(&maps.emission),
+                        },
+                    ],
+                });
+                pass.set_bind_group(1, &model_bg, &[]);
+                pass.set_vertex_buffer(0, draw.mesh.vertex_buf.slice(..));
+                pass.set_index_buffer(draw.mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..draw.mesh.index_count, 0, 0..1);
             }
         }
 
@@ -4831,17 +5131,26 @@ impl GpuRenderer3D {
         // tonemap → linear→sRGB — identical code to the software path, so the
         // two backends match), then pack the display image to BGRA bytes.
         let mapped = slice.get_mapped_range();
-        let mut pixels: Vec<Color> = Vec::with_capacity(w as usize * h as usize);
-        for row in 0..h as usize {
-            let start = row * targets.padded_row as usize;
-            let row_bytes = &mapped[start..start + (w * 8) as usize];
-            for px in row_bytes.chunks_exact(8) {
-                let r = f16_to_f32(u16::from_le_bytes([px[0], px[1]]));
-                let g = f16_to_f32(u16::from_le_bytes([px[2], px[3]]));
-                let b = f16_to_f32(u16::from_le_bytes([px[4], px[5]]));
-                let a = f16_to_f32(u16::from_le_bytes([px[6], px[7]]));
-                pixels.push(Color::new(r, g, b, a));
-            }
+        // Decoded in row bands on worker threads (pat-414k3): per pixel the
+        // same conversion, so the same bits.
+        // Reused across frames: a fresh zeroed 13 MB buffer per frame was a
+        // visible cost of its own. Every element is overwritten below.
+        let mut pixels = std::mem::take(&mut self.editor_hdr_scratch);
+        pixels.resize(w as usize * h as usize, Color::new(0.0, 0.0, 0.0, 0.0));
+        {
+            let src: &[u8] = &mapped;
+            let padded_row = targets.padded_row as usize;
+            par_rows(&mut pixels, w as usize, |row, out| {
+                let start = row * padded_row;
+                let row_bytes = &src[start..start + (w * 8) as usize];
+                for (px, c) in row_bytes.chunks_exact(8).zip(out.iter_mut()) {
+                    let r = f16_to_f32(u16::from_le_bytes([px[0], px[1]]));
+                    let g = f16_to_f32(u16::from_le_bytes([px[2], px[3]]));
+                    let b = f16_to_f32(u16::from_le_bytes([px[4], px[5]]));
+                    let a = f16_to_f32(u16::from_le_bytes([px[6], px[7]]));
+                    *c = Color::new(r, g, b, a);
+                }
+            });
         }
         drop(mapped);
         targets.readback_buf.unmap();
@@ -4863,18 +5172,16 @@ impl GpuRenderer3D {
                 .poll(wgpu::PollType::Wait { submission_index: None, timeout: None })
                 .ok();
             let depth_mapped = depth_slice.get_mapped_range();
-            let mut depth: Vec<f32> = Vec::with_capacity(w as usize * h as usize);
-            for row in 0..h {
-                let start = (row * depth_padded_row) as usize;
-                for col in 0..w {
-                    let o = start + (col * 4) as usize;
-                    depth.push(f32::from_le_bytes([
-                        depth_mapped[o],
-                        depth_mapped[o + 1],
-                        depth_mapped[o + 2],
-                        depth_mapped[o + 3],
-                    ]));
-                }
+            let mut depth: Vec<f32> = vec![0.0; w as usize * h as usize];
+            {
+                let src: &[u8] = &depth_mapped;
+                par_rows(&mut depth, w as usize, |row, out| {
+                    let start = row * depth_padded_row as usize;
+                    for (col, d) in out.iter_mut().enumerate() {
+                        let o = start + col * 4;
+                        *d = f32::from_le_bytes([src[o], src[o + 1], src[o + 2], src[o + 3]]);
+                    }
+                });
             }
             drop(depth_mapped);
             depth_buf.unmap();
@@ -4936,16 +5243,21 @@ impl GpuRenderer3D {
 
         crate::postprocess::apply_camera_post(&mut pixels, w, h, env);
 
-        let mut data = Vec::with_capacity(w as usize * h as usize * 4);
-        for c in &pixels {
-            // Stored order is B, G, R, A (the format the caller's BMP encode
-            // expects). Post-process already clamped to [0, 1].
-            data.push((c.b * 255.0) as u8);
-            data.push((c.g * 255.0) as u8);
-            data.push((c.r * 255.0) as u8);
-            data.push((c.a * 255.0) as u8);
-        }
+        let mut data = vec![0u8; w as usize * h as usize * 4];
+        par_rows(&mut data, w as usize * 4, |row, out| {
+            let src = &pixels[row * w as usize..(row + 1) * w as usize];
+            for (c, px) in src.iter().zip(out.chunks_exact_mut(4)) {
+                // Stored order is B, G, R, A (the format the caller's BMP
+                // encode expects). Post-process already clamped to [0, 1].
+                px[0] = (c.b * 255.0) as u8;
+                px[1] = (c.g * 255.0) as u8;
+                px[2] = (c.r * 255.0) as u8;
+                px[3] = (c.a * 255.0) as u8;
+            }
+        });
 
+        self.editor_last_draws = draw_count;
+        self.editor_hdr_scratch = pixels;
         (w, h, data)
     }
 

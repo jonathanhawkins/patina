@@ -230,14 +230,23 @@ fn main() {
     // default 0.4×); the browser upscales the frame with bilinear smoothing during
     // motion so the reduced resolution reads as motion blur.
     let mut last_frame_lowres = false;
+    // pat-414k3: a running 3D game renders on its own thread, so the next
+    // frame's snapshot (taken under the editor-state lock) overlaps this
+    // frame's GPU render, readback and post-process instead of queueing
+    // behind them. Throughput becomes the slower of the two, not their sum.
+    let play3d = Play3DRenderThread::spawn();
     while running.load(Ordering::SeqCst) {
-        let (is_runtime_running, game_frame) = {
+        let (is_runtime_running, game_frame, has_runtime) = {
             let state = handle.state().lock().unwrap();
             (
                 state.is_running && !state.is_paused,
                 state.runtime_frame_count,
+                state.is_running,
             )
         };
+        // Publish what the render thread finished. A frame that completes
+        // after Stop is dropped, so it cannot replace the editor's view.
+        play3d.publish_finished(&handle, has_runtime);
         if is_runtime_running {
             // Render each game frame once, as soon as the game thread has
             // stepped it. Rendering on a 16 ms timer of its own drifted against
@@ -391,9 +400,8 @@ fn main() {
                 // Running 3D scene: GPU-render off the lock, then publish BMP (the
                 // Game view streams BMP, like the editor viewport).
                 RenderJob::Play3D(prepared) => {
-                    let img = prepared.render();
-                    let bmp = gdrender2d::encode_bmp_bgra(&img);
-                    handle.update_frame_bmp(bmp, img.width, img.height);
+                    // Blocks only while the previous frame is still rendering.
+                    play3d.submit(prepared, render_started);
                 }
                 // A Gpu job is only ever the editor's idle viewport; it is
                 // rendered by the idle branch, never here.
@@ -413,7 +421,10 @@ fn main() {
                     handle.update_frame(fb);
                 }
             }
-            handle.note_render_time(render_started.elapsed());
+            // The render thread notes a Play-3D frame's time when it finishes.
+            if !play3d.owns_timing() {
+                handle.note_render_time(render_started.elapsed());
+            }
         } else {
             // Poll fast while an interaction is actively producing new frames,
             // otherwise idle at 50ms. The interaction cadence is a live perf knob
@@ -665,5 +676,79 @@ extern "C" fn sigint_handler(_sig: i32) {
         // SAFETY: ptr was stored from a valid Arc<AtomicBool> that we leaked.
         let flag = unsafe { &*(ptr as *const AtomicBool) };
         flag.store(false, Ordering::SeqCst);
+    }
+}
+
+/// The Play-3D render thread (pat-414k3): takes a prepared frame, renders it
+/// (GPU, readback, post-process, HUD) and encodes the BMP, and hands the result
+/// back to the main loop, which publishes it.
+///
+/// ONE persistent thread on purpose: the GPU renderer is thread-local, so every
+/// Play frame must render on the same thread to keep its uploaded meshes,
+/// textures and shadow caches.
+struct Play3DRenderThread {
+    /// A prepared frame and how long preparing it took.
+    jobs: std::sync::mpsc::SyncSender<(gdeditor::play_3d::PreparedPlay3DFrame, Duration)>,
+    done: std::sync::mpsc::Receiver<Play3DFrameDone>,
+    /// Set once a Play-3D frame was submitted this loop pass; cleared on read.
+    submitted: std::cell::Cell<bool>,
+}
+
+struct Play3DFrameDone {
+    bmp: Vec<u8>,
+    width: u32,
+    height: u32,
+    took: Duration,
+}
+
+impl Play3DRenderThread {
+    fn spawn() -> Self {
+        // Rendezvous: `submit` waits until the thread is free, so at most one
+        // frame is in flight and none queues up behind it (no added latency).
+        let (jobs, rx) =
+            std::sync::mpsc::sync_channel::<(gdeditor::play_3d::PreparedPlay3DFrame, Duration)>(0);
+        let (tx, done) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("play3d-render".into())
+            .spawn(move || {
+                for (prepared, prepare_took) in rx {
+                    let started = std::time::Instant::now();
+                    let img = prepared.render();
+                    let bmp = gdrender2d::encode_bmp_bgra(&img);
+                    let frame = Play3DFrameDone {
+                        bmp,
+                        width: img.width,
+                        height: img.height,
+                        // Snapshot + render, as before, without the time the
+                        // frame waited for this thread to be free.
+                        took: prepare_took + started.elapsed(),
+                    };
+                    if tx.send(frame).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("spawn the Play-3D render thread");
+        Self { jobs, done, submitted: std::cell::Cell::new(false) }
+    }
+
+    fn submit(&self, prepared: gdeditor::play_3d::PreparedPlay3DFrame, started: std::time::Instant) {
+        self.jobs
+            .send((prepared, started.elapsed()))
+            .expect("the Play-3D render thread exited");
+        self.submitted.set(true);
+    }
+
+    fn owns_timing(&self) -> bool {
+        self.submitted.replace(false)
+    }
+
+    fn publish_finished(&self, handle: &EditorServerHandle, publish: bool) {
+        while let Ok(frame) = self.done.try_recv() {
+            if publish {
+                handle.update_frame_bmp(frame.bmp, frame.width, frame.height);
+                handle.note_render_time(frame.took);
+            }
+        }
     }
 }
