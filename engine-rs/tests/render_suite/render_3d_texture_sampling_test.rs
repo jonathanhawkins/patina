@@ -281,7 +281,10 @@ fn roughness_map_modulates_specular() {
     let light = Some(Vector3::new(-0.3, 0.0, -1.0));
     let base = || Material3D {
         shading_mode: ShadingMode::Phong,
-        albedo: Color::WHITE,
+        // ⚠️ Not white: since pat-9gjpr applied Godot's xPI light energy, a white
+        // surface lit head-on clips to 1.0 with or without the highlight, and
+        // the comparison below could never see the roughness map.
+        albedo: Color::new(0.25, 0.25, 0.25, 1.0),
         roughness: 1.0,
         metallic: 0.0,
         ..Default::default()

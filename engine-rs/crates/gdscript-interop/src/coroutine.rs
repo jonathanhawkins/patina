@@ -207,6 +207,10 @@ pub struct SuspendedCoroutine {
     /// Statements still to execute after resume, from the OUTERMOST block (the
     /// function body). Inner constructs are carried by [`frames`](Self::frames).
     pub remaining: Vec<Stmt>,
+    /// Source line of each statement in [`remaining`](Self::remaining),
+    /// index-aligned; empty when unknown. Lets a resumed body report the line
+    /// it failed on (pat-c7i5e).
+    pub remaining_lines: Vec<usize>,
     /// The enclosing constructs still to finish, innermost first.
     ///
     /// Empty for a top-level `await`, which is why the old flat `remaining`
@@ -409,6 +413,7 @@ mod tests {
             frames: Vec::new(),
             id: CoroutineId(0),
             remaining: vec![],
+            remaining_lines: vec![],
             locals: HashMap::new(),
             instance_props: HashMap::new(),
             function_name: "f".into(),
@@ -433,6 +438,7 @@ mod tests {
             frames: Vec::new(),
             id: CoroutineId(0),
             remaining: vec![],
+            remaining_lines: vec![],
             locals: HashMap::new(),
             instance_props: HashMap::new(),
             function_name: "f".into(),
@@ -464,6 +470,7 @@ mod tests {
                 frames: Vec::new(),
                 id: CoroutineId(0),
                 remaining: vec![],
+                remaining_lines: vec![],
                 locals: HashMap::new(),
                 instance_props: HashMap::new(),
                 function_name: "f".into(),
@@ -526,6 +533,7 @@ mod tests {
                 frames: Vec::new(),
                 id: CoroutineId(0),
                 remaining: vec![],
+                remaining_lines: vec![],
                 locals: HashMap::new(),
                 instance_props: HashMap::new(),
                 function_name: format!("t{secs}"),

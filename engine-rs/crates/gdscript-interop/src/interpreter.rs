@@ -940,6 +940,15 @@ impl Environment {
         self.frame_starts.pop();
     }
 
+    /// Pops scopes until `depth` remain: unwinds whatever an aborted body left
+    /// pushed. Never pops the global scope.
+    fn truncate_scopes(&mut self, depth: usize) {
+        let depth = depth.max(1);
+        self.scopes.truncate(depth);
+        self.consts.truncate(depth);
+        self.frame_starts.truncate(depth);
+    }
+
     /// Overwrites `name` in the innermost call frame's FIRST scope (where an
     /// instance method seeds its members), if that scope holds it. A local
     /// that shadows the member in a deeper scope is left alone.
@@ -1115,6 +1124,15 @@ pub struct Interpreter {
     /// stream) so tests and tooling can observe the error stream, including the
     /// source location appended by `push_error`/`push_warning`.
     errors: Vec<String>,
+    /// Errors raised by coroutine bodies resumed after an `await`, as
+    /// `(function name, error)`, drained by [`Self::take_coroutine_errors`]
+    /// (pat-c7i5e). A resume runs from the engine's frame/signal pump, which
+    /// has no caller to return an error to; before this every host discarded
+    /// it with `let _ = …`, so a bug after an `await` was invisible.
+    coroutine_errors: Vec<(String, RuntimeError)>,
+    /// Lines of the statements the NEXT [`park_coroutine`](Self::park_coroutine)
+    /// call parks, set just before it by a body that knows them; taken there.
+    park_lines: Vec<usize>,
     /// Scene-tree access for `get_node`, `emit_signal`, etc.
     pub(crate) scene_access: Option<Box<dyn SceneAccess>>,
     /// The raw NodeId of the node this script is attached to.
@@ -1187,6 +1205,8 @@ impl Clone for Interpreter {
             call_stack_frames: self.call_stack_frames.clone(),
             warnings: self.warnings.clone(),
             errors: self.errors.clone(),
+            coroutine_errors: Vec::new(),
+            park_lines: Vec::new(),
             scene_access: None,
             current_node_id: self.current_node_id,
             coroutine_host: crate::coroutine::CoroutineHost::new(),
@@ -1507,6 +1527,13 @@ pub struct ClassInstance {
     /// constant read THROUGH an instance (`player.SPEED`, `$Hud.MAX`) answers
     /// as it does in Godot instead of reading back null.
     pub constants: HashMap<String, Variant>,
+    /// Index (into the chain's non-`@onready` member vars, root first) of the
+    /// first initializer that could not be evaluated at construction, because
+    /// it reads the node it is attached to (`var base_fov := fov`) and no node
+    /// was bound yet. It and every later initializer are deferred to
+    /// [`Interpreter::resolve_deferred_initializers`], which the scene tree
+    /// runs when the script is attached (pat-0ywbp). `None` = all evaluated.
+    pub deferred_init_from: Option<usize>,
 }
 
 /// Which engine list a script extension was registered into (pat-s3rrv.229).
@@ -1586,6 +1613,12 @@ impl Interpreter {
         std::mem::take(&mut self.errors)
     }
 
+    /// Drains the errors resumed coroutines raised since the last call, as
+    /// `(function name, error)` — the error carries the line it failed on.
+    pub fn take_coroutine_errors(&mut self) -> Vec<(String, RuntimeError)> {
+        std::mem::take(&mut self.coroutine_errors)
+    }
+
     /// Creates a new interpreter with an empty environment.
     pub fn new() -> Self {
         Self {
@@ -1607,6 +1640,8 @@ impl Interpreter {
             call_stack_frames: Vec::new(),
             warnings: Vec::new(),
             errors: Vec::new(),
+            coroutine_errors: Vec::new(),
+            park_lines: Vec::new(),
             scene_access: None,
             current_node_id: None,
             coroutine_host: crate::coroutine::CoroutineHost::new(),
@@ -2296,6 +2331,7 @@ impl Interpreter {
             .coroutine_host
             .suspend(crate::coroutine::SuspendedCoroutine {
                 id: crate::coroutine::CoroutineId(0),
+                remaining_lines: std::mem::take(&mut self.park_lines),
                 remaining,
                 frames,
                 locals,
@@ -2466,7 +2502,20 @@ impl Interpreter {
             }
             for co in ready {
                 let before = self.output.len();
-                self.resume_one(co)?;
+                let depth = self.environment.scopes.len();
+                let function_name = co.function_name.clone();
+                if let Err(mut err) = self.resume_one(co) {
+                    // The failed body aborts, as in Godot, but it must neither
+                    // take the OTHER ready coroutines down with it (the old `?`
+                    // dropped every one after it in `ready` — they had already
+                    // been taken off the host) nor leave its scopes pushed.
+                    self.environment.truncate_scopes(depth);
+                    if err.source_location.is_none() {
+                        err.source_location = Some(self.make_location());
+                    }
+                    tracing::debug!(function = %function_name, error = %err, "resumed coroutine failed");
+                    self.coroutine_errors.push((function_name, err));
+                }
                 emitted.extend(self.output[before..].iter().cloned());
             }
         }
@@ -2519,6 +2568,7 @@ impl Interpreter {
                 Some(ControlFlow::Suspend(target)) => {
                     self.pending_continuation
                         .extend(co.frames[fi + 1..].iter().cloned());
+                    self.park_lines = co.remaining_lines.clone();
                     self.park_coroutine(
                         co.remaining.clone(),
                         target,
@@ -2543,11 +2593,21 @@ impl Interpreter {
             // would resume the frame and then run it to the end — the button
             // would appear to work and behave as Continue.
             let stmt_line = debug_lines.get(i).copied().unwrap_or(0);
+            if stmt_line == 0 {
+                // Not under the debugger: still track the line, so an error in
+                // the resumed body names it (pat-c7i5e).
+                if let Some(&line) = co.remaining_lines.get(i) {
+                    if line != 0 {
+                        self.current_line = line;
+                    }
+                }
+            }
             if stmt_line != 0 {
                 self.current_line = stmt_line;
                 if let Some(target) = self.debug_break_before(stmt_line) {
                     let rest = co.remaining[i..].to_vec();
                     let rest_lines = debug_lines.get(i..).map(|s| s.to_vec()).unwrap_or_default();
+                    self.park_lines = co.remaining_lines.get(i..).map(|s| s.to_vec()).unwrap_or_default();
                     self.park_coroutine(rest, target, &co.function_name, co.is_instance_method);
                     let paused_in = co.function_name.clone();
                     self.publish_debug_pause(&paused_in, stmt_line, rest_lines);
@@ -2562,6 +2622,8 @@ impl Interpreter {
                 }
                 Some(ControlFlow::Suspend(target)) => {
                     let rest = co.remaining[i + 1..].to_vec();
+                    self.park_lines =
+                        co.remaining_lines.get(i + 1..).map(|s| s.to_vec()).unwrap_or_default();
                     self.park_coroutine(rest, target, &co.function_name, co.is_instance_method);
                     self.environment.pop_scope();
                     return Ok(Variant::Nil);
@@ -10605,6 +10667,8 @@ impl Interpreter {
                 }
                 Some(ControlFlow::Suspend(target)) => {
                     let remaining = body[i + 1..].to_vec();
+                    self.park_lines =
+                        body_lines.get(i + 1..).map(|s| s.to_vec()).unwrap_or_default();
                     self.park_coroutine(remaining, target, name, false);
                     self.environment.pop_scope();
                     self.environment.pop_scope();
@@ -20642,6 +20706,8 @@ impl Interpreter {
         // script started with ONLY its own vars, so a base's `var hp = 10` did
         // not exist on the instance at all and every inherited method touching
         // it operated on Nil.
+        let mut deferred_init_from: Option<usize> = None;
+        let mut index = 0usize;
         for def in Self::class_chain_root_first(class_def) {
             for var in &def.instance_vars {
                 let is_onready = var.annotations.iter().any(|a| a.name == "onready");
@@ -20649,21 +20715,32 @@ impl Interpreter {
                     // @onready vars are deferred until _ready; start as Nil.
                     Variant::Nil
                 } else {
-                    match (&var.default, &var.type_hint) {
-                        // `var speed: float = 200` holds 200.0, not 200: Godot's
-                        // typed assign converts (pat-mgixk.19). Without this,
-                        // `speed / 3` integer-divided.
-                        (Some(expr), Some(hint)) => {
-                            let v = self.eval_expr(expr)?;
-                            crate::container_typing::coerce_for_declared_slot(v, hint)
-                                .map_err(container_error)?
+                    let this = index;
+                    index += 1;
+                    if deferred_init_from.is_some() {
+                        // Behind a deferred initializer: evaluated in order with
+                        // it later, so it still sees the members above it.
+                        Self::member_placeholder(var)
+                    } else {
+                        match self.eval_member_initializer(var) {
+                            Ok(v) => v,
+                            // 🔑 Godot evaluates a member initializer AGAINST THE
+                            // NODE (`var base_fov := fov` reads the Camera3D's
+                            // fov, `var previous_speed := linear_velocity.length()`
+                            // the body's velocity — truck_town). With no node
+                            // bound yet this raised UndefinedVariable and the
+                            // whole script failed to load (pat-0ywbp). Defer it
+                            // to attach time instead; a genuine error resurfaces
+                            // there, with the node to report it against.
+                            Err(e)
+                                if var.default.is_some()
+                                    && matches!(e.kind, RuntimeErrorKind::UndefinedVariable(_)) =>
+                            {
+                                deferred_init_from = Some(this);
+                                Self::member_placeholder(var)
+                            }
+                            Err(e) => return Err(e),
                         }
-                        (Some(expr), None) => self.eval_expr(expr)?,
-                        // `var count: int` with no initialiser is 0, not null.
-                        // GDScript's analyzer default-initialises a typed member,
-                        // so `count += 1` works; it used to operate on Nil.
-                        (None, Some(hint)) => crate::container_typing::typed_default(hint),
-                        (None, None) => Variant::Nil,
                     }
                 };
                 self.environment.define(var.name.clone(), val.clone());
@@ -20674,7 +20751,80 @@ impl Interpreter {
             class_def: class_def.clone(),
             properties,
             constants,
+            deferred_init_from,
         })
+    }
+
+    /// Evaluates one non-`@onready` member's initializer, applying the declared
+    /// type's conversion.
+    fn eval_member_initializer(&mut self, var: &VarDecl) -> Result<Variant, RuntimeError> {
+        Ok(match (&var.default, &var.type_hint) {
+            // `var speed: float = 200` holds 200.0, not 200: Godot's
+            // typed assign converts (pat-mgixk.19). Without this,
+            // `speed / 3` integer-divided.
+            (Some(expr), Some(hint)) => {
+                let v = self.eval_expr(expr)?;
+                crate::container_typing::coerce_for_declared_slot(v, hint)
+                    .map_err(container_error)?
+            }
+            (Some(expr), None) => self.eval_expr(expr)?,
+            // `var count: int` with no initialiser is 0, not null.
+            // GDScript's analyzer default-initialises a typed member,
+            // so `count += 1` works; it used to operate on Nil.
+            (None, Some(hint)) => crate::container_typing::typed_default(hint),
+            (None, None) => Variant::Nil,
+        })
+    }
+
+    /// The value a member holds before its (deferred) initializer has run:
+    /// the declared type's default, as Godot's analyzer gives it.
+    fn member_placeholder(var: &VarDecl) -> Variant {
+        match &var.type_hint {
+            Some(hint) => crate::container_typing::typed_default(hint),
+            None => Variant::Nil,
+        }
+    }
+
+    /// Runs the member initializers [`instantiate_class`](Self::instantiate_class)
+    /// had to defer because they read the node (pat-0ywbp).
+    ///
+    /// The caller binds scene access and the node first; this installs the
+    /// instance as `self`, so a bare `fov` / `transform` / `linear_velocity`
+    /// resolves through the node exactly as it does inside a method. Run in
+    /// declaration order, one at a time, so each sees the members above it.
+    /// Every deferred initializer is attempted (a failed one keeps its type's
+    /// default) and the first error is returned.
+    pub fn resolve_deferred_initializers(
+        &mut self,
+        instance: &mut ClassInstance,
+    ) -> Result<(), RuntimeError> {
+        let Some(from) = instance.deferred_init_from.take() else {
+            return Ok(());
+        };
+        let pending: Vec<VarDecl> = Self::class_chain_root_first(&instance.class_def)
+            .into_iter()
+            .flat_map(|def| def.instance_vars.iter())
+            .filter(|var| !var.annotations.iter().any(|a| a.name == "onready"))
+            .skip(from)
+            .cloned()
+            .collect();
+        let mut first_error: Option<RuntimeError> = None;
+        for var in pending {
+            match self.resume_with_instance_self(instance, |i| i.eval_member_initializer(&var)) {
+                Ok(value) => {
+                    instance.properties.insert(var.name.clone(), value);
+                }
+                Err(err) => {
+                    if first_error.is_none() {
+                        first_error = Some(err);
+                    }
+                }
+            }
+        }
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     /// Resolves `@onready` variables by evaluating their default expressions.
@@ -21187,6 +21337,8 @@ impl Interpreter {
                 }
                 Some(ControlFlow::Suspend(target)) => {
                     let remaining = body[i + 1..].to_vec();
+                    self.park_lines =
+                        body_lines.get(i + 1..).map(|s| s.to_vec()).unwrap_or_default();
                     self.park_coroutine(remaining, target, method_name, true);
                     // Write back any property mutations before parking.
                     merge_frame_property_writes(

@@ -17,6 +17,9 @@
 //                  loader swallowed a failure (grid_map.scn, player.tscn)
 //   missing method a script call the engine does not have (RenderingServer.…),
 //                  plus every other script error the scene raised
+//   script load    a script that failed to read or PARSE, so its node ran with
+//   failure        no script at all — from the runner's `script failed to load`
+//                  script_errors (or, older runners, its WARN line on stderr)
 //   unsupported    a node / ext_resource / sub_resource type Patina's ClassDB
 //                  does not register (from `patina-runner --class-list`)
 //
@@ -148,7 +151,34 @@ export function parseRunnerResult({ code, signal, stdout, stderr, timedOut }, ro
   }
   const kids = out.tree?.children || [];
   const scene = kids.find((c) => rootName && c.name === rootName) || kids[kids.length - 1] || null;
-  return { ok: true, error: null, tree: out.tree, node_count: scene ? countNodes(scene) : 0, script_errors: out.script_errors || [] };
+  const script_errors = out.script_errors || [];
+  return {
+    ok: true, error: null, tree: out.tree, node_count: scene ? countNodes(scene) : 0, script_errors,
+    script_load_failures: scriptLoadFailures(script_errors, err),
+  };
+}
+
+/// Scripts that never attached because they failed to read or parse, as
+/// sorted, unique `<script>: <error>` strings. The runner reports them in
+/// `script_errors` as `<node>: script failed to load: <res path>: <error>`;
+/// an older runner only logs `WARN ... failed to parse GDScript path=<abs>
+/// error=...` on stderr, which used to be the WHOLE signal — a script that
+/// never loaded passed the audit as OK (pat-kkqnm). Both are read; a stderr
+/// line whose path ends with an already-reported res path is the same failure.
+export function scriptLoadFailures(scriptErrors, stderrLines = []) {
+  const found = new Map();
+  for (const e of scriptErrors) {
+    const m = /: script failed to load: (\S+): (.*)$/.exec(e);
+    if (m && !found.has(m[1])) found.set(m[1], m[2]);
+  }
+  for (const l of stderrLines) {
+    const m = /failed to (?:parse|read) GDScript(?: file)?\s+path=(\S+)\s+error=(.*)$/.exec(l);
+    if (!m) continue;
+    const abs = m[1];
+    const known = [...found.keys()].some((res) => abs.endsWith(`/${res.replace(/^res:\/\//, '')}`));
+    if (!known && !found.has(abs)) found.set(abs, m[2].replace(/^"|"$/g, ''));
+  }
+  return [...found].map(([p, e]) => `${p}: ${e}`).sort();
 }
 
 export function countNodes(n) {
@@ -284,8 +314,12 @@ export function sceneFindings(s) {
   const f = [];
   if (s.error) f.push(`load error: ${s.error}${s.format !== 'text' ? ` (${s.format} file)` : ''}`);
   for (const p of s.placeholders) f.push(`placeholder: ${p.finding}`);
+  for (const l of s.script_load_failures || []) f.push(`script load failure: ${l}`);
   for (const m of s.missing_methods) f.push(`missing method: ${m}`);
-  for (const e of s.script_errors) if (!s.missing_methods.some((m) => e.includes(`'${m}'`))) f.push(`script error: ${e}`);
+  for (const e of s.script_errors) {
+    if (e.includes(': script failed to load: ')) continue; // reported above
+    if (!s.missing_methods.some((m) => e.includes(`'${m}'`))) f.push(`script error: ${e}`);
+  }
   for (const u of s.unsupported) f.push(`unsupported type: ${u.type} (${u.as.join(', ')})`);
   return f;
 }
@@ -375,6 +409,7 @@ async function auditScene(o, gameDir, rel, classes, flags) {
     scene: rel, format, ok: r.ok, error: r.error, node_count: r.node_count,
     placeholders: r.ok ? findPlaceholders(parsed, r.tree, expectedOf) : [],
     script_errors, missing_methods: missingMethods(r.script_errors),
+    script_load_failures: r.script_load_failures || [],
     unsupported: unsupportedTypes(parsed, classes),
     binary_resources,
   };
@@ -467,7 +502,7 @@ export function printReport(rep) {
     if (!rep.live.findings.length) lines.push('          (clean)');
   }
   const t = rep.totals;
-  lines.push(`summary: ${t.scenes} scenes · ${t.load_errors} load errors · ${t.placeholders} placeholder instances · ${t.missing_methods} missing methods · ${t.script_errors} other script errors · ${t.unsupported} unsupported types${rep.live ? ` · ${rep.live.findings.length} live findings` : ''} → ${rep.ok ? 'OK' : 'FAIL'}`);
+  lines.push(`summary: ${t.scenes} scenes · ${t.load_errors} load errors · ${t.placeholders} placeholder instances · ${t.script_load_failures} script load failures · ${t.missing_methods} missing methods · ${t.script_errors} other script errors · ${t.unsupported} unsupported types${rep.live ? ` · ${rep.live.findings.length} live findings` : ''} → ${rep.ok ? 'OK' : 'FAIL'}`);
   return lines.join('\n');
 }
 
@@ -477,6 +512,7 @@ export function totals(scenes, live) {
     scenes: scenes.length,
     load_errors: scenes.filter((s) => !s.ok).length,
     placeholders: scenes.reduce((a, s) => a + s.placeholders.length, 0),
+    script_load_failures: uniq(scenes.flatMap((s) => (s.script_load_failures || []).map((l) => l.split(': ')[0]))),
     missing_methods: uniq(scenes.flatMap((s) => s.missing_methods)),
     script_errors: scenes.reduce((a, s) => a + s.findings.filter((f) => f.startsWith('script error')).length, 0),
     unsupported: uniq(scenes.flatMap((s) => s.unsupported.map((u) => u.type))),

@@ -1733,6 +1733,9 @@ fn is_internal_prop(key: &str) -> bool {
         || key.starts_with("__tile_occluder_")
         || key == "_instance"
         || key == "_instance_path"
+        // Runtime marker: the file a script-instantiated scene came from
+        // (pat-i4jgd), never a property line.
+        || key == crate::world_environment::SCENE_FILE_PATH_KEY
         // Editor-only instance markers: "Editable Children" is written as an
         // `[editable path=..]` section and the dock's source label is the
         // instance's own `instance=` (pat-hivyf), never as property lines.

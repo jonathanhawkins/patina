@@ -644,20 +644,21 @@ pub fn attach_subtree_scripts(tree: &mut SceneTree, subtree_root: NodeId, projec
 fn attach_scripts_to(tree: &mut SceneTree, ids: Vec<NodeId>, project_dir: &Path) -> usize {
     // Collected first: attaching borrows the tree mutably, and the walk needs it
     // immutably.
-    let mut scripts_to_load: Vec<(NodeId, PathBuf)> = Vec::new();
+    let mut scripts_to_load: Vec<(NodeId, PathBuf, String)> = Vec::new();
     for node_id in ids {
         if tree.get_script(node_id).is_some() {
             continue;
         }
         if let Some(node) = tree.get_node(node_id) {
             if let Variant::String(res_path) = node.get_property("_script_path") {
-                scripts_to_load.push((node_id, resolve_res_path(project_dir, &res_path)));
+                let resolved = resolve_res_path(project_dir, &res_path);
+                scripts_to_load.push((node_id, resolved, res_path));
             }
         }
     }
 
     let mut attached = 0usize;
-    for (node_id, path) in scripts_to_load {
+    for (node_id, path, res_path) in scripts_to_load {
         match std::fs::read_to_string(&path) {
             Ok(source) => match GDScriptNodeInstance::from_source(&source, node_id) {
                 Ok(instance) => {
@@ -665,17 +666,27 @@ fn attach_scripts_to(tree: &mut SceneTree, ids: Vec<NodeId>, project_dir: &Path)
                     attached += 1;
                     tracing::info!(path = %path.display(), "attached GDScript to node");
                 }
-                Err(e) => tracing::warn!(
-                    path = %path.display(),
-                    error = format!("{e:?}"),
-                    "failed to parse GDScript"
-                ),
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = format!("{e:?}"),
+                        "failed to parse GDScript"
+                    );
+                    // Also into the tree's script-error log, so `--script-output`
+                    // carries it in `script_errors` and scene-audit reports it
+                    // (pat-kkqnm). A WARN line alone let a script that never
+                    // loaded — truck_town's vehicle.gd — pass the audit as OK.
+                    tree.record_script_load_error(node_id, &res_path, &e.to_string());
+                }
             },
-            Err(e) => tracing::warn!(
-                path = %path.display(),
-                error = %e,
-                "failed to read GDScript file"
-            ),
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to read GDScript file"
+                );
+                tree.record_script_load_error(node_id, &res_path, &e.to_string());
+            }
         }
     }
     attached

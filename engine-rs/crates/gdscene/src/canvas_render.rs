@@ -2381,7 +2381,12 @@ pub fn build_control_render_items_sourced(
             // the whole window. A container placed only by a stored `size`
             // (no offsets) keeps that; one with neither still gets the viewport.
             let anchored = control::anchored_size(tree, id, size);
-            let own = if anchored.x > 0.0 && anchored.y > 0.0 {
+            // ⚠️ `||`, not `&&` (pat-60d96): a container anchored as a full-width
+            // STRIP (truck_town's CarContainer: anchor_top = anchor_bottom = 0.5,
+            // anchor_right = 1, offsets 0) has zero authored height and grows
+            // around its centre line. `&&` sent it to the viewport fallback, so
+            // it was laid out 648 tall and its buttons sank 75px.
+            let own = if anchored.x > 0.0 || anchored.y > 0.0 {
                 anchored
             } else {
                 let stored = control::get_size(tree, id);
@@ -2514,7 +2519,21 @@ pub fn build_control_render_items_sourced(
                 z,
                 ..
             } => (
-                Transform2D::translated(rect.position),
+                // 🔑 Scaled INTO the control's rect (pat-60d96): a Sprite kind
+                // draws at the texture's natural size, so a TextureRect /
+                // TextureButton / Button icon drew its full-resolution image
+                // from the rect's corner -- truck_town's 1136x667 logo in an
+                // 841x494 TextureRect overflowed the window by 35%.
+                match crate::control_render::texture_pixel_size(&texture_path) {
+                    Some(natural) => {
+                        Transform2D::translated(rect.position)
+                            * Transform2D::scaled(Vector2::new(
+                                rect.size.x / natural.x,
+                                rect.size.y / natural.y,
+                            ))
+                    }
+                    None => Transform2D::translated(rect.position),
+                },
                 z,
                 Render2DKind::Sprite {
                     texture: texture_path,

@@ -265,18 +265,32 @@ thread_local! {
     /// the scene and baking its sky every frame would dominate the frame; the
     /// `Arc`'d sky bake is also what lets the GPU keep its upload.
     static INLINE_ENV_CACHE: std::cell::RefCell<
-        std::collections::HashMap<(String, String), Option<Environment3D>>,
+        std::collections::HashMap<(String, String), Option<InlineEnvBase>>,
     > = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
 /// The scene file a node was authored in: the `_instance_path` of the node
 /// that owns it (an instanced sub-scene's root), else the project's main scene.
+/// The node property holding the `res://` file a script-instantiated scene's
+/// root was built from (Godot's `Node.scene_file_path`; pat-i4jgd).
+pub const SCENE_FILE_PATH_KEY: &str = "_scene_file_path";
+
 fn authoring_scene_path(tree: &SceneTree, id: NodeId) -> Option<String> {
     let node = tree.get_node(id)?;
     let owner = node.owner().and_then(|o| tree.get_node(o)).unwrap_or(node);
-    match owner.get_property("_instance_path") {
+    // `_instance_path` marks the root of an `instance=` sub-scene;
+    // `_scene_file_path` (Godot's `Node.scene_file_path`) the root of a scene a
+    // SCRIPT instantiated -- truck_town's `preload("town_scene.tscn")
+    // .instantiate()`, which carries none of the former (pat-i4jgd). Without it
+    // the lookup fell back to the main scene, car_select.tscn, which has no
+    // such Environment, and the town played with the project clear colour.
+    let file = |key: &str| match owner.get_property(key) {
         Variant::String(s) if !s.is_empty() => Some(s),
-        _ => {
+        _ => None,
+    };
+    match file("_instance_path").or_else(|| file(SCENE_FILE_PATH_KEY)) {
+        Some(s) => Some(s),
+        None => {
             let main = project_setting_string("application/run/main_scene");
             (!main.is_empty()).then_some(main)
         }
@@ -321,12 +335,32 @@ fn inline_scene_environment(tree: &SceneTree, camera: Option<NodeId>) -> Option<
             continue;
         };
         let key = (scene_path.clone(), sub_id.clone());
-        if let Some(hit) = INLINE_ENV_CACHE.with(|c| c.borrow().get(&key).cloned()) {
-            return hit;
+        let cached = match INLINE_ENV_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+            Some(hit) => hit,
+            None => {
+                let base = inline_env_base_from_scene_file(&scene_path, &sub_id);
+                INLINE_ENV_CACHE.with(|c| c.borrow_mut().insert(key, base.clone()));
+                base
+            }
+        };
+        let (mut props, sky) = cached?;
+        // 🔑 A Godot resource is SHARED: `$WorldEnvironment.environment.
+        // fog_light_color = c` (truck_town's `set_mood`) changes what renders.
+        // Patina lands such writes on the node's `__subres__environment__*`
+        // companions (the interpreter's sub-resource member write), which also
+        // hold the file's body verbatim -- so they are the live values and
+        // win over the file read (pat-i4jgd).
+        let prefix = "__subres__environment__";
+        for (k, v) in node.properties() {
+            if let Some(field) = k.strip_prefix(prefix) {
+                if field != "sky" {
+                    props.insert(field.to_string(), v.clone());
+                }
+            }
         }
-        let env = environment_from_scene_file(&scene_path, &sub_id);
-        INLINE_ENV_CACHE.with(|c| c.borrow_mut().insert(key, env.clone()));
-        return env;
+        let mut env = Environment3D::from_properties(props.iter().map(|(k, v)| (k.as_str(), v)));
+        env.sky = sky;
+        return Some(env);
     }
     None
 }
@@ -376,19 +410,19 @@ fn node_nested_class(node: &Node, path: &str) -> Option<String> {
     }
 }
 
-/// A sky material held in a `.tres` file (`sky_material = ExtResource(..)`, or
-/// `preload("res://town/sky_day.tres")` written by a script), textures loaded.
-fn sky_material_from_tres_path(path: &str) -> Option<SkyMaterial> {
+/// An inline Environment as its scene file declares it: the property bag and
+/// the resolved (texture-loaded, baked) sky.
+type InlineEnvBase = (std::collections::HashMap<String, Variant>, Option<Sky>);
+
+/// A sky material saved as its own `.tres` (`sky_material = ExtResource(..)`,
+/// truck_town's `sky_day.tres`), read with that file's own ext-resource table.
+fn sky_material_from_tres(path: &str) -> Option<SkyMaterial> {
     let text = FileAccess::read_file_string(path).ok()?;
-    let resource = gdresource::loader::TresLoader::new()
-        .parse_str(&text, path)
-        .ok()?;
-    let props: std::collections::HashMap<String, Variant> = resource
-        .properties()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    let ext = |id: &str| resource.ext_resources.get(id).map(|e| e.path.clone());
-    let mut material = sky_material_from_props(&resource.class_name, &props, &ext, &|_| None);
+    let res = gdresource::loader::TresLoader::new().parse_str(&text, path).ok()?;
+    let props: std::collections::HashMap<String, Variant> =
+        res.properties().map(|(k, v)| (k.clone(), v.clone())).collect();
+    let ext = |id: &str| res.ext_resources.get(id).map(|e| e.path.clone());
+    let mut material = sky_material_from_props(&res.class_name, &props, &ext, &|_| None);
     load_sky_textures(&mut material, &ext);
     Some(material)
 }
@@ -414,11 +448,11 @@ fn sky_from_node(node: &Node) -> Option<Sky> {
         }
         Some(Variant::String(r)) if r.starts_with("ExtResource:") => {
             let path = ext(&r["ExtResource:".len()..])?;
-            sky_material_from_tres_path(&path)?
+            sky_material_from_tres(&path)?
         }
         // A script assigned a loaded resource (`preload("res://x.tres")`).
         Some(Variant::Resource(r)) if !r.path.is_empty() && !r.path.contains("::") => {
-            sky_material_from_tres_path(&r.path)?
+            sky_material_from_tres(&r.path)?
         }
         // A script-built material (`ProceduralSkyMaterial.new()`).
         Some(Variant::Resource(r)) => {
@@ -480,12 +514,23 @@ fn environment_from_node(node: &Node) -> Option<Environment3D> {
     Some(env)
 }
 
-/// Builds the Environment sub-resource `env_id` of the scene file at `path`.
+/// The Environment sub-resource `env_id` of the scene file at `path`, as the
+/// FILE declares it (no script writes). The fallback for a node that carries
+/// no flattened companions, and the oracle the companion-built path is tested
+/// against (`inline_environment_from_companions_matches_scene_file`).
 pub fn environment_from_scene_file(path: &str, env_id: &str) -> Option<Environment3D> {
+    let (props, sky) = inline_env_base_from_scene_file(path, env_id)?;
+    let mut env = Environment3D::from_properties(props.iter().map(|(k, v)| (k.as_str(), v)));
+    env.sky = sky;
+    Some(env)
+}
+
+/// Builds the Environment sub-resource `env_id` of the scene file at `path`.
+fn inline_env_base_from_scene_file(path: &str, env_id: &str) -> Option<InlineEnvBase> {
     let text = crate::binary_scene::read_scene_source(path)?;
     let scene = crate::packed_scene::PackedScene::from_tscn(&text).ok()?;
     let props = scene.sub_resource_props(env_id)?;
-    let mut env = Environment3D::from_properties(props.iter().map(|(k, v)| (k.as_str(), v)));
+    let mut env_sky = None;
     let sub_id = |v: Option<&Variant>| match v {
         Some(Variant::String(s)) => s.strip_prefix("SubResource:").map(str::to_string),
         _ => None,
@@ -494,20 +539,44 @@ pub fn environment_from_scene_file(path: &str, env_id: &str) -> Option<Environme
     let sub = |id: &str| scene.sub_resource_props(id).cloned();
     if let Some(sky_props) = sub_id(props.get("sky")).and_then(|id| scene.sub_resource_props(&id))
     {
-        let mut material = match sub_id(sky_props.get("sky_material")) {
-            Some(mid) => match (scene.sub_resource_type(&mid), scene.sub_resource_props(&mid)) {
-                (Some(class), Some(mp)) => sky_material_from_props(class, mp, &ext, &sub),
-                _ => SkyMaterial::Procedural(gdserver3d::sky::ProceduralSkyMaterial::default()),
-            },
-            None => SkyMaterial::Procedural(gdserver3d::sky::ProceduralSkyMaterial::default()),
+        // `sky_material = ExtResource(..)` names a material `.tres`
+        // (pat-i4jgd). It used to fall to the DEFAULT procedural sky, which
+        // drew truck_town's blue day sky as Godot's grey default.
+        let ext_material = match sky_props.get("sky_material") {
+            Some(Variant::String(r)) => r
+                .strip_prefix("ExtResource:")
+                .and_then(|id| ext(id))
+                .and_then(|p| sky_material_from_tres(&p)),
+            _ => None,
         };
-        load_sky_textures(&mut material, &ext);
-        env.sky = Some(Sky {
+        let material = match ext_material {
+            Some(m) => m,
+            None => {
+                let mut material = match sub_id(sky_props.get("sky_material")) {
+                    Some(mid) => {
+                        match (scene.sub_resource_type(&mid), scene.sub_resource_props(&mid)) {
+                            (Some(class), Some(mp)) => {
+                                sky_material_from_props(class, mp, &ext, &sub)
+                            }
+                            _ => SkyMaterial::Procedural(
+                                gdserver3d::sky::ProceduralSkyMaterial::default(),
+                            ),
+                        }
+                    }
+                    None => {
+                        SkyMaterial::Procedural(gdserver3d::sky::ProceduralSkyMaterial::default())
+                    }
+                };
+                load_sky_textures(&mut material, &ext);
+                material
+            }
+        };
+        env_sky = Some(Sky {
             material,
             ..Sky::default()
         });
     }
-    Some(env)
+    Some((props.clone(), env_sky))
 }
 
 /// The environment a running game renders this scene with, or `None` when there

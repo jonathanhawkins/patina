@@ -323,7 +323,7 @@ impl Viewport3D {
                 let deformed = r
                     .mesh_path
                     .as_deref()
-                    .and_then(|marker| marker.split('?').next())
+                    .filter(|marker| !marker.starts_with("primitive:"))
                     .and_then(mesh_from_file)
                     .and_then(|base| {
                         gdscene::render_server_3d::deformed_mesh_for_node(tree, nid, &base)
@@ -790,12 +790,15 @@ pub fn mesh_for_primitive(path: &str) -> Mesh3D {
 fn build_mesh_for_primitive(path: &str) -> Mesh3D {
     use gdserver3d::primitive_mesh::BoxMesh;
 
-    let (marker, (props, text_props)) = split_mesh_marker(path);
     // A file-backed mesh (.obj, or a .glb/.gltf model since pat-s3rrv.31)
-    // renders its own geometry rather than the placeholder marker below.
-    if let Some(mesh) = mesh_from_file(marker) {
-        return mesh;
+    // renders its own geometry rather than the placeholder marker below. Given
+    // the WHOLE marker: a glTF path's query names which mesh of the file.
+    if !path.starts_with("primitive:") {
+        if let Some(mesh) = mesh_from_file(path) {
+            return mesh;
+        }
     }
+    let (marker, (props, text_props)) = split_mesh_marker(path);
 
     // ⚠️ One resolver, shared with the runtime renderer (pat-s3rrv.199).
     // This used to be a private match with its own fallback numbers, which is
@@ -867,10 +870,22 @@ pub(crate) fn mesh_geometry_for_node(
 }
 
 fn mesh_marker_with_props(tree: &SceneTree, node_id: u64, path: String) -> String {
+    let nid = gdscene::node::NodeId::from_object_id(gdcore::id::ObjectId::from_raw(node_id));
     if !path.starts_with("primitive:") {
+        // A node instanced from a multi-mesh glTF names the FILE in `mesh` and
+        // WHICH mesh of it in `gltf_mesh_index` (gltf_scene.rs); the index has
+        // to travel in the marker, which is all the render body sees
+        // (pat-i4jgd).
+        let lower = path.to_ascii_lowercase();
+        if (lower.ends_with(".gltf") || lower.ends_with(".glb")) && !path.contains('?') {
+            if let Some(gdvariant::Variant::Int(i)) =
+                tree.get_node(nid).map(|n| n.get_property("gltf_mesh_index"))
+            {
+                return format!("{path}?gltf_mesh={i}");
+            }
+        }
         return path;
     }
-    let nid = gdscene::node::NodeId::from_object_id(gdcore::id::ObjectId::from_raw(node_id));
     let Some(node) = tree.get_node(nid) else {
         return path;
     };
@@ -990,7 +1005,19 @@ fn split_mesh_marker(path: &str) -> (&str, MarkerProps) {
 /// current working directory, which is where the editor runs a project from.
 /// Anything unreadable or unparseable returns `None` so the caller keeps its
 /// placeholder — a missing asset should not blank the viewport.
-fn mesh_from_file(path: &str) -> Option<Mesh3D> {
+///
+/// 🔑 The path may carry a `?gltf_mesh=<i>` query ([`mesh_marker_with_props`]
+/// appends it from the node's `gltf_mesh_index`): a glTF node draws ONE mesh of
+/// its document, not every primitive in the file (pat-i4jgd). Without it each of
+/// truck_town's 35 town-model nodes drew the whole town again, offset by its own
+/// transform -- the copy placed by `HugeTireMesh` swallowed the camera and the
+/// Play view was one dark surface.
+fn mesh_from_file(marker: &str) -> Option<Mesh3D> {
+    let (path, query) = marker.split_once('?').unwrap_or((marker, ""));
+    let gltf_mesh = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("gltf_mesh="))
+        .and_then(|v| v.parse::<i64>().ok());
     let lowered = path.to_ascii_lowercase();
     let on_disk = path.strip_prefix("res://").unwrap_or(path);
 
@@ -1005,7 +1032,9 @@ fn mesh_from_file(path: &str) -> Option<Mesh3D> {
         // Parsed once per file (pat-ujiku): this runs for every mesh node on
         // every frame, under the editor-state lock.
         let resource = gdscene::render_server_3d::import_gltf_cached(path)?;
-        return gdscene::render_server_3d::mesh3d_from_gltf_resource(&resource);
+        return gdscene::render_server_3d::mesh3d_from_gltf_resource_for_mesh(
+            &resource, gltf_mesh,
+        );
     }
 
     // pat-33wmr: a saved ArrayMesh — every GridMap tile of a real Godot

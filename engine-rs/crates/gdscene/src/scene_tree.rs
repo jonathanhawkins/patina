@@ -2575,6 +2575,7 @@ impl SceneTree {
             // callback writes reaches the node like any other.
             script.pump_xr_signals();
             script.clear_scene_access();
+            self.record_coroutine_errors(node_id, &mut *script);
 
             // Sync any variables a resumed coroutine wrote (e.g. `done = true`)
             // back to node properties, matching `call_script_with_access`.
@@ -5774,21 +5775,45 @@ impl SceneTree {
     /// `SceneState::instantiate` applies the scene's stored values. Running it
     /// after would let a constructor silently overwrite an authored override.
     ///
-    /// ⚠️ Invoked on the script directly, with no `SceneAccess` bound, and that
-    /// is faithful rather than a shortcut: in Godot `_init` runs before the node
-    /// is in the tree, so `get_tree()` is null inside it. A failure is ignored
-    /// for the same reason the local-to-scene setup callback is silent — a
-    /// script that does not define `_init`, or whose `_init` raises, is still a
-    /// valid instance.
+    /// ⚠️ `_init` (and the deferred member initializers before it) run with
+    /// `SceneAccess` bound to this node, so they can read the node's own
+    /// properties as Godot's constructor can (`var base_fov := fov`,
+    /// pat-0ywbp). The node is not in the tree yet. A failure in `_init` is
+    /// ignored for the same reason the local-to-scene setup callback is silent:
+    /// a script that does not define `_init`, or whose `_init` raises, is still
+    /// a valid instance.
     pub fn attach_script_with_init_args(
         &mut self,
         node_id: NodeId,
         mut script: Box<dyn ScriptInstance>,
         init_args: &[Variant],
     ) {
+        // Member initializers that read the node (`var base_fov := fov`,
+        // `var initial_transform := transform`) were deferred by the
+        // interpreter, which had no node at construction (pat-0ywbp). Godot
+        // runs them as the script is set, BEFORE `_init` and before the
+        // `.tscn` values listed after `script = …` are applied — so they see
+        // the node's native properties (truck_town's Camera3D: fov 74, its
+        // authored transform) while an exported override still reads its
+        // initializer. Real Godot 4.6.1 prints `INIT fov=74 base_fov=74` for
+        // that camera.
+        //
+        // SAFETY: the accessor lives only for this block and is cleared before
+        // it ends, the invariant `call_script_method` relies on; `script` is
+        // not in the arena yet, so it cannot alias.
+        let accessor = unsafe { crate::scripting::SceneTreeAccessor::new(self as *mut SceneTree) };
+        script.set_scene_access(Box::new(accessor), node_id.raw());
+        let init_result = script.resolve_member_initializers();
+        if let Err(err) = init_result {
+            tracing::error!(node = %node_id, error = %err, "member initializer failed");
+            self.record_script_error(node_id, "<member initializer>", &err.to_string());
+        }
+        // `_init` runs with the same binding: in Godot the object exists, so
+        // `fov` inside `_init` reads the Camera3D's value (74, not an error).
         if script.has_method("_init") {
             let _ = script.call_method("_init", init_args);
         }
+        script.clear_scene_access();
         // Godot applies a scene's stored node properties through `Object::set` as
         // it instantiates (packed_scene.cpp `SceneState::instantiate`), which
         // routes each exported value into the script instance and runs that
@@ -6375,6 +6400,41 @@ impl SceneTree {
             .push_back(format!("{path}: {method}(): {error}"));
     }
 
+    /// Moves the errors `script`'s resumed coroutines raised into the script
+    /// error log, as `<node>: <function>(): <error> at line N` — the same shape
+    /// a failed direct call gets (pat-c7i5e).
+    fn record_coroutine_errors(&mut self, node_id: NodeId, script: &mut dyn ScriptInstance) {
+        for (function, error) in script.take_coroutine_errors() {
+            tracing::error!(node = %node_id, function = %function, error = %error, "resumed coroutine failed");
+            self.record_script_error(node_id, &function, &error);
+        }
+    }
+
+    /// Records a script that could not be attached to `node_id` because its
+    /// file failed to read or PARSE (pat-kkqnm), into the same log failed
+    /// calls go to, so `--script-output`'s `script_errors` and every host that
+    /// drains [`Self::drain_script_output`] see it. The node runs without its
+    /// script, which is otherwise silent.
+    ///
+    /// Format: `<node path>: script failed to load: <res path>: <error>` —
+    /// scene-audit keys its "script load failure" finding on that phrase.
+    pub fn record_script_load_error(&mut self, node_id: NodeId, script_path: &str, error: &str) {
+        let path = self
+            .node_path(node_id)
+            .unwrap_or_else(|| format!("<node {}>", node_id.raw()));
+        let line = format!("{path}: script failed to load: {script_path}: {error}");
+        // A node left scriptless is retried by every later attach pass (the
+        // runner's boot then its main path), each failing the same way. Godot
+        // loads a script resource once, so it reports it once.
+        if self.script_errors.contains(&line) {
+            return;
+        }
+        if self.script_errors.len() >= SCRIPT_ERROR_LOG_CAP {
+            self.script_errors.pop_front();
+        }
+        self.script_errors.push_back(line);
+    }
+
     /// Drops a freed node's script, keeping whatever it printed or raised that
     /// has not been drained yet.
     fn retire_script(&mut self, node_id: NodeId) {
@@ -6430,6 +6490,15 @@ impl SceneTree {
         out.prints.extend(stamped.into_iter().map(|(_, line)| line));
         out.errors.extend(self.drain_script_errors());
         out
+    }
+
+    /// Whether `node_id`'s SCRIPT (attached, or currently executing) declares
+    /// `method` — native class methods are not counted.
+    pub fn script_declares_method(&self, node_id: NodeId, method: &str) -> bool {
+        match self.scripts.get(&node_id) {
+            Some(script) => script.has_method(method),
+            None => running_script_has_method(node_id, method),
+        }
     }
 
     pub fn node_has_method(&self, node_id: NodeId, method: &str) -> bool {
@@ -6511,6 +6580,7 @@ impl SceneTree {
             // `await` reject another node's same-named signal (pat-0q2kx.9).
             script.notify_await_signal_from(source.raw(), signal_name, args);
             script.clear_scene_access();
+            self.record_coroutine_errors(node_id, &mut *script);
 
             // Sync any variables a resumed coroutine wrote back to node
             // properties, matching `call_script_with_access`.

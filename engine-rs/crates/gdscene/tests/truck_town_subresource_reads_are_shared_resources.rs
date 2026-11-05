@@ -457,6 +457,19 @@ fn the_town_runs_without_sub_resource_errors() {
         ),
         "the speedometer tints its label every frame"
     );
+    // Godot 4.6.1: `tint_gradient.resource_path` ==
+    // "res://town/town_scene.tscn::Gradient_nng2a" — the town was
+    // script-instantiated, so its file is the root's `scene_file_path`.
+    match ml
+        .tree()
+        .get_script(sp)
+        .and_then(|s| s.get_property("tint_gradient"))
+    {
+        Some(Variant::Resource(r)) => {
+            assert_eq!(r.path, "res://town/town_scene.tscn::Gradient_nng2a")
+        }
+        other => panic!("tint_gradient must be a Resource, got {other:?}"),
+    }
 }
 
 fn sky_top(env: &gdserver3d::environment::Environment3D) -> [f32; 4] {

@@ -162,9 +162,18 @@ fn scope_of(tree: &SceneTree, id: NodeId) -> (Option<String>, NodeId) {
 /// Godot's `resource_path` for an embedded sub-resource: `"<scene>::<id>"`, or
 /// empty when the owning scene's file is not recorded.
 fn resource_path_for(tree: &SceneTree, id: NodeId, sub_id: &str) -> String {
-    match scope_of(tree, id).0 {
-        Some(scene) => format!("{scene}::{sub_id}"),
-        None => String::new(),
+    if let Some(scene) = scope_of(tree, id).0 {
+        return format!("{scene}::{sub_id}");
+    }
+    // A scene a SCRIPT instantiated records its file as Godot's
+    // `scene_file_path` on its root (`world_environment::SCENE_FILE_PATH_KEY`).
+    let owner = tree
+        .get_node(id)
+        .map(|n| n.owner().unwrap_or(id))
+        .and_then(|o| tree.get_node(o));
+    match owner.map(|o| o.get_property(crate::world_environment::SCENE_FILE_PATH_KEY)) {
+        Some(Variant::String(scene)) if !scene.is_empty() => format!("{scene}::{sub_id}"),
+        _ => String::new(),
     }
 }
 

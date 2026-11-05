@@ -1555,7 +1555,15 @@ pub fn resolve_control_layout(tree: &mut SceneTree, node_id: NodeId, parent: Vec
     let set_from_outside = match last {
         Variant::Rect2(r) => r.position != pos || r.size != size,
         // First layout: an authored rect with no authored offsets is the rect.
-        _ => !offsets_authored && (pos != Vector2::ZERO || size != Vector2::ZERO),
+        // ⚠️ Unless an ANCHOR is set (pat-60d96): anchors with zero offsets are
+        // a complete layout -- truck_town's CarContainer is a full-width strip
+        // on the centre line (anchor_top = anchor_bottom = 0.5). Its container
+        // pass had already stored a size, so the (0, 0) position was taken as
+        // authored and the strip jumped to the top of the menu.
+        _ => {
+            let anchored = [al, at, ar, ab].iter().any(|a| *a != 0.0);
+            !offsets_authored && !anchored && (pos != Vector2::ZERO || size != Vector2::ZERO)
+        }
     };
     if set_from_outside {
         set_offset_left(tree, node_id, pos.x - parent.x * al);
@@ -1673,10 +1681,26 @@ pub fn content_minimum_size(tree: &SceneTree, node_id: NodeId) -> Vector2 {
         return Vector2::new(width, lines * line_h);
     }
     if gdobject::class_db::is_parent_class(class, "BaseButton") {
-        return Vector2::new(
-            text_w(&text) + 2.0 * BUTTON_CONTENT_MARGIN,
-            line_h + 2.0 * BUTTON_CONTENT_MARGIN,
-        );
+        // A Button's `icon` adds to its minimum (`Button::
+        // get_minimum_size_for_text_and_icon`): beside the text, separated by
+        // the theme's `h_separation` (4) when there is text, and at least as
+        // tall (pat-60d96). Without it truck_town's three icon-only car buttons
+        // laid out 8x24 and their pictures had nowhere to draw.
+        let icon = if class == "Button" && !matches!(node.get_property("expand_icon"), Variant::Bool(true)) {
+            crate::control_render::texture_path_prop(tree, node_id, "icon")
+                .and_then(|p| crate::control_render::texture_pixel_size(&p))
+        } else {
+            None
+        };
+        let tw = text_w(&text);
+        let (w, h) = match icon {
+            Some(sz) => (
+                tw + sz.x + if text.is_empty() { 0.0 } else { BUTTON_H_SEPARATION },
+                line_h.max(sz.y),
+            ),
+            None => (tw, line_h),
+        };
+        return Vector2::new(w + 2.0 * BUTTON_CONTENT_MARGIN, h + 2.0 * BUTTON_CONTENT_MARGIN);
     }
     Vector2::ZERO
 }
@@ -1684,7 +1708,9 @@ pub fn content_minimum_size(tree: &SceneTree, node_id: NodeId) -> Vector2 {
 /// Godot's default theme font size.
 const DEFAULT_FONT_SIZE: f32 = 16.0;
 /// Content margin on each side of the default button stylebox.
-const BUTTON_CONTENT_MARGIN: f32 = 4.0;
+pub(crate) const BUTTON_CONTENT_MARGIN: f32 = 4.0;
+/// The default theme's `Button.h_separation` between icon and text.
+const BUTTON_H_SEPARATION: f32 = 4.0;
 
 /// A Control's size as its anchors and offsets give it inside its parent —
 /// the parent Control's own anchored size, or `viewport` for a Control whose

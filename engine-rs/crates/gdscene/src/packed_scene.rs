@@ -2435,6 +2435,45 @@ impl PackedScene {
         self.sub_resource_props.insert(id, props);
     }
 
+    /// Applies a scene `.import`'s `nodes/root_scale` to a glTF-built scene
+    /// (pat-i4jgd), as `ResourceImporterScene::import` does.
+    ///
+    /// With `nodes/apply_root_scale` (Godot's default) the scale is baked into
+    /// the descendants (`_apply_permanent_scale_to_descendants`) and the root
+    /// keeps an identity transform -- which matters, because an instancing
+    /// scene's `transform = ...` override REPLACES the root's transform. Godot
+    /// scales every descendant's origin and every mesh's vertices; for a uniform
+    /// scale that places every vertex exactly where left-multiplying each
+    /// direct child's transform by the scale does, so that is what this does.
+    /// ⚠️ The children's `scale` therefore reads `s` here where Godot reads 1.
+    ///
+    /// Without `apply_root_scale` the root node itself is scaled.
+    pub(crate) fn apply_gltf_root_scale(&mut self, scale: f32, apply_to_descendants: bool) {
+        if (scale - 1.0).abs() < f32::EPSILON || !scale.is_finite() || scale <= 0.0 {
+            return;
+        }
+        let s = gdcore::math3d::Transform3D {
+            basis: gdcore::math3d::Basis::from_scale(gdcore::math::Vector3::new(scale, scale, scale)),
+            origin: gdcore::math::Vector3::ZERO,
+        };
+        for t in &mut self.templates {
+            let target = if apply_to_descendants {
+                t.parent_path.as_deref() == Some(".")
+            } else {
+                t.parent_path.is_none()
+            };
+            if !target {
+                continue;
+            }
+            let current = match t.properties.get("transform") {
+                Some(Variant::Transform3D(x)) => *x,
+                _ => gdcore::math3d::Transform3D::IDENTITY,
+            };
+            t.properties
+                .insert("transform".into(), Variant::Transform3D(s * current));
+        }
+    }
+
     /// The clips of a scene built from a glTF document, for the importer to
     /// apply its `.import` settings to (pat-3mbf5). `None` for any other scene.
     pub fn gltf_animations_mut(&mut self) -> Option<&mut Vec<crate::animation::Animation>> {
@@ -3847,9 +3886,25 @@ fn ext_material_props(
     if resource.class_name == "ShaderMaterial" {
         return None;
     }
+    // 🔑 A texture inside the material names the `.tres`'s OWN ext table
+    // (`albedo_texture = ExtResource("1_5bi3i")` in truck_town's grass.tres),
+    // which is meaningless once the bag is flattened onto a node of another
+    // file: resolve it to the `res://` path here, the form the texture loader
+    // reads (pat-i4jgd). Unresolved, the road and grass drew untextured white.
     let props = resource
         .properties()
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(k, v)| {
+            let v = match v {
+                Variant::String(s) => match parse_ext_resource_ref(s)
+                    .and_then(|id| resource.ext_resources.get(&id))
+                {
+                    Some(ext) => Variant::String(ext.path.clone()),
+                    None => v.clone(),
+                },
+                other => other.clone(),
+            };
+            (k.clone(), v)
+        })
         .collect();
     Some((resource.class_name.clone(), props))
 }

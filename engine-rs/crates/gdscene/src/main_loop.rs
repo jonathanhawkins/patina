@@ -2817,6 +2817,14 @@ impl MainLoop {
         };
         self.physics_server_3d
             .set_gravity(Vector3::new(dir3.x * g3, dir3.y * g3, dir3.z * g3));
+        // The 3D space's default damping (pat-qg3nu). Absent keys keep Godot's
+        // defaults (0.1 / 0.1), which the server already holds.
+        if let Some(v) = settings.get("physics/3d/default_linear_damp").and_then(|v| v.as_float()) {
+            self.physics_server_3d.set_default_linear_damp(v as f32);
+        }
+        if let Some(v) = settings.get("physics/3d/default_angular_damp").and_then(|v| v.as_float()) {
+            self.physics_server_3d.set_default_angular_damp(v as f32);
+        }
 
         // Jolt's contact penetration model (pat-29zst), only when the project
         // selects Jolt. The key spelling is project.godot's own
