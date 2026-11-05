@@ -170,20 +170,30 @@ pub fn process_character_movement(tree: &mut SceneTree, physics: &PhysicsServer3
         // on the CharacterBody3D silently skipped every character and nothing
         // ever moved. Registration resolves shapes the same way (`find_map` over
         // the body's children in `sync_to_physics`).
-        let children = match tree.get_node(node_id) {
-            Some(n) => n.children().to_vec(),
-            None => continue,
-        };
-        let Some(shape) = children
-            .iter()
-            .find_map(|&child| crate::physics_server_3d::shape_from_node_3d(tree, child))
+        //
+        // 🔑 The shape's OFFSET comes along (pat-2ifdx): a character's capsule
+        // is normally raised by half its height so the body origin sits at the
+        // feet, and sweeping it at the origin stood every such character half a
+        // body above the floor. Same subtree walk the server registers bodies
+        // with, so the two cannot disagree about which shape is primary.
+        let Some((shape_offset, shape_rotation, shape)) =
+            crate::physics_server_3d::shapes_from_body_subtree(tree, node_id)
+                .into_iter()
+                .next()
         else {
             continue;
         };
 
         // World space, like every other physics read (pat-0q2kx.31).
-        let start = node3d::get_global_transform(tree, node_id).origin;
+        let global = node3d::get_global_transform(tree, node_id);
+        let start = global.origin;
         let mut character = CharacterBody3D::new(start, shape);
+        // `shapes_from_body_subtree` answers in the body's LOCAL frame; the
+        // sweep is in world space and the character carries no rotation of its
+        // own, so the body's rotation is folded into the offset here.
+        let body_rot = global.basis.get_rotation_quaternion();
+        character.shape_offset = body_rot.xform(shape_offset);
+        character.shape_rotation = body_rot * shape_rotation;
         character.up_direction = vec3_prop(tree, node_id, "up_direction", DEFAULT_UP_DIRECTION);
         character.floor_max_angle =
             f32_prop(tree, node_id, "floor_max_angle", DEFAULT_FLOOR_MAX_ANGLE);

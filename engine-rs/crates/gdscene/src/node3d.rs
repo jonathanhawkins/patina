@@ -2296,7 +2296,24 @@ pub fn call_node3d_method(
         }
         "set_as_top_level" => {
             let enabled = matches!(args.first(), Some(Variant::Bool(true)));
-            set_top_level(tree, node_id, enabled);
+            // 🔑 Godot KEEPS the node where it is on screen when the flag
+            // flips (`Node3D::set_as_top_level`: enabling stores
+            // `get_global_transform()` as the new local transform; disabling
+            // stores `parent_global⁻¹ * global`). Flipping only the flag made
+            // the old LOCAL transform read as a world one, so the official 3D
+            // platformer's follow camera — `set_as_top_level(true)` in `_ready`
+            // — jumped from behind the player to near the world origin, its
+            // first follow step swung it round to the far side, and the
+            // player then walked "forward" in the wrong direction.
+            if enabled != is_top_level(tree, node_id) {
+                let global = get_global_transform(tree, node_id);
+                set_top_level(tree, node_id, enabled);
+                let parent_global = effective_parent_global(tree, node_id);
+                let local = parent_global.inverse() * global;
+                if let Some(node) = tree.get_node_mut(node_id) {
+                    store_local_transform(node, local);
+                }
+            }
             Some(Variant::Nil)
         }
         "is_set_as_top_level" => Some(Variant::Bool(is_top_level(tree, node_id))),

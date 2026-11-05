@@ -289,11 +289,46 @@ const MAX_HULL_POINTS_FOR_PLANES: usize = 24;
 /// Returns an empty vec for degenerate (`< 4` points) or oversized
 /// (`> MAX_HULL_POINTS_FOR_PLANES`) inputs — callers fall back to the
 /// bounding box in that case.
+///
+/// 🔑 Memoized by the exact point bits (pat-2ifdx). The derivation is O(n^4)
+/// — about 50k dot products for a 24-point hull — and the ray and point tests
+/// call it per query, so a GridMap level's convex tiles (the same few hulls
+/// repeated across thousands of cells) re-derived identical planes several
+/// times every tick. The cache is bounded and simply cleared when full.
 pub fn convex_face_planes(points: &[Vector3]) -> Vec<(Vector3, f32)> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    const CACHE_LIMIT: usize = 4096;
+    static CACHE: OnceLock<Mutex<HashMap<Vec<u32>, Vec<(Vector3, f32)>>>> = OnceLock::new();
+
     let n = points.len();
     if !(4..=MAX_HULL_POINTS_FOR_PLANES).contains(&n) {
         return Vec::new();
     }
+    let key: Vec<u32> = points
+        .iter()
+        .flat_map(|p| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()])
+        .collect();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(map) = cache.lock() {
+        if let Some(planes) = map.get(&key) {
+            return planes.clone();
+        }
+    }
+    let planes = derive_convex_face_planes(points);
+    if let Ok(mut map) = cache.lock() {
+        if map.len() >= CACHE_LIMIT {
+            map.clear();
+        }
+        map.insert(key, planes.clone());
+    }
+    planes
+}
+
+/// The uncached derivation behind [`convex_face_planes`].
+fn derive_convex_face_planes(points: &[Vector3]) -> Vec<(Vector3, f32)> {
+    let n = points.len();
 
     const EPS: f32 = 1e-4;
     let mut planes: Vec<(Vector3, f32)> = Vec::new();

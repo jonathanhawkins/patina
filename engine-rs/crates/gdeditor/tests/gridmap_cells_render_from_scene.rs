@@ -89,10 +89,12 @@ fn gridmap_cells_render_from_scene() {
         cells[0].0, "res://meshes/cube.obj",
         "the cell must carry the mesh path its library item names",
     );
-    // cell x = 2 at cell_size 2 → world x = 4.
+    // cell x = 2 at cell_size 2 → world x = 5: Godot's `map_to_local` puts a
+    // cell at its CENTRE, `cell * cell_size + cell_size / 2` on every
+    // `cell_center_*` axis (default true) — pat-2ifdx.
     assert!(
-        (cells[0].1.x - 4.0).abs() < 1e-4,
-        "the cell must sit at cell * cell_size = 4 on x, got {}",
+        (cells[0].1.x - 5.0).abs() < 1e-4,
+        "the cell must sit at its centre, cell * cell_size + 1 = 5 on x, got {}",
         cells[0].1.x,
     );
 }

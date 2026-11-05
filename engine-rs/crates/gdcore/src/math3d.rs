@@ -475,17 +475,16 @@ impl Transform3D {
     }
 
     /// Creates a transform that looks at `target` from `self.origin` with the given `up` vector.
+    ///
+    /// Godot: `t.basis = Basis::looking_at(target - origin, up)` — the basis's
+    /// **-Z** faces the target (`core/math/transform_3d.cpp`). This used to
+    /// build +Z toward the target with X = up x forward, the mirror of Godot's
+    /// answer, so a script that re-reads `basis.z` after `looking_at(-dir)`
+    /// (the platformer's `enemy.gd`) saw its heading flip every tick and the
+    /// enemy turned back and forth instead of round (pat-1unro).
     pub fn looking_at(self, target: Vector3, up: Vector3) -> Self {
-        let forward = (target - self.origin).normalized();
-        let right = up.cross(forward).normalized();
-        let new_up = forward.cross(right);
-
         Self {
-            basis: Basis {
-                x: right,
-                y: new_up,
-                z: forward,
-            },
+            basis: Basis::looking_at(target - self.origin, up),
             origin: self.origin,
         }
     }
@@ -2015,6 +2014,28 @@ impl Plane {
 mod tests {
     use super::*;
     use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI};
+
+    /// pat-1unro — Godot 4.6.1: `Transform3D().looking_at(Vector3(1, 0, 0))`
+    /// has `basis.z == (-1, 0, 0)` and `basis.x == (0, 0, 1)`: -Z faces the
+    /// target. This returned +Z toward it (and a mirrored X), so the
+    /// platformer's `looking_at(-dir)` → `basis.z` round trip flipped every
+    /// tick.
+    #[test]
+    fn transform3d_looking_at_points_minus_z_at_the_target_like_godot() {
+        let t = Transform3D::IDENTITY.looking_at(Vector3::new(1.0, 0.0, 0.0), Vector3::UP);
+        assert!(v3_approx_eq(t.basis.z, Vector3::new(-1.0, 0.0, 0.0)), "{:?}", t.basis);
+        assert!(v3_approx_eq(t.basis.x, Vector3::new(0.0, 0.0, 1.0)), "{:?}", t.basis);
+        assert!(v3_approx_eq(t.basis.y, Vector3::UP), "{:?}", t.basis);
+        // The target is taken relative to the transform's own origin, which
+        // is kept.
+        let moved = Transform3D {
+            basis: Basis::IDENTITY,
+            origin: Vector3::new(5.0, 0.0, 0.0),
+        }
+        .looking_at(Vector3::new(5.0, 0.0, 3.0), Vector3::UP);
+        assert!(v3_approx_eq(moved.basis.z, Vector3::new(0.0, 0.0, -1.0)));
+        assert_eq!(moved.origin, Vector3::new(5.0, 0.0, 0.0));
+    }
 
     const EPSILON: f32 = 1e-5;
 

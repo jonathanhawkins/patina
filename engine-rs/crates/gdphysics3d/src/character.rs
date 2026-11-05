@@ -9,6 +9,7 @@
 //! `floor_constant_speed`, `floor_block_on_wall`, `wall_min_slide_angle`).
 
 use gdcore::math::Vector3;
+use gdcore::math3d::Quaternion;
 
 use crate::body::{BodyId3D, PhysicsBody3D};
 use crate::collision;
@@ -43,6 +44,17 @@ pub struct CharacterBody3D {
     pub position: Vector3,
     /// Collision shape in local space.
     pub shape: Shape3D,
+    /// Where the shape sits relative to [`position`](Self::position): the
+    /// `CollisionShape3D`'s transform under the body (pat-2ifdx).
+    ///
+    /// 🔑 A stock character raises its capsule by half its height so the body
+    /// origin is at the FEET (the official 3D platformer authors `0, 1.05, 0`
+    /// for a 2.1 m capsule). Testing the capsule at the origin instead put it
+    /// half a body too low, so the character came to rest 1.05 m above where
+    /// Godot stands it.
+    pub shape_offset: Vector3,
+    /// The shape's rotation relative to the body.
+    pub shape_rotation: Quaternion,
     /// The up direction for floor/ceiling detection (default: positive Y).
     pub up_direction: Vector3,
     /// Maximum angle (in radians) from up_direction that still counts as floor.
@@ -198,6 +210,8 @@ impl CharacterBody3D {
         Self {
             position,
             shape,
+            shape_offset: Vector3::ZERO,
+            shape_rotation: Quaternion::IDENTITY,
             up_direction: Vector3::new(0.0, 1.0, 0.0),
             floor_max_angle: DEFAULT_FLOOR_MAX_ANGLE,
             collision_layer: 1,
@@ -226,6 +240,57 @@ impl CharacterBody3D {
             platform_angular_velocity: Vector3::ZERO,
             last_motion: Vector3::ZERO,
         }
+    }
+
+    /// The deepest overlap between this character's shape — placed at `at`
+    /// plus [`shape_offset`](Self::shape_offset) — and EVERY shape `body` owns,
+    /// each at its own world position and rotation (pat-2ifdx).
+    ///
+    /// ⚠️ Replaces a test of the body's primary shape at the body ORIGIN with
+    /// no rotation. That dropped a body's shape offset, its extra shapes and
+    /// its orientation, so a rotated GridMap corner tile collided as if it were
+    /// unrotated and a two-shape body collided as one.
+    ///
+    /// A bounding-sphere reject runs before the narrow phase: a level holds
+    /// thousands of static bodies and the sweep tests every one of them
+    /// several times per tick.
+    fn collide_body(&self, at: Vector3, body: &PhysicsBody3D) -> collision::CollisionResult3D {
+        let own_pos = at + self.shape_offset;
+        let own_radius = bounding_sphere(&self.shape);
+        let mut best = collision::CollisionResult3D::NONE;
+        let primary = (
+            body.position + body.rotation.xform(body.shape_offset),
+            body.rotation * body.shape_rotation,
+            &body.shape,
+        );
+        let extras = body.extra_shapes.iter().map(|(off, rot, shape)| {
+            (
+                body.position + body.rotation.xform(*off),
+                body.rotation * *rot,
+                shape,
+            )
+        });
+        for (pos, rot, shape) in std::iter::once(primary).chain(extras) {
+            let theirs = bounding_sphere(shape);
+            let reach = own_radius.1 + theirs.1;
+            let centre_a = own_pos + self.shape_rotation.xform(own_radius.0);
+            let centre_b = pos + rot.xform(theirs.0);
+            if (centre_a - centre_b).length_squared() > reach * reach {
+                continue;
+            }
+            let r = collision::test_collision_rot(
+                own_pos,
+                self.shape_rotation,
+                &self.shape,
+                pos,
+                rot,
+                shape,
+            );
+            if r.colliding && (!best.colliding || r.depth > best.depth) {
+                best = r;
+            }
+        }
+        best
     }
 
     /// Returns the minimum extent of the shape, used for sub-step sizing.
@@ -418,6 +483,17 @@ impl CharacterBody3D {
             self.platform_velocity = Vector3::ZERO;
         }
 
+        // Godot: "Reset the gravity accumulation when touching the ground" —
+        // `if (on_floor && !vel_dir_facing_up) velocity = velocity.slide(up)`
+        // (`character_body_3d.cpp`, `_move_and_slide_grounded`). Without it a
+        // standing character kept one tick of gravity in `velocity.y`
+        // (-0.1833 at the platformer's 22 m/s^2, 120 Hz) where Godot reads 0
+        // (pat-2ifdx).
+        if grounded_mode && self.on_floor && !vel_dir_facing_up {
+            let up = self.up_direction;
+            output_vel = output_vel - up * output_vel.dot(up);
+        }
+
         output_vel
     }
 
@@ -433,6 +509,18 @@ impl CharacterBody3D {
         vel_dir_facing_up: bool,
     ) -> Vector3 {
         let mut remaining = step_vel;
+        // The displacement still to APPLY this iteration — distinct from
+        // `remaining`, the slid motion this returns (pat-2ifdx).
+        //
+        // 🔑 A collision is resolved by moving to the FULL target and pushing
+        // out along the surface normal, which already IS the slide: the motion
+        // projected onto the surface. The old loop then applied the projected
+        // remainder a second time from the pushed-out position, so every tick
+        // spent touching a surface moved the character twice along it — the
+        // platformer's player walked at 2x MAX_SPEED across its own floor while
+        // its reported `velocity` read exactly MAX_SPEED. After a contact only
+        // depenetration from further bodies remains, so nothing more is applied.
+        let mut to_apply = step_vel;
 
         for _ in 0..self.max_slides {
             if remaining.length_squared() < 1e-8 {
@@ -446,7 +534,7 @@ impl CharacterBody3D {
             // `get_position_delta` for every ordinary move, which is exactly
             // the bug the two methods exist to distinguish.
             let iter_start = self.position;
-            let target = self.position + remaining;
+            let target = self.position + to_apply;
 
             // Find the deepest collision against all bodies.
             //
@@ -463,8 +551,7 @@ impl CharacterBody3D {
                     continue;
                 }
 
-                let result =
-                    collision::test_collision(target, &self.shape, body.position, &body.shape);
+                let result = self.collide_body(target, body);
 
                 if result.colliding
                     && result.depth > 0.0
@@ -478,7 +565,11 @@ impl CharacterBody3D {
             let Some(result) = deepest else {
                 // No collision — move freely.
                 self.position = target;
-                self.last_motion = self.position - iter_start;
+                // A depenetration-only pass (`to_apply` zero) moved nothing, so
+                // it must not overwrite the last real motion with zero.
+                if to_apply.length_squared() > 0.0 {
+                    self.last_motion = self.position - iter_start;
+                }
                 break;
             };
 
@@ -495,6 +586,8 @@ impl CharacterBody3D {
             // reproduces the old exact-contact behaviour (pat-s3rrv.103).
             self.position = target + surface_normal * (result.depth + self.safe_margin);
             self.last_motion = self.position - iter_start;
+            let applied = to_apply;
+            to_apply = Vector3::ZERO;
 
             // `slide_on_ceiling = false`: a jump into a ceiling stops dead and
             // the body falls vertically instead of skating along it
@@ -511,6 +604,20 @@ impl CharacterBody3D {
             // contact would freeze a character the moment its head brushed
             // anything, which is what dropping that term looks like in play.
             if self.on_ceiling && !self.slide_on_ceiling && vel_dir_facing_up {
+                // Godot stops the body AT the contact: it travels only the
+                // fraction of this motion that reached the ceiling, sideways
+                // component included. Pushing out of the full target (above)
+                // would keep the whole sideways step, i.e. still slide
+                // (pat-2ifdx — the old loop hid this by sliding twice when the
+                // knob was on).
+                let into = -applied.dot(surface_normal);
+                let reach = if into > 1e-9 {
+                    (1.0 - (result.depth + self.safe_margin) / into).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                self.position = iter_start + applied * reach;
+                self.last_motion = self.position - iter_start;
                 // ⚠️ Recorded before returning. The contact HAPPENED — cancelling
                 // the remaining motion is the response to it, not a reason to
                 // hide it — and a script checking `get_slide_collision_count()`
@@ -591,7 +698,7 @@ impl CharacterBody3D {
             if (self.collision_mask & body.collision_layer) == 0 {
                 continue;
             }
-            let result = collision::test_collision(target, &self.shape, body.position, &body.shape);
+            let result = self.collide_body(target, body);
             if result.colliding
                 && result.depth > 0.0
                 && (deepest.is_none() || result.depth > deepest.as_ref().unwrap().depth)
@@ -637,7 +744,7 @@ impl CharacterBody3D {
             if (self.collision_mask & body.collision_layer) == 0 {
                 continue;
             }
-            let r = collision::test_collision(probe_pos, &self.shape, body.position, &body.shape);
+            let r = self.collide_body(probe_pos, body);
             if r.colliding && r.depth > 0.0 {
                 let normal = -r.normal;
                 if normal.dot(self.up_direction) > floor_cos
@@ -665,7 +772,7 @@ impl CharacterBody3D {
             if (self.collision_mask & body.collision_layer) == 0 {
                 continue;
             }
-            let r = collision::test_collision(probe_pos, &self.shape, body.position, &body.shape);
+            let r = self.collide_body(probe_pos, body);
             if r.colliding && r.depth > 0.0 {
                 let normal = -r.normal;
                 if normal.dot(self.up_direction) > floor_cos
@@ -1402,9 +1509,14 @@ mod tests {
             stop_x.abs() < 0.02,
             "floor_stop_on_slope keeps the character in place, got x = {stop_x}"
         );
+        // The slid motion is the 0.1 m drop projected onto the 30-degree
+        // plane — 0.05 m along it, 0.1 * sin30 * cos30 = 0.0433 m in X. This
+        // threshold was 0.05, which only the old double-applied slide cleared
+        // (pat-2ifdx).
         assert!(
-            slide_x > 0.05,
-            "without floor_stop_on_slope the character slides downhill, got x = {slide_x}"
+            (slide_x - 0.1 * 0.5 * 0.866_025_4).abs() < 0.005,
+            "without floor_stop_on_slope the character slides downhill by the \
+             motion's projection onto the slope, got x = {slide_x}"
         );
         assert!(stop_x < slide_x, "stopping must move less than sliding");
     }
@@ -1423,4 +1535,16 @@ mod tests {
             c.get_floor_angle()
         );
     }
+}
+
+/// A conservative bounding sphere for `shape` in its own frame: `(centre,
+/// radius)`. Unbounded shapes (a world boundary) answer an infinite radius so
+/// they are never rejected.
+fn bounding_sphere(shape: &Shape3D) -> (Vector3, f32) {
+    if matches!(shape, Shape3D::WorldBoundaryShape { .. }) {
+        return (Vector3::ZERO, f32::INFINITY);
+    }
+    let aabb = shape.bounding_aabb();
+    let half = aabb.size * 0.5;
+    (aabb.position + half, half.length())
 }

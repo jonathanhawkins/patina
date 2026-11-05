@@ -485,7 +485,22 @@ impl PhysicsBody3D {
         // would have both of them pruned away before the narrow-phase ever ran —
         // the feature would look implemented and collide with nothing.
         let mut out: Option<Aabb> = None;
-        for (world_pos, world_rot, shape) in self.shapes_world() {
+        // Borrowed, not `shapes_world()`: that clones every shape (a convex
+        // hull's whole point list) and the broadphase calls this for every body
+        // every step — thousands of times a tick on a GridMap level.
+        let primary = (
+            self.position + self.rotation.xform(self.shape_offset),
+            self.rotation * self.shape_rotation,
+            &self.shape,
+        );
+        let extras = self.extra_shapes.iter().map(|(offset, rotation, shape)| {
+            (
+                self.position + self.rotation.xform(*offset),
+                self.rotation * *rotation,
+                shape,
+            )
+        });
+        for (world_pos, world_rot, shape) in std::iter::once(primary).chain(extras) {
             let local = shape.bounding_aabb();
             // ⚠️ The box must follow the shape's ROTATION, or this silently
             // defeats the rotation support it sits next to. The broadphase
@@ -634,11 +649,24 @@ impl PhysicsBody3D {
     /// Applies the world-space inverse inertia tensor to a world-space vector
     /// (a torque or an angular impulse), returning the resulting world-space
     /// angular quantity: `R · I_local⁻¹ · Rᵀ · v`.
+    ///
+    /// 🔑 A locked rotation axis has NO inverse inertia (pat-1unro), as in
+    /// Godot, where a locked axis is infinitely stiff: `lock_rotation` zeroes
+    /// the whole result and each `axis_lock_angular_*` zeroes its world axis.
+    /// Otherwise the contact solver budgets part of every off-centre impulse
+    /// for a rotation the lock then throws away — the impulse comes out too
+    /// small, so a rotation-locked body resting on the floor (the platformer's
+    /// enemies) kept most of its downward velocity every tick.
     pub fn apply_inverse_inertia(&self, world_vec: Vector3) -> Vector3 {
+        if self.lock_rotation {
+            return Vector3::ZERO;
+        }
         let inv = self.inverse_inertia_diagonal();
         let local = self.rotation.inverse().xform(world_vec);
         let scaled = Vector3::new(local.x * inv.x, local.y * inv.y, local.z * inv.z);
-        self.rotation.xform(scaled)
+        let mut out = self.rotation.xform(scaled);
+        apply_axis_lock(&mut out, self.axis_lock_angular);
+        out
     }
 
     /// Returns `true` if this is a rigid body that is not frozen.
