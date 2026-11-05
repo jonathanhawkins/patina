@@ -24,7 +24,10 @@
 //
 //   --soak <s>           also play each game for <s> seconds watching memory and
 //                        render time (the nightly run uses 180)
-//   --build              rebuild the release editor first
+//   --build              rebuild the release editor first (implied by both
+//                        --update-* flags). Without it, a release editor older
+//                        than the engine sources stops the gate (exit 2)
+//   --allow-stale        measure a stale editor binary anyway
 //   --file-beads         open a `br` bug (label playtest-gate) for each failing
 //                        game, unless an open one with the same title exists
 //   --update-baselines   record this run's render times as the new baselines
@@ -89,13 +92,17 @@ export function parseArgs(argv) {
     else if (a === '--soak') o.soak = Number(v());
     else if (a === '--build') o.build = true;
     else if (a === '--file-beads') o.fileBeads = true;
-    else if (a === '--update-baselines') o.updateBaselines = true;
+    else if (a === '--update-baselines') o.updateBaselines = o.build = true;
     else if (a === '--port-base') o.portBase = Number(v());
     else if (a === '--json') o.json = true;
     else if (a === '--godot') o.godot = true;
     else if (a === '--godot-only') o.godot = o.godotOnly = true;
     else if (a === '--godot-cache') o.godotCache = path.resolve(v());
-    else if (a === '--update-godot-baselines') o.updateGodotBaselines = o.godot = true;
+    // Recording baselines from a stale editor binary locks old behaviour in as
+    // the reference (it happened: a pre-merge binary re-recorded every game),
+    // so both update flags always rebuild first.
+    else if (a === '--update-godot-baselines') o.updateGodotBaselines = o.godot = o.build = true;
+    else if (a === '--allow-stale') o.allowStale = true;
     else if (a === '-h' || a === '--help') {
       console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1).filter((l) => l.startsWith('//')).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
       process.exit(0);
@@ -332,6 +339,44 @@ function fileBead(game, result) {
   return `filed ${id}: ${title}`;
 }
 
+/// Newest modification time (ms) of any engine source the editor binary is
+/// built from: `engine-rs/crates/*/src/**`, `engine-rs/examples/**`, and the
+/// crates' `Cargo.toml`s. Tests, fixtures and docs don't count.
+export function newestEngineSourceMtime(engineDir = path.join(ROOT, 'engine-rs')) {
+  let newest = 0;
+  const walk = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (/\.(rs|toml|wgsl|js|html|css)$/.test(e.name)) newest = Math.max(newest, fs.statSync(p).mtimeMs);
+    }
+  };
+  const crates = path.join(engineDir, 'crates');
+  for (const c of fs.existsSync(crates) ? fs.readdirSync(crates) : []) {
+    walk(path.join(crates, c, 'src'));
+    const toml = path.join(crates, c, 'Cargo.toml');
+    if (fs.existsSync(toml)) newest = Math.max(newest, fs.statSync(toml).mtimeMs);
+  }
+  walk(path.join(engineDir, 'examples'));
+  return newest;
+}
+
+/// Null when `binary` is at least as new as the engine sources, else a message
+/// saying how far behind it is. A missing binary counts as stale.
+export function staleBinaryMessage(binary, newestSourceMs) {
+  if (!fs.existsSync(binary)) return `${binary} does not exist`;
+  const built = fs.statSync(binary).mtimeMs;
+  if (built >= newestSourceMs) return null;
+  const mins = Math.round((newestSourceMs - built) / 60000);
+  return `${path.relative(ROOT, binary)} is ${mins} min older than the newest engine source; it would measure old code`;
+}
+
 async function main() {
   const o = parseArgs(process.argv.slice(2));
   const scenarios = loadScenarios(o.games);
@@ -342,6 +387,11 @@ async function main() {
   if (o.build) {
     const b = sh('scripts/rust_task.sh', ['build', '--release', '--example', 'editor'], { cwd: path.join(ROOT, 'engine-rs'), stdio: 'inherit' });
     if (b.status !== 0) process.exit(2);
+  }
+  const stale = staleBinaryMessage(path.join(ROOT, 'engine-rs/target/release/examples/editor'), newestEngineSourceMtime());
+  if (stale && !o.allowStale) {
+    console.error(`playtest-gate: ${stale}. Pass --build to rebuild it (or --allow-stale to measure it anyway).`);
+    process.exit(2);
   }
   const baselines = fs.existsSync(BASELINES) ? JSON.parse(fs.readFileSync(BASELINES, 'utf8')) : {};
   const parityBase = o.godot ? readBaselines() : {};
