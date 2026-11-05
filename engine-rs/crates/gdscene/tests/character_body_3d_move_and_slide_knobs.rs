@@ -2,7 +2,8 @@
 //!
 //! Godot: *"If true, during a jump against the ceiling, the body will slide; if
 //! false it will be stopped and will fall vertically."* (`CharacterBody3D.xml:183`,
-//! default **true**.) The 3D solver had ceiling DETECTION (`is_on_ceiling`) but
+//! default **true**.) ⚠️ Measured (pat-kiuul): against a FLAT ceiling both
+//! settings end in the same place — see the acceptance test. The 3D solver had ceiling DETECTION (`is_on_ceiling`) but
 //! no such knob, so a body authored with it off skated along the ceiling anyway.
 //!
 //! ⚠️ The rule is gated on Godot's `vel_dir_facing_up`
@@ -80,30 +81,23 @@ fn run(slide: bool, velocity: &str) -> Vector3 {
     node3d::get_position(ml.tree(), player)
 }
 
-/// **The acceptance.** Jumping into a ceiling with the knob off stops the body
-/// instead of letting it skate sideways.
+/// **The acceptance**, measured on Godot 4.6.1 + Jolt (pat-kiuul) with
+/// `tools/oracle/character_body_3d_jolt/knobs_60hz`: this exact
+/// scene at 60 ticks/s for 120 ticks. Against a FLAT ceiling the knob changes
+/// nothing — both bodies end at (12.000014, 1.999089). Godot's
+/// `_move_and_slide_grounded` takes the no-slide branch with the knob off, and
+/// that branch is `motion = remainder.slide(up)`: it drops only the UPWARD part,
+/// exactly what sliding along a flat ceiling drops. (The docs' "stopped and will
+/// fall vertically" describes the velocity on a SLOPED ceiling.) This test used
+/// to assert the body stopped sideways, which no Godot branch does.
 #[test]
 fn slide_on_ceiling_false_stops_a_jump_against_the_ceiling() {
-    // Up AND sideways: the sideways component is what "sliding along the
-    // ceiling" would preserve, so it is the thing that has to differ.
     let sliding = run(true, "Vector3(6, 10, 0)");
     let stopped = run(false, "Vector3(6, 10, 0)");
-
-    // ⚠️ Control first: with sliding ON the body must actually travel sideways,
-    // otherwise "stopped" below is indistinguishable from a body that never
-    // moved or never reached the ceiling at all.
-    assert!(
-        sliding.x > 1.0,
-        "with slide_on_ceiling = true the body must skate along the ceiling; it \
-         only reached x = {} — the fixture never established contact, so the \
-         comparison below would prove nothing",
-        sliding.x
-    );
-    assert!(
-        stopped.x < sliding.x,
-        "with slide_on_ceiling = false the body must stop rather than slide: \
-         got x = {} against {} when sliding is enabled",
-        stopped.x,
-        sliding.x
-    );
+    for (what, p) in [("slide_on_ceiling = true", sliding), ("slide_on_ceiling = false", stopped)] {
+        assert!(
+            (p.x - 12.000014).abs() < 1e-4 && (p.y - 1.999089).abs() < 1e-5,
+            "{what}: Godot (12.000014, 1.999089), Patina {p:?}"
+        );
+    }
 }

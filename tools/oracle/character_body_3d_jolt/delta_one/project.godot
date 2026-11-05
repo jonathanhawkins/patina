@@ -1,0 +1,9 @@
+config_version=5
+
+[application]
+run/main_scene="res://main.tscn"
+
+[physics]
+common/physics_ticks_per_second=1
+common/max_physics_steps_per_frame=1
+3d/physics_engine="Jolt Physics"

@@ -7,11 +7,11 @@
 //! `is_on_ceiling`, the floor normal and the platform velocity.
 //!
 //! Patina had both halves and no seam (pat-0q2kx.36). `gdphysics3d::character`
-//! implements the full `move_and_slide` — sub-stepping, slope snapping, platform
-//! carry — and nothing ever called it: `MainLoop`'s 3D physics phase was
-//! sync → step → sync, and only the 2D server had a character pass. A
-//! `CharacterBody3D` in a scene therefore never moved, and `is_on_floor()`
-//! answered `false` forever, with nothing to indicate why.
+//! implements the full `move_and_slide` (since pat-kiuul a port of Godot's,
+//! over Jolt's motion query) — and nothing ever called it: `MainLoop`'s 3D
+//! physics phase was sync → step → sync, and only the 2D server had a
+//! character pass. A `CharacterBody3D` in a scene therefore never moved, and
+//! `is_on_floor()` answered `false` forever, with nothing to indicate why.
 //!
 //! This lives in its own module rather than on `PhysicsServer3D` for the same
 //! reason [`raycast3d`](crate::raycast3d) and [`shapecast3d`](crate::shapecast3d)
@@ -172,9 +172,18 @@ fn slide_one(
     // the snap internally, and the existing publish block reports the new
     // position and `is_on_floor` — so this path cannot drift from the
     // moving one.
+    //
+    // ⚠️ Not while a platform is stored (pat-kiuul): Godot re-reads that
+    // body's CURRENT velocity at the top of every call, so a body standing
+    // still on a platform that starts moving is carried from that call on.
+    let has_platform = matches!(
+        tree.get_node(node_id).map(|n| n.get_property("_platform_body")),
+        Some(Variant::Int(i)) if i >= 0
+    );
     if velocity.length_squared() < 1e-8
         && stored_platform.length_squared() < 1e-8
         && !snap_requested
+        && !has_platform
     {
         return false;
     }
@@ -216,6 +225,14 @@ fn slide_one(
         vec3_prop(tree, node_id, "wall_normal", Vector3::ZERO),
         stored_platform,
     );
+    // Godot's `platform_rid` / `platform_layer` (pat-kiuul): the body the last
+    // call stood on, whose CURRENT velocity the next call re-reads before it
+    // moves. Stored as the raw body id; -1 (or absent) is "none".
+    let platform_body = match tree.get_node(node_id).map(|n| n.get_property("_platform_body")) {
+        Some(Variant::Int(i)) if i >= 0 => Some(gdphysics3d::body::BodyId3D(i as u64)),
+        _ => None,
+    };
+    character.restore_platform(platform_body, u32_prop(tree, node_id, "_platform_layer", 0));
     // `shapes_from_body_subtree` answers in the body's LOCAL frame; the
     // sweep is in world space and the character carries no rotation of its
     // own, so the body's rotation is folded into the offset here.
@@ -264,6 +281,8 @@ fn slide_one(
         _ => MotionMode::Grounded,
     };
     character.collision_layer = u32_prop(tree, node_id, "collision_layer", 1);
+    // A GridMap octant is one Jolt body in Godot (pat-kiuul).
+    character.body_groups = Some(physics.compound_groups());
     character.collision_mask = u32_prop(tree, node_id, "collision_mask", 1);
 
     // Everything except this character's own body. Without the exclusion a
@@ -275,10 +294,6 @@ fn slide_one(
         .filter(|b| Some(b.id) != self_body)
         .collect();
 
-    // `move_and_slide` takes THIS FRAME'S MOTION, not a per-second velocity
-    // (gdphysics3d::character docs; its own tests pass raw distances), and
-    // returns the motion left after sliding. Scale in and back out so the
-    // node's `velocity` property stays a per-second value, as in Godot.
     // pat-s3rrv.103 — the standalone `apply_floor_snap()`, applied BEFORE
     // the move so the body is already grounded when it slides.
     //
@@ -291,9 +306,10 @@ fn slide_one(
         character.apply_floor_snap_manual(&obstacles);
     }
 
-    let motion = velocity * dt;
-    let result_motion = character.move_and_slide(motion, &obstacles);
-    let new_velocity = result_motion / dt;
+    // Godot's `move_and_slide()` works on the per-second `velocity` and the
+    // physics delta (pat-kiuul): the margin, snap length and the
+    // platform carry are all distances, so the solver needs both.
+    let new_velocity = character.move_and_slide_delta(velocity, dt, &obstacles);
 
     let end = character.position;
     let on_floor = character.is_on_floor();
@@ -386,6 +402,12 @@ fn slide_one(
             Variant::Vector3(platform_angular_velocity),
         );
         node.set_property("_slide_collisions", Variant::Array(slide_records.into()));
+        let (platform_body, platform_layer) = character.get_platform();
+        node.set_property(
+            "_platform_body",
+            Variant::Int(platform_body.map(|b| b.0 as i64).unwrap_or(-1)),
+        );
+        node.set_property("_platform_layer", Variant::Int(platform_layer as i64));
     }
     collided
 }

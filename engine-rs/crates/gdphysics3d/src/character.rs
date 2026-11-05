@@ -3,16 +3,26 @@
 //! Provides [`CharacterBody3D`] with `move_and_slide` for 3D movement that
 //! slides along surfaces and detects floor/wall/ceiling contacts.
 //!
-//! This mirrors Godot 4's `CharacterBody3D::move_and_slide` behaviour: motion
-//! modes (grounded vs floating), moving-platform carry and on-leave velocity,
-//! floor snapping onto slopes/stairs, and the slope knobs (`floor_stop_on_slope`,
-//! `floor_constant_speed`, `floor_block_on_wall`, `wall_min_slide_angle`).
+//! A line-for-line port of Godot 4.6's `CharacterBody3D::move_and_slide`
+//! (`scene/3d/physics/character_body_3d.cpp`: `_move_and_slide_grounded`,
+//! `_move_and_slide_floating`, `apply_floor_snap`, `_set_collision_direction`)
+//! and `PhysicsBody3D::move_and_collide`, over the Jolt `body_test_motion` port
+//! in [`crate::jolt_motion`] (pat-kiuul).
+//!
+//! It replaced a sub-stepped push-out solver that matched Godot's outcomes but
+//! not its numbers: a walking body rested at exactly `floor + safe_margin`
+//! (-3.9990 on the 3D platformer) where Godot rests 1e-4 above the floor
+//! (-3.9999), and a landing lost horizontal speed differently (dx 0.0947 vs
+//! 0.0956 at the platformer's f195), which grew to 1e-2 within 40 frames.
 
 use gdcore::math::Vector3;
 use gdcore::math3d::Quaternion;
 
 use crate::body::{BodyId3D, PhysicsBody3D};
 use crate::collision;
+use crate::jolt_motion::{
+    body_test_motion, MotionCollision, MotionParameters, MotionResult, MotionShape, CMP_EPSILON,
+};
 use crate::shape::Shape3D;
 
 /// How the character interprets surfaces during `move_and_slide`.
@@ -116,14 +126,18 @@ pub struct CharacterBody3D {
     /// (`character_body_3d.cpp:56-62`) — a character standing on a floor while
     /// brushing a moving wall is carried by the FLOOR.
     pub platform_wall_layers: u32,
-    /// The body behind the wall contact of the last `move_and_slide`, kept so
-    /// the next call can look up its velocity for the carry above.
-    ///
-    /// ⚠️ Mirrors Godot's `platform_rid`, which is likewise captured during one
-    /// call and consulted at the top of the NEXT one — the carry has to be
-    /// applied before the motion it affects, so it necessarily uses the
-    /// previous frame's contact.
-    wall_body: Option<BodyId3D>,
+    /// The body behind the floor (or wall) contact of the last
+    /// `move_and_slide` — Godot's `platform_rid`, captured during one call and
+    /// re-read at the top of the NEXT one for its current velocity.
+    platform_body: Option<BodyId3D>,
+    /// That body's collision layer (Godot's `platform_layer`), tested against
+    /// `platform_floor_layers` / `platform_wall_layers`.
+    platform_layer: u32,
+    /// Velocity of the ceiling body hit during the last call (Godot's
+    /// `platform_ceiling_velocity`).
+    platform_ceiling_velocity: Vector3,
+    /// Normal of the last ceiling contact.
+    ceiling_normal: Vector3,
     /// Contacts recorded by the last `move_and_slide`, in the order they were
     /// resolved (Godot's `get_slide_collision(i)`).
     slide_collisions: Vec<KinematicCollision3D>,
@@ -155,6 +169,11 @@ pub struct CharacterBody3D {
     /// only when nothing was hit, so a fixture that never collides cannot tell
     /// a correct implementation from one that returns the total.
     last_motion: Vector3,
+    /// Bodies Godot would hold as ONE body — a GridMap octant — by group key
+    /// (pat-kiuul). Jolt removes internal edges per body, so cells of one
+    /// octant smooth each other's seams and cells of two octants do not.
+    /// `None`: every body is its own.
+    pub body_groups: Option<std::sync::Arc<std::collections::HashMap<BodyId3D, u64>>>,
 }
 
 /// One contact recorded by `move_and_slide`, behind Godot's
@@ -174,14 +193,11 @@ pub struct KinematicCollision3D {
     pub normal: Vector3,
     /// Penetration depth.
     pub depth: f32,
-    /// Position of the character after collision resolution.
+    /// The contact point (Godot's `KinematicCollision3D.get_position()`).
     pub position: Vector3,
     /// Motion left unapplied after this contact.
     pub remainder: Vector3,
 }
-
-/// Maximum sub-steps for large motions to prevent tunneling.
-const MAX_SUBSTEPS: usize = 32;
 
 /// Floor angle threshold (approximately 45 degrees).
 const DEFAULT_FLOOR_MAX_ANGLE: f32 = std::f32::consts::FRAC_PI_4;
@@ -195,14 +211,57 @@ const DEFAULT_FLOOR_SNAP_LENGTH: f32 = 0.1;
 /// Default minimum wall slide angle: 15 degrees in radians (Godot 4 default).
 const DEFAULT_WALL_MIN_SLIDE_ANGLE: f32 = 0.2617994;
 
-/// Downward probe margin used to detect the floor the character rests on.
-const FLOOR_PROBE_MARGIN: f32 = 0.08;
+/// Godot's `FLOOR_ANGLE_THRESHOLD`: "so, if you pass 45 as limit, avoid
+/// numerical precision errors when angle is 45".
+const FLOOR_ANGLE_THRESHOLD: f32 = 0.01;
 
-/// Number of samples taken when casting the shape down for floor snapping.
-const SNAP_SAMPLES: usize = 16;
+/// Godot's `Vector3::is_zero_approx`.
+fn is_zero_approx(v: Vector3) -> bool {
+    v.x.abs() < CMP_EPSILON && v.y.abs() < CMP_EPSILON && v.z.abs() < CMP_EPSILON
+}
 
-/// Horizontal-input magnitude below which `floor_stop_on_slope` engages.
-const STOP_ON_SLOPE_EPS: f32 = 1e-3;
+/// Godot's `Vector3::slide`.
+fn slide(v: Vector3, n: Vector3) -> Vector3 {
+    v - n * v.dot(n)
+}
+
+/// Godot's `Vector3::normalized` (zero stays zero).
+fn normalized(v: Vector3) -> Vector3 {
+    let l = v.length();
+    if l == 0.0 {
+        Vector3::ZERO
+    } else {
+        v / l
+    }
+}
+
+/// Godot's `Vector3::is_equal_approx` (per component, relative tolerance).
+fn is_equal_approx(a: Vector3, b: Vector3) -> bool {
+    let eq = |x: f32, y: f32| {
+        if x == y {
+            return true;
+        }
+        let tol = (CMP_EPSILON * x.abs()).max(CMP_EPSILON);
+        (x - y).abs() < tol
+    };
+    eq(a.x, b.x) && eq(a.y, b.y) && eq(a.z, b.z)
+}
+
+/// Godot's `CharacterBody3D::CollisionState`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CollisionState {
+    floor: bool,
+    wall: bool,
+    ceiling: bool,
+}
+
+impl CollisionState {
+    const ALL: CollisionState = CollisionState {
+        floor: true,
+        wall: true,
+        ceiling: true,
+    };
+}
 
 impl CharacterBody3D {
     /// Creates a new character body at the given position.
@@ -229,9 +288,12 @@ impl CharacterBody3D {
             on_ceiling: false,
             floor_normal: Vector3::ZERO,
             wall_normal: Vector3::ZERO,
+            ceiling_normal: Vector3::ZERO,
             platform_floor_layers: u32::MAX,
             platform_wall_layers: 0,
-            wall_body: None,
+            platform_body: None,
+            platform_layer: 0,
+            platform_ceiling_velocity: Vector3::ZERO,
             slide_collisions: Vec::new(),
             slide_on_ceiling: true,
             // Godot CharacterBody3D.safe_margin default.
@@ -239,617 +301,821 @@ impl CharacterBody3D {
             platform_velocity: Vector3::ZERO,
             platform_angular_velocity: Vector3::ZERO,
             last_motion: Vector3::ZERO,
+            body_groups: None,
         }
     }
 
-    /// The deepest overlap between this character's shape — placed at `at`
-    /// plus [`shape_offset`](Self::shape_offset) — and EVERY shape `body` owns,
-    /// each at its own world position and rotation (pat-2ifdx).
-    ///
-    /// ⚠️ Replaces a test of the body's primary shape at the body ORIGIN with
-    /// no rotation. That dropped a body's shape offset, its extra shapes and
-    /// its orientation, so a rotated GridMap corner tile collided as if it were
-    /// unrotated and a two-shape body collided as one.
-    ///
-    /// A bounding-sphere reject runs before the narrow phase: a level holds
-    /// thousands of static bodies and the sweep tests every one of them
-    /// several times per tick.
-    fn collide_body(&self, at: Vector3, body: &PhysicsBody3D) -> collision::CollisionResult3D {
-        let own_pos = at + self.shape_offset;
-        let own_radius = bounding_sphere(&self.shape);
-        let mut best = collision::CollisionResult3D::NONE;
-        let primary = (
-            body.position + body.rotation.xform(body.shape_offset),
-            body.rotation * body.shape_rotation,
-            &body.shape,
-        );
-        let extras = body.extra_shapes.iter().map(|(off, rot, shape)| {
-            (
-                body.position + body.rotation.xform(*off),
-                body.rotation * *rot,
-                shape,
-            )
+    /// The shape as the motion query sees it.
+    fn motion_shape(&self) -> MotionShape<'_> {
+        MotionShape {
+            shape: &self.shape,
+            offset: self.shape_offset,
+            rotation: self.shape_rotation,
+            collision_mask: self.collision_mask,
+            groups: self.body_groups.as_deref(),
+        }
+    }
+
+    /// Godot's `PhysicsBody3D::move_and_collide(parameters, result, test_only,
+    /// cancel_sliding)` (`scene/3d/physics/physics_body_3d.cpp`).
+    fn godot_move_and_collide(
+        &mut self,
+        params: &MotionParameters,
+        bodies: &[&PhysicsBody3D],
+        test_only: bool,
+        cancel_sliding: bool,
+    ) -> (bool, MotionResult) {
+        let (colliding, mut r) = body_test_motion(&self.motion_shape(), bodies, params);
+
+        // Restore direction of motion to be along original motion, in order to
+        // avoid sliding due to recovery, but only if collision depth is low
+        // enough to avoid tunneling.
+        let mut cancel_sliding = cancel_sliding;
+        if cancel_sliding {
+            let motion_length = params.motion.length();
+            let mut precision = 0.001f32;
+            if colliding {
+                // Can't just use margin as a threshold because collision depth
+                // is calculated on unsafe motion, so even in normal resting
+                // cases the depth can be a bit more than the margin.
+                precision +=
+                    motion_length * (r.collision_unsafe_fraction - r.collision_safe_fraction);
+                if r.collisions[0].depth > params.margin + precision {
+                    cancel_sliding = false;
+                }
+            }
+            if cancel_sliding {
+                // When motion is null, recovery is the resulting motion.
+                let motion_normal = if motion_length > CMP_EPSILON {
+                    params.motion / motion_length
+                } else {
+                    Vector3::ZERO
+                };
+                // Check depth of recovery.
+                let projected_length = r.travel.dot(motion_normal);
+                let recovery = r.travel - motion_normal * projected_length;
+                let recovery_length = recovery.length();
+                // Fixes cases where canceling slide causes the motion to go too
+                // deep into the ground, because we're only taking rest
+                // information into account and not general recovery.
+                if recovery_length < params.margin + precision {
+                    // Apply adjustment to motion.
+                    r.travel = motion_normal * projected_length;
+                    r.remainder = params.motion - r.travel;
+                }
+            }
+        }
+
+        if !test_only {
+            self.position = params.from + r.travel;
+        }
+        (colliding, r)
+    }
+
+    /// Records one `MotionResult` as Godot's `motion_results.push_back`.
+    fn push_motion_result(&mut self, r: &MotionResult) {
+        let c = &r.collisions[0];
+        self.slide_collisions.push(KinematicCollision3D {
+            collider: Some(c.collider),
+            normal: c.normal,
+            depth: r.collision_depth,
+            position: c.position,
+            remainder: r.remainder,
         });
-        for (pos, rot, shape) in std::iter::once(primary).chain(extras) {
-            let theirs = bounding_sphere(shape);
-            let reach = own_radius.1 + theirs.1;
-            let centre_a = own_pos + self.shape_rotation.xform(own_radius.0);
-            let centre_b = pos + rot.xform(theirs.0);
-            if (centre_a - centre_b).length_squared() > reach * reach {
-                continue;
-            }
-            let r = collision::test_collision_rot(
-                own_pos,
-                self.shape_rotation,
-                &self.shape,
-                pos,
-                rot,
-                shape,
-            );
-            if r.colliding && (!best.colliding || r.depth > best.depth) {
-                best = r;
-            }
-        }
-        best
-    }
-
-    /// Returns the minimum extent of the shape, used for sub-step sizing.
-    fn safe_step_distance(&self) -> f32 {
-        match &self.shape {
-            Shape3D::Sphere { radius } => *radius,
-            Shape3D::BoxShape { half_extents } => {
-                half_extents.x.min(half_extents.y).min(half_extents.z)
-            }
-            Shape3D::CapsuleShape { radius, .. } => *radius,
-            Shape3D::CylinderShape { radius, height } => radius.min(*height * 0.5),
-            _ => 1.0,
-        }
     }
 
     /// Moves the character by `velocity`, sliding along colliding surfaces.
     ///
-    /// `velocity` is this frame's motion. Returns the resulting velocity after
-    /// sliding (the character's own velocity, excluding any platform carry, but
-    /// including on-leave platform velocity). Populates floor/wall/ceiling state
-    /// for queries. Uses sub-stepping for large motions to prevent tunneling.
-    ///
-    /// In [`MotionMode::Grounded`] this also carries the character with a moving
-    /// floor body, snaps the character down onto slopes/stairs, applies the
-    /// slope knobs, and adds the platform velocity back on leave. In
-    /// [`MotionMode::Floating`] every surface is a wall and none of that runs.
+    /// `velocity` is this frame's motion (a per-frame displacement): it is
+    /// [`Self::move_and_slide_delta`] with `delta = 1`. Returns the resulting
+    /// motion after sliding.
     pub fn move_and_slide(&mut self, velocity: Vector3, bodies: &[&PhysicsBody3D]) -> Vector3 {
-        let was_on_floor = self.on_floor;
-        let previous_platform_velocity = self.platform_velocity;
-        // Read BEFORE the reset below, which clears both — the wall carry is
-        // decided from the PREVIOUS call's contact, as it is in Godot.
-        let was_on_wall = self.on_wall;
-        let previous_wall_body = self.wall_body;
+        self.move_and_slide_delta(velocity, 1.0, bodies)
+    }
 
-        // Reset contact state for this call.
+    /// Godot's `CharacterBody3D::move_and_slide()`
+    /// (`scene/3d/physics/character_body_3d.cpp`), line for line, over the
+    /// Jolt motion query in [`crate::jolt_motion`] (pat-kiuul).
+    ///
+    /// `velocity` is per second and `delta` the physics step; returns the
+    /// velocity the body leaves with (Godot writes it back to `velocity`).
+    pub fn move_and_slide_delta(
+        &mut self,
+        velocity: Vector3,
+        delta: f32,
+        bodies: &[&PhysicsBody3D],
+    ) -> Vector3 {
+        let mut velocity = velocity;
+        let mut current_platform_velocity = self.platform_velocity;
+
+        if (self.on_floor || self.on_wall) && self.platform_body.is_some() {
+            let excluded = if self.on_floor {
+                (self.platform_floor_layers & self.platform_layer) == 0
+            } else {
+                (self.platform_wall_layers & self.platform_layer) == 0
+            };
+            if !excluded {
+                // This approach makes sure there is less delay between the
+                // actual body velocity and the one we saved.
+                match bodies.iter().find(|b| Some(b.id) == self.platform_body) {
+                    Some(b) => {
+                        let local_position = self.position - b.position;
+                        current_platform_velocity =
+                            b.linear_velocity + b.angular_velocity.cross(local_position);
+                    }
+                    None => {
+                        // Body is removed or destroyed, invalidate floor.
+                        current_platform_velocity = Vector3::ZERO;
+                        self.platform_body = None;
+                    }
+                }
+            } else {
+                current_platform_velocity = Vector3::ZERO;
+            }
+        }
+
+        self.slide_collisions.clear();
+
+        let was_on_floor = self.on_floor;
         self.on_floor = false;
         self.on_wall = false;
         self.on_ceiling = false;
+
+        self.last_motion = Vector3::ZERO;
+
+        if !is_zero_approx(current_platform_velocity) {
+            let mut params = MotionParameters::new(
+                self.position,
+                current_platform_velocity * delta,
+                self.safe_margin,
+            );
+            // Also report collisions generated only from recovery.
+            params.recovery_as_collision = true;
+            if let Some(id) = self.platform_body {
+                params.exclude_bodies.push(id);
+            }
+            let (collided, floor_result) =
+                self.godot_move_and_collide(&params, bodies, false, false);
+            if collided {
+                self.push_motion_result(&floor_result);
+                self.set_collision_direction(&floor_result, CollisionState::ALL, bodies);
+            }
+        }
+
+        if self.motion_mode == MotionMode::Grounded {
+            self.move_and_slide_grounded(delta, was_on_floor, &mut velocity, bodies);
+        } else {
+            self.move_and_slide_floating(delta, &mut velocity, bodies);
+        }
+
+        match self.platform_on_leave {
+            PlatformOnLeave::DoNotAddVelocity => {}
+            mode => {
+                // Add last platform velocity when just left a moving platform.
+                if !self.on_floor && !self.on_wall {
+                    if mode == PlatformOnLeave::AddUpwardVelocity
+                        && current_platform_velocity.dot(self.up_direction) < 0.0
+                    {
+                        current_platform_velocity =
+                            slide(current_platform_velocity, self.up_direction);
+                    }
+                    velocity = velocity + current_platform_velocity;
+                }
+            }
+        }
+
+        velocity
+    }
+
+    /// Godot's `_move_and_slide_grounded`.
+    fn move_and_slide_grounded(
+        &mut self,
+        delta: f32,
+        was_on_floor: bool,
+        velocity: &mut Vector3,
+        bodies: &[&PhysicsBody3D],
+    ) {
+        let up = self.up_direction;
+        let margin = self.safe_margin;
+        let mut motion = *velocity * delta;
+        let motion_slide_up = slide(motion, up);
+        let prev_floor_normal = self.floor_normal;
+
+        self.platform_body = None;
+        self.platform_velocity = Vector3::ZERO;
+        self.platform_angular_velocity = Vector3::ZERO;
+        self.platform_ceiling_velocity = Vector3::ZERO;
         self.floor_normal = Vector3::ZERO;
         self.wall_normal = Vector3::ZERO;
-        // Reset with the rest of the per-call state: Godot reports these for
-        // the LAST call, so a call that moves nothing must not leave the
-        // previous call's motion visible.
-        self.last_motion = Vector3::ZERO;
-        self.slide_collisions.clear();
-        self.wall_body = None;
+        self.ceiling_normal = Vector3::ZERO;
 
-        let grounded_mode = self.motion_mode == MotionMode::Grounded;
+        // No sliding on first attempt to keep floor motion stable when
+        // possible, when stop on slope is enabled or when there is no up
+        // direction.
+        let mut sliding_enabled = !self.floor_stop_on_slope;
+        // Constant speed can be applied only the first time sliding is enabled.
+        let mut can_apply_constant_speed = sliding_enabled;
+        // If the platform's ceiling push down the body.
+        let mut apply_ceiling_velocity = false;
+        let mut first_slide = true;
+        let vel_dir_facing_up = velocity.dot(up) > 0.0;
+        let mut total_travel = Vector3::ZERO;
 
-        // ⚠️ Godot's `vel_dir_facing_up` is taken from the body's OWN velocity
-        // (`character_body_3d.cpp:159`), before the moving-platform carry below
-        // is folded into `motion`. Deriving it from the carried motion instead
-        // would let a descending platform flip the sign and cancel a jump the
-        // player never made.
-        let vel_dir_facing_up = velocity.dot(self.up_direction) > 0.0;
+        for _iteration in 0..self.max_slides {
+            let mut params = MotionParameters::new(self.position, motion, margin);
+            // There can be 4 collisions between 2 walls + 2 more for the floor.
+            params.max_collisions = 6;
+            // Also report collisions generated only from recovery.
+            params.recovery_as_collision = true;
 
-        // --- Platform detection & carry (Grounded only) ----------------------
-        // Probe the floor beneath us; capture the floor body's velocity so the
-        // character is carried, and remember the floor normal for the slope
-        // knobs below.
-        let mut motion = velocity;
-        let mut probed_floor_normal: Option<Vector3> = None;
-        if grounded_mode {
-            if let Some((idx, normal)) = self.probe_floor(bodies) {
-                // The floor is a floor either way; only whether it CARRIES the
-                // character is masked (Godot's `platform_floor_layers`).
-                if (self.platform_floor_layers & bodies[idx].collision_layer) != 0 {
-                    self.platform_velocity = bodies[idx].linear_velocity;
-                    self.platform_angular_velocity = bodies[idx].angular_velocity;
-                    motion = motion + self.platform_velocity;
-                } else {
-                    self.platform_velocity = Vector3::ZERO;
-                    self.platform_angular_velocity = Vector3::ZERO;
-                }
-                probed_floor_normal = Some(normal);
-            } else if was_on_wall {
-                // No floor, but we were against a wall: Godot's `else if
-                // (collision_state.wall)` branch (`character_body_3d.cpp:60`).
-                // A character pinned to a moving wall is carried by it, which is
-                // how wall-riding elevators and conveyor walls work.
-                //
-                // ⚠️ The body is looked up by id rather than index: `bodies` is
-                // rebuilt every tick by the caller and an index from the
-                // previous call can point at a different body, or out of range.
-                let carried = previous_wall_body
-                    .and_then(|id| bodies.iter().position(|b| b.id == id))
-                    .filter(|&idx| (self.platform_wall_layers & bodies[idx].collision_layer) != 0);
-                if let Some(idx) = carried {
-                    self.platform_velocity = bodies[idx].linear_velocity;
-                    self.platform_angular_velocity = bodies[idx].angular_velocity;
-                    motion = motion + self.platform_velocity;
-                } else {
-                    self.platform_velocity = Vector3::ZERO;
-                    self.platform_angular_velocity = Vector3::ZERO;
-                }
-            } else {
-                self.platform_velocity = Vector3::ZERO;
-                self.platform_angular_velocity = Vector3::ZERO;
-            }
-        } else {
-            self.platform_velocity = Vector3::ZERO;
-            self.platform_angular_velocity = Vector3::ZERO;
-        }
+            let (mut collided, mut result) =
+                self.godot_move_and_collide(&params, bodies, false, !sliding_enabled);
 
-        // --- Slope knobs affecting the motion --------------------------------
-        if let Some(floor_normal) = probed_floor_normal {
-            let up = self.up_direction;
-            let horizontal_input = velocity - up * velocity.dot(up);
-            let horizontal_len = horizontal_input.length();
-            let is_slope = floor_normal.dot(up) < 1.0 - 1e-4;
-            if is_slope {
-                if self.floor_stop_on_slope && horizontal_len < STOP_ON_SLOPE_EPS {
-                    // No horizontal input on a walkable slope: cancel the motion
-                    // so gravity does not slide the character downhill.
-                    motion = Vector3::ZERO;
-                } else if self.floor_constant_speed && horizontal_len > STOP_ON_SLOPE_EPS {
-                    // Preserve the horizontal speed magnitude along the slope by
-                    // rescaling the slope-tangent motion.
-                    let tangential = motion - floor_normal * motion.dot(floor_normal);
-                    let horiz_tan = tangential - up * tangential.dot(up);
-                    let horiz_tan_len = horiz_tan.length();
-                    if horiz_tan_len > 1e-6 {
-                        motion = tangential * (horizontal_len / horiz_tan_len);
+            self.last_motion = result.travel;
+
+            if collided {
+                self.push_motion_result(&result);
+
+                let previous_state = CollisionState {
+                    floor: self.on_floor,
+                    wall: self.on_wall,
+                    ceiling: self.on_ceiling,
+                };
+
+                let result_state =
+                    self.set_collision_direction(&result, CollisionState::ALL, bodies);
+
+                // If we hit a ceiling platform, we set the vertical velocity to
+                // at least the platform one.
+                if self.on_ceiling
+                    && self.platform_ceiling_velocity != Vector3::ZERO
+                    && self.platform_ceiling_velocity.dot(up) < 0.0
+                {
+                    // If ceiling sliding is on, only apply when the ceiling is
+                    // flat or when the motion is upward.
+                    if !self.slide_on_ceiling
+                        || motion.dot(up) < 0.0
+                        || (self.ceiling_normal + up).length() < 0.01
+                    {
+                        apply_ceiling_velocity = true;
+                        let ceiling_vertical_velocity = up * up.dot(self.platform_ceiling_velocity);
+                        let motion_vertical_velocity = up * up.dot(*velocity);
+                        if motion_vertical_velocity.dot(up) > 0.0
+                            || ceiling_vertical_velocity.length_squared()
+                                > motion_vertical_velocity.length_squared()
+                        {
+                            *velocity = ceiling_vertical_velocity + slide(*velocity, up);
+                        }
                     }
                 }
-            }
-        }
 
-        // --- Apply the sliding motion, sub-stepping large moves. -------------
-        let mut motion_out = motion;
-        // The character's OWN velocity as Godot's slide loop leaves it
-        // (platform carry excluded). Godot changes `velocity` inside the loop
-        // only for the cases `slide_step` handles (a grounded body walking into
-        // a wall, the wall-min-slide stop, ceilings); everything else keeps the
-        // velocity the script set, apart from the floor reset below.
-        //
-        // ⚠️ This used to zero every AXIS whose motion a collision absorbed. A
-        // grounded player walking diagonally into a slanted wall kept its full
-        // x speed (neither axis was absorbed) where Godot slides the velocity
-        // along the wall: (3.2, 0, 0) became Godot's (0.61, 0, 1.22) on the 3D
-        // platformer, and Patina's player ground on into the wall (pat-d4ghb).
-        let mut output_vel = velocity;
-        let speed = motion.length();
-        if speed >= 1e-8 {
-            let safe_dist = self.safe_step_distance();
-            let num_steps = ((speed / safe_dist).ceil() as usize).clamp(1, MAX_SUBSTEPS);
-            let inv_steps = 1.0 / num_steps as f32;
-
-            for _ in 0..num_steps {
-                let sub = motion_out * inv_steps;
-                if sub.length_squared() < 1e-8 {
+                if self.on_floor
+                    && self.floor_stop_on_slope
+                    && (normalized(*velocity) + up).length() < 0.01
+                {
+                    if result.travel.length() <= margin + CMP_EPSILON {
+                        self.position = self.position - result.travel;
+                    }
+                    *velocity = Vector3::ZERO;
+                    self.last_motion = Vector3::ZERO;
                     break;
                 }
 
-                let sub_result = self.slide_step(
-                    sub,
-                    bodies,
-                    was_on_floor,
-                    vel_dir_facing_up,
-                    &mut output_vel,
-                );
+                // Godot also zeroes `motion` here; nothing reads it after the break.
+                if is_zero_approx(result.remainder) {
+                    break;
+                }
 
-                // If a component was absorbed by collision, zero it so later
-                // sub-steps stop advancing along it.
-                if sub.x.abs() > 1e-8 && sub_result.x.abs() < sub.x.abs() * 0.1 {
-                    motion_out.x = 0.0;
+                // Apply regular sliding by default.
+                let mut apply_default_sliding = true;
+
+                // Wall collision checks.
+                if result_state.wall && motion_slide_up.dot(self.wall_normal) <= 0.0 {
+                    // Move on floor only checks.
+                    if self.floor_block_on_wall {
+                        // Needs horizontal motion from current motion instead of
+                        // motion_slide_up to properly test the angle and avoid
+                        // standing on slopes.
+                        let horizontal_motion = slide(motion, up);
+                        let horizontal_normal = normalized(slide(self.wall_normal, up));
+                        let motion_angle = (-horizontal_normal.dot(normalized(horizontal_motion)))
+                            .clamp(-1.0, 1.0)
+                            .acos()
+                            .abs();
+
+                        // Avoid to move forward on a wall if floor_block_on_wall
+                        // is true. Applies only when the motion angle is under 90
+                        // degrees, in order to avoid blocking lateral motion along
+                        // a wall.
+                        if motion_angle < 0.5 * std::f32::consts::PI {
+                            apply_default_sliding = false;
+                            if was_on_floor && !vel_dir_facing_up {
+                                // Cancel the motion.
+                                let travel_total = result.travel.length();
+                                let cancel_dist_max = (margin * 20.0).min(0.1);
+                                if travel_total <= margin + CMP_EPSILON {
+                                    self.position = self.position - result.travel;
+                                    // Cancel for constant speed computation.
+                                    result.travel = Vector3::ZERO;
+                                } else if travel_total < cancel_dist_max {
+                                    // If the movement is large the body can be
+                                    // prevented from reaching the walls.
+                                    self.position = self.position - slide(result.travel, up);
+                                    // Keep remaining motion in sync with amount
+                                    // canceled.
+                                    motion = slide(motion, up);
+                                    result.travel = Vector3::ZERO;
+                                } else {
+                                    // Travel is too high to be safely canceled, we
+                                    // take it into account.
+                                    result.travel = slide(result.travel, up);
+                                    motion = result.remainder;
+                                }
+                                // Determines if you are on the ground, and limits
+                                // the possibility of climbing on the walls because
+                                // of the approximations.
+                                self.snap_on_floor(true, false, bodies);
+                            } else {
+                                // If the movement is not canceled we only keep the
+                                // remaining.
+                                motion = result.remainder;
+                            }
+
+                            // Apply slide on forward in order to allow only
+                            // lateral motion on next step.
+                            let forward = normalized(slide(self.wall_normal, up));
+                            motion = slide(motion, forward);
+
+                            // Scales the horizontal velocity according to the
+                            // wall slope.
+                            if vel_dir_facing_up {
+                                let slide_motion = slide(*velocity, result.collisions[0].normal);
+                                // Keeps the vertical motion from velocity and add
+                                // the horizontal motion of the projection.
+                                *velocity = up * up.dot(*velocity) + slide(slide_motion, up);
+                            } else {
+                                *velocity = slide(*velocity, forward);
+                            }
+
+                            // Allow only lateral motion along previous floor when
+                            // already on floor. Fixes slowing down when moving in
+                            // diagonal against an inclined wall.
+                            if was_on_floor && !vel_dir_facing_up && motion.dot(up) > 0.0 {
+                                // Slide along the corner between the wall and
+                                // previous floor.
+                                let floor_side = prev_floor_normal.cross(self.wall_normal);
+                                if floor_side != Vector3::ZERO {
+                                    motion = floor_side * motion.dot(floor_side);
+                                }
+                            }
+
+                            // Stop all motion when a second wall is hit (unless
+                            // sliding down or jumping), in order to avoid
+                            // jittering in corner cases.
+                            let mut stop_all_motion = previous_state.wall && !vel_dir_facing_up;
+
+                            // Allow sliding when the body falls.
+                            if !self.on_floor && motion.dot(up) < 0.0 {
+                                let slide_motion = slide(motion, self.wall_normal);
+                                // Test again to allow sliding only if the result
+                                // goes downwards. Fixes jittering issues at the
+                                // bottom of inclined walls.
+                                if slide_motion.dot(up) < 0.0 {
+                                    stop_all_motion = false;
+                                    motion = slide_motion;
+                                }
+                            }
+
+                            if stop_all_motion {
+                                motion = Vector3::ZERO;
+                                *velocity = Vector3::ZERO;
+                            }
+                        }
+                    }
+
+                    // Stop horizontal motion when under wall slide threshold.
+                    if was_on_floor && self.wall_min_slide_angle > 0.0 && result_state.wall {
+                        let horizontal_normal = normalized(slide(self.wall_normal, up));
+                        let motion_angle = (-horizontal_normal.dot(normalized(motion_slide_up)))
+                            .clamp(-1.0, 1.0)
+                            .acos()
+                            .abs();
+                        if motion_angle < self.wall_min_slide_angle {
+                            motion = up * motion.dot(up);
+                            *velocity = up * velocity.dot(up);
+
+                            apply_default_sliding = false;
+                        }
+                    }
                 }
-                if sub.y.abs() > 1e-8 && sub_result.y.abs() < sub.y.abs() * 0.1 {
-                    motion_out.y = 0.0;
+
+                if apply_default_sliding {
+                    // Regular sliding, the last part of the test handle the case
+                    // when you don't want to slide on the ceiling.
+                    if (sliding_enabled || !self.on_floor)
+                        && (!self.on_ceiling || self.slide_on_ceiling || !vel_dir_facing_up)
+                        && !apply_ceiling_velocity
+                    {
+                        let collision_normal = result.collisions[0].normal;
+
+                        let mut slide_motion = slide(result.remainder, collision_normal);
+                        if self.on_floor && !self.on_wall && !is_zero_approx(motion_slide_up) {
+                            // Slide using the intersection between the motion
+                            // plane and the floor plane, in order to keep the
+                            // direction intact.
+                            let motion_length = slide_motion.length();
+                            slide_motion = up.cross(result.remainder).cross(self.floor_normal);
+
+                            // Keep the length from default slide to change speed
+                            // in slopes by default, when constant speed is not
+                            // enabled.
+                            slide_motion = normalized(slide_motion);
+                            slide_motion = slide_motion * motion_length;
+                        }
+
+                        if slide_motion.dot(*velocity) > 0.0 {
+                            motion = slide_motion;
+                        } else {
+                            motion = Vector3::ZERO;
+                        }
+
+                        if self.slide_on_ceiling && result_state.ceiling {
+                            // Apply slide only in the direction of the input
+                            // motion, otherwise just stop to avoid jittering when
+                            // moving against a wall.
+                            if vel_dir_facing_up {
+                                *velocity = slide(*velocity, collision_normal);
+                            } else {
+                                // Avoid acceleration in slope when falling.
+                                *velocity = up * up.dot(*velocity);
+                            }
+                        }
+                    }
+                    // No sliding on first attempt to keep floor motion stable
+                    // when possible.
+                    else {
+                        motion = result.remainder;
+                        if result_state.ceiling && !self.slide_on_ceiling && vel_dir_facing_up {
+                            *velocity = slide(*velocity, up);
+                            motion = slide(motion, up);
+                        }
+                    }
                 }
-                if sub.z.abs() > 1e-8 && sub_result.z.abs() < sub.z.abs() * 0.1 {
-                    motion_out.z = 0.0;
+
+                total_travel = total_travel + result.travel;
+
+                // Apply Constant Speed.
+                if was_on_floor
+                    && self.floor_constant_speed
+                    && can_apply_constant_speed
+                    && self.on_floor
+                    && !is_zero_approx(motion)
+                {
+                    let travel_slide_up = slide(total_travel, up);
+                    motion = normalized(motion)
+                        * (motion_slide_up.length() - travel_slide_up.length()).max(0.0);
                 }
             }
-        }
+            // When you move forward in a downward slope you don't collide
+            // because you will be in the air. This test ensures that constant
+            // speed is applied, only if the player is still on the ground after
+            // the snap is applied.
+            else if self.floor_constant_speed
+                && first_slide
+                && self.on_floor_if_snapped(was_on_floor, vel_dir_facing_up, bodies)
+            {
+                can_apply_constant_speed = false;
+                sliding_enabled = true;
+                self.position = self.position - result.travel;
 
-        // --- Floor snapping (Grounded only) ----------------------------------
-        if grounded_mode {
-            self.apply_floor_snap(was_on_floor, velocity, bodies);
-        }
+                // Slide using the intersection between the motion plane and the
+                // floor plane, in order to keep the direction intact.
+                let motion_slide_norm = normalized(up.cross(motion).cross(prev_floor_normal));
 
-        // --- On-leave velocity -----------------------------------------------
-        if grounded_mode && was_on_floor && !self.on_floor {
-            match self.platform_on_leave {
-                PlatformOnLeave::AddVelocity => {
-                    output_vel = output_vel + previous_platform_velocity;
-                }
-                PlatformOnLeave::AddUpwardVelocity => {
-                    let up_comp = previous_platform_velocity.dot(self.up_direction);
-                    output_vel = output_vel + self.up_direction * up_comp;
-                }
-                PlatformOnLeave::DoNotAddVelocity => {}
+                motion = motion_slide_norm * motion_slide_up.length();
+                collided = true;
             }
-            // We are airborne now — forget the platform we were standing on.
-            self.platform_velocity = Vector3::ZERO;
-        }
 
-        // Godot: "Reset the gravity accumulation when touching the ground" —
-        // `if (on_floor && !vel_dir_facing_up) velocity = velocity.slide(up)`
-        // (`character_body_3d.cpp`, `_move_and_slide_grounded`). Without it a
-        // standing character kept one tick of gravity in `velocity.y`
-        // (-0.1833 at the platformer's 22 m/s^2, 120 Hz) where Godot reads 0
-        // (pat-2ifdx).
-        if grounded_mode && self.on_floor && !vel_dir_facing_up {
-            let up = self.up_direction;
-            output_vel = output_vel - up * output_vel.dot(up);
-        }
-
-        output_vel
-    }
-
-    /// Performs a single slide step with the given step velocity.
-    ///
-    /// `was_on_floor` reports whether the character was grounded at the start of
-    /// the `move_and_slide` call; it gates the grounded wall knobs.
-    fn slide_step(
-        &mut self,
-        step_vel: Vector3,
-        bodies: &[&PhysicsBody3D],
-        was_on_floor: bool,
-        vel_dir_facing_up: bool,
-        vel: &mut Vector3,
-    ) -> Vector3 {
-        let mut remaining = step_vel;
-        // The displacement still to APPLY this iteration — distinct from
-        // `remaining`, the slid motion this returns (pat-2ifdx).
-        //
-        // 🔑 A collision is resolved by moving to the FULL target and pushing
-        // out along the surface normal, which already IS the slide: the motion
-        // projected onto the surface. The old loop then applied the projected
-        // remainder a second time from the pushed-out position, so every tick
-        // spent touching a surface moved the character twice along it — the
-        // platformer's player walked at 2x MAX_SPEED across its own floor while
-        // its reported `velocity` read exactly MAX_SPEED. After a contact only
-        // depenetration from further bodies remains, so nothing more is applied.
-        let mut to_apply = step_vel;
-
-        for _ in 0..self.max_slides {
-            if remaining.length_squared() < 1e-8 {
+            if !collided || is_zero_approx(motion) {
                 break;
             }
 
-            // ⚠️ `get_last_motion` is measured per SLIDE ITERATION, not per
-            // anti-tunnelling sub-step: Godot splits the movement when sliding
-            // occurs and reports the final segment. Recording it around the
-            // outer distance loop instead would make it identical to
-            // `get_position_delta` for every ordinary move, which is exactly
-            // the bug the two methods exist to distinguish.
-            let iter_start = self.position;
-            let target = self.position + to_apply;
+            can_apply_constant_speed = !can_apply_constant_speed && !sliding_enabled;
+            sliding_enabled = true;
+            first_slide = false;
+        }
 
-            // Find the deepest collision against all bodies.
-            //
-            // ⚠️ The body INDEX is tracked alongside the result. Without it the
-            // contact is recorded with no idea what was struck, and
-            // `get_collider()` can only ever answer null — which is how the
-            // collision data came to be computed and thrown away.
-            let mut deepest: Option<collision::CollisionResult3D> = None;
-            let mut deepest_idx: Option<usize> = None;
+        self.snap_on_floor(was_on_floor, vel_dir_facing_up, bodies);
 
-            for (body_idx, body) in bodies.iter().enumerate() {
-                // Layer/mask filtering.
-                if (self.collision_mask & body.collision_layer) == 0 {
+        // Reset the gravity accumulation when touching the ground.
+        if self.on_floor && !vel_dir_facing_up {
+            *velocity = slide(*velocity, up);
+        }
+    }
+
+    /// Godot's `_move_and_slide_floating`.
+    fn move_and_slide_floating(
+        &mut self,
+        delta: f32,
+        velocity: &mut Vector3,
+        bodies: &[&PhysicsBody3D],
+    ) {
+        let margin = self.safe_margin;
+        let mut motion = *velocity * delta;
+
+        self.platform_body = None;
+        self.floor_normal = Vector3::ZERO;
+        self.platform_velocity = Vector3::ZERO;
+        self.platform_angular_velocity = Vector3::ZERO;
+
+        let mut first_slide = true;
+        for _iteration in 0..self.max_slides {
+            let mut params = MotionParameters::new(self.position, motion, margin);
+            // Also report collisions generated only from recovery.
+            params.recovery_as_collision = true;
+
+            let (collided, result) = self.godot_move_and_collide(&params, bodies, false, false);
+
+            self.last_motion = result.travel;
+
+            if collided {
+                self.push_motion_result(&result);
+
+                self.set_collision_direction(&result, CollisionState::ALL, bodies);
+
+                // Godot also zeroes `motion` here; nothing reads it after the break.
+                if is_zero_approx(result.remainder) {
+                    break;
+                }
+
+                if self.wall_min_slide_angle != 0.0
+                    && self
+                        .wall_normal
+                        .dot(-normalized(*velocity))
+                        .clamp(-1.0, 1.0)
+                        .acos()
+                        < self.wall_min_slide_angle + FLOOR_ANGLE_THRESHOLD
+                {
+                    motion = Vector3::ZERO;
+                    if result.travel.length() < margin + CMP_EPSILON {
+                        self.position = self.position - result.travel;
+                    }
+                } else if first_slide {
+                    let motion_slide_norm = normalized(slide(result.remainder, self.wall_normal));
+                    motion = motion_slide_norm * (motion.length() - result.travel.length());
+                } else {
+                    motion = slide(result.remainder, self.wall_normal);
+                }
+
+                if motion.dot(*velocity) <= 0.0 {
+                    motion = Vector3::ZERO;
+                }
+            }
+
+            if !collided || is_zero_approx(motion) {
+                break;
+            }
+
+            first_slide = false;
+        }
+    }
+
+    /// Godot's `CharacterBody3D::apply_floor_snap()`.
+    fn godot_apply_floor_snap(&mut self, bodies: &[&PhysicsBody3D]) {
+        if self.on_floor {
+            return;
+        }
+
+        // Snap by at least collision margin to keep floor state consistent.
+        let length = self.floor_snap_length.max(self.safe_margin);
+
+        let mut params =
+            MotionParameters::new(self.position, -self.up_direction * length, self.safe_margin);
+        params.max_collisions = 4;
+        // Also report collisions generated only from recovery.
+        params.recovery_as_collision = true;
+
+        let from = self.position;
+        let (collided, mut result) = self.godot_move_and_collide(&params, bodies, true, false);
+        if collided {
+            // Apply direction for floor only.
+            let result_state = self.set_collision_direction(
+                &result,
+                CollisionState {
+                    floor: true,
+                    wall: false,
+                    ceiling: false,
+                },
+                bodies,
+            );
+
+            if result_state.floor {
+                // Ensure that we only move the body along the up axis, because
+                // move_and_collide may stray the object a bit when getting it
+                // unstuck. Canceling this motion should not affect
+                // move_and_slide, as previous calls to move_and_collide already
+                // took care of freeing the body.
+                if result.travel.length() > self.safe_margin {
+                    result.travel = self.up_direction * self.up_direction.dot(result.travel);
+                } else {
+                    result.travel = Vector3::ZERO;
+                }
+
+                self.position = from + result.travel;
+            }
+        }
+    }
+
+    /// Godot's `_snap_on_floor`.
+    fn snap_on_floor(
+        &mut self,
+        was_on_floor: bool,
+        vel_dir_facing_up: bool,
+        bodies: &[&PhysicsBody3D],
+    ) {
+        if self.on_floor || !was_on_floor || vel_dir_facing_up {
+            return;
+        }
+        self.godot_apply_floor_snap(bodies);
+    }
+
+    /// Godot's `_on_floor_if_snapped`.
+    fn on_floor_if_snapped(
+        &mut self,
+        was_on_floor: bool,
+        vel_dir_facing_up: bool,
+        bodies: &[&PhysicsBody3D],
+    ) -> bool {
+        if self.up_direction == Vector3::ZERO || self.on_floor || !was_on_floor || vel_dir_facing_up
+        {
+            return false;
+        }
+
+        // Snap by at least collision margin to keep floor state consistent.
+        let length = self.floor_snap_length.max(self.safe_margin);
+
+        let mut params =
+            MotionParameters::new(self.position, -self.up_direction * length, self.safe_margin);
+        params.max_collisions = 4;
+        // Also report collisions generated only from recovery.
+        params.recovery_as_collision = true;
+
+        let (collided, result) = self.godot_move_and_collide(&params, bodies, true, false);
+        if collided {
+            // Don't apply direction for any type.
+            let result_state =
+                self.set_collision_direction(&result, CollisionState::default(), bodies);
+            return result_state.floor;
+        }
+        false
+    }
+
+    /// Godot's `_set_collision_direction`: classifies every collision of
+    /// `result`, applying to the body's state only the kinds in `apply`.
+    /// Returns the kinds found (`r_state`).
+    fn set_collision_direction(
+        &mut self,
+        result: &MotionResult,
+        apply: CollisionState,
+        bodies: &[&PhysicsBody3D],
+    ) -> CollisionState {
+        let mut r_state = CollisionState::default();
+
+        let mut wall_depth = -1.0f32;
+        let mut floor_depth = -1.0f32;
+
+        let was_on_wall = self.on_wall;
+        let prev_wall_normal = self.wall_normal;
+        let mut wall_collision_count = 0;
+        let mut combined_wall_normal = Vector3::ZERO;
+        // Avoid duplicate on average calculation.
+        let mut tmp_wall_col = Vector3::ZERO;
+
+        for collision in result.collisions.iter().rev() {
+            if self.motion_mode == MotionMode::Grounded {
+                // Check if any collision is floor.
+                let floor_angle = collision.get_angle(self.up_direction);
+                if floor_angle <= self.floor_max_angle + FLOOR_ANGLE_THRESHOLD {
+                    r_state.floor = true;
+                    if apply.floor && collision.depth > floor_depth {
+                        self.on_floor = true;
+                        self.floor_normal = collision.normal;
+                        floor_depth = collision.depth;
+                        self.set_platform_data(collision, bodies);
+                    }
                     continue;
                 }
 
-                let result = self.collide_body(target, body);
-
-                if result.colliding
-                    && result.depth > 0.0
-                    && (deepest.is_none() || result.depth > deepest.as_ref().unwrap().depth)
-                {
-                    deepest = Some(result);
-                    deepest_idx = Some(body_idx);
+                // Check if any collision is ceiling.
+                let ceiling_angle = collision.get_angle(-self.up_direction);
+                if ceiling_angle <= self.floor_max_angle + FLOOR_ANGLE_THRESHOLD {
+                    r_state.ceiling = true;
+                    if apply.ceiling {
+                        self.platform_ceiling_velocity = collision.collider_velocity;
+                        self.ceiling_normal = collision.normal;
+                        self.on_ceiling = true;
+                    }
+                    continue;
                 }
             }
 
-            let Some(result) = deepest else {
-                // No collision — move freely.
-                self.position = target;
-                // A depenetration-only pass (`to_apply` zero) moved nothing, so
-                // it must not overwrite the last real motion with zero.
-                if to_apply.length_squared() > 0.0 {
-                    self.last_motion = self.position - iter_start;
+            // Collision is wall by default.
+            r_state.wall = true;
+
+            if apply.wall && collision.depth > wall_depth {
+                self.on_wall = true;
+                wall_depth = collision.depth;
+                self.wall_normal = collision.normal;
+
+                // Don't apply wall velocity when the collider is a
+                // CharacterBody3D (Patina: any kinematic body).
+                let is_character = bodies
+                    .get(collision.collider_index)
+                    .is_some_and(|b| b.body_type == crate::body::BodyType3D::Kinematic);
+                if !is_character {
+                    self.set_platform_data(collision, bodies);
                 }
-                break;
-            };
-
-            // The collision normal points from A (character) toward B (body).
-            // The surface normal points from the body toward the character.
-            let surface_normal = -result.normal;
-            self.classify_surface(surface_normal, deepest_idx.map(|i| bodies[i].id));
-
-            // Separate from the surface.
-            // ⚠️ `+ safe_margin`, not just the measured depth: Godot keeps a
-            // small gap so the very next frame's overlap test does not start
-            // from an exact-touch state, where a float rounding the wrong way
-            // reads as a fresh penetration. Authoring `safe_margin = 0`
-            // reproduces the old exact-contact behaviour (pat-s3rrv.103).
-            self.position = target + surface_normal * (result.depth + self.safe_margin);
-            self.last_motion = self.position - iter_start;
-            let applied = to_apply;
-            to_apply = Vector3::ZERO;
-
-            // `slide_on_ceiling = false`: a jump into a ceiling stops dead and
-            // the body falls vertically instead of skating along it
-            // (`character_body_3d.cpp:314`).
-            //
-            // ⚠️ Placed AFTER the separation, not before it. Godot applies the
-            // collision response and then cancels the REMAINDER; returning
-            // early instead would leave the body still penetrating the ceiling
-            // it just hit, and the next tick would start from inside geometry.
-            //
-            // ⚠️ Gated on `vel_dir_facing_up`. Godot cancels ONLY while the body
-            // is moving upward — a body walking under a low ceiling, or falling
-            // past one, still slides normally. Cancelling on every ceiling
-            // contact would freeze a character the moment its head brushed
-            // anything, which is what dropping that term looks like in play.
-            if self.on_ceiling && !self.slide_on_ceiling && vel_dir_facing_up {
-                // Godot stops the body AT the contact: it travels only the
-                // fraction of this motion that reached the ceiling, sideways
-                // component included. Pushing out of the full target (above)
-                // would keep the whole sideways step, i.e. still slide
-                // (pat-2ifdx — the old loop hid this by sliding twice when the
-                // knob was on).
-                let into = -applied.dot(surface_normal);
-                let reach = if into > 1e-9 {
-                    (1.0 - (result.depth + self.safe_margin) / into).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                };
-                self.position = iter_start + applied * reach;
-                self.last_motion = self.position - iter_start;
-                // ⚠️ Recorded before returning. The contact HAPPENED — cancelling
-                // the remaining motion is the response to it, not a reason to
-                // hide it — and a script checking `get_slide_collision_count()`
-                // after a blocked jump would otherwise see zero and conclude it
-                // never touched anything. `remainder` is ZERO because that is
-                // exactly what is left to apply.
-                self.slide_collisions.push(KinematicCollision3D {
-                    collider: deepest_idx.map(|i| bodies[i].id),
-                    normal: surface_normal,
-                    depth: result.depth,
-                    position: self.position,
-                    remainder: Vector3::ZERO,
-                });
-                // Godot: `velocity = velocity.slide(up_direction)`.
-                let up = self.up_direction;
-                *vel = *vel - up * vel.dot(up);
-                return Vector3::ZERO;
             }
 
-            // Slide: remove the velocity component along the surface normal.
-            let vel_along_normal = remaining.dot(surface_normal);
-            remaining = remaining - surface_normal * vel_along_normal;
-
-            // Recorded AFTER the projection so `remainder` is the motion still
-            // to be applied, which is what Godot reports — recording it before
-            // would hand back the pre-slide motion and describe a body that
-            // stopped dead.
-            self.slide_collisions.push(KinematicCollision3D {
-                collider: deepest_idx.map(|i| bodies[i].id),
-                normal: surface_normal,
-                depth: result.depth,
-                position: self.position,
-                remainder: remaining,
-            });
-
-            // Grounded wall knobs only apply to wall surfaces.
-            let up_dot = surface_normal.dot(self.up_direction);
-            let floor_cos = self.floor_max_angle.cos();
-            let is_wall_surface = self.motion_mode == MotionMode::Grounded
-                && up_dot <= floor_cos
-                && up_dot >= -floor_cos;
-
-            if is_wall_surface {
-                let up = self.up_direction;
-                let motion_slide_up = step_vel - up * step_vel.dot(up);
-                let forward = {
-                    let h = surface_normal - up * surface_normal.dot(up);
-                    if h.length_squared() > 1e-12 {
-                        h.normalized()
-                    } else {
-                        Vector3::ZERO
-                    }
-                };
-                if self.floor_block_on_wall
-                    && motion_slide_up.dot(surface_normal) <= 0.0
-                    && was_on_floor
-                    && !vel_dir_facing_up
-                {
-                    // Godot's `floor_block_on_wall` branch
-                    // (`_move_and_slide_grounded`): a grounded body walking into
-                    // a wall keeps only the motion and velocity ALONG it —
-                    // `motion = motion.slide(forward)`,
-                    // `velocity = velocity.slide(forward)` — with `forward` the
-                    // wall normal flattened onto the floor plane (pat-d4ghb).
-                    remaining = remaining - forward * remaining.dot(forward);
-                    *vel = *vel - forward * vel.dot(forward);
-                    // ⚠️ Godot also CANCELS a wall approach shorter than
-                    // `min(0.1, margin * 20)` and re-applies the remaining motion
-                    // slid along the wall. Not reproduced: where that leaves the
-                    // body depends on where Jolt's cast first split the motion
-                    // on the FLOOR (measured at the platformer's x = 5.66 wall:
-                    // a floor contact after 0.0155 of a 0.0276 step, from a body
-                    // resting 1e-4 above the floor), which this push-out solver
-                    // has no equivalent of. Emulating the cancel without it
-                    // landed 1.3e-2 from Godot; plain push-out lands 5.7e-3.
-                    // ...and cannot climb it.
-                    let up_comp = remaining.dot(up);
-                    if up_comp > 0.0 {
-                        remaining = remaining - up * up_comp;
-                    }
-                } else if was_on_floor
-                    && self.wall_min_slide_angle > 0.0
-                    && motion_slide_up.length_squared() > 1e-12
-                {
-                    // Godot's "stop horizontal motion when under wall slide
-                    // threshold": the angle is between the MOTION and the wall
-                    // (head-on is 0), not between the wall normal and up — that
-                    // reading could never fire, since a wall is by definition
-                    // more than `floor_max_angle` from up.
-                    let motion_angle = (-forward.dot(motion_slide_up.normalized()))
-                        .clamp(-1.0, 1.0)
-                        .acos()
-                        .abs();
-                    if motion_angle < self.wall_min_slide_angle {
-                        remaining = up * remaining.dot(up);
-                        *vel = up * vel.dot(up);
-                    } else {
-                        *vel = *vel - surface_normal * vel.dot(surface_normal);
-                    }
-                } else {
-                    // Any other wall contact slides the velocity along the
-                    // wall. Measured on Godot 4.6.1 + Jolt: an airborne sphere
-                    // moving (6, 0, 3) into an x-facing wall reads (0, 0, 3)
-                    // after `move_and_slide()`.
-                    *vel = *vel - surface_normal * vel.dot(surface_normal);
-                }
-            } else if self.motion_mode == MotionMode::Floating {
-                *vel = *vel - surface_normal * vel.dot(surface_normal);
-            } else if up_dot < -floor_cos && self.slide_on_ceiling && vel_dir_facing_up {
-                // Godot: a rising body's velocity slides along the ceiling —
-                // measured, (2, 6, 0) into a flat ceiling reads (2, 0, 0).
-                *vel = *vel - surface_normal * vel.dot(surface_normal);
+            // Collect normal for calculating average.
+            if !is_equal_approx(collision.normal, tmp_wall_col) {
+                tmp_wall_col = collision.normal;
+                combined_wall_normal = combined_wall_normal + collision.normal;
+                wall_collision_count += 1;
             }
         }
 
-        remaining
+        if r_state.wall
+            && wall_collision_count > 1
+            && !r_state.floor
+            && self.motion_mode == MotionMode::Grounded
+        {
+            // Check if wall normals cancel out to floor support.
+            let combined_wall_normal = normalized(combined_wall_normal);
+            let floor_angle = combined_wall_normal
+                .dot(self.up_direction)
+                .clamp(-1.0, 1.0)
+                .acos();
+            if floor_angle <= self.floor_max_angle + FLOOR_ANGLE_THRESHOLD {
+                r_state.floor = true;
+                r_state.wall = false;
+                if apply.floor {
+                    self.on_floor = true;
+                    self.floor_normal = combined_wall_normal;
+                }
+                if apply.wall {
+                    self.on_wall = was_on_wall;
+                    self.wall_normal = prev_wall_normal;
+                }
+                return r_state;
+            }
+        }
+        r_state
     }
 
-    /// Moves the character by `motion`, stopping at the first collision.
+    /// Godot's `_set_platform_data`.
+    fn set_platform_data(&mut self, collision: &MotionCollision, bodies: &[&PhysicsBody3D]) {
+        let Some(body) = bodies.get(collision.collider_index) else {
+            return;
+        };
+        self.platform_body = Some(body.id);
+        self.platform_velocity = collision.collider_velocity;
+        self.platform_angular_velocity = collision.collider_angular_velocity;
+        self.platform_layer = body.collision_layer;
+    }
+
+    /// Godot's `PhysicsBody3D::move_and_collide(motion)`: moves by `motion`,
+    /// stopping at the first collision.
     ///
-    /// Returns `Some(CollisionResult3D)` if a collision occurred, or `None`
-    /// if the full motion completed without hitting anything.
+    /// Returns the collision (normal pointing away from the obstacle, depth)
+    /// or `None` if the full motion completed.
     pub fn move_and_collide(
         &mut self,
         motion: Vector3,
         bodies: &[&PhysicsBody3D],
     ) -> Option<collision::CollisionResult3D> {
-        let target = self.position + motion;
-
-        let mut deepest: Option<collision::CollisionResult3D> = None;
-        for body in bodies {
-            if (self.collision_mask & body.collision_layer) == 0 {
-                continue;
-            }
-            let result = self.collide_body(target, body);
-            if result.colliding
-                && result.depth > 0.0
-                && (deepest.is_none() || result.depth > deepest.as_ref().unwrap().depth)
-            {
-                deepest = Some(result);
-            }
+        let params = MotionParameters::new(self.position, motion, self.safe_margin);
+        let (collided, r) = self.godot_move_and_collide(&params, bodies, false, false);
+        if !collided {
+            return None;
         }
-
-        match deepest {
-            None => {
-                self.position = target;
-                None
-            }
-            Some(result) => {
-                let surface_normal = -result.normal;
-                // ⚠️ `+ safe_margin`, not just the measured depth: Godot keeps a
-            // small gap so the very next frame's overlap test does not start
-            // from an exact-touch state, where a float rounding the wrong way
-            // reads as a fresh penetration. Authoring `safe_margin = 0`
-            // reproduces the old exact-contact behaviour (pat-s3rrv.103).
-            self.position = target + surface_normal * (result.depth + self.safe_margin);
-                Some(collision::CollisionResult3D {
-                    colliding: true,
-                    normal: surface_normal,
-                    depth: result.depth,
-                })
-            }
-        }
+        Some(collision::CollisionResult3D {
+            colliding: true,
+            normal: r.collisions[0].normal,
+            depth: r.collision_depth,
+        })
     }
 
-    /// Probes for the floor body directly beneath the character.
-    ///
-    /// Returns the index (into `bodies`) of the floor body and the surface
-    /// normal, or `None` when the character is not resting on a floor. The shape
-    /// is offset a small margin downward so a resting (just-touching) contact is
-    /// detected.
-    fn probe_floor(&self, bodies: &[&PhysicsBody3D]) -> Option<(usize, Vector3)> {
-        let probe_pos = self.position - self.up_direction * FLOOR_PROBE_MARGIN;
-        let floor_cos = self.floor_max_angle.cos();
-        let mut best: Option<(usize, f32, Vector3)> = None;
-
-        for (i, body) in bodies.iter().enumerate() {
-            if (self.collision_mask & body.collision_layer) == 0 {
-                continue;
-            }
-            let r = self.collide_body(probe_pos, body);
-            if r.colliding && r.depth > 0.0 {
-                let normal = -r.normal;
-                if normal.dot(self.up_direction) > floor_cos
-                    && (best.is_none() || r.depth > best.as_ref().unwrap().1)
-                {
-                    best = Some((i, r.depth, normal));
-                }
-            }
-        }
-
-        best.map(|(i, _, n)| (i, n))
-    }
-
-    /// Casts the shape downward up to `floor_snap_length` to keep the character
-    /// glued to slopes/stairs when it would otherwise leave the floor.
-    ///
-    /// ⚠️ `pub` because Godot exposes `apply_floor_snap()` as a script method a
-    /// body can call on demand, not only as an internal phase of
-    /// `move_and_slide` (pat-s3rrv.103).
+    /// Godot's floor snap at the end of `move_and_slide` (`_snap_on_floor`):
+    /// snaps only a body that was on the floor and is not moving up.
     pub fn apply_floor_snap(
         &mut self,
         was_on_floor: bool,
         velocity: Vector3,
         bodies: &[&PhysicsBody3D],
     ) {
-        if self.floor_snap_length <= 0.0 || self.on_floor {
-            return;
-        }
-        // Never snap while moving upward relative to the up direction.
-        let along_up = velocity.dot(self.up_direction);
-        if along_up > 1e-6 {
-            return;
-        }
-        // Only snap a body that was ON THE FLOOR at the start of the call:
-        // Godot's `_snap_on_floor` returns early on `!p_was_on_floor`
-        // (`character_body_3d.cpp`). This used to snap any DESCENDING body too,
-        // so a falling character was yanked onto a floor up to
-        // `floor_snap_length` below it a tick or more early: the 3D
-        // platformer's player landed at physics frame 10 at y = -4.0 where
-        // Godot lands at frame 15 at -3.999 (pat-d4ghb).
-        if !was_on_floor {
-            return;
-        }
-
-        self.snap_probe(bodies);
+        let vel_dir_facing_up = velocity.dot(self.up_direction) > 0.0;
+        self.snap_on_floor(was_on_floor, vel_dir_facing_up, bodies);
     }
 
     /// Seeds the contact state the PREVIOUS `move_and_slide` left (pat-d4ghb).
@@ -858,8 +1124,7 @@ impl CharacterBody3D {
     /// the floor normal and the platform velocity carry from call to call.
     /// Patina's scene bridge builds a fresh solver body per call from the
     /// node's published properties, and without this every call started
-    /// airborne: the floor snap never fired for a walking body, and
-    /// `floor_block_on_wall` / the platform on-leave velocity never applied.
+    /// airborne.
     pub fn restore_contact_state(
         &mut self,
         on_floor: bool,
@@ -877,142 +1142,25 @@ impl CharacterBody3D {
         self.platform_velocity = platform_velocity;
     }
 
-    /// Godot's **manual** `apply_floor_snap()` (pat-s3rrv.103).
-    ///
-    /// ⚠️ Deliberately does NOT share the velocity guards above.
-    /// `CharacterBody3D.xml` is explicit: *"Allows to manually apply a snap to
-    /// the floor **regardless of the body's velocity**. This function does
-    /// nothing when `is_on_floor()` returns true."*
-    ///
-    /// Those guards are right for the caller inside [`Self::move_and_slide`] —
-    /// yanking a rising body downward mid-jump would be wrong — but they make
-    /// the manual call a no-op in the case it exists for: a body standing
-    /// still, whose velocity is zero and which was not already grounded. Only
-    /// the `on_floor` and `floor_snap_length` conditions carry over, because
-    /// those are the two the documentation keeps.
+    /// Seeds Godot's `platform_rid` / `platform_layer` from the previous call:
+    /// the body the character stood on (or rode on a wall), whose velocity the
+    /// next `move_and_slide` re-reads before moving (pat-kiuul).
+    pub fn restore_platform(&mut self, body: Option<BodyId3D>, layer: u32) {
+        self.platform_body = body;
+        self.platform_layer = layer;
+    }
+
+    /// The body the last `move_and_slide` stood on or rode (Godot's
+    /// `platform_rid`), and its collision layer.
+    pub fn get_platform(&self) -> (Option<BodyId3D>, u32) {
+        (self.platform_body, self.platform_layer)
+    }
+
+    /// Godot's **manual** `apply_floor_snap()` (pat-s3rrv.103): snaps to the
+    /// floor regardless of the body's velocity; does nothing when already on
+    /// the floor.
     pub fn apply_floor_snap_manual(&mut self, bodies: &[&PhysicsBody3D]) {
-        if self.floor_snap_length <= 0.0 || self.on_floor {
-            return;
-        }
-        self.snap_probe(bodies);
-    }
-
-    /// The downward probe both snap paths share.
-    ///
-    /// Godot's `apply_floor_snap` (`character_body_3d.cpp`) as a shape cast
-    /// (pat-d4ghb): cast the body straight down `floor_snap_length`, stop at
-    /// the FIRST contact of any kind, and snap only if that contact is a floor.
-    /// The body then moves along the up axis ONLY ("ensure that we only move
-    /// the body along the up axis"), and not at all when the travel is within
-    /// `safe_margin`.
-    ///
-    /// ⚠️ This used to place the body at `probe + normal * depth` from the
-    /// first sample that overlapped a floor-angled surface. Over a ledge the
-    /// capsule meets the edge with a TILTED normal, so that pushed the player
-    /// sideways (z drifted 4.5e-3 walking straight along x off the platformer's
-    /// first ledge) and the coarse sampling dropped the floor a tick before
-    /// Godot did. It also skipped a WALL contact to find a floor below it,
-    /// where Godot's cast stops at the wall and does not snap.
-    ///
-    /// Extracted so the manual and automatic snaps cannot drift into finding
-    /// the floor at different distances.
-    fn snap_probe(&mut self, bodies: &[&PhysicsBody3D]) {
-        let up = self.up_direction;
-        let start = self.position;
-        let touches = |t: f32| self.deepest_contact(start - up * t, bodies);
-
-        // Coarse march to the first sample that touches anything, then bisect
-        // the interval for the contact distance.
-        let mut free = 0.0f32;
-        let mut hit = None;
-        for i in 1..=SNAP_SAMPLES {
-            let t = self.floor_snap_length * (i as f32 / SNAP_SAMPLES as f32);
-            if touches(t).is_some() {
-                hit = Some(t);
-                break;
-            }
-            free = t;
-        }
-        let Some(mut blocked) = hit else {
-            return;
-        };
-        for _ in 0..24 {
-            let mid = 0.5 * (free + blocked);
-            if touches(mid).is_some() {
-                blocked = mid;
-            } else {
-                free = mid;
-            }
-        }
-        let Some((normal, _)) = touches(blocked) else {
-            return;
-        };
-        // Godot's floor test: angle <= floor_max_angle + FLOOR_ANGLE_THRESHOLD.
-        let angle = normal.dot(up).clamp(-1.0, 1.0).acos();
-        if angle > self.floor_max_angle + 0.01 {
-            return;
-        }
-        // The cast stops `safe_margin` short of contact.
-        let travel = free - self.safe_margin;
-        if travel > self.safe_margin {
-            self.position = start - up * travel;
-        }
-        self.on_floor = true;
-        self.floor_normal = normal;
-    }
-
-    /// The deepest contact of any orientation at `probe_pos`, as a surface
-    /// normal (pointing at the character) and depth.
-    fn deepest_contact(
-        &self,
-        probe_pos: Vector3,
-        bodies: &[&PhysicsBody3D],
-    ) -> Option<(Vector3, f32)> {
-        let mut best: Option<(Vector3, f32)> = None;
-        for body in bodies {
-            if (self.collision_mask & body.collision_layer) == 0 {
-                continue;
-            }
-            let r = self.collide_body(probe_pos, body);
-            if r.colliding && r.depth > 0.0 && best.is_none_or(|(_, d)| r.depth > d) {
-                best = Some((-r.normal, r.depth));
-            }
-        }
-        best
-    }
-
-    /// Classifies a collision normal as floor, wall, or ceiling.
-    ///
-    /// In [`MotionMode::Floating`] every surface is a wall.
-    /// Sorts one contact into floor / wall / ceiling.
-    ///
-    /// `body` is the body that was struck, recorded whenever the contact is a
-    /// WALL so the next `move_and_slide` can carry the character with it
-    /// (`platform_wall_layers`). It is threaded in rather than read from a
-    /// field because the classification is what decides the contact *is* a
-    /// wall — the caller does not know until this returns.
-    fn classify_surface(&mut self, normal: Vector3, body: Option<BodyId3D>) {
-        if self.motion_mode == MotionMode::Floating {
-            self.on_wall = true;
-            self.wall_normal = normal;
-            self.wall_body = body;
-            return;
-        }
-
-        let dot = normal.dot(self.up_direction);
-        let floor_cos = self.floor_max_angle.cos();
-        if dot > floor_cos {
-            self.on_floor = true;
-            self.floor_normal = normal;
-        } else if dot < -floor_cos {
-            self.on_ceiling = true;
-        } else {
-            self.on_wall = true;
-            self.wall_normal = normal;
-            // Last wall wins, matching Godot: `platform_rid` is overwritten by
-            // each collision, so the platform is the most recent contact.
-            self.wall_body = body;
-        }
+        self.godot_apply_floor_snap(bodies);
     }
 
     /// Returns `true` if the character is touching a floor surface.
@@ -1064,17 +1212,11 @@ impl CharacterBody3D {
 
     /// The last sub-motion the slide loop actually achieved (Godot's
     /// `get_last_motion`).
-    ///
-    /// ⚠️ Distinct from the total travel: when the character slides along a
-    /// wall the motion is split, and this is the FINAL segment — which is why
-    /// Godot documents it as the way to read the current direction of travel.
     pub fn get_last_motion(&self) -> Vector3 {
         self.last_motion
     }
 
     /// Returns the angle (radians) between the floor normal and `up_direction`.
-    ///
-    /// `0` on flat ground; larger on steeper slopes.
     pub fn get_floor_angle(&self) -> f32 {
         self.floor_normal
             .dot(self.up_direction)
@@ -1102,27 +1244,64 @@ mod tests {
         body
     }
 
+    // Measured on Godot 4.6.1 + Jolt (pat-kiuul) by the probe project
+    // `tools/oracle/character_body_3d_jolt/delta_one`, which runs with
+    // `physics_ticks_per_second = 1`, so `move_and_slide()` moves by exactly
+    // `velocity` -- the same units as this solver's `move_and_slide`.
     /// pat-d4ghb: Godot snaps only a body that WAS on the floor. A falling
     /// body 0.05 above a floor (inside the 0.1 snap length) stays airborne and
     /// moves by its own motion only.
+    ///
+    /// pat-kiuul: the snap is Jolt's shape cast, so it lands where the cast's
+    /// binary search does -- NOT `safe_margin` short of the floor, which is
+    /// what the old solver assumed (it put both bodies at 1.001). A 0.05 gap
+    /// is touched exactly at the 0.5 the search tests first and lands on the
+    /// floor (Godot 1.000000119); a 0.04 gap stops at the search's 0.390625
+    /// (Godot 1.000937462).
     #[test]
     fn a_falling_body_is_not_snapped_onto_the_floor_below() {
         // Floor top at y = 0; sphere bottom at 0.05 + 0.02 after the motion.
         let floor = make_static_floor(-1.0);
         let bodies: Vec<&PhysicsBody3D> = vec![&floor];
-        let mut c = CharacterBody3D::new(Vector3::new(0.0, 1.07, 0.0), Shape3D::Sphere { radius: 1.0 });
+        let mut c = CharacterBody3D::new(
+            Vector3::new(0.0, 1.07, 0.0),
+            Shape3D::Sphere { radius: 1.0 },
+        );
         c.move_and_slide(Vector3::new(0.0, -0.02, 0.0), &bodies);
         assert!(!c.is_on_floor(), "an airborne body is not snapped");
-        assert!((c.position.y - 1.05).abs() < 1e-5, "moved by its motion only: {}", c.position.y);
+        assert!(
+            (c.position.y - 1.050000072).abs() < 1e-6,
+            "moved by its motion only: {}",
+            c.position.y
+        );
 
-        // The same body grounded by the previous call IS snapped, along up only,
-        // `safe_margin` short of the floor.
-        let mut g = CharacterBody3D::new(Vector3::new(0.0, 1.07, 0.0), Shape3D::Sphere { radius: 1.0 });
-        g.restore_contact_state(true, false, false, Vector3::new(0.0, 1.0, 0.0), Vector3::ZERO, Vector3::ZERO);
-        g.move_and_slide(Vector3::new(0.0, -0.02, 0.0), &bodies);
-        assert!(g.is_on_floor(), "a grounded body is snapped");
-        assert!((g.position.y - 1.001).abs() < 1e-4, "snapped to safe_margin: {}", g.position.y);
-        assert!(g.position.x.abs() < 1e-6 && g.position.z.abs() < 1e-6);
+        // The same body grounded by the previous call IS snapped, along up only.
+        let snapped = |y: f32| {
+            let mut g =
+                CharacterBody3D::new(Vector3::new(0.0, y, 0.0), Shape3D::Sphere { radius: 1.0 });
+            g.restore_contact_state(
+                true,
+                false,
+                false,
+                Vector3::new(0.0, 1.0, 0.0),
+                Vector3::ZERO,
+                Vector3::ZERO,
+            );
+            g.move_and_slide(Vector3::new(0.0, -0.02, 0.0), &bodies);
+            assert!(g.is_on_floor(), "a grounded body is snapped");
+            assert!(g.position.x.abs() < 1e-6 && g.position.z.abs() < 1e-6);
+            g.position.y
+        };
+        let y = snapped(1.07);
+        assert!(
+            (y - 1.000000119).abs() < 1e-6,
+            "0.05 gap: Godot 1.000000119, Patina {y}"
+        );
+        let y = snapped(1.06);
+        assert!(
+            (y - 1.000937462).abs() < 1e-6,
+            "0.04 gap: Godot 1.000937462, Patina {y}"
+        );
     }
 
     /// pat-d4ghb, measured on Godot 4.6.1 + Jolt: a GROUNDED body walking
@@ -1135,13 +1314,29 @@ mod tests {
         let bodies: Vec<&PhysicsBody3D> = vec![&floor, &wall];
         // Sphere radius 1 resting on y = 0 (centre 1.001), 0.01 from the wall
         // face at x = 4.
-        let mut c = CharacterBody3D::new(Vector3::new(2.99, 1.001, 0.0), Shape3D::Sphere { radius: 1.0 });
-        c.restore_contact_state(true, false, false, Vector3::new(0.0, 1.0, 0.0), Vector3::ZERO, Vector3::ZERO);
+        let mut c = CharacterBody3D::new(
+            Vector3::new(2.99, 1.001, 0.0),
+            Shape3D::Sphere { radius: 1.0 },
+        );
+        c.restore_contact_state(
+            true,
+            false,
+            false,
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::ZERO,
+            Vector3::ZERO,
+        );
         let dt = 1.0 / 60.0;
         let out = c.move_and_slide(Vector3::new(6.0, -0.2, 3.0) * dt, &bodies) / dt;
         assert!(c.is_on_wall(), "touching the wall");
-        assert!(out.x.abs() < 1e-3 && out.y.abs() < 1e-3, "slid velocity {out:?}");
-        assert!((out.z - 3.0).abs() < 1e-3, "kept the along-wall speed: {out:?}");
+        assert!(
+            out.x.abs() < 1e-3 && out.y.abs() < 1e-3,
+            "slid velocity {out:?}"
+        );
+        assert!(
+            (out.z - 3.0).abs() < 1e-3,
+            "kept the along-wall speed: {out:?}"
+        );
     }
 
     fn make_static_wall(x: f32) -> PhysicsBody3D {
@@ -1234,8 +1429,10 @@ mod tests {
 
     #[test]
     fn move_and_slide_detects_ceiling() {
-        let mut character =
-            CharacterBody3D::new(Vector3::new(0.0, -2.0, 0.0), Shape3D::Sphere { radius: 1.0 });
+        let mut character = CharacterBody3D::new(
+            Vector3::new(0.0, -2.0, 0.0),
+            Shape3D::Sphere { radius: 1.0 },
+        );
         // Ceiling box centered at y=1, half_extents (100, 1, 100) => bottom edge at y=0
         // Character at y=-2, moves up by 2.5 => center at y=0.5 (inside ceiling box)
         let ceiling = make_static_ceiling(1.0);
@@ -1246,46 +1443,44 @@ mod tests {
         assert!(!character.is_on_floor());
     }
 
-    /// `slide_on_ceiling = false` cancels a jump into the ceiling
-    /// (pat-s3rrv.103, `character_body_3d.cpp:314`).
+    // Measured on Godot 4.6.1 + Jolt (pat-kiuul) by the probe project
+    // `tools/oracle/character_body_3d_jolt/delta_one`, which runs with
+    // `physics_ticks_per_second = 1`, so `move_and_slide()` moves by exactly
+    // `velocity` -- the same units as this solver's `move_and_slide`.
+    /// `slide_on_ceiling = false` against a FLAT ceiling (pat-s3rrv.103,
+    /// pat-kiuul). Godot's `_move_and_slide_grounded` then takes the
+    /// "no sliding" branch: `motion = remainder.slide(up)`, `velocity =
+    /// velocity.slide(up)`. That keeps the sideways part, so the body ends
+    /// exactly where the sliding one does -- Godot: both at (3, -1.000902) with
+    /// velocity (3, 0, 0). The old solver stopped the body dead at the contact,
+    /// which no Godot branch does.
     #[test]
     fn slide_on_ceiling_false_cancels_an_upward_jump() {
         // Ceiling bottom edge sits at y = 0; the character starts below it and
         // is driven UP and sideways, so it arrives while moving upward.
         let ceiling = make_static_ceiling(1.0);
         let bodies: Vec<&PhysicsBody3D> = vec![&ceiling];
-
-        let mut sliding = CharacterBody3D::new(
-            Vector3::new(0.0, -2.0, 0.0),
-            Shape3D::Sphere { radius: 1.0 },
-        );
-        sliding.move_and_slide(Vector3::new(3.0, 2.5, 0.0), &bodies);
-
-        let mut stopped = CharacterBody3D::new(
-            Vector3::new(0.0, -2.0, 0.0),
-            Shape3D::Sphere { radius: 1.0 },
-        );
-        stopped.slide_on_ceiling = false;
-        stopped.move_and_slide(Vector3::new(3.0, 2.5, 0.0), &bodies);
-
-        assert!(
-            sliding.is_on_ceiling() && stopped.is_on_ceiling(),
-            "both fixtures must actually reach the ceiling, or the comparison \
-             below is between two bodies that simply flew apart"
-        );
-        // The control: with sliding enabled the sideways component survives.
-        assert!(
-            sliding.position.x > 1.0,
-            "slide_on_ceiling = true must let the body skate sideways, got x = {}",
-            sliding.position.x
-        );
-        assert!(
-            stopped.position.x < sliding.position.x,
-            "slide_on_ceiling = false must stop the body instead of sliding: \
-             x = {} vs {} with sliding on",
-            stopped.position.x,
-            sliding.position.x
-        );
+        for slide_on_ceiling in [true, false] {
+            let mut c = CharacterBody3D::new(
+                Vector3::new(0.0, -2.0, 0.0),
+                Shape3D::Sphere { radius: 1.0 },
+            );
+            c.slide_on_ceiling = slide_on_ceiling;
+            let v = c.move_and_slide(Vector3::new(3.0, 2.5, 0.0), &bodies);
+            assert!(
+                c.is_on_ceiling(),
+                "slide_on_ceiling {slide_on_ceiling}: reached the ceiling"
+            );
+            assert!(
+                (c.position.x - 3.0).abs() < 1e-5 && (c.position.y + 1.000902).abs() < 2e-6,
+                "slide_on_ceiling {slide_on_ceiling}: Godot (3, -1.000902), Patina {:?}",
+                c.position
+            );
+            assert!(
+                (v - Vector3::new(3.0, 0.0, 0.0)).length() < 1e-5,
+                "slide_on_ceiling {slide_on_ceiling}: Godot velocity (3, 0, 0), Patina {v:?}"
+            );
+        }
     }
 
     /// 🔑 The `vel_dir_facing_up` half of the rule.
@@ -1523,17 +1718,30 @@ mod tests {
         let (snapped_floor, snapped_y) = run(0.2);
         let (nosnap_floor, nosnap_y) = run(0.0);
 
-        assert!(snapped_floor, "with snapping the character stays on the floor");
-        assert!(!nosnap_floor, "without snapping the character leaves the floor");
+        assert!(
+            snapped_floor,
+            "with snapping the character stays on the floor"
+        );
+        assert!(
+            !nosnap_floor,
+            "without snapping the character leaves the floor"
+        );
         assert!(
             snapped_y < nosnap_y - 1e-3,
             "snapped y tracks the descending slope (lower) than the floating y: {snapped_y} vs {nosnap_y}"
         );
     }
 
+    // Measured on Godot 4.6.1 + Jolt (pat-kiuul) by the probe project
+    // `tools/oracle/character_body_3d_jolt/delta_one`, which runs with
+    // `physics_ticks_per_second = 1`, so `move_and_slide()` moves by exactly
+    // `velocity` -- the same units as this solver's `move_and_slide`.
+    /// A floor body with a nonzero velocity carries the resting character --
+    /// from the SECOND call: Godot re-reads the velocity of the `platform_rid`
+    /// the PREVIOUS call stood on. Godot: first call x = 0 (on floor, platform
+    /// velocity 2), second call x = 2.
     #[test]
     fn character_carried_by_moving_platform() {
-        // A floor body with a nonzero velocity carries the resting character.
         let mut platform = PhysicsBody3D::new(
             BodyId3D(20),
             BodyType3D::Kinematic,
@@ -1548,19 +1756,26 @@ mod tests {
         let bodies: Vec<&PhysicsBody3D> = vec![&platform];
 
         // Sphere (radius 1) resting on the platform top (y=0).
-        let mut c = CharacterBody3D::new(Vector3::new(0.0, 1.0, 0.0), Shape3D::Sphere { radius: 1.0 });
-        // No own velocity — the platform alone should move the character.
+        let mut c =
+            CharacterBody3D::new(Vector3::new(0.0, 1.0, 0.0), Shape3D::Sphere { radius: 1.0 });
+        // No own velocity -- the platform alone should move the character.
         c.move_and_slide(Vector3::ZERO, &bodies);
-
+        assert!(c.is_on_floor());
         assert!(
-            (c.position.x - 2.0).abs() < 1e-3,
-            "character carried by platform velocity, got x = {}",
+            c.position.x.abs() < 1e-6,
+            "not carried on the first call: x = {}",
             c.position.x
         );
         assert!(
             (c.get_platform_velocity().x - 2.0).abs() < 1e-6,
             "platform velocity is exposed, got {:?}",
             c.get_platform_velocity()
+        );
+        c.move_and_slide(Vector3::ZERO, &bodies);
+        assert!(
+            (c.position.x - 2.0).abs() < 1e-5 && (c.position.y - 1.0).abs() < 1e-5,
+            "carried by the platform: Godot (2, 1), Patina {:?}",
+            c.position
         );
     }
 
@@ -1569,7 +1784,8 @@ mod tests {
         let bodies: Vec<&PhysicsBody3D> = vec![];
 
         // AddVelocity: the outgoing velocity retains the full platform velocity.
-        let mut c = CharacterBody3D::new(Vector3::new(0.0, 1.0, 0.0), Shape3D::Sphere { radius: 1.0 });
+        let mut c =
+            CharacterBody3D::new(Vector3::new(0.0, 1.0, 0.0), Shape3D::Sphere { radius: 1.0 });
         c.platform_on_leave = PlatformOnLeave::AddVelocity;
         // Simulate "was standing on a platform moving at +2 X last frame".
         c.on_floor = true;
@@ -1597,20 +1813,115 @@ mod tests {
         );
     }
 
+    // Measured on Godot 4.6.1 + Jolt (pat-kiuul) by the probe project
+    // `tools/oracle/character_body_3d_jolt/delta_one`, which runs with
+    // `physics_ticks_per_second = 1`, so `move_and_slide()` moves by exactly
+    // `velocity` -- the same units as this solver's `move_and_slide`.
+    /// `PLATFORM_ON_LEAVE_ADD_UPWARD_VELOCITY` ignores only a DOWNWARD platform
+    /// component (`current_platform_velocity.slide(up)` when it points down);
+    /// the sideways part is kept. Godot: jumping 50 off a (2, 3, 0) platform
+    /// leaves with (2, 53, 0). (The old solver dropped the sideways 2.)
     #[test]
     fn character_platform_on_leave_add_upward_velocity() {
         let bodies: Vec<&PhysicsBody3D> = vec![];
-        // AddUpwardVelocity keeps only the up-axis component of the platform.
-        let mut c = CharacterBody3D::new(Vector3::new(0.0, 1.0, 0.0), Shape3D::Sphere { radius: 1.0 });
-        c.platform_on_leave = PlatformOnLeave::AddUpwardVelocity;
-        c.on_floor = true;
-        c.platform_velocity = Vector3::new(2.0, 3.0, 0.0); // moving up-and-sideways
-        let out = c.move_and_slide(Vector3::new(0.0, 5.0, 0.0), &bodies);
-        assert!(out.x.abs() < 1e-4, "sideways platform component dropped, got {:?}", out);
+        let leave = |platform: Vector3| {
+            let mut c =
+                CharacterBody3D::new(Vector3::new(0.0, 1.0, 0.0), Shape3D::Sphere { radius: 1.0 });
+            c.platform_on_leave = PlatformOnLeave::AddUpwardVelocity;
+            c.on_floor = true;
+            c.platform_velocity = platform;
+            c.move_and_slide(Vector3::new(0.0, 5.0, 0.0), &bodies)
+        };
+        let out = leave(Vector3::new(2.0, 3.0, 0.0));
         assert!(
-            (out.y - 8.0).abs() < 1e-4,
-            "only the upward platform component (3) is added to the jump (5), got {:?}",
-            out
+            (out - Vector3::new(2.0, 8.0, 0.0)).length() < 1e-5,
+            "up-and-sideways: got {out:?}"
+        );
+        let out = leave(Vector3::new(2.0, -3.0, 0.0));
+        assert!(
+            (out - Vector3::new(2.0, 5.0, 0.0)).length() < 1e-5,
+            "downward part ignored: got {out:?}"
+        );
+    }
+
+    // Measured on Godot 4.6.1 + Jolt (pat-kiuul) by the probe project
+    // `tools/oracle/character_body_3d_jolt/delta_one`, which runs with
+    // `physics_ticks_per_second = 1`, so `move_and_slide()` moves by exactly
+    // `velocity` -- the same units as this solver's `move_and_slide`.
+    /// The same leave off a real moving body (Godot `StaticBody3D` with
+    /// `constant_linear_velocity = (2, 3, 0)`): land, then jump at 50. Godot
+    /// (2, 53, 0).
+    #[test]
+    fn leaving_a_rising_platform_keeps_its_velocity() {
+        let mut platform = PhysicsBody3D::new(
+            BodyId3D(21),
+            BodyType3D::Kinematic,
+            Vector3::new(0.0, -1.0, 0.0),
+            Shape3D::BoxShape {
+                half_extents: Vector3::new(10.0, 1.0, 10.0),
+            },
+            1.0,
+        );
+        platform.linear_velocity = Vector3::new(2.0, 3.0, 0.0);
+        let bodies: Vec<&PhysicsBody3D> = vec![&platform];
+        let mut c =
+            CharacterBody3D::new(Vector3::new(0.0, 1.0, 0.0), Shape3D::Sphere { radius: 1.0 });
+        c.platform_on_leave = PlatformOnLeave::AddUpwardVelocity;
+        c.move_and_slide(Vector3::ZERO, &bodies);
+        let out = c.move_and_slide(Vector3::new(0.0, 50.0, 0.0), &bodies);
+        assert!(
+            (out - Vector3::new(2.0, 53.0, 0.0)).length() < 1e-4,
+            "Godot (2, 53, 0), Patina {out:?}"
+        );
+    }
+
+    // Measured on Godot 4.6.1 + Jolt (pat-kiuul) by the probe project
+    // `tools/oracle/character_body_3d_jolt/delta_one`, which runs with
+    // `physics_ticks_per_second = 1`, so `move_and_slide()` moves by exactly
+    // `velocity` -- the same units as this solver's `move_and_slide`.
+    /// The 3D platformer's capsule (r 0.4, h 2.1, raised 1.05) walking on a
+    /// 2 m box floor whose top is y = -4, with the game's per-tick motion at
+    /// 120 Hz -- (6.0666667, -22/120, 0) / 120 -- for 40 calls. Godot rests it
+    /// at y = -3.999896526, 1e-4 above the floor: Jolt's 5-step cast lands it
+    /// below the safe margin and the next slide's recovery climbs back only 87 %
+    /// of the way. The old push-out solver rested it at exactly floor + margin
+    /// (-3.999). Position x: Godot 2.022220850.
+    #[test]
+    fn walking_capsule_rests_where_jolt_puts_it() {
+        let mut floor = make_static_floor(-5.0);
+        floor.shape = Shape3D::BoxShape {
+            half_extents: Vector3::new(1000.0, 1.0, 1000.0),
+        };
+        let bodies: Vec<&PhysicsBody3D> = vec![&floor];
+        let mut c = CharacterBody3D::new(
+            Vector3::new(0.0, -3.998966, 0.0),
+            Shape3D::CapsuleShape {
+                radius: 0.4,
+                height: 2.1,
+            },
+        );
+        c.shape_offset = Vector3::new(0.0, 1.05, 0.0);
+        let mut v = Vector3::ZERO;
+        for _ in 0..40 {
+            v = c.move_and_slide(
+                Vector3::new(6.0666667 / 120.0, -22.0 / 120.0 / 120.0, 0.0),
+                &bodies,
+            );
+        }
+        assert!(c.is_on_floor());
+        assert!(
+            (c.position.y + 3.999896526).abs() < 2e-6,
+            "Godot rests at -3.999896526, Patina {}",
+            c.position.y
+        );
+        assert!(
+            (c.position.x - 2.022220850).abs() < 1e-5,
+            "Godot x 2.022220850, Patina {}",
+            c.position.x
+        );
+        assert!(
+            (v - Vector3::new(0.050555557, 0.0, 0.0)).length() < 1e-6,
+            "Godot velocity, Patina {v:?}"
         );
     }
 
@@ -1649,7 +1960,10 @@ mod tests {
             "with max_slides = 0 the slide loop is a no-op, got y = {}",
             c0.position.y
         );
-        assert!(!c0.is_on_floor(), "no slide iterations means no floor contact");
+        assert!(
+            !c0.is_on_floor(),
+            "no slide iterations means no floor contact"
+        );
 
         // max_slides = 6 (default): the floor is resolved.
         let mut c6 =
@@ -1714,16 +2028,4 @@ mod tests {
             c.get_floor_angle()
         );
     }
-}
-
-/// A conservative bounding sphere for `shape` in its own frame: `(centre,
-/// radius)`. Unbounded shapes (a world boundary) answer an infinite radius so
-/// they are never rejected.
-fn bounding_sphere(shape: &Shape3D) -> (Vector3, f32) {
-    if matches!(shape, Shape3D::WorldBoundaryShape { .. }) {
-        return (Vector3::ZERO, f32::INFINITY);
-    }
-    let aabb = shape.bounding_aabb();
-    let half = aabb.size * 0.5;
-    (aabb.position + half, half.length())
 }

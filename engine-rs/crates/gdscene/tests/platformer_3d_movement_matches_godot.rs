@@ -192,35 +192,37 @@ fn player_camera_and_enemy_follow_godot_frame_by_frame() {
     );
 
     // -- frame 8: landed exactly when Godot lands, not snapped early ---------
-    assert_near(s[8].player, [-9.49833, -3.998966, 3.9334], 1e-3, "f8 player landed");
+    assert_near(s[8].player, [-9.49833, -3.998966, 3.9334], 1e-5, "f8 player landed");
     assert_near(s[8].velocity, [0.0, 0.0, 0.0], 1e-4, "f8 player velocity");
-    assert_near(s[8].camera, [-10.75505, -0.046525, 3.9334], 1e-3, "f8 camera");
+    assert_near(s[8].camera, [-10.75505, -0.046525, 3.9334], 1e-5, "f8 camera");
 
     // -- frame 30: standing; the enemy's whole fall matches ------------------
     assert_near(s[30].enemy, [18.3062, 2.794241, 5.96938], 1e-4, "f30 enemy falling");
 
     // -- walking forward ------------------------------------------------------
-    assert_near(s[60].player, [-7.754435, -3.999599, 3.9334], 1e-3, "f60 player");
-    assert_near(s[60].velocity, [6.066667, 0.0, 0.0], 1e-4, "f60 velocity");
-    // ⚠️ 2.5e-3: the camera integrates the player's resting height, which Jolt
-    // leaves ~6e-4 lower than Patina while walking (see the report).
-    assert_near(s[60].camera, [-10.667976, -0.107758, 3.9334], 2.5e-3, "f60 camera");
-    assert_near(s[95].player, [-4.215555, -3.999599, 3.933393], 1e-3, "f95 player");
-    assert_near(s[95].camera, [-7.630732, -1.281284, 3.9334], 2.5e-3, "f95 camera");
+    // pat-kiuul: 1e-5, from 1e-3 / 2.5e-3. The walking body rests where Jolt's
+    // motion query rests it (-3.999599 over this tile, 4e-4 above its top;
+    // -3.999897 over a plain box), not at floor + safe_margin as the old
+    // push-out solver did, and the camera that integrates it follows.
+    assert_near(s[60].player, [-7.754435, -3.999599, 3.9334], 1e-5, "f60 player");
+    assert_near(s[60].velocity, [6.066667, 0.0, 0.0], 1e-5, "f60 velocity");
+    assert_near(s[60].camera, [-10.667976, -0.107758, 3.9334], 1e-5, "f60 camera");
+    assert_near(s[95].player, [-4.215555, -3.999599, 3.933393], 1e-5, "f95 player");
+    assert_near(s[95].camera, [-7.630732, -1.281284, 3.9334], 1e-5, "f95 camera");
 
     // -- over the ledge: the vertical-only floor snap keeps it on the floor
     //    as long as Godot does, with no sideways shove --------------------------
-    assert_near(s[99].player, [-3.810835, -4.108875, 3.9334], 2e-3, "f99 player");
-    assert_near(s[99].velocity, [6.066667, 0.0, 0.0], 1e-4, "f99 velocity (still grounded)");
-    assert_near(s[120].player, [-1.709782, -5.488476, 3.933331], 2e-3, "f120 player");
+    assert_near(s[99].player, [-3.810835, -4.108875, 3.9334], 1e-5, "f99 player");
+    assert_near(s[99].velocity, [6.066667, 0.0, 0.0], 1e-5, "f99 velocity (still grounded)");
+    assert_near(s[120].player, [-1.709782, -5.488476, 3.933331], 1e-5, "f120 player");
 
     // -- the jump release cuts the jump ONCE ----------------------------------
-    assert_near(s[139].velocity, [5.883332, 7.668333, -0.004018], 1e-3, "f139 velocity");
-    assert_near(s[160].player, [2.240675, -5.868292, 3.93064], 2e-3, "f160 player");
+    assert_near(s[139].velocity, [5.883332, 7.668333, -0.004018], 1e-5, "f139 velocity");
+    assert_near(s[160].player, [2.240675, -5.868292, 3.93064], 1e-5, "f160 player");
 
     // -- a grounded body walking into a slanted wall slides its velocity -----
-    assert_near(s[198].velocity, [0.610251, 0.0, 1.220503], 1e-3, "f198 velocity");
-    assert_near(s[204].velocity, [0.0, 0.0, 0.0], 1e-4, "f204 velocity");
+    assert_near(s[198].velocity, [0.610251, 0.0, 1.220503], 1e-5, "f198 velocity");
+    assert_near(s[204].velocity, [0.0, 0.0, 0.0], 1e-5, "f204 velocity");
 
     // -- the enemy lands and rests where Jolt rests it (pat-29zst) ----------
     // Jolt corrects only the penetration beyond its `penetration_slop` (0.02),
@@ -261,4 +263,49 @@ fn velocity_read_right_after_move_and_slide_is_the_slid_one() {
             s[f].air_dir_blend
         );
     }
+}
+
+/// pat-kiuul: the parity gate's own scenario (`games/platformer_3d/
+/// playtest.json`, keys `wait:1500,KeyW:1500,KeyA:1000,KeyD:1000,Space:300`:
+/// W for frames 91-180, A for 181-240) against the frame-exact Godot 4.6.1
+/// capture of `scripts/compare-to-godot.mjs`.
+///
+/// Before the Jolt `body_test_motion` port the walking player rested at
+/// floor + safe_margin (-3.9990 where Godot reads -3.999901), missed the
+/// 1.4e-3 bump at the x = -8 GridMap seam (f118), and lost horizontal speed
+/// differently on the f195 landing — the gate's first divergence at f237.
+#[test]
+fn gate_scenario_matches_godot_through_the_seam_and_the_landing() {
+    let mut ml = boot_game();
+    let mut s = vec![sample(&ml)];
+    for f in 1..=196 {
+        let input = ml.input_state_mut();
+        if f == 91 {
+            input.action_press("move_forward", 1.0);
+        }
+        if f == 181 {
+            input.action_release("move_forward");
+            input.action_press("move_left", 1.0);
+        }
+        ml.step(FRAME);
+        s.push(sample(&ml));
+    }
+    // Walking off from rest: Jolt's 5-step cast leaves the capsule 1e-4 above
+    // the floor box, not at the 1e-3 safe margin.
+    assert_near(s[92].player, [-9.48861, -3.999949, 3.9334], 1e-5, "f92 player");
+    assert_near(s[100].player, [-9.294164, -3.999901, 3.9334], 1e-5, "f100 player");
+    // The seam onto the next tile at x = -8: up 1.4e-3, then 4e-4 above it.
+    assert_near(s[118].player, [-7.956657, -3.998502, 3.9334], 1e-5, "f118 player over the seam");
+    assert_near(s[119].player, [-7.855546, -3.99959, 3.9334], 1e-5, "f119 player");
+    assert_near(s[160].player, [-3.70978, -4.113474, 3.9334], 1e-5, "f160 player off the ledge");
+    // The landing: position and the velocity it keeps.
+    assert_near(s[195].player, [-0.234852, -7.999715, 3.704301], 1e-5, "f195 player landed");
+    assert_near(s[195].velocity, [5.597527, 0.0, -2.160486], 1e-5, "f195 velocity");
+    // ⚠️ The landing height settles 7e-6 off Godot at f196: Jolt's cast
+    // brackets a touch within 2e-7 of its f32 rounding there, and which side
+    // it falls is float noise. From f197 the player script's
+    // `horizontal_speed < MAX_SPEED` meets a speed equal to 6 within an ulp,
+    // so the run is chaotic past this frame.
+    assert_near(s[196].player, [-0.146606, -7.999895, 3.657423], 1e-5, "f196 player");
+    assert_near(s[196].velocity, [5.185974, 0.0, -3.017562], 1e-5, "f196 velocity");
 }
