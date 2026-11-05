@@ -1,0 +1,11 @@
+{
+  "scene": "car_select/car_select.tscn",
+  "keys": "wait:1500,Enter:300,wait:2500,KeyW:2500,KeyA:1200,KeyD:1200,wait:500",
+  "watch": ["/root/TownScene/InstancePos/car/Body:position"],
+  "min_fps": 30,
+  "expect": [
+    { "watch": "/root/TownScene/InstancePos/car/Body:position", "after": "KeyW:2500", "axis": 2, "change": "increase" },
+    { "watch": "/root/TownScene/InstancePos/car/Body:position", "after": "KeyA:1200", "axis": 0, "change": "increase" },
+    { "watch": "/root/TownScene/InstancePos/car/Body:position", "after": "KeyD:1200", "change": "change" }
+  ]
+}
