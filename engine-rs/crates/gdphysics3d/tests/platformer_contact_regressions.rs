@@ -149,9 +149,13 @@ fn lock_rotation_has_no_inverse_inertia() {
     assert!(w.y != 0.0);
 }
 
-/// A sphere resting 1.5 mm into the flat top of a convex slab reports 1.5 mm
-/// straight up — not EPA's 109 mm along a tilted normal, which kicked every
-/// enemy 0.1 m into the air at each tile seam. Both argument orders agree.
+/// The exact sphere-vs-convex solver: a sphere resting 1.5 mm into the flat
+/// top of a convex slab reports 1.5 mm straight up, both argument orders
+/// agree, and past the side the closest feature is the top edge. (The EPA
+/// path it replaced reported 109 mm along a tilted normal on the platformer's
+/// real `floor_edge` tile; that case is pinned by the enemy test in
+/// `gdscene/tests/platformer_3d_level_collision.rs`, which goes red without
+/// this solver. This simpler slab is a correctness check of the solver.)
 #[test]
 fn sphere_on_a_convex_slab_reports_the_true_depth() {
     // A 2 x 0.2 x 2 slab whose top face is y = 0, offset so its centre is not

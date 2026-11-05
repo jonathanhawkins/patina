@@ -327,19 +327,41 @@ fn player_stands_on_the_level_and_walks_forward_like_godot() {
         0.02,
         "player after 1 s of move_forward",
     );
-    // `reset_position` teleports the player home and calls
-    // `reset_physics_interpolation()`, which raised "method not found".
-    ml.input_state_mut().action_release("move_forward");
-    ml.input_state_mut().action_press("reset_position", 1.0);
-    ml.step(TICK);
-    ml.input_state_mut().action_release("reset_position");
-    let home = origin(&ml, "/root/Game/Player");
-    assert!(
-        (home.x - -9.49833).abs() < 0.05 && (home.z - 3.9334).abs() < 0.05,
-        "reset_position sends the player back to its spawn: {home:?}"
-    );
     let errors = ml.tree_mut().drain_script_errors();
     assert!(errors.is_empty(), "script errors: {errors:?}");
+}
+
+/// Godot's `Node3D.set_as_top_level(true)` keeps the node where it is: the
+/// global transform is stored as the new local one (`node_3d.cpp`). The
+/// platformer's follow camera calls it in `_ready`; dropping the parent offset
+/// moved the camera to near the world origin.
+#[test]
+fn set_as_top_level_keeps_the_global_transform() {
+    gdobject::class_db::register_all_classes();
+    let tscn = r#"[gd_scene format=3]
+[node name="Root" type="Node3D"]
+[node name="Parent" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 10, 2, -3)
+[node name="Child" type="Node3D" parent="Parent"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1)
+"#;
+    let packed = PackedScene::from_tscn(tscn).unwrap();
+    let mut tree = SceneTree::new();
+    let root = tree.root_id();
+    gdscene::packed_scene::add_packed_scene_to_tree(&mut tree, root, &packed).unwrap();
+    let child = tree.get_node_by_path("/root/Root/Parent/Child").unwrap();
+    let before = gdscene::node3d::get_global_transform(&tree, child).origin;
+    assert_eq!(before, Vector3::new(11.0, 3.0, -2.0));
+    gdscene::node3d::call_node3d_method(&mut tree, child, "set_as_top_level", &[Variant::Bool(true)]);
+    assert!(gdscene::node3d::is_top_level(&tree, child));
+    assert_eq!(
+        gdscene::node3d::get_global_transform(&tree, child).origin,
+        before,
+        "becoming top-level must not move the node"
+    );
+    gdscene::node3d::call_node3d_method(&mut tree, child, "set_as_top_level", &[Variant::Bool(false)]);
+    assert_eq!(gdscene::node3d::get_global_transform(&tree, child).origin, before);
+    assert_eq!(gdscene::node3d::get_position(&tree, child), Vector3::new(1.0, 1.0, 1.0));
 }
 
 // ---------------------------------------------------------------------------

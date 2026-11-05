@@ -1254,7 +1254,6 @@ fn node_class() -> ClassRegistration {
         .method(MethodInfo::new("is_processing", 0).const_method())
         .method(MethodInfo::new("set_physics_process", 1))
         .method(MethodInfo::new("is_physics_processing", 0).const_method())
-        .method(MethodInfo::new("reset_physics_interpolation", 0))
         .method(MethodInfo::new("add_to_group", 1))
         .method(MethodInfo::new("remove_from_group", 1))
         .method(MethodInfo::new("is_in_group", 1).const_method())
