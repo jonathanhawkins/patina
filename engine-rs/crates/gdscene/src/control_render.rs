@@ -172,6 +172,16 @@ pub enum ControlDrawItem {
         /// Paint order.
         z: i32,
     },
+    /// A filled polygon — a translucent rounded stylebox, which cannot be
+    /// built from overlapping rects without blending twice (pat-9ww3e).
+    Polygon {
+        /// Vertices in global viewport space.
+        points: Vec<Vector2>,
+        /// Fill color.
+        color: Color,
+        /// Paint order.
+        z: i32,
+    },
     /// A line segment — separators, focus underlines, check marks.
     Line {
         /// Start point in global viewport space.
@@ -316,6 +326,13 @@ pub fn control_draw_items_themed_sourced(
                     color: *color,
                     z,
                 }),
+                DrawCommand::DrawPolygon { points, colors } if !points.is_empty() => {
+                    out.push(ControlDrawItem::Polygon {
+                        points: points.clone(),
+                        color: colors.first().copied().unwrap_or(Color::WHITE),
+                        z,
+                    })
+                }
                 DrawCommand::DrawLine {
                     from,
                     to,
@@ -1031,9 +1048,10 @@ fn render_node(
         // Empty draws nothing, so padding is its *entire* purpose, and before
         // this the margins were parsed, stored, and then never read by anything.
         let is_container = if class == "PanelContainer" {
-            let margins = theme
-                .get_stylebox("PanelContainer", "panel")
-                .or_else(|| theme.get_stylebox("Panel", "panel"))
+            // The node's own `theme_override_styles/panel` first (pat-9ww3e),
+            // the same resolution `control::arrange_container` uses.
+            let margins = control::resolve_stylebox_in(tree, node_id, theme, "PanelContainer", "panel")
+                .or_else(|| theme.get_stylebox("Panel", "panel").cloned())
                 .map(|sb| sb.content_margins())
                 .unwrap_or([0.0; 4]);
             control::arrange_panel_container(tree, node_id, size, margins);
@@ -1277,7 +1295,7 @@ pub(crate) fn texture_path_prop(tree: &SceneTree, node_id: NodeId, key: &str) ->
 
 /// A texture file's pixel size, decoded once per path and cached, for the
 /// controls whose layout depends on it (a Button's `icon`; pat-60d96).
-pub(crate) fn texture_pixel_size(path: &str) -> Option<Vector2> {
+pub fn texture_pixel_size(path: &str) -> Option<Vector2> {
     use std::cell::RefCell;
     use std::collections::HashMap;
     thread_local! {
@@ -1428,14 +1446,29 @@ pub fn measure_text_px_in(text: &str, font_size: f32, font_path: Option<&str>) -
         .unwrap_or_else(|| measure_text_px(text, font_size))
 }
 
-/// Line height at an exact `font_size` in pixels (pat-s3rrv.37).
+/// Line height at an exact `font_size` in pixels: the built-in face's
+/// `ascent + descent`, each rounded up — Godot's `Font::get_height`
+/// (pat-9ww3e).
 ///
-/// Godot's line height comes from the font's ascent + descent, not from a
-/// nominal glyph box. Until the ascent/descent accessors are threaded through,
-/// this uses the font size itself, which is already exact where `GLYPH_H`-based
-/// arithmetic was quantised.
+/// This returned the font size itself, so a default 16px Label was 16 tall
+/// where Godot's is 23, and every container built from labels and buttons came
+/// out short.
 pub(crate) fn line_height_px(font_size: f32) -> f32 {
-    font_size.max(1.0)
+    builtin_face().line_height(font_size.max(1.0))
+}
+
+/// [`line_height_px`] in the face a control actually draws with — its
+/// `theme_override_fonts/font` when that loads, else the built-in face.
+pub fn line_height_px_in(font_size: f32, font_path: Option<&str>) -> f32 {
+    font_path
+        .and_then(|path| crate::canvas_render::line_height_with_override_font(path, font_size.max(1.0)))
+        .unwrap_or_else(|| line_height_px(font_size))
+}
+
+/// The built-in face's ascent at `font_size`, rounded up as Godot's is: where
+/// the baseline of a line drawn at `y` sits (`y + ascent`).
+pub(crate) fn ascent_px(font_size: f32) -> f32 {
+    builtin_face().ascent(font_size.max(1.0))
 }
 
 /// Approximate pixel width of `text` at the given scale, using the nominal
@@ -2285,7 +2318,10 @@ fn layout_label_lines(
     let measure = |s: &str| measure_text_px_in(s, font_size as f32, font_path.as_deref());
     let space = measure(" ");
     let max_width = rect.size.x;
-    let line_height = line_height_px(font_size as f32);
+    let line_height = line_height_px_in(font_size as f32, font_path.as_deref());
+    // Godot's Label steps each line by the font height PLUS `line_spacing`
+    // (3 in the default theme), which is why its 4-line help text is 101px.
+    let line_spacing = control::label_line_spacing(tree, node_id);
 
     let mut out = Vec::new();
     // The row this paragraph starts on, so paragraphs stack instead of
@@ -2311,6 +2347,28 @@ fn layout_label_lines(
         let widths: Vec<f32> = words.iter().map(|w| measure(w)).collect();
 
         // Wrapping is off unless the node asks for it, matching Godot's default.
+        //
+        // An unwrapped line that fits is drawn AS AUTHORED (pat-9ww3e):
+        // re-joining its words with single spaces collapsed spark_keeper's
+        // "move  ·  Space" double spaces, which Godot's shaper keeps.
+        let ellipsis_requested = matches!(overrun, 3 | 4);
+        if autowrap == 0 {
+            let width = measure(paragraph);
+            if !(ellipsis_requested && width > max_width) {
+                let dx = align_offset(width, max_width, align);
+                out.push(DrawCommand::DrawString {
+                    text: paragraph.to_string(),
+                    position: Vector2::new(
+                        rect.position.x + dx,
+                        rect.position.y + row_base as f32 * (line_height + line_spacing),
+                    ),
+                    color,
+                    font_size: font_size.max(1) as u32,
+                });
+                row_base += 1;
+                continue;
+            }
+        }
         let lines = if autowrap == 0 {
             vec![gdrender2d::text_layout::LineRange {
                 start: 0,
@@ -2351,7 +2409,7 @@ fn layout_label_lines(
                 text: text_line,
                 position: Vector2::new(
                     rect.position.x + dx,
-                    rect.position.y + row as f32 * line_height,
+                    rect.position.y + row as f32 * (line_height + line_spacing),
                 ),
                 color,
                 font_size: font_size.max(1) as u32,
@@ -2890,6 +2948,83 @@ pub fn richtext_meta_regions(
         .collect()
 }
 
+/// The default theme's 16x16 CheckBox icons drawn at `origin`, from their SVG
+/// sources (`scene/theme/icons/{checked,unchecked,radio_checked,
+/// radio_unchecked}.svg`, pat-9ww3e):
+///
+/// * unchecked: a 14px rounded square (radius 2.333) of #1a1a1a at 50%;
+/// * checked: the same square in white at 75% with a #1a1a1a tick;
+/// * radio_unchecked: an r=7 disc of #1a1a1a at 50%;
+/// * radio_checked: an r=5.5 #1a1a1a disc with a 3px white 75% stroke, i.e. a
+///   white ring from r=4 to r=7 around a dark r=4 centre.
+fn checkbox_icon_commands(origin: Vector2, checked: bool, radio: bool) -> Vec<DrawCommand> {
+    let dark = Color::new(26.0 / 255.0, 26.0 / 255.0, 26.0 / 255.0, 1.0);
+    let centre = Vector2::new(origin.x + 8.0, origin.y + 8.0);
+    let mut out = Vec::new();
+    match (radio, checked) {
+        (true, false) => out.push(DrawCommand::DrawCircle {
+            center: centre,
+            radius: 7.0,
+            color: Color::new(dark.r, dark.g, dark.b, 0.5),
+        }),
+        (true, true) => {
+            out.push(DrawCommand::DrawCircle {
+                center: centre,
+                radius: 7.0,
+                color: Color::new(1.0, 1.0, 1.0, 0.75),
+            });
+            out.push(DrawCommand::DrawCircle {
+                center: centre,
+                radius: 4.0,
+                color: dark,
+            });
+        }
+        (false, checked) => {
+            let square = crate::stylebox::StyleBox::Flat(crate::stylebox::StyleBoxFlat {
+                bg_color: if checked {
+                    Color::new(1.0, 1.0, 1.0, 0.75)
+                } else {
+                    Color::new(dark.r, dark.g, dark.b, 0.5)
+                },
+                corner_radius: [2.333; 4],
+                ..crate::stylebox::StyleBoxFlat::default()
+            });
+            out.extend(square.draw(Rect2::new(
+                Vector2::new(origin.x + 1.0, origin.y + 1.0),
+                Vector2::new(14.0, 14.0),
+            )));
+            if checked {
+                // `m11.5 3.75-5.6 5.6-1.7-1.7-1.5 1.5 3.2 3.2 7.1-7.1z`: a tick
+                // through (4.2, 8.4) -> (6.9, 11.1) -> (12.3, 5.2).
+                let at = |x: f32, y: f32| Vector2::new(origin.x + x, origin.y + y);
+                out.push(DrawCommand::DrawLine {
+                    from: at(3.9, 8.3),
+                    to: at(6.4, 10.8),
+                    color: dark,
+                    width: 2.1,
+                });
+                out.push(DrawCommand::DrawLine {
+                    from: at(6.4, 10.8),
+                    to: at(12.3, 4.9),
+                    color: dark,
+                    width: 2.1,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The default theme's slider grabber (`slider_grabber.svg`): an r=7 disc of
+/// #fefefe at 75% in a 16x16 box whose top-left is `origin`.
+fn slider_grabber_commands(origin: Vector2) -> Vec<DrawCommand> {
+    vec![DrawCommand::DrawCircle {
+        center: Vector2::new(origin.x + 8.0, origin.y + 8.0),
+        radius: 7.0,
+        color: Color::new(254.0 / 255.0, 254.0 / 255.0, 254.0 / 255.0, 0.75),
+    }]
+}
+
 fn draw_control(
     tree: &SceneTree,
     node_id: NodeId,
@@ -2972,9 +3107,19 @@ fn draw_control(
             if !scripted.is_empty() {
                 out.extend(scripted.iter().cloned());
             }
-            // Prefer a typed StyleBox (pat-u3l8c.70); fall back to the legacy
-            // Variant::Color background.
-            else if let Some(sb) = theme.get_stylebox("Panel", "panel") {
+            // Prefer a typed StyleBox (pat-u3l8c.70): the node's own
+            // `theme_override_styles/panel`, then its class's, then Panel's
+            // (pat-9ww3e — truck_town's loading screen is a PanelContainer
+            // with an opaque override, and drew the default translucent box).
+            else if let Some(sb) = control::resolve_stylebox_in(
+                tree,
+                node_id,
+                theme,
+                &class_of(tree, node_id),
+                "panel",
+            )
+            .or_else(|| theme.get_stylebox("Panel", "panel").cloned())
+            {
                 out.extend(sb.draw(rect));
             } else {
                 let bg = stylebox_bg(theme, "Panel", "panel", Color::new(0.15, 0.15, 0.15, 1.0));
@@ -2986,7 +3131,25 @@ fn draw_control(
             }
         }
         "Button" => {
-            if let Some(sb) = theme.get_stylebox("Button", "normal") {
+            // Godot's `Button::_notification(DRAW)` picks ONE state stylebox —
+            // disabled, pressed (a toggled-on toggle button), hover, else normal
+            // — and draws `focus` OVER it while the button has focus
+            // (pat-9ww3e). Only `normal` was ever drawn, so the focused first
+            // car in truck_town's menu showed no focus frame.
+            let state = if bool_prop(tree, node_id, "disabled").unwrap_or(false) {
+                "disabled"
+            } else if bool_prop(tree, node_id, "toggle_mode").unwrap_or(false)
+                && bool_prop(tree, node_id, "button_pressed").unwrap_or(false)
+            {
+                "pressed"
+            } else if tree.hovered_control() == Some(node_id) {
+                "hover"
+            } else {
+                "normal"
+            };
+            let state_box = control::resolve_stylebox_in(tree, node_id, theme, "Button", state)
+                .or_else(|| control::resolve_stylebox_in(tree, node_id, theme, "Button", "normal"));
+            if let Some(sb) = state_box {
                 out.extend(sb.draw(rect));
             } else {
                 let bg = stylebox_bg(theme, "Button", "normal", Color::new(0.2, 0.2, 0.2, 1.0));
@@ -3049,16 +3212,14 @@ fn draw_control(
                 // font nobody drew. Now that the rasterizer paints this text
                 // with `builtin_face`, centring has to use the same metrics or
                 // the label sits off-centre by the difference between them.
-                let tw = measure_text_px_in(
-                    &text,
-                    font_size as f32,
-                    font_override_path(tree, node_id).as_deref(),
-                );
-                let th = line_height_px(font_size as f32);
-                // Centre the label within the button rect.
+                let font_path = font_override_path(tree, node_id);
+                let tw = measure_text_px_in(&text, font_size as f32, font_path.as_deref());
+                let th = line_height_px_in(font_size as f32, font_path.as_deref());
+                // Centre the label within the button rect, on whole pixels as
+                // Godot's shaped text lands.
                 let position = Vector2::new(
-                    rect.position.x + (rect.size.x - tw) * 0.5,
-                    rect.position.y + (rect.size.y - th) * 0.5,
+                    (rect.position.x + (rect.size.x - tw) * 0.5).round(),
+                    (rect.position.y + (rect.size.y - th) * 0.5).round(),
                 );
                 out.push(DrawCommand::DrawString {
                     text,
@@ -3066,6 +3227,12 @@ fn draw_control(
                     color: font_color,
                     font_size: font_size.max(1) as u32,
                 });
+            }
+            // The focus frame, over everything else the button drew.
+            if tree.focus_owner() == Some(node_id) {
+                if let Some(sb) = control::resolve_stylebox_in(tree, node_id, theme, "Button", "focus") {
+                    out.extend(sb.draw(rect));
+                }
             }
         }
         // pat-s3rrv.166: LinkButton is Godot's hyperlink-styled button. It was
@@ -3127,7 +3294,14 @@ fn draw_control(
                     // Same geometry the RichTextLabel underline uses, so the two
                     // rules sit at the same offset for identical text.
                     let thickness = scale as f32;
-                    let uy = position.y + glyph_h + thickness;
+                    // Godot puts the rule at the line's ASCENT plus the font's
+                    // underline position (`link_button.cpp` DRAW), just under
+                    // the baseline. Offsetting by the whole line height only
+                    // agreed while the line height was the font size; with
+                    // Godot's 23px line (pat-9ww3e) it would hang below the
+                    // descenders.
+                    let _ = glyph_h;
+                    let uy = position.y + ascent_px(font_size as f32) + thickness;
                     out.push(DrawCommand::DrawLine {
                         from: Vector2::new(position.x, uy),
                         // Spans the TEXT width, not the control rect: a
@@ -3325,6 +3499,51 @@ fn draw_control(
                 // had ZERO consumers anywhere in the workspace, so an authored
                 // `autowrap_mode`/`horizontal_alignment`/`text_overrun_behavior`
                 // changed nothing on screen.
+                // The font OUTLINE, under the text (pat-9ww3e): Godot strokes
+                // each glyph `outline_size` px wide in `font_outline_color`
+                // before filling it. Approximated by stamping the text in the
+                // outline colour around a circle of radius `outline_size / 2`
+                // — truck_town's TURBO label has a 6px pink outline that was
+                // simply missing.
+                let outline_size = if has_settings {
+                    int_prop(tree, node_id, "__ls__outline_size").unwrap_or(0)
+                } else {
+                    int_prop(tree, node_id, "theme_override_constants/outline_size")
+                        .or_else(|| theme.get_constant("Label", "outline_size"))
+                        .unwrap_or(0)
+                };
+                if outline_size > 0 {
+                    let outline_color = if has_settings {
+                        color_prop(tree, node_id, "__ls__outline_color")
+                    } else {
+                        color_prop(tree, node_id, "theme_override_colors/font_outline_color")
+                    }
+                    .unwrap_or(Color::new(0.0, 0.0, 0.0, 1.0));
+                    let r = outline_size as f32 * 0.5;
+                    const STAMPS: usize = 12;
+                    for i in 0..STAMPS {
+                        let a = i as f32 / STAMPS as f32 * std::f32::consts::TAU;
+                        let (dx, dy) = (r * a.cos(), r * a.sin());
+                        for cmd in
+                            layout_label_lines(tree, node_id, &text, rect, outline_color, font_size)
+                        {
+                            if let DrawCommand::DrawString {
+                                text,
+                                position,
+                                color,
+                                font_size,
+                            } = cmd
+                            {
+                                out.push(DrawCommand::DrawString {
+                                    text,
+                                    position: Vector2::new(position.x + dx, position.y + dy),
+                                    color,
+                                    font_size,
+                                });
+                            }
+                        }
+                    }
+                }
                 for cmd in layout_label_lines(tree, node_id, &text, rect, font_color, font_size) {
                     out.push(cmd);
                 }
@@ -3356,22 +3575,48 @@ fn draw_control(
             .or_else(|| tex("texture_focused"));
 
             if let Some(texture_path) = chosen {
-                // ⚠️ Drawn into the control rect, i.e. `STRETCH_SCALE`, whatever
-                // `stretch_mode` says — including its default of `STRETCH_KEEP`,
-                // which should draw at the texture's NATURAL size.
-                //
-                // Every other mode needs the texture's dimensions, and this pass
-                // cannot know them: `draw_control` emits a path, and the pixels
-                // are resolved much later by `gdrender2d::Renderer::find_texture`.
-                // There is no size source in `gdscene`, and threading a resource
-                // cache in would change the signature of every arm in this file.
-                // `TextureRect` above ignores `stretch_mode` for exactly the same
-                // reason, so this is consistent rather than newly wrong — but it
-                // IS wrong, and the fix belongs with a texture-metadata source
-                // for the whole control pass, not in this arm (pat-s3rrv.170).
+                // Godot's `stretch_mode` geometry (`texture_button.cpp:185-224`,
+                // pat-9ww3e): SCALE 0, TILE 1, KEEP 2 (the default), KEEP_CENTERED
+                // 3, KEEP_ASPECT 4, KEEP_ASPECT_CENTERED 5, KEEP_ASPECT_COVERED 6.
+                // It used to fill the rect whatever the mode, so truck_town's
+                // 50px mute icon in a 30x31 button (KEEP_ASPECT_CENTERED)
+                // stretched instead of keeping its square.
+                let dest = match texture_pixel_size(&texture_path) {
+                    Some(tex) if tex.x > 0.0 && tex.y > 0.0 => {
+                        match int_prop(tree, node_id, "stretch_mode").unwrap_or(2) {
+                            0 | 1 | 6 => rect,
+                            3 => Rect2::new(
+                                Vector2::new(
+                                    rect.position.x + (rect.size.x - tex.x) * 0.5,
+                                    rect.position.y + (rect.size.y - tex.y) * 0.5,
+                                ),
+                                tex,
+                            ),
+                            mode @ (4 | 5) => {
+                                let mut w = tex.x * rect.size.y / tex.y;
+                                let mut h = rect.size.y;
+                                if w > rect.size.x {
+                                    w = rect.size.x;
+                                    h = tex.y * w / tex.x;
+                                }
+                                let ofs = if mode == 5 {
+                                    Vector2::new((rect.size.x - w) * 0.5, (rect.size.y - h) * 0.5)
+                                } else {
+                                    Vector2::ZERO
+                                };
+                                Rect2::new(
+                                    Vector2::new(rect.position.x + ofs.x, rect.position.y + ofs.y),
+                                    Vector2::new(w, h),
+                                )
+                            }
+                            _ => Rect2::new(rect.position, tex),
+                        }
+                    }
+                    _ => rect,
+                };
                 out.push(DrawCommand::DrawTextureRect {
                     texture_path,
-                    rect,
+                    rect: dest,
                     modulate: Color::WHITE,
                 });
             }
@@ -3912,51 +4157,81 @@ fn draw_control(
             }
         }
         slider_class @ ("HSlider" | "VSlider") => {
-            let axis = match crate::range_controls::slider_axis(slider_class) {
-                Some(a) => a,
-                None => return,
-            };
-            // The track, from the theme's own `slider` stylebox.
-            let track = stylebox_bg(
-                theme,
-                slider_class,
-                "slider",
-                Color::new(0.1, 0.1, 0.1, 1.0),
-            );
-            out.push(DrawCommand::DrawRect {
-                rect,
-                color: track,
-                filled: true,
-            });
-
-            let ratio = control::get_range_ratio(tree, node_id);
-            let local = crate::range_controls::grabber_rect(rect.size, axis, ratio);
-            // `grabber_rect` works in control-local space; shift it onto the
-            // control's global rect for the draw list.
-            let grabber_rect = Rect2::new(
-                Vector2::new(
-                    rect.position.x + local.position.x,
-                    rect.position.y + local.position.y,
-                ),
-                local.size,
-            );
-            let grabber = stylebox_bg(
-                theme,
-                slider_class,
-                "grabber",
-                Color::new(0.8, 0.8, 0.8, 1.0),
-            );
-            out.push(DrawCommand::DrawRect {
-                rect: grabber_rect,
-                color: grabber,
-                filled: true,
-            });
+            // Godot's `Slider::_notification(DRAW)` (`slider.cpp:270-360`,
+            // pat-9ww3e): the `slider` stylebox as a track `style.min` thick,
+            // centred across the control; the `grabber_area` stylebox over the
+            // filled part; the 16x16 grabber icon at `ratio * (length - 16)`.
+            // This filled the whole control rect with an opaque track and drew
+            // a rectangle grabber, and its stylebox ignored the node's own
+            // `theme_override_styles/slider`.
+            let vertical = slider_class == "VSlider";
+            let style = control::resolve_stylebox_in(tree, node_id, theme, slider_class, "slider");
+            let area_style =
+                control::resolve_stylebox_in(tree, node_id, theme, slider_class, "grabber_area");
+            let style_min = style
+                .as_ref()
+                .map(|sb| {
+                    let [l, t, r, b] = sb.content_margins();
+                    Vector2::new(l + r, t + b)
+                })
+                .unwrap_or(Vector2::new(8.0, 8.0));
+            let ratio = control::get_range_ratio(tree, node_id).clamp(0.0, 1.0) as f32;
+            let g = control::SLIDER_GRABBER_SIZE;
+            let (p0, sz) = (rect.position, rect.size);
+            if !vertical {
+                let wh = style_min.y.floor();
+                let y = p0.y + ((sz.y - wh) / 2.0).floor();
+                let areasize = sz.x - g;
+                if let Some(sb) = &style {
+                    out.extend(sb.draw(Rect2::new(Vector2::new(p0.x, y), Vector2::new(sz.x, wh))));
+                }
+                let fill = (areasize * ratio + g / 2.0).floor();
+                if let Some(sb) = &area_style {
+                    out.extend(sb.draw(Rect2::new(Vector2::new(p0.x, y), Vector2::new(fill, wh))));
+                }
+                // The same rect the drag maths reads (`grabber_rect`), so a
+                // grabber drawn here is exactly where a click picks it up.
+                let local = crate::range_controls::grabber_rect(
+                    sz,
+                    crate::range_controls::SliderAxis::Horizontal,
+                    ratio,
+                );
+                out.extend(slider_grabber_commands(Vector2::new(
+                    (p0.x + local.position.x).floor(),
+                    p0.y + ((sz.y - g) / 2.0).floor(),
+                )));
+            } else {
+                let ww = style_min.x.floor();
+                let x = p0.x + ((sz.x - ww) / 2.0).floor();
+                let areasize = sz.y - g;
+                if let Some(sb) = &style {
+                    out.extend(sb.draw(Rect2::new(Vector2::new(x, p0.y), Vector2::new(ww, sz.y))));
+                }
+                let fill = (areasize * ratio + g / 2.0).round();
+                if let Some(sb) = &area_style {
+                    out.extend(sb.draw(Rect2::new(
+                        Vector2::new(x, p0.y + sz.y - fill),
+                        Vector2::new(ww, fill),
+                    )));
+                }
+                let local = crate::range_controls::grabber_rect(
+                    sz,
+                    crate::range_controls::SliderAxis::Vertical,
+                    ratio,
+                );
+                out.extend(slider_grabber_commands(Vector2::new(
+                    p0.x + ((sz.x - g) / 2.0).floor(),
+                    (p0.y + local.position.y).floor(),
+                )));
+            }
 
             // Godot draws `tick_count` marks across the track; 0 (the default)
             // means none, so the loop is skipped entirely rather than drawing a
             // single degenerate tick.
             let ticks = num_prop(tree, node_id, "tick_count").unwrap_or(0.0) as i64;
             if ticks > 1 {
+                let axis = crate::range_controls::slider_axis(slider_class)
+                    .unwrap_or(crate::range_controls::SliderAxis::Horizontal);
                 let tick_color = theme
                     .get_color(slider_class, "font_color")
                     .unwrap_or(Color::new(0.6, 0.6, 0.6, 1.0));
@@ -3966,7 +4241,7 @@ fn draw_control(
                     let (from, to) = match axis {
                         crate::range_controls::SliderAxis::Horizontal => {
                             let x = rect.position.x
-                                + crate::range_controls::GRABBER_EXTENT * 0.5
+                                + crate::range_controls::SLIDER_GRABBER_EXTENT * 0.5
                                 + span * t;
                             (
                                 Vector2::new(x, rect.position.y),
@@ -3975,7 +4250,7 @@ fn draw_control(
                         }
                         crate::range_controls::SliderAxis::Vertical => {
                             let y = rect.position.y
-                                + crate::range_controls::GRABBER_EXTENT * 0.5
+                                + crate::range_controls::SLIDER_GRABBER_EXTENT * 0.5
                                 + span * t;
                             (
                                 Vector2::new(rect.position.x, y),
@@ -4107,7 +4382,31 @@ fn draw_control(
                     });
                 }
             } else {
-                let fill = crate::range_controls::linear_fill_rect(rect, fill_mode, ratio);
+                // Without nine-patch stretching Godot draws the progress texture
+                // at its OWN size, shifted by `texture_progress_offset`
+                // (`texture_progress_bar.cpp` DRAW, pat-9ww3e) — not stretched
+                // over the control. truck_town's turbometer fill sits 2px in
+                // from its outline that way; stretched, it covered the outline.
+                let nine_patch = bool_prop(tree, node_id, "nine_patch_stretch").unwrap_or(false);
+                let base = match texture_path_prop(tree, node_id, "texture_progress")
+                    .and_then(|p| texture_pixel_size(&p))
+                {
+                    Some(size) if !nine_patch => {
+                        let offset = match tree
+                            .get_node(node_id)
+                            .map(|n| n.get_property("texture_progress_offset"))
+                        {
+                            Some(Variant::Vector2(v)) => v,
+                            _ => Vector2::ZERO,
+                        };
+                        Rect2::new(
+                            Vector2::new(rect.position.x + offset.x, rect.position.y + offset.y),
+                            size,
+                        )
+                    }
+                    _ => rect,
+                };
+                let fill = crate::range_controls::linear_fill_rect(base, fill_mode, ratio);
                 if fill.size.x > 0.0 && fill.size.y > 0.0 {
                     match texture_path_prop(tree, node_id, "texture_progress") {
                         Some(path) => out.push(DrawCommand::DrawTextureRect {
@@ -4138,51 +4437,54 @@ fn draw_control(
             }
         }
         "CheckBox" | "CheckButton" => {
-            // Box glyph on the left, text to its right.
+            // Godot's `CheckBox` (`check_box.cpp` + `button.cpp` DRAW,
+            // pat-9ww3e): the state stylebox (an EMPTY box with 4px content
+            // margins in the default theme), the 16x16 check icon at the content
+            // rect's left edge, vertically centred, then the text after the
+            // icon and `h_separation`. With a `button_group` it is a radio
+            // button and draws the `radio_*` icons instead.
+            //
+            // This drew a font-coloured outline box as tall as the control and
+            // a 5x7-placeholder-sized label, so the menu's mood picker showed
+            // four big empty squares where Godot shows faint discs.
+            let class = class_of(tree, node_id);
             let checked = bool_prop(tree, node_id, "button_pressed").unwrap_or(false);
-            let box_side = rect.size.y.min(GLYPH_H * 3.0).max(8.0);
-            let box_rect = Rect2::new(
-                Vector2::new(
-                    rect.position.x,
-                    rect.position.y + (rect.size.y - box_side) * 0.5,
-                ),
-                Vector2::new(box_side, box_side),
+            let radio = !matches!(
+                tree.get_node(node_id).map(|n| n.get_property("button_group")),
+                None | Some(Variant::Nil)
             );
-            let border = theme
-                .get_color("CheckBox", "font_color")
-                .unwrap_or(Color::new(0.875, 0.875, 0.875, 1.0));
-            // Outline (unfilled) box.
-            out.push(DrawCommand::DrawRect {
-                rect: box_rect,
-                color: border,
-                filled: false,
-            });
-            if checked {
-                // Inset filled square marks the checked state.
-                let inset = box_side * 0.25;
-                out.push(DrawCommand::DrawRect {
-                    rect: Rect2::new(
-                        Vector2::new(box_rect.position.x + inset, box_rect.position.y + inset),
-                        Vector2::new(box_side - inset * 2.0, box_side - inset * 2.0),
-                    ),
-                    color: border,
-                    filled: true,
-                });
+            let style = control::resolve_stylebox_in(tree, node_id, theme, &class, "normal");
+            let [ml, _mt, _mr, _mb] = style.as_ref().map(|sb| sb.content_margins()).unwrap_or([4.0; 4]);
+            if let Some(sb) = &style {
+                out.extend(sb.draw(rect));
             }
+            let icon = control::CHECKBOX_ICON_SIZE;
+            let ox = (rect.position.x + ml).floor();
+            let oy = (rect.position.y + (rect.size.y - icon) * 0.5).floor();
+            out.extend(checkbox_icon_commands(Vector2::new(ox, oy), checked, radio));
             let text = string_prop(tree, node_id, "text").unwrap_or_default();
             if !text.is_empty() {
+                let font_color = color_prop(tree, node_id, "theme_override_colors/font_color")
+                    .or_else(|| {
+                        theme.get_color(
+                            "CheckBox",
+                            if checked { "font_pressed_color" } else { "font_color" },
+                        )
+                    })
+                    .unwrap_or(Color::new(0.875, 0.875, 0.875, 1.0));
                 let font_size = font_size_override(tree, node_id, "font_size")
                     .or_else(|| theme.get_font_size("CheckBox", "font_size"))
                     .unwrap_or(16);
-                let scale = text_scale(font_size);
-                let th = GLYPH_H * scale as f32;
+                let font_path = font_override_path(tree, node_id);
+                let th = line_height_px_in(font_size as f32, font_path.as_deref());
+                let sep = theme.get_constant("CheckBox", "h_separation").unwrap_or(4) as f32;
                 out.push(DrawCommand::DrawString {
                     text,
                     position: Vector2::new(
-                        box_rect.position.x + box_side + GLYPH_GAP * 2.0 * scale as f32,
-                        rect.position.y + (rect.size.y - th) * 0.5,
+                        ox + icon + sep,
+                        (rect.position.y + (rect.size.y - th) * 0.5).round(),
                     ),
-                    color: border,
+                    color: font_color,
                     font_size: font_size.max(1) as u32,
                 });
             }
@@ -4705,11 +5007,14 @@ mod tests {
         let theme = Theme::default_theme();
         render_control_tree(&mut tree, id, &theme, &mut vp, Vector2::new(32.0, 32.0));
 
+        // Godot's default Panel: `make_flat_stylebox(style_normal_color, 0,
+        // 0, 0, 0)` — (0.1, 0.1, 0.1) at 60% alpha, rounded, so one polygon
+        // (a translucent box cannot be overlapping bands) (pat-9ww3e).
         match &vp.get_sorted_items()[0].commands[0] {
-            DrawCommand::DrawRect { color, .. } => {
-                assert!(approx(*color, Color::new(0.15, 0.15, 0.15, 1.0)));
+            DrawCommand::DrawPolygon { colors, .. } => {
+                assert!(approx(colors[0], Color::new(0.1, 0.1, 0.1, 0.6)));
             }
-            other => panic!("expected DrawRect, got {other:?}"),
+            other => panic!("expected DrawPolygon, got {other:?}"),
         }
     }
 
@@ -4736,7 +5041,9 @@ mod tests {
         assert!(!bg.is_empty(), "button = bg + text");
         assert!(bg.iter().all(|c| matches!(
             c,
-            DrawCommand::DrawRect { filled: true, .. } | DrawCommand::DrawCircle { .. }
+            DrawCommand::DrawRect { filled: true, .. }
+                | DrawCommand::DrawCircle { .. }
+                | DrawCommand::DrawPolygon { .. }
         )));
         let bounds = rect_union(bg);
         assert!(
@@ -4867,12 +5174,13 @@ mod tests {
             render_control_tree(&mut tree, id, &theme, &mut vp, Vector2::new(128.0, 32.0));
             let cmds = &vp.get_sorted_items()[0].commands;
             cmds.iter()
-                .filter(|c| matches!(c, DrawCommand::DrawRect { filled: true, .. }))
+                .filter(|c| matches!(c, DrawCommand::DrawLine { .. }))
                 .count()
         };
-        // Unchecked: no filled rect (only the outline box). Checked: one filled mark.
+        // Godot's `checked.svg` is the `unchecked.svg` square plus a TICK (two
+        // strokes here); an unchecked box draws no tick (pat-9ww3e).
         assert_eq!(make(false), 0);
-        assert_eq!(make(true), 1);
+        assert_eq!(make(true), 2);
     }
 
     #[test]
@@ -5024,6 +5332,15 @@ mod tests {
                 DrawCommand::DrawCircle { center, radius, .. } => (
                     *center - Vector2::new(*radius, *radius),
                     *center + Vector2::new(*radius, *radius),
+                ),
+                DrawCommand::DrawPolygon { points, .. } if !points.is_empty() => points.iter().fold(
+                    (Vector2::new(f32::MAX, f32::MAX), Vector2::new(f32::MIN, f32::MIN)),
+                    |(lo, hi), p| {
+                        (
+                            Vector2::new(lo.x.min(p.x), lo.y.min(p.y)),
+                            Vector2::new(hi.x.max(p.x), hi.y.max(p.y)),
+                        )
+                    },
                 ),
                 _ => continue,
             };

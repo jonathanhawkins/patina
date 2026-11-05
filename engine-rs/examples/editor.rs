@@ -303,10 +303,18 @@ fn main() {
                         .as_ref()
                         .unwrap_or(&state.project_settings)
                         .default_clear_color();
+                    // `&mut`: the HUD's Control pass resolves container
+                    // layout (pat-9ww3e), as the 2D branch below does. The
+                    // shared `running_tree` borrow ended at the condition above.
+                    let st = &mut *state;
+                    let tree = match st.run_main_loop.as_mut() {
+                        Some(ml) => ml.tree_mut(),
+                        None => &mut st.scene_tree,
+                    };
                     break 'job RenderJob::Play3D(gdeditor::play_3d::prepare_play_3d_frame(
-                        running_tree,
-                        &state.editor_viewport_3d,
-                        state.runtime_camera_override,
+                        tree,
+                        &st.editor_viewport_3d,
+                        st.runtime_camera_override,
                         clear,
                         rw,
                         rh,

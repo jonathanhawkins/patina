@@ -8,10 +8,9 @@ Cantarell is licensed under the **SIL Open Font License, Version 1.1**
 Copyright (c) The Cantarell Project Authors. "Cantarell" is a Reserved Font Name.
 
 `Xolonium-Regular.ttf` is the OVERRIDE face for tests that need a font
-DIFFERENT from the built-in default. ⚠️ `Cantarell-Regular.ttf` cannot serve
-that purpose: it is byte-identical to `assets/default_font.ttf`, the face every
-default-theme string is drawn with, so "override with Cantarell" changes no
-pixels at all.
+DIFFERENT from the built-in default. (`Cantarell-Regular.ttf` was
+byte-identical to `assets/default_font.ttf` until pat-9ww3e switched the
+default to Godot's Open Sans SemiBold, so older tests avoid it as an override.)
 
 Xolonium is licensed under the **SIL Open Font License, Version 1.1** (full
 text in `Xolonium-LICENSE.txt`). Copyright 2011-2016 Severin Meyer. "Xolonium"

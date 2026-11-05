@@ -4888,6 +4888,22 @@ impl MainLoop {
             Ok(None) | Err(_) => {}
         }
 
+        // -- Control layout (pat-9ww3e) --
+        // Godot sorts containers and resolves anchors inside the frame (the
+        // deferred `_sort_children` / `_size_changed` calls), so by the end of
+        // it every Control's `size` and `position` are laid out whether or not
+        // anything draws. Here layout only ran in the render pass, so a frame
+        // stepped without a render — every frame of the agent interface's
+        // `play`, and any a script reads between renders — reported a stale or
+        // zero rect: truck_town's menu CheckBoxes read 0x0 until the first
+        // screenshot.
+        {
+            let window = *self.tree.root_window();
+            let size = crate::canvas_render::canvas_size_of(&window);
+            let root = self.tree.root_id();
+            crate::canvas_render::layout_controls(&mut self.tree, root, size);
+        }
+
         // -- input cleanup --
         // Clear input snapshot so it doesn't leak into the next frame.
         self.tree.clear_input_snapshot();

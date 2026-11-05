@@ -77,12 +77,12 @@ fn play_inputs() -> Editor3DRenderInputs {
     std::thread::sleep(Duration::from_millis(800));
     let inputs = {
         let state = handle.state();
-        let st = state.lock().unwrap();
-        let tree = st
-            .run_main_loop
-            .as_ref()
-            .map(|ml| ml.tree())
-            .unwrap_or(&st.scene_tree);
+        let mut st = state.lock().unwrap();
+        let st = &mut *st;
+        let tree = match st.run_main_loop.as_mut() {
+            Some(ml) => ml.tree_mut(),
+            None => &mut st.scene_tree,
+        };
         let clear = st
             .run_project_settings
             .as_ref()

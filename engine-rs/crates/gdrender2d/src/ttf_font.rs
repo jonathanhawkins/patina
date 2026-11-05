@@ -51,10 +51,12 @@ impl TtfFont {
             .map_err(|e| format!("invalid font data: {e}"))
     }
 
-    /// The engine's built-in default UI font (Cantarell, SIL OFL 1.1), embedded
-    /// into the binary so text renders without an explicit font resource —
-    /// mirroring Godot's built-in default font. Set it on a renderer at app
-    /// startup via [`crate::renderer::SoftwareRenderer::use_default_font`].
+    /// The engine's built-in default UI font: **Open Sans SemiBold**, the very
+    /// face Godot embeds as its default theme font
+    /// (`scene/theme/SCsub` -> `thirdparty/fonts/OpenSans_SemiBold.woff2`,
+    /// SIL OFL 1.1), stored here as the equivalent TTF so `ab_glyph` can read
+    /// it (pat-9ww3e). It was Cantarell Regular, a narrower, lighter face, so
+    /// every default-theme string measured and drew unlike Godot's.
     pub fn builtin() -> Self {
         const DEFAULT: &[u8] = include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -63,19 +65,37 @@ impl TtfFont {
         Self::from_bytes(DEFAULT.to_vec()).expect("embedded default font is a valid TTF")
     }
 
-    fn scaled(&self, px_size: f32) -> PxScaleFont<&FontVec> {
-        self.font.as_scaled(PxScale::from(px_size))
+    /// The `ab_glyph` scale for a Godot font size.
+    ///
+    /// 🔑 Godot's `font_size` is the EM size in pixels (FreeType's
+    /// `FT_Set_Pixel_Sizes`), but `ab_glyph`'s `PxScale` is the pixel height
+    /// of `ascent - descent`. Passing the font size straight through drew every
+    /// glyph `units_per_em / (ascent - descent)` too small — 0.73x for Open
+    /// Sans, so a default 16px Label drew at an 11.7px em (pat-9ww3e).
+    fn px_scale(&self, px_size: f32) -> PxScale {
+        let height = self.font.height_unscaled();
+        let upem = self.font.units_per_em().unwrap_or(height);
+        if height <= 0.0 || upem <= 0.0 {
+            return PxScale::from(px_size);
+        }
+        PxScale::from(px_size * height / upem)
     }
 
-    /// The `px_size` (this type's unit: the pixel height of `ascent -
-    /// descent`) that renders the font at an EM of `em_px` pixels — Godot's
-    /// `font_size` (FreeType `FT_Set_Pixel_Sizes` sets the em). The two differ
-    /// by the face's `height / units_per_em`, ~1.27 for the built-in face.
+    fn scaled(&self, px_size: f32) -> PxScaleFont<&FontVec> {
+        self.font.as_scaled(self.px_scale(px_size))
+    }
+
+    /// The `px_size` that renders the font at an EM of `em_px` pixels —
+    /// Godot's `font_size`.
+    ///
+    /// ⚠️ An IDENTITY since pat-9ww3e: every `px_size` this type takes is now
+    /// the EM itself ([`Self::px_scale`] converts to `ab_glyph`'s
+    /// ascent-minus-descent unit internally), so every caller — the 2D
+    /// Control text path included — gets Godot's size without converting.
+    /// Kept so the Label3D path (pat-3ljz4) that converts explicitly does not
+    /// scale twice.
     pub fn px_size_for_em(&self, em_px: f32) -> f32 {
-        match self.font.units_per_em() {
-            Some(upem) if upem > 0.0 => em_px * self.font.height_unscaled() / upem,
-            _ => em_px,
-        }
+        em_px
     }
 
     /// Whether the font contains a glyph for `ch` (id 0 is `.notdef`).
@@ -95,20 +115,28 @@ impl TtfFont {
         s.kern(self.font.glyph_id(a), self.font.glyph_id(b))
     }
 
-    /// Distance from the baseline up to the top of the line (positive).
+    /// Distance from the baseline up to the top of the line (positive), in
+    /// whole pixels.
+    ///
+    /// Rounded UP, as FreeType's scaled `size->metrics.ascender` is and as
+    /// Godot's TextServer reports it: Open Sans at 16px has an exact ascent of
+    /// 17.1 and Godot's is 18, which is why a default Label is 23px tall.
     pub fn ascent(&self, px_size: f32) -> f32 {
-        self.scaled(px_size).ascent()
+        self.scaled(px_size).ascent().ceil()
     }
 
-    /// Distance from the baseline down to the bottom of the line (positive).
+    /// Distance from the baseline down to the bottom of the line (positive),
+    /// rounded up like [`Self::ascent`].
     pub fn descent(&self, px_size: f32) -> f32 {
-        -self.scaled(px_size).descent()
+        (-self.scaled(px_size).descent()).ceil()
     }
 
-    /// Recommended line-to-line spacing (`ascent + descent + line_gap`).
+    /// Godot's font height, `ascent + descent` (`Font::get_height`).
+    ///
+    /// No `line_gap`: Godot's TextServer leaves it out, and a Label spaces its
+    /// lines by this plus the theme's `line_spacing` instead.
     pub fn line_height(&self, px_size: f32) -> f32 {
-        let s = self.scaled(px_size);
-        s.ascent() - s.descent() + s.line_gap()
+        self.ascent(px_size) + self.descent(px_size)
     }
 
     /// Rasterizes `ch` at `px_size` into an alpha coverage bitmap.
@@ -119,7 +147,7 @@ impl TtfFont {
         let s = self.scaled(px_size);
         let gid = self.font.glyph_id(ch);
         let advance = s.h_advance(gid);
-        let glyph: Glyph = gid.with_scale_and_position(PxScale::from(px_size), point(0.0, 0.0));
+        let glyph: Glyph = gid.with_scale_and_position(self.px_scale(px_size), point(0.0, 0.0));
         let outlined = self.font.outline_glyph(glyph)?;
         let bounds = outlined.px_bounds();
         let w = (bounds.max.x - bounds.min.x).ceil().max(0.0) as usize;

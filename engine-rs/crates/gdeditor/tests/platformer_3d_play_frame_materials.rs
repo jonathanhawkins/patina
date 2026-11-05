@@ -97,11 +97,11 @@ fn play_frame(w: u32, h: u32) -> (PreparedPlay3DFrame, std::collections::HashMap
                 gdcore::math3d::Transform3D { basis, origin: eye },
             );
         }
-        let tree = st
-            .run_main_loop
-            .as_ref()
-            .map(|ml| ml.tree())
-            .unwrap_or(&st.scene_tree);
+        let st = &mut *st;
+        let tree = match st.run_main_loop.as_mut() {
+            Some(ml) => ml.tree_mut(),
+            None => &mut st.scene_tree,
+        };
         let clear = st
             .run_project_settings
             .as_ref()

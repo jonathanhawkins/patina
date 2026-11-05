@@ -72,9 +72,11 @@ fn docs_w() -> f32 {
 
 /// Underline offset below a top-left-anchored label at the default font size.
 ///
-/// `line_height_px(16) + thickness(2)`. The line height is now the authored
-/// pixel size rather than `GLYPH_H * text_scale` (= 14), so this moved 16 -> 18.
-const UNDERLINE_Y: f32 = 18.0;
+/// The 16px face's ascent (18, as Godot's TextServer reports it) + thickness
+/// (2): Godot draws the rule at `line_ascent + underline_position`, just under
+/// the baseline (pat-9ww3e; Open Sans' underline position is ~1.2px at 16px).
+/// It was `line_height(16) + 2` while the line height was the font size.
+const UNDERLINE_Y: f32 = 20.0;
 
 /// A tree holding one `LinkButton` at the origin, 120x24.
 ///

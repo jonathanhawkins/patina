@@ -38,6 +38,12 @@ fn container_with(class: &str, n: usize, min: Vector2) -> (SceneTree, NodeId, Ve
     let cid = tree
         .add_child(root, Node::new("C", class))
         .expect("container");
+    // Every expected rect below was computed for a GAPLESS box. Godot's
+    // default BoxContainer `separation` is 4 (default_theme.cpp:1249), which
+    // Patina now applies (pat-9ww3e), so the premise is spelled out.
+    if let Some(n) = tree.get_node_mut(cid) {
+        n.set_property("theme_override_constants/separation", Variant::Int(0));
+    }
     let kids: Vec<NodeId> = (0..n)
         .map(|i| {
             let k = tree

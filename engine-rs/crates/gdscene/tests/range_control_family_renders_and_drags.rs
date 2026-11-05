@@ -25,7 +25,7 @@ use gdplatform::input::{InputEvent, MouseButton};
 use gdscene::control::{self, AnchorPreset};
 use gdscene::control_render::render_control_tree;
 use gdscene::node::{Node, NodeId};
-use gdscene::range_controls::{self, SliderAxis, GRABBER_EXTENT};
+use gdscene::range_controls::{self, SliderAxis, SLIDER_GRABBER_EXTENT};
 use gdscene::scene_tree::SceneTree;
 use gdscene::theme::Theme;
 use gdserver2d::canvas::DrawCommand;
@@ -145,47 +145,37 @@ fn each_range_control_renders_against_the_theme() {
     let theme = Theme::default_theme();
 
     // -- HSlider: track + grabber ------------------------------------------
+    // Godot's `Slider` DRAW (pat-9ww3e): the `slider` stylebox as a track
+    // `style.min.height` (8) thick across the full width — a translucent rounded
+    // box, so one polygon — and the 16x16 `slider_grabber.svg` disc (r = 7).
     let cmds = draw("HSlider", 100.0, 16.0, &[("value", Variant::Float(50.0))]);
-    let rects = filled_rects(&cmds);
-    assert!(
-        rects.len() >= 2,
-        "an HSlider draws a track and a grabber, got {} rects: {cmds:?}",
-        rects.len()
-    );
     let track_color = theme
         .get_stylebox("HSlider", "slider")
         .and_then(|sb| sb.bg_color())
-        .or_else(|| {
-            match theme.get_item(
-                gdscene::theme::ThemePropertyType::Stylebox,
-                "HSlider",
-                "slider",
-            ) {
-                Some(Variant::Color(c)) => Some(*c),
-                _ => None,
-            }
-        })
         .expect("the default theme ships an HSlider `slider` stylebox");
     // ⚠️ Matched by CONTENT, not by index. The render pass may emit a panel or
-    // focus rect around the arm's own commands, so pinning `rects[0]` would
-    // make this fail for reasons that have nothing to do with sliders.
+    // focus rect around the arm's own commands.
     assert!(
-        rects
-            .iter()
-            .any(|(color, _, size)| *color == track_color && (size.x - 100.0).abs() < 0.001),
+        cmds.iter().any(|c| match c {
+            DrawCommand::DrawPolygon { points, colors } => {
+                let (lo, hi) = points.iter().fold((f32::MAX, f32::MIN), |(l, h), p| (l.min(p.x), h.max(p.x)));
+                colors.first() == Some(&track_color) && lo.abs() < 0.001 && (hi - 100.0).abs() < 0.001
+            }
+            _ => false,
+        }),
         "the full-width track must use the theme's own `slider` stylebox colour, \
-         not a hard-coded one; got {rects:?}"
+         not a hard-coded one; got {cmds:?}"
     );
     // The grabber sits at the middle of the track for value 50 of 0..100.
     let expected =
         range_controls::grabber_rect(Vector2::new(100.0, 16.0), SliderAxis::Horizontal, 0.5);
     assert!(
-        rects
-            .iter()
-            .any(|(_, pos, size)| (pos.x - expected.position.x).abs() < 0.001
-                && (size.x - GRABBER_EXTENT).abs() < 0.001),
+        cmds.iter().any(|c| matches!(c,
+            DrawCommand::DrawCircle { center, radius, .. }
+                if (center.x - (expected.position.x + SLIDER_GRABBER_EXTENT / 2.0)).abs() < 0.001
+                    && (*radius - 7.0).abs() < 0.001)),
         "the grabber must be drawn where `grabber_rect` puts it ({expected:?}) — the \
-         same geometry the drag path reads, so the two cannot disagree; got {rects:?}"
+         same geometry the drag path reads, so the two cannot disagree; got {cmds:?}"
     );
 
     // -- SpinBox: field + arrows -------------------------------------------
@@ -225,7 +215,7 @@ fn each_range_control_renders_against_the_theme() {
 #[test]
 fn a_vertical_slider_has_its_minimum_at_the_bottom() {
     let size = Vector2::new(16.0, 100.0);
-    let half = GRABBER_EXTENT / 2.0;
+    let half = SLIDER_GRABBER_EXTENT / 2.0;
 
     // Near the TOP of the control = maximum.
     let top =
@@ -266,10 +256,14 @@ fn range_control_family_renders_and_drags() {
 
     // ⚠️ The point is derived from Godot's own formula, NOT from the helper
     // under test — otherwise the assertion would be circular. With width 100
-    // and a 10px grabber the track is 90px, so ratio 0.75 is at
-    // `0.75 * 90 + 5 = 72.5` (`slider.cpp:75`: `(pos.x - grab_w/2) / max`).
-    let target = Vector2::new(0.75 * (100.0 - GRABBER_EXTENT) + GRABBER_EXTENT / 2.0, 8.0);
-    assert_eq!(target.x, 72.5, "the fixture's own arithmetic");
+    // and Godot's 16px grabber icon (pat-9ww3e) the track is 84px, so ratio
+    // 0.75 is at `0.75 * 84 + 8 = 71` (`slider.cpp:75`:
+    // `(pos.x - grab_w/2) / max`).
+    let target = Vector2::new(
+        0.75 * (100.0 - SLIDER_GRABBER_EXTENT) + SLIDER_GRABBER_EXTENT / 2.0,
+        8.0,
+    );
+    assert_eq!(target.x, 71.0, "the fixture's own arithmetic");
 
     let changed = range_controls::drag_slider_to_local(&mut tree, id, target);
     assert_eq!(
@@ -421,9 +415,10 @@ fn a_dragged_slider_emits_value_changed_to_a_connected_callable() {
         "starts at min"
     );
 
-    // The same local 72.5 the acceptance test derives from `slider.cpp:75`,
-    // shifted into viewport space by the control's own origin.
-    let press = Vector2::new(20.0 + 72.5, 30.0 + 8.0);
+    // The same local 71 the acceptance test derives from `slider.cpp:75`
+    // (16px grabber, pat-9ww3e), shifted into viewport space by the control's
+    // own origin.
+    let press = Vector2::new(20.0 + 71.0, 30.0 + 8.0);
     tree.push_input(&InputEvent::MouseButton {
         button: MouseButton::Left,
         pressed: true,

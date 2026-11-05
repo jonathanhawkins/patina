@@ -80,9 +80,9 @@ const CLEAR: Color = Color::new(0.3, 0.3, 0.3, 1.0);
 
 #[test]
 fn a_3d_scene_with_no_camera_plays_as_the_clear_colour_only() {
-    let tree = load(NO_CAMERA);
+    let mut tree = load(NO_CAMERA);
     let editor_vp = editor_viewport(&tree);
-    let frame = prepare_play_3d_frame(&tree, &editor_vp, false, CLEAR, W, H);
+    let frame = prepare_play_3d_frame(&mut tree, &editor_vp, false, CLEAR, W, H);
 
     // Whole frame: every pixel is the clear colour (0.3 -> 77), so no grid
     // line, axis, collision wireframe, selection box or mesh got drawn.
@@ -113,18 +113,18 @@ fn a_3d_scene_with_no_camera_plays_as_the_clear_colour_only() {
 
 #[test]
 fn the_clear_colour_is_the_projects() {
-    let tree = load(NO_CAMERA);
+    let mut tree = load(NO_CAMERA);
     let editor_vp = editor_viewport(&tree);
     let red = Color::new(1.0, 0.0, 0.0, 1.0);
-    let img = prepare_play_3d_frame(&tree, &editor_vp, false, red, W, H).render();
+    let img = prepare_play_3d_frame(&mut tree, &editor_vp, false, red, W, H).render();
     assert!(img.data.chunks_exact(4).all(|px| px == [0, 0, 255, 255]));
 }
 
 #[test]
 fn a_3d_scene_with_a_camera_renders_through_it_without_editor_items() {
-    let tree = load(&with_camera(3.0));
+    let mut tree = load(&with_camera(3.0));
     let editor_vp = editor_viewport(&tree);
-    let frame = prepare_play_3d_frame(&tree, &editor_vp, false, CLEAR, W, H);
+    let frame = prepare_play_3d_frame(&mut tree, &editor_vp, false, CLEAR, W, H);
 
     let (vp, inputs) = match &frame.scene {
         Play3DScene::Camera { vp, inputs } => (vp, inputs),
@@ -166,10 +166,12 @@ fn a_3d_scene_with_a_camera_renders_through_it_without_editor_items() {
         .get_node_mut(coin_id)
         .unwrap()
         .set_property("visible", gdvariant::Variant::Bool(false));
-    let empty = prepare_play_3d_frame(&hidden, &editor_viewport(&hidden), false, CLEAR, W, H)
+    let hidden_vp = editor_viewport(&hidden);
+    let empty = prepare_play_3d_frame(&mut hidden, &hidden_vp, false, CLEAR, W, H)
         .render();
-    let far_tree = load(&with_camera(8.0));
-    let far = prepare_play_3d_frame(&far_tree, &editor_viewport(&far_tree), false, CLEAR, W, H)
+    let mut far_tree = load(&with_camera(8.0));
+    let far_vp = editor_viewport(&far_tree);
+    let far = prepare_play_3d_frame(&mut far_tree, &far_vp, false, CLEAR, W, H)
         .render();
     let diff = |a: &[u8], b: &[u8]| a.iter().zip(b).filter(|(x, y)| x != y).count();
     assert!(diff(&near.data, &empty.data) > 400, "the coin is drawn through the camera");
@@ -178,10 +180,10 @@ fn a_3d_scene_with_a_camera_renders_through_it_without_editor_items() {
     // With the coin hidden, what is left is the background only: no grid, no
     // wireframe, no marker. A camera-only scene (nothing else 3D) renders the
     // same bytes.
-    let bare = load(
+    let mut bare = load(
         "[gd_scene format=3]\n\n[node name=\"Game\" type=\"Node3D\"]\n\n[node name=\"Cam\" type=\"Camera3D\" parent=\".\"]\ntransform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 3)\ncurrent = true\n",
     );
-    let bare_img = prepare_play_3d_frame(&bare, &editor_viewport(&hidden), false, CLEAR, W, H)
+    let bare_img = prepare_play_3d_frame(&mut bare, &hidden_vp, false, CLEAR, W, H)
         .render();
     assert_eq!(
         diff(&empty.data, &bare_img.data),
@@ -192,8 +194,8 @@ fn a_3d_scene_with_a_camera_renders_through_it_without_editor_items() {
 
 #[test]
 fn the_camera_override_keeps_the_editor_camera() {
-    let tree = load(&with_camera(3.0));
+    let mut tree = load(&with_camera(3.0));
     let editor_vp = editor_viewport(&tree);
-    let frame = prepare_play_3d_frame(&tree, &editor_vp, true, CLEAR, W, H);
+    let frame = prepare_play_3d_frame(&mut tree, &editor_vp, true, CLEAR, W, H);
     assert!(matches!(frame.scene, Play3DScene::EditorCamera { .. }));
 }

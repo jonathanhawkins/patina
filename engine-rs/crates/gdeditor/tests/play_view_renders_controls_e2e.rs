@@ -124,15 +124,20 @@ fn play_view_renders_controls_e2e() {
     // 3. The container stacked its children instead of leaving them at the origin.
     //    Collect the distinct y origins of the filled rects — a VBox must produce
     //    at least two different ones (button row, progress row).
+    //    Godot's default Button/Panel boxes are TRANSLUCENT and rounded, which
+    //    Patina draws as one filled polygon (pat-9ww3e), so those count too.
     let mut ys: Vec<i32> = items
         .iter()
-        .filter(|i| {
-            matches!(
-                i.kind,
-                gdeditor::viewport_2d_render::Render2DKind::ColorRect { .. }
-            )
+        .filter_map(|i| match &i.kind {
+            gdeditor::viewport_2d_render::Render2DKind::ColorRect { .. } => {
+                Some(i.global_transform.origin.y.round() as i32)
+            }
+            gdeditor::viewport_2d_render::Render2DKind::Polygon { points, .. } => points
+                .iter()
+                .map(|p| (i.global_transform.origin.y + p.y).round() as i32)
+                .min(),
+            _ => None,
         })
-        .map(|i| i.global_transform.origin.y.round() as i32)
         .collect();
     ys.sort_unstable();
     ys.dedup();

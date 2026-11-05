@@ -72,7 +72,7 @@ pub struct PreparedPlay3DFrame {
 /// `editor_vp` is the editor's 3D viewport (used only under the camera
 /// override); `clear_color` is the project's `default_clear_color`.
 pub fn prepare_play_3d_frame(
-    tree: &SceneTree,
+    tree: &mut SceneTree,
     editor_vp: &Viewport3D,
     camera_override: bool,
     clear_color: Color,
@@ -109,9 +109,23 @@ pub fn prepare_play_3d_frame(
     // The HUD (pat-mgixk.36): same item order as
     // `scene_renderer::render_runtime_frame` (list -> Camera2D -> window
     // stretch) so both Play paths frame it alike.
-    let mut canvas_items = crate::viewport_2d_render::build_runtime_render_list(tree);
     let mut window = *tree.root_window();
     window.size = Vector2::new(width as f32, height as f32);
+    // 🔑 The Control pass FIRST, exactly as the 2D `prepare_play_frame` runs it
+    // (pat-9ww3e). Without it a 3D game's UI was drawn only by the generic
+    // per-node `render_kind_for` walk: no container layout (truck_town's HUD
+    // piled up at the window's top-left with the Back button missing), no
+    // CheckBox/HSlider/TextureButton theme drawing, and labels at the walk's own
+    // metrics. Its layout also writes each Control's rect back onto the node,
+    // which the runtime list then reads.
+    let root = tree.root_id();
+    let controls = crate::viewport_2d_render::build_control_render_items_sourced(
+        tree,
+        root,
+        gdscene::canvas_render::canvas_size_of(&window),
+    );
+    let runtime = crate::viewport_2d_render::build_runtime_render_list(tree);
+    let mut canvas_items = crate::viewport_2d_render::merge_control_items(tree, runtime, controls);
     if let Some(view) = crate::viewport_2d_render::camera2d_view_transform(
         tree,
         gdscene::canvas_render::canvas_size_of(&window),
@@ -155,13 +169,35 @@ impl PreparedPlay3DFrame {
         if self.canvas_items.is_empty() {
             return None;
         }
-        Some(crate::viewport_2d_render::rasterize_render_list(
-            &self.canvas_items,
-            self.width,
-            self.height,
-            crate::scene_renderer::CANVAS_OVERLAY_CLEAR,
-            None,
-        ))
+        // 🔑 A texture cache, as the 2D Play raster has (pat-9ww3e). With
+        // `None` every textured HUD item drew the rasterizer's 32px placeholder
+        // square instead: truck_town's turbometer was a white box. One cache per
+        // render thread (the editor renders Play on one persistent thread), reset
+        // whenever the mounted `res://` root changes so a second project never
+        // reads the first one's textures.
+        thread_local! {
+            static HUD_TEXTURES: std::cell::RefCell<(Option<std::path::PathBuf>, gdscene::texture_cache::TextureCache)> =
+                std::cell::RefCell::new((None, gdscene::texture_cache::TextureCache::new(String::new())));
+        }
+        let root = gdcore::file_access::project_root();
+        Some(HUD_TEXTURES.with(|cell| {
+            let mut cell = cell.borrow_mut();
+            if cell.0 != root {
+                let dir = root
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                cell.1 = gdscene::texture_cache::TextureCache::new(dir);
+                cell.0 = root.clone();
+            }
+            crate::viewport_2d_render::rasterize_render_list(
+                &self.canvas_items,
+                self.width,
+                self.height,
+                crate::scene_renderer::CANVAS_OVERLAY_CLEAR,
+                Some(&mut cell.1),
+            )
+        }))
     }
 
     /// The whole Play frame: the 3D half with the HUD composited over it. Needs
