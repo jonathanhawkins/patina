@@ -671,6 +671,13 @@ pub struct JoltContactParams {
     pub baumgarte: f32,
     /// `physics/jolt_physics_3d/simulation/position_steps` (2).
     pub position_steps: u32,
+    /// `physics/jolt_physics_3d/simulation/velocity_steps` (10): the contact
+    /// solver's Gauss-Seidel sweeps over a pair's manifold (pat-std5q).
+    pub velocity_steps: u32,
+    /// `physics/jolt_physics_3d/simulation/bounce_velocity_threshold` (1.0):
+    /// Jolt's `mMinVelocityForRestitution`, the approach speed below which a
+    /// contact does not bounce.
+    pub bounce_velocity_threshold: f32,
 }
 
 impl Default for JoltContactParams {
@@ -680,6 +687,8 @@ impl Default for JoltContactParams {
             speculative_contact_distance: 0.02,
             baumgarte: 0.2,
             position_steps: 2,
+            velocity_steps: 10,
+            bounce_velocity_threshold: 1.0,
         }
     }
 }
@@ -705,6 +714,10 @@ impl JoltContactParams {
         }
     }
 }
+
+/// Jolt's `mManifoldTolerance` (1 mm): added to the speculative distance when
+/// deciding which clipped face points join a manifold.
+const JOLT_MANIFOLD_TOLERANCE: f32 = 1.0e-3;
 
 /// A 3D physics world that owns bodies and steps the simulation.
 pub struct PhysicsWorld3D {
@@ -1045,14 +1058,16 @@ impl PhysicsWorld3D {
             if ghosts.contains(&(id_a, id_b)) {
                 continue;
             }
+            // `pos_a`/`pos_b` are the CENTRES OF MASS: contact lever arms are
+            // measured from the point each body turns about (pat-zljoy).
             let (should_collide, pos_a, shapes_a, pos_b, shapes_b) = {
                 let a = &self.bodies[&id_a];
                 let b = &self.bodies[&id_b];
                 (
                     a.should_collide_with(b),
-                    a.position,
+                    a.center_of_mass_world(),
                     a.shapes_world(),
-                    b.position,
+                    b.center_of_mass_world(),
                     b.shapes_world(),
                 )
             };
@@ -1143,7 +1158,7 @@ impl PhysicsWorld3D {
                 // ⚠️ The SHAPE's world centre, not the body's. These coincided
                 // before offsets existed; with them, using `pos_a` would place
                 // the contact on a phantom shape at the body origin.
-                let contact_pos = contact_position(
+                let mut contact_pos = contact_position(
                     &shape_a,
                     shape_pos_a,
                     shape_rot_a,
@@ -1152,21 +1167,69 @@ impl PhysicsWorld3D {
                     shape_rot_b,
                     result.normal,
                 );
-                if let Some(a) = self.bodies.get_mut(&id_a) {
-                    a.add_contact(ContactPoint3D {
-                        position: contact_pos,
-                        normal: result.normal,
-                        depth: result.depth,
-                        other_body: id_b,
-                    });
+                // Under Jolt the pair touches through MANIFOLDS: up to four
+                // points per face pair, the way Jolt's narrow phase reports
+                // them (pat-std5q). Pairs without flat faces (spheres,
+                // capsules) keep their one contact as a one-point manifold.
+                let manifolds: Vec<collision::ContactManifold3D> = match self.jolt_contacts {
+                    None => Vec::new(),
+                    Some(jolt) => {
+                        let found = collision::contact_manifolds(
+                            shape_pos_a,
+                            shape_rot_a,
+                            &shape_a,
+                            shape_pos_b,
+                            shape_rot_b,
+                            &shape_b,
+                            &result,
+                            jolt.speculative_contact_distance + JOLT_MANIFOLD_TOLERANCE,
+                        );
+                        if found.iter().any(|m| m.points.iter().any(|p| p.depth > 0.0)) {
+                            found
+                        } else {
+                            vec![collision::ContactManifold3D {
+                                normal: result.normal,
+                                points: vec![collision::ManifoldPoint3D {
+                                    on_a: contact_pos,
+                                    on_b: contact_pos,
+                                    depth: result.depth,
+                                }],
+                            }]
+                        }
+                    }
+                };
+                if let Some(deepest) = manifolds
+                    .iter()
+                    .flat_map(|m| m.points.iter())
+                    .max_by(|p, q| p.depth.total_cmp(&q.depth))
+                {
+                    contact_pos = deepest.position();
                 }
-                if let Some(b) = self.bodies.get_mut(&id_b) {
-                    b.add_contact(ContactPoint3D {
-                        position: contact_pos,
-                        normal: result.normal * -1.0,
-                        depth: result.depth,
-                        other_body: id_a,
-                    });
+                let reported: Vec<(Vector3, Vector3, f32)> = if manifolds.is_empty() {
+                    vec![(contact_pos, result.normal, result.depth)]
+                } else {
+                    manifolds
+                        .iter()
+                        .flat_map(|m| m.points.iter().map(|p| (p.position(), m.normal, p.depth)))
+                        .collect()
+                };
+                for &(position, normal, depth) in &reported {
+                    if let Some(a) = self.bodies.get_mut(&id_a) {
+                        a.add_contact(ContactPoint3D {
+                            position,
+                            normal,
+                            depth,
+                            other_body: id_b,
+                        });
+                    }
+                    if let Some(b) = self.bodies.get_mut(&id_b) {
+                        b.add_contact(ContactPoint3D {
+                            position,
+                            normal: normal * -1.0,
+                            depth,
+                            other_body: id_a,
+                        });
+                    }
                 }
 
                 let a_inv = self.bodies[&id_a].inverse_mass();
@@ -1203,6 +1266,11 @@ impl PhysicsWorld3D {
                     }
                     if let Some(b) = self.bodies.get_mut(&id_b) {
                         b.position = b.position + correction * (b_inv / total_inv);
+                    }
+
+                    if let Some(jolt) = self.jolt_contacts {
+                        self.solve_contact_manifolds(id_a, id_b, pos_a, pos_b, &manifolds, dt, jolt);
+                        continue;
                     }
 
                     // Impulse-based velocity response with restitution and
@@ -1321,6 +1389,151 @@ impl PhysicsWorld3D {
         // Solve joint constraints (pin position correction + hinge motor)
         // after integration and contact resolution (pat-u3l8c.57).
         self.solve_joints(dt);
+    }
+
+    /// Jolt's contact velocity solve for one body pair (pat-std5q):
+    /// `velocity_steps` Gauss-Seidel sweeps over every point of the pair's
+    /// manifolds, each point a non-penetration constraint with an accumulated
+    /// (never negative) impulse, plus friction clamped to the friction cone of
+    /// that impulse (`ContactConstraintManager::SolveVelocityConstraints`).
+    ///
+    /// 🔑 Iterating is what makes a manifold work. One impulse per point,
+    /// computed from the pre-solve velocity, over-corrects: two points at the
+    /// ends of an edge each stop the WHOLE approach on their own, and the pair
+    /// together bounces the body off. Accumulated impulses share the load.
+    ///
+    /// A speculative point (`depth < 0`, still apart) only limits the
+    /// approach to what closes the gap this step. Restitution applies above
+    /// Jolt's `bounce_velocity_threshold`, combined as Godot does
+    /// (`CLAMP(a + b, 0, 1)`); friction is `abs(MIN(a, b))`
+    /// (`jolt_space_3d.cpp`, `SetCombineFriction`/`SetCombineRestitution`).
+    #[allow(clippy::too_many_arguments)]
+    fn solve_contact_manifolds(
+        &mut self,
+        id_a: BodyId3D,
+        id_b: BodyId3D,
+        pos_a: Vector3,
+        pos_b: Vector3,
+        manifolds: &[collision::ContactManifold3D],
+        dt: f32,
+        jolt: JoltContactParams,
+    ) {
+        struct Row {
+            ra: Vector3,
+            rb: Vector3,
+            n: Vector3,
+            t: [Vector3; 2],
+            kn: f32,
+            kt: [f32; 2],
+            /// Largest approach speed the point may keep after the solve.
+            target: f32,
+            normal_impulse: f32,
+            friction_impulse: [f32; 2],
+        }
+        /// Both bodies' velocities while the solve runs.
+        struct Vel {
+            va: Vector3,
+            wa: Vector3,
+            vb: Vector3,
+            wb: Vector3,
+        }
+        let (a, b) = (&self.bodies[&id_a], &self.bodies[&id_b]);
+        let (inv_a, inv_b) = (a.inverse_mass(), b.inverse_mass());
+        let friction = a.friction.min(b.friction).abs();
+        let restitution = (a.bounce + b.bounce).clamp(0.0, 1.0);
+        let mut v = Vel {
+            va: a.linear_velocity,
+            wa: a.angular_velocity,
+            vb: b.linear_velocity,
+            wb: b.angular_velocity,
+        };
+        let mass = |ra: Vector3, rb: Vector3, d: Vector3| {
+            inv_a
+                + inv_b
+                + a.apply_inverse_inertia(ra.cross(d)).cross(ra).dot(d)
+                + b.apply_inverse_inertia(rb.cross(d)).cross(rb).dot(d)
+        };
+        // `+p` on B and `-p` on A, at the point's offsets.
+        let apply = |v: &mut Vel, ra: Vector3, rb: Vector3, p: Vector3| {
+            v.va = v.va - p * inv_a;
+            v.wa = v.wa - a.apply_inverse_inertia(ra.cross(p));
+            v.vb = v.vb + p * inv_b;
+            v.wb = v.wb + b.apply_inverse_inertia(rb.cross(p));
+        };
+        let relative = |v: &Vel, ra: Vector3, rb: Vector3| {
+            (v.va + v.wa.cross(ra)) - (v.vb + v.wb.cross(rb))
+        };
+        let mut rows: Vec<Row> = Vec::new();
+        for m in manifolds {
+            let n = m.normal.normalized();
+            let t = perpendicular_basis(n);
+            for p in &m.points {
+                let at = p.position();
+                let (ra, rb) = (at - pos_a, at - pos_b);
+                let kn = mass(ra, rb, n);
+                if kn <= 0.0 {
+                    continue;
+                }
+                let approach = relative(&v, ra, rb).dot(n);
+                let target = if p.depth < 0.0 {
+                    -p.depth / dt
+                } else if restitution > 0.0 && approach > jolt.bounce_velocity_threshold {
+                    -restitution * approach
+                } else {
+                    0.0
+                };
+                rows.push(Row {
+                    ra,
+                    rb,
+                    n,
+                    t,
+                    kn,
+                    kt: [mass(ra, rb, t[0]), mass(ra, rb, t[1])],
+                    target,
+                    normal_impulse: 0.0,
+                    friction_impulse: [0.0; 2],
+                });
+            }
+        }
+        for _ in 0..jolt.velocity_steps.max(1) {
+            for r in &mut rows {
+                let rel = relative(&v, r.ra, r.rb);
+                let total = (r.normal_impulse + (rel.dot(r.n) - r.target) / r.kn).max(0.0);
+                let d = total - r.normal_impulse;
+                r.normal_impulse = total;
+                apply(&mut v, r.ra, r.rb, r.n * d);
+
+                if friction <= 0.0 || r.normal_impulse <= 0.0 {
+                    continue;
+                }
+                let rel = relative(&v, r.ra, r.rb);
+                let mut f = [0.0f32; 2];
+                for k in 0..2 {
+                    let step = if r.kt[k] > 0.0 { rel.dot(r.t[k]) / r.kt[k] } else { 0.0 };
+                    f[k] = r.friction_impulse[k] + step;
+                }
+                let limit = friction * r.normal_impulse;
+                let len = (f[0] * f[0] + f[1] * f[1]).sqrt();
+                if len > limit && len > 0.0 {
+                    f = [f[0] * limit / len, f[1] * limit / len];
+                }
+                let p = r.t[0] * (f[0] - r.friction_impulse[0])
+                    + r.t[1] * (f[1] - r.friction_impulse[1]);
+                r.friction_impulse = f;
+                apply(&mut v, r.ra, r.rb, p);
+            }
+        }
+        if !rows.iter().any(|r| r.normal_impulse > 0.0) {
+            return;
+        }
+        for (id, lin, ang) in [(id_a, v.va, v.wa), (id_b, v.vb, v.wb)] {
+            if let Some(body) = self.bodies.get_mut(&id) {
+                if body.body_type == BodyType3D::Rigid {
+                    body.linear_velocity = lin;
+                    body.angular_velocity = ang;
+                }
+            }
+        }
     }
 
     /// Applies the registered joints to their bodies for this step
@@ -3081,6 +3294,46 @@ mod concave_contact_point_tests {
         let drift = ((p.x - start.x).powi(2) + (p.z - start.z).powi(2)).sqrt();
         assert!(drift < 0.5, "box slid {drift} m down a 5.7 degree slope to {p:?}");
         assert!(p.y > -3.5, "box fell through the ramp: {p:?}");
+    }
+
+    /// pat-std5q: under Jolt the box lands on its whole bottom face — a
+    /// four-point manifold — so it settles flush with the slope and stops, the
+    /// way Godot's box on truck_town's road rests 0.03 m from where it landed.
+    /// One contact under the box centre let it rock and creep.
+    #[test]
+    fn jolt_box_on_a_trimesh_slope_lands_flush_through_four_contacts() {
+        let mut world = PhysicsWorld3D::new();
+        world.jolt_contacts = Some(JoltContactParams::default());
+        world.add_body(PhysicsBody3D::new(BodyId3D(1), BodyType3D::Static, Vector3::ZERO, ramp(), 0.0));
+        let start = Vector3::new(30.0, -3.0 + 1.5, 0.0);
+        let mut body = PhysicsBody3D::new(
+            BodyId3D(2),
+            BodyType3D::Rigid,
+            start,
+            Shape3D::BoxShape {
+                half_extents: Vector3::new(0.5, 0.5, 0.5),
+            },
+            1.0,
+        );
+        body.contact_monitor = true;
+        body.max_contacts_reported = 8;
+        let id = world.add_body(body);
+        let mut most_contacts = 0;
+        for _ in 0..600 {
+            world.step(1.0 / 120.0);
+            most_contacts = most_contacts.max(world.get_body(id).unwrap().get_contact_count());
+        }
+        let b = world.get_body(id).unwrap();
+        assert_eq!(most_contacts, 4, "the box's bottom face touches the slope at its four corners");
+        let drift = ((b.position.x - start.x).powi(2) + (b.position.z - start.z).powi(2)).sqrt();
+        // Measured: 0.056 m, all of it while landing; one contact point
+        // crept 0.088 m and was still turning after 5 s.
+        assert!(drift < 0.07, "box crept {drift} m down a 5.7 degree slope (friction 1.0)");
+        // Flush: its up axis is the slope normal.
+        let up = b.rotation.xform(Vector3::new(0.0, 1.0, 0.0));
+        let normal = Vector3::new(0.1, 1.0, 0.0).normalized();
+        assert!(up.dot(normal) > 0.9999, "box rests tipped: up {up:?}, slope normal {normal:?}");
+        assert!(b.angular_velocity.length() < 1e-3, "box still turning: {:?}", b.angular_velocity);
     }
 }
 

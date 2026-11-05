@@ -105,9 +105,19 @@ fn car_on_town() -> Car {
     // The probe drives the controls itself, as the Godot one did with the
     // script detached.
     tree.get_node_mut(body).unwrap().set_property("script", Variant::Nil);
+    // The Godot probe reported the chassis' contacts the same way; monitoring
+    // does not change the simulation.
+    tree.get_node_mut(body).unwrap().set_property("contact_monitor", Variant::Bool(true));
+    tree.get_node_mut(body).unwrap().set_property("max_contacts_reported", Variant::Int(16));
 
     let mut ml = MainLoop::new(tree);
-    ml.set_physics_ticks_per_second(120);
+    // The project's own settings: 120 ticks/s and `3d/physics_engine="Jolt
+    // Physics"`, which selects Jolt's contact model (pat-std5q). Without
+    // them the town ran GodotPhysics' solver against Godot's Jolt numbers.
+    let text = std::fs::read_to_string(game_dir().join("project.godot")).unwrap();
+    let settings = gdcore::project_settings::ProjectSettings::from_godot_format(&text).unwrap();
+    gdscene::project_runtime::apply_project_settings(&mut ml, &settings);
+    assert_eq!(ml.physics_ticks_per_second(), 120);
     ml.register_physics_bodies();
     Car { ml, body, wheels }
 }
@@ -134,9 +144,29 @@ struct Rec {
     /// The Body's local basis (heading = its Z column).
     basis: Basis,
     speed: f32,
+    /// World angular velocity, as the node publishes it.
+    ang: Vector3,
     wheel_local: [Transform3D; 4],
     wheel_contact: [bool; 4],
     wheel_rpm: [f32; 4],
+    /// The chassis' contacts from the last step: (world position, normal).
+    contacts: Vec<(Vector3, Vector3)>,
+}
+
+fn body_contacts(tree: &SceneTree, id: NodeId) -> Vec<(Vector3, Vector3)> {
+    let Variant::Array(list) = tree.get_node(id).unwrap().get_property("_body_contacts") else {
+        return Vec::new();
+    };
+    list.to_vec()
+        .into_iter()
+        .filter_map(|c| match c {
+            Variant::Dictionary(d) => match (d.get("position"), d.get("normal")) {
+                (Some(Variant::Vector3(p)), Some(Variant::Vector3(n))) => Some((p, n)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
 }
 
 /// Runs `s` and returns the record at the start of each tick (index 0 = tick 1).
@@ -152,19 +182,25 @@ fn run(s: Schedule) -> Vec<Rec> {
             pos: gdscene::node3d::get_position(tree, car.body),
             basis: gdscene::node3d::get_local_transform(tree, car.body).basis,
             speed: v3(tree, car.body, "linear_velocity").length(),
+            ang: v3(tree, car.body, "angular_velocity"),
             wheel_local: car.wheels.map(|w| gdscene::node3d::get_local_transform(tree, w)),
             wheel_contact: car.wheels.map(|w| tree.get_node(w).unwrap().get_property("_wheel_in_contact") == Variant::Bool(true)),
             wheel_rpm: car.wheels.map(|w| f(tree, w, "_wheel_rpm")),
+            contacts: body_contacts(tree, car.body),
         };
         if let Some(d) = dump.as_mut() {
             use std::io::Write;
             let w = &rec.wheel_local[0];
+            let g = gdscene::node3d::get_global_transform(tree, car.body).origin;
             writeln!(
                 d,
-                "{tick} p=({:.4},{:.4},{:.4}) sp={:.3} bz=({:.3},{:.3},{:.3}) w1=({:.4},{:.4},{:.4}) c={:?}",
-                rec.pos.x, rec.pos.y, rec.pos.z, rec.speed, rec.basis.z.x, rec.basis.z.y, rec.basis.z.z,
+                "{tick} p=({:.4},{:.4},{:.4}) g=({:.4},{:.4},{:.4}) sp={:.3} w=({:.4},{:.4},{:.4}) bz=({:.3},{:.3},{:.3}) w1=({:.4},{:.4},{:.4}) c={:?}",
+                rec.pos.x, rec.pos.y, rec.pos.z, g.x, g.y, g.z, rec.speed, rec.ang.x, rec.ang.y, rec.ang.z,
+                rec.basis.z.x, rec.basis.z.y, rec.basis.z.z,
                 w.origin.x, w.origin.y, w.origin.z, rec.wheel_contact,
             )
+            .unwrap();
+            writeln!(d, "{tick} contacts {:?}", rec.contacts)
             .unwrap();
         }
         let speed = rec.speed;
@@ -237,41 +273,77 @@ fn minivan_settles_on_its_springs_at_godots_height() {
 /// Full throttle down the start road: Godot's acceleration curve, including
 /// the 0.1/s default damping, then the ramp at its end throws the car.
 ///
-/// | tick | Godot speed | Godot Body z |
+/// | tick | Godot speed | Godot Body position |
 /// |---|---|---|
-/// | 360 | 4.165 | 1.9266 |
-/// | 420 | 5.995 | 4.4933 |
-/// | 540 | 9.229 | 12.1454 |
-/// | 600 | 8.228 (on the ramp lip; Wheel1 already off it) | 16.683, y 0.8185 |
-/// | 630 | | 18.208, y 1.932; from 629 all four wheels hang at the rest length (y -0.0348) |
+/// | 360 | 4.165 | z 1.9266 |
+/// | 420 | 5.995 | z 4.4933 |
+/// | 540 | 9.229 | z 12.1454 |
+/// | 576 | | the chassis' front edge meets the ramp: two contacts, z 13.8563 and 14.8103 (world), either side of the 14.3333 centre line |
+/// | 600 | 8.228 (on the ramp lip; Wheel1 already off it) | (-0.0017, 0.8185, 16.6831) |
+/// | 629 | | the rear wheels have left the lip; from 630 all four hang at the rest length (y -0.0348) |
+/// | 630 | | (-0.0017, 1.9320, 18.2081), pitching at 0.9108 rad/s |
+/// | 660 | | y 2.5023 |
+/// | 700 | | x -0.0015 |
+///
+/// Godot's angular velocity about the world X and Y axes stays under 0.002
+/// rad/s from tick 570 to 700: the car pitches over the ramp and neither rolls
+/// nor yaws. Before pat-std5q Patina's single off-centre contact gave it up to
+/// 0.57 rad/s of roll/yaw, and its chassis box sat 0.077 m to the side of
+/// where the car authors it. The speed is checked to 0.2%: it is the
+/// velocity Godot publishes BEFORE the wheels' impulses (pat-zljoy), which
+/// `vehicle.gd`'s throttle law reads.
 #[test]
 fn throttle_and_ramp_jump_match_godot() {
     let recs = run(RAMP);
     for (tick, speed, z) in [(360, 4.165, 1.9266), (420, 5.995, 4.4933), (540, 9.229, 12.1454)] {
         let r = at(&recs, tick);
-        assert_near(&format!("speed at tick {tick}"), r.speed, speed, 0.02 * speed);
-        assert_near(&format!("z at tick {tick}"), r.pos.z, z, 0.02 * z.max(1.0));
+        assert_near(&format!("speed at tick {tick}"), r.speed, speed, 0.002 * speed);
+        assert_near(&format!("z at tick {tick}"), r.pos.z, z, 0.002 * z.max(1.0));
         assert!(r.wheel_contact.iter().all(|&c| c), "tick {tick}: all wheels on the road");
         assert_near(&format!("x at tick {tick} (drives straight)"), r.pos.x, -0.0017, 0.005);
     }
     let rpm = at(&recs, 540).wheel_rpm[0];
     assert_near("Wheel1 rpm at tick 540", rpm, 353.8, 0.03 * 353.8);
 
-    // The ramp. Patina's chassis-vs-ramp contact differs from Jolt's manifold
-    // in its details, so the jump is held to a few percent rather than to the
-    // centimetre.
+    // The ramp: the chassis box's front edge meets the ramp face through a
+    // TWO-point manifold, one contact at each end of the edge. Godot reports
+    // the pair from tick 576 at x 19.3152, 19.2442 at tick 577: Jolt finds a
+    // contact from the positions BEFORE its step's motion (0.075 m at this
+    // speed), so Patina's first contact, found after the motion, sits where
+    // Godot's tick-577 one does.
+    let c = &at(&recs, 576).contacts;
+    assert_eq!(c.len(), 2, "tick 576: the chassis touches the ramp at {c:?}; Godot reports 2 contacts");
+    let mut zs: Vec<f32> = c.iter().map(|(p, _)| p.z).collect();
+    zs.sort_by(f32::total_cmp);
+    assert_near("near contact z (world)", zs[0], 13.8563, 0.005);
+    assert_near("far contact z (world)", zs[1], 14.8103, 0.005);
+    for (p, n) in c {
+        assert_near("contact x (world, Godot's tick 577)", p.x, 19.2442, 0.01);
+        assert_vec_near("contact normal (the ramp face)", *n, (0.4926, 0.8702, 0.0), 0.002);
+    }
+    for tick in 570..=700 {
+        let w = at(&recs, tick).ang;
+        assert!(
+            w.x.abs() < 0.01 && w.y.abs() < 0.01,
+            "tick {tick}: the car rolls/yaws at {w:?}; Godot's stays under 0.002 rad/s about X and Y"
+        );
+    }
     let r = at(&recs, 600);
-    assert_near("z at tick 600", r.pos.z, 16.683, 0.3);
-    assert_near("y at tick 600", r.pos.y, 0.8185, 0.08);
+    assert_vec_near("Body at tick 600", r.pos, (-0.0017, 0.8185, 16.6831), 0.04);
     assert!(!r.wheel_contact[0], "Wheel1 has left the ramp at tick 600 (Godot)");
+    assert!(at(&recs, 628).wheel_contact[1], "the rear wheels are still on the lip at tick 628 (Godot)");
     let r = at(&recs, 630);
-    assert_near("y at tick 630 (airborne)", r.pos.y, 1.932, 0.1);
-    assert_near("z at tick 630", r.pos.z, 18.208, 0.3);
-    // Godot's rear wheels leave the lip at tick 629, Patina's by 635.
-    let r = at(&recs, 640);
-    for (i, w) in r.wheel_local.iter().enumerate() {
-        assert!(!r.wheel_contact[i], "wheel {} airborne at tick 640", i + 1);
-        assert_near(&format!("wheel {} hangs at its rest length", i + 1), w.origin.y, -0.0348, 1e-3);
+    assert_vec_near("Body at tick 630 (airborne)", r.pos, (-0.0017, 1.9320, 18.2081), 0.05);
+    assert_near("pitch rate at tick 630", r.ang.z, 0.9108, 0.06);
+    assert_near("y at tick 660 (top of the jump)", at(&recs, 660).pos.y, 2.5023, 0.08);
+    assert_near("x at tick 700 (still on the centre line)", at(&recs, 700).pos.x, -0.0015, 0.01);
+    assert!(!at(&recs, 629).wheel_contact.iter().any(|&c| c), "every wheel airborne at tick 629 (Godot)");
+    for tick in [630, 640] {
+        let r = at(&recs, tick);
+        for (i, w) in r.wheel_local.iter().enumerate() {
+            assert!(!r.wheel_contact[i], "wheel {} airborne at tick {tick}", i + 1);
+            assert_near(&format!("wheel {} hangs at its rest length", i + 1), w.origin.y, -0.0348, 1e-3);
+        }
     }
 }
 
@@ -290,18 +362,21 @@ fn throttle_and_ramp_jump_match_godot() {
 fn steering_turns_like_godot() {
     let recs = run(TURN);
     let r = at(&recs, 480);
-    assert_vec_near("Body at tick 480", r.pos, (0.4622, 0.1252, 7.3117), 0.1);
-    assert_vec_near("heading at tick 480", r.basis.z, (0.3831, 0.0162, 0.9236), 0.03);
-    assert_near("speed at tick 480", r.speed, 5.396, 0.1);
+    assert_vec_near("Body at tick 480", r.pos, (0.4622, 0.1252, 7.3117), 0.02);
+    assert_vec_near("heading at tick 480", r.basis.z, (0.3831, 0.0162, 0.9236), 0.01);
+    assert_near("speed at tick 480", r.speed, 5.396, 0.03);
     for (i, steers) in [(0, true), (1, false), (2, true), (3, false)] {
         let x = r.wheel_local[i].basis.x;
         let want = if steers { (0.921, 0.0, -0.389) } else { (1.0, 0.0, 0.0) };
         assert_vec_near(&format!("wheel {} axle at steering 0.4", i + 1), x, want, 0.01);
     }
     let r = at(&recs, 540);
-    assert_vec_near("Body at tick 540", r.pos, (2.1388, 0.1231, 9.1530), 0.15);
-    assert_vec_near("heading at tick 540", r.basis.z, (0.8292, 0.0163, 0.5587), 0.04);
-    assert_near("speed at tick 540", r.speed, 4.756, 0.1);
+    assert_vec_near("Body at tick 540", r.pos, (2.1388, 0.1231, 9.1530), 0.03);
+    assert_vec_near("heading at tick 540", r.basis.z, (0.8292, 0.0163, 0.5587), 0.015);
+    assert_near("speed at tick 540", r.speed, 4.756, 0.03);
+    // pat-std5q: the right wheels drop off the road edge here and the
+    // chassis box lands on it; Godot's car is at (3.5563, -0.0061, 9.7741).
+    assert_vec_near("Body at tick 580", at(&recs, 580).pos, (3.5563, -0.0061, 9.7741), 0.04);
 }
 
 /// The wheels SPIN: the pose's Y axis turns about the axle by the integrated

@@ -289,6 +289,62 @@ fn authored_inertia_3d(tree: &SceneTree, nid: NodeId, body: &PhysicsBody3D) -> O
     Some(i)
 }
 
+/// Where a rigid body's centre of mass sits, in its local frame (pat-zljoy).
+///
+/// `center_of_mass_mode` CUSTOM (1) uses the authored `center_of_mass`; AUTO
+/// (0, the default) uses the shapes' centroid, each shape weighted by its
+/// volume as Jolt's compound shape weighs them (uniform density). A body
+/// with one shape offset from its origin therefore turns about that shape's
+/// centre, not about the origin. Static and kinematic bodies never turn under
+/// contact, so theirs stays at the origin.
+fn center_of_mass_3d(tree: &SceneTree, nid: NodeId, body: &PhysicsBody3D) -> Vector3 {
+    if body.body_type != BodyType3D::Rigid {
+        return Vector3::ZERO;
+    }
+    if u32_prop_3d(tree, nid, "center_of_mass_mode", 0) == 1 {
+        return vec3_prop_3d(tree, nid, "center_of_mass", Vector3::ZERO);
+    }
+    let shapes = std::iter::once((body.shape_offset, body.shape_rotation, &body.shape))
+        .chain(body.extra_shapes.iter().map(|(o, r, s)| (*o, *r, s)));
+    let (mut sum, mut total) = (Vector3::ZERO, 0.0f32);
+    for (offset, rotation, shape) in shapes {
+        let (volume, centroid) = shape_volume_and_centroid(shape);
+        if volume > 0.0 {
+            sum = sum + (offset + rotation.xform(centroid)) * volume;
+            total += volume;
+        }
+    }
+    if total > 0.0 {
+        sum * (1.0 / total)
+    } else {
+        Vector3::ZERO
+    }
+}
+
+/// A convex shape's volume and its centroid in the shape's own frame. A hull
+/// is approximated by its bounding box (Jolt integrates the hull exactly; the
+/// hulls in the shipped games are symmetric about their origin).
+fn shape_volume_and_centroid(shape: &Shape3D) -> (f32, Vector3) {
+    use std::f32::consts::PI;
+    match shape {
+        Shape3D::Sphere { radius } => (4.0 / 3.0 * PI * radius.powi(3), Vector3::ZERO),
+        Shape3D::BoxShape { half_extents } => {
+            (8.0 * half_extents.x * half_extents.y * half_extents.z, Vector3::ZERO)
+        }
+        Shape3D::CapsuleShape { radius, height } => {
+            let cylinder = (height - 2.0 * radius).max(0.0);
+            (PI * radius * radius * cylinder + 4.0 / 3.0 * PI * radius.powi(3), Vector3::ZERO)
+        }
+        Shape3D::CylinderShape { radius, height } => (PI * radius * radius * height, Vector3::ZERO),
+        Shape3D::ConvexPolygonShape { .. } => {
+            let aabb = shape.bounding_aabb();
+            let s = aabb.size;
+            (s.x * s.y * s.z, aabb.position + s * 0.5)
+        }
+        _ => (0.0, Vector3::ZERO),
+    }
+}
+
 fn vec3_prop_3d(tree: &SceneTree, id: NodeId, key: &str, default: Vector3) -> Vector3 {
     tree.get_node(id)
         .map(|n| match n.get_property(key) {
@@ -702,18 +758,16 @@ pub(crate) fn shapes_from_body_subtree(
 ) -> Vec<(Vector3, Quaternion, Shape3D)> {
     let body_global = node3d::get_global_transform(tree, body_id);
     let body_origin = body_global.origin;
-    let inv_rot = Quaternion::from_euler(node3d::get_rotation(tree, body_id)).inverse();
-    // The body's GLOBAL orientation, so a shape's rotation can be expressed
-    // relative to its body the way `Basis` composition does it — the same
-    // "parent inverse * child" idiom `skeleton3d.rs` uses for bone poses.
+    // The body's GLOBAL orientation: both the shape's offset (a WORLD delta
+    // below) and its rotation are expressed relative to the body through it,
+    // the "parent inverse * child" idiom `skeleton3d.rs` uses for bone poses.
     //
-    // ⚠️ PRE-EXISTING INCONSISTENCY, deliberately left alone: `inv_rot` above
-    // is built from the body's LOCAL euler (`node3d::get_rotation`), not its
-    // global one, so the position delta below is already mis-rotated for a body
-    // nested under a rotated parent. That is not this bead's bug and existing
-    // green tests may pin the current behaviour, so the offset line is
-    // untouched; the two agree whenever the body's ancestors are unrotated,
-    // which covers every case in the tree today. Worth its own bead.
+    // 🔑 The offset used to be un-rotated by the body's LOCAL euler instead
+    // (pat-std5q). The two agree only while every ancestor is unrotated:
+    // truck_town's car sits under an `InstancePos` turned 90 degrees, so its
+    // chassis box (authored 0.077 m forward of the body) sat 0.077 m to the
+    // SIDE, and once the car pitched the error grew into a 0.25 m sideways
+    // shift — its ramp contacts landed off the centre line and rolled it.
     let inv_rot_global = body_global.basis.get_rotation_quaternion().inverse();
 
     let mut out: Vec<(Vector3, Quaternion, Shape3D)> = Vec::new();
@@ -749,7 +803,7 @@ pub(crate) fn shapes_from_body_subtree(
             // so an intermediate `Node3D` between the body and the shape — which
             // the walker explicitly supports — contributes its rotation too.
             let local_rot = inv_rot_global * shape_global.basis.get_rotation_quaternion();
-            out.push((inv_rot.xform(delta), local_rot, shape));
+            out.push((inv_rot_global.xform(delta), local_rot, shape));
         }
 
         kids.reverse();
@@ -803,6 +857,14 @@ pub struct PhysicsServer3D {
     vehicle_wheel_nodes: HashMap<NodeId, Vec<NodeId>>,
     /// Vehicles whose `_body_state_changed` ran in this tick's step.
     vehicles_updated: HashSet<NodeId>,
+    /// A vehicle chassis' velocities as its state callback FOUND them, before
+    /// the wheels' impulses (pat-zljoy), keyed by the chassis' body node.
+    /// That is what Godot's `VehicleBody3D::_body_state_changed` publishes:
+    /// it runs `RigidBody3D::_body_state_changed` (which copies
+    /// `linear_velocity` onto the node) FIRST, then applies the impulses to
+    /// the state. The impulses stay in the body; only the node reads the
+    /// earlier value, until the next step.
+    vehicle_published_velocity: HashMap<NodeId, (Vector3, Vector3)>,
     /// `physics/3d/default_linear_damp` / `default_angular_damp` (Godot: 0.1
     /// each), combined into every rigid body's damping (pat-qg3nu).
     default_linear_damp: f32,
@@ -914,6 +976,7 @@ impl PhysicsServer3D {
             vehicles: HashMap::new(),
             vehicle_wheel_nodes: HashMap::new(),
             vehicles_updated: HashSet::new(),
+            vehicle_published_velocity: HashMap::new(),
             default_linear_damp: 0.1,
             default_angular_damp: 0.1,
             next_joint_id: 1,
@@ -948,6 +1011,7 @@ impl PhysicsServer3D {
             vehicles: HashMap::new(),
             vehicle_wheel_nodes: HashMap::new(),
             vehicles_updated: HashSet::new(),
+            vehicle_published_velocity: HashMap::new(),
             default_linear_damp: 0.1,
             default_angular_damp: 0.1,
             next_joint_id: 1,
@@ -1337,6 +1401,7 @@ impl PhysicsServer3D {
                         body.shape_rotation = shape_rotation;
                         body.extra_shapes = authored;
                         body.inertia_override = authored_inertia_3d(tree, nid, &body);
+                        body.center_of_mass = center_of_mass_3d(tree, nid, &body);
 
                         // Initial orientation: the node's WORLD one, like its
                         // position (pat-qg3nu). The LOCAL rotation dropped the
@@ -1381,7 +1446,8 @@ impl PhysicsServer3D {
                             body.linear_damp = 0.0;
                             body.angular_damp = 0.0;
                         }
-                        body.friction = float_prop_3d(tree, nid, "friction", 0.5) as f32;
+                        // Godot's default with no material is 1.0, not 0.5 (pat-uqw01).
+                        body.friction = float_prop_3d(tree, nid, "friction", 1.0) as f32;
                         body.bounce = float_prop_3d(tree, nid, "bounce", 0.0) as f32;
                         // `physics_material_override`, which `PackedScene`
                         // flattens onto the node as `__physics_material__*`
@@ -1507,6 +1573,7 @@ impl PhysicsServer3D {
                                 b.shape_rotation = rot;
                                 b.extra_shapes = authored;
                             }
+                            b.center_of_mass = center_of_mass_3d(tree, nid, b);
                         }
                     }
                 }
@@ -2205,14 +2272,22 @@ impl PhysicsServer3D {
             FreezeMode::None
         };
 
+        // A vehicle's node still holds the pre-impulse velocity published
+        // last tick (pat-zljoy); reading it back would undo the wheels'
+        // impulses. Only a value a script wrote since then is adopted.
+        let published = self.vehicle_published_velocity.get(&nid).copied();
         let Some(body) = self.world.get_body_mut(body_id) else {
             return;
         };
         if let Some(v) = node_lin {
-            body.linear_velocity = v;
+            if published.map_or(true, |(l, _)| l != v) {
+                body.linear_velocity = v;
+            }
         }
         if let Some(v) = node_ang {
-            body.angular_velocity = v;
+            if published.map_or(true, |(_, a)| a != v) {
+                body.angular_velocity = v;
+            }
         }
         // Godot: `axis = p_axis.normalized(); vel -= axis * axis.dot(vel); vel += p_axis`
         // (`rigid_body_3d.cpp:463`). The component ALONG the axis is replaced
@@ -2705,11 +2780,16 @@ impl PhysicsServer3D {
         // Godot has not stepped it. Controllers are taken out and put back
         // because `update` needs `&mut self.world`.
         self.vehicles_updated.clear();
+        self.vehicle_published_velocity.clear();
         if !self.vehicles.is_empty() && dt > 0.0 {
             let mut taken: Vec<(NodeId, VehicleController3D)> = self.vehicles.drain().collect();
             for (nid, controller) in &mut taken {
                 if self.held_this_step.contains(&controller.chassis) {
                     continue;
+                }
+                if let Some(b) = self.world.get_body(controller.chassis) {
+                    self.vehicle_published_velocity
+                        .insert(*nid, (b.linear_velocity, b.angular_velocity));
                 }
                 controller.update(&mut self.world, dt);
                 self.vehicles_updated.insert(*nid);
@@ -3231,7 +3311,11 @@ impl PhysicsServer3D {
             if body.body_type != BodyType3D::Rigid {
                 continue;
             }
-            let (lin, ang, sleeping) = (body.linear_velocity, body.angular_velocity, body.sleeping);
+            let (mut lin, mut ang, sleeping) =
+                (body.linear_velocity, body.angular_velocity, body.sleeping);
+            if let Some(&(l, a)) = self.vehicle_published_velocity.get(&nid) {
+                (lin, ang) = (l, a);
+            }
             if let Some(node) = tree.get_node_mut(nid) {
                 node.set_property("linear_velocity", Variant::Vector3(lin));
                 node.set_property("angular_velocity", Variant::Vector3(ang));
@@ -3412,6 +3496,32 @@ mod tests {
         let mut server = PhysicsServer3D::new();
         server.sync_to_physics(&tree);
         assert_eq!(server.body_count(), 1);
+    }
+
+    /// A shape's offset is relative to its BODY, whatever the body's parents
+    /// do (pat-std5q). truck_town's car sits under an `InstancePos` turned 90
+    /// degrees about Y; its chassis box, authored 0.077 m forward (+Z) of the
+    /// body, was registered 0.077 m to the side.
+    #[test]
+    fn shape_offset_is_body_local_under_a_rotated_parent() {
+        let mut tree = SceneTree::new();
+        let root = tree.root_id();
+        let parent = tree.add_child(root, Node::new("InstancePos", "Node3D")).unwrap();
+        node3d::set_rotation(&mut tree, parent, Vector3::new(0.0, std::f32::consts::FRAC_PI_2, 0.0));
+        let body = tree.add_child(parent, Node::new("Body", "RigidBody3D")).unwrap();
+        // The body pitched, as the car is on the ramp.
+        node3d::set_rotation(&mut tree, body, Vector3::new(0.5, 0.0, 0.0));
+        let mut shape_node = Node::new("Shape", "CollisionShape3D");
+        shape_node.set_property("shape", Variant::String("BoxShape3D".to_owned()));
+        let shape_nid = tree.add_child(body, shape_node).unwrap();
+        node3d::set_position(&mut tree, shape_nid, Vector3::new(0.0, 0.588, 0.077));
+
+        let shapes = shapes_from_body_subtree(&tree, body);
+        let (offset, _, _) = shapes[0];
+        assert!(
+            (offset - Vector3::new(0.0, 0.588, 0.077)).length() < 1e-4,
+            "shape offset {offset:?}; the CollisionShape3D is at (0, 0.588, 0.077) in its body"
+        );
     }
 
     #[test]
