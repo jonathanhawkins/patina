@@ -32,6 +32,8 @@ pub mod test_adapter;
 #[cfg(feature = "gpu")]
 pub use wgpu;
 #[cfg(feature = "gpu")]
+pub mod spatial_wgsl;
+#[cfg(feature = "gpu")]
 pub mod wgpu_pipeline;
 /// Presentable canvas/window surfaces with async adapter+device acquisition —
 /// the browser render path (pat-u3l8c.110). Separate from [`wgpu_pipeline`],

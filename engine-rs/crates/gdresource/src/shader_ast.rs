@@ -159,6 +159,10 @@ pub enum Stmt {
     Local {
         /// Declared name.
         name: String,
+        /// The declared type as written (`float`, `vec3`, …). The CPU evaluator
+        /// is dynamically typed and ignores it; the GPU transpiler
+        /// (`gdrender3d::spatial_wgsl`) needs it to emit a typed WGSL `var`.
+        ty: String,
         /// Initializer, if any.
         init: Option<Expr>,
     },
@@ -217,6 +221,14 @@ pub struct Function {
     pub name: String,
     /// Parameter names, in order.
     pub params: Vec<String>,
+    /// Each parameter's type as written, parallel to `params` (`""` when the
+    /// parser saw no type token). Read by the GPU transpiler only.
+    pub param_types: Vec<String>,
+    /// Each parameter's qualifier (`""`, `"in"`, `"out"` or `"inout"`),
+    /// parallel to `params`.
+    pub param_qualifiers: Vec<String>,
+    /// The declared return type as written (`void`, `float`, …).
+    pub return_type: String,
     /// Body statements.
     pub body: Vec<Stmt>,
 }
@@ -230,6 +242,12 @@ pub struct ShaderProgram {
     pub uniforms: Vec<String>,
     /// Declared varying names.
     pub varyings: Vec<String>,
+    /// Each varying's type as written, parallel to `varyings`, and whether it
+    /// was declared `flat`.
+    pub varying_types: Vec<(String, bool)>,
+    /// Top-level `const TYPE NAME = expr;` declarations, in source order:
+    /// (name, type, initializer). The CPU evaluator does not read these.
+    pub consts: Vec<(String, String, Expr)>,
     /// Every function, keyed by name.
     pub functions: HashMap<String, Function>,
 }
@@ -428,19 +446,48 @@ impl Parser {
                 ShaderToken::Uniform | ShaderToken::Varying | ShaderToken::Const => {
                     let is_uniform = matches!(self.peek(), ShaderToken::Uniform);
                     let is_varying = matches!(self.peek(), ShaderToken::Varying);
+                    let is_const = matches!(self.peek(), ShaderToken::Const);
                     self.advance();
-                    // Skip precision/interpolation qualifiers and the type.
+                    // Skip precision/interpolation qualifiers and the type,
+                    // remembering the type and a `flat` qualifier.
+                    let mut ty = String::new();
+                    let mut flat = false;
                     while !matches!(
                         self.peek(),
                         ShaderToken::Ident(_) | ShaderToken::Semicolon | ShaderToken::Eof
                     ) {
-                        self.advance();
+                        let t = self.advance();
+                        if Self::is_type_token(&t) {
+                            ty = Self::type_name(&t);
+                        } else if matches!(t, ShaderToken::Flat) {
+                            flat = true;
+                        }
                     }
                     if let ShaderToken::Ident(name) = self.peek().clone() {
                         if is_uniform {
                             program.uniforms.push(name);
                         } else if is_varying {
                             program.varyings.push(name);
+                            program.varying_types.push((ty, flat));
+                        } else if is_const {
+                            // `const T NAME = expr;` — keep the initializer for
+                            // the GPU transpiler. A form this cannot read (an
+                            // array, a missing `=`) is skipped as before.
+                            let save = self.pos;
+                            self.advance();
+                            let parsed = if self.eat(&ShaderToken::Assign) {
+                                self.parse_expr().ok()
+                            } else {
+                                None
+                            };
+                            match parsed {
+                                Some(init)
+                                    if matches!(self.peek(), ShaderToken::Semicolon) =>
+                                {
+                                    program.consts.push((name, ty, init));
+                                }
+                                _ => self.pos = save,
+                            }
                         }
                     }
                     self.skip_to_semicolon();
@@ -497,7 +544,7 @@ impl Parser {
     }
 
     fn parse_function(&mut self) -> Result<Function, ShaderError> {
-        self.advance(); // return type
+        let return_type = Self::type_name(&self.advance());
         let name = match self.advance() {
             ShaderToken::Ident(n) => n,
             other => return self.err(format!("expected a function name, found `{other}`")),
@@ -505,21 +552,34 @@ impl Parser {
         self.expect(&ShaderToken::LParen, "`(` after the function name")?;
 
         let mut params = Vec::new();
+        let mut param_types = Vec::new();
+        let mut param_qualifiers = Vec::new();
+        let mut ty = String::new();
+        let mut qualifier = String::new();
         while !self.eat(&ShaderToken::RParen) {
             if matches!(self.peek(), ShaderToken::Eof) {
                 return self.err("unterminated parameter list");
             }
             // Qualifiers and the type precede the name; the name is the last
             // identifier before `,` or `)`.
-            if let ShaderToken::Ident(n) = self.peek().clone() {
-                let next_is_end = self
-                    .tokens
-                    .get(self.pos + 1)
-                    .map(|s| matches!(s.token, ShaderToken::Comma | ShaderToken::RParen))
-                    .unwrap_or(false);
-                if next_is_end {
-                    params.push(n);
+            match self.peek().clone() {
+                ShaderToken::Ident(n) => {
+                    let next_is_end = self
+                        .tokens
+                        .get(self.pos + 1)
+                        .map(|s| matches!(s.token, ShaderToken::Comma | ShaderToken::RParen))
+                        .unwrap_or(false);
+                    if next_is_end {
+                        params.push(n);
+                        param_types.push(std::mem::take(&mut ty));
+                        param_qualifiers.push(std::mem::take(&mut qualifier));
+                    }
                 }
+                ShaderToken::In => qualifier = "in".into(),
+                ShaderToken::Out => qualifier = "out".into(),
+                ShaderToken::Inout => qualifier = "inout".into(),
+                t if Self::is_type_token(&t) => ty = Self::type_name(&t),
+                _ => {}
             }
             self.advance();
             self.eat(&ShaderToken::Comma);
@@ -527,7 +587,14 @@ impl Parser {
 
         self.expect(&ShaderToken::LBrace, "`{` to open the function body")?;
         let body = self.parse_block()?;
-        Ok(Function { name, params, body })
+        Ok(Function {
+            name,
+            params,
+            param_types,
+            param_qualifiers,
+            return_type,
+            body,
+        })
     }
 
     /// Parses statements until the matching `}` (which is consumed).
@@ -609,7 +676,7 @@ impl Parser {
     }
 
     fn parse_local(&mut self) -> Result<Stmt, ShaderError> {
-        self.advance(); // the type
+        let ty = Self::type_name(&self.advance());
         let name = match self.advance() {
             ShaderToken::Ident(n) => n,
             other => return self.err(format!("expected a variable name, found `{other}`")),
@@ -620,7 +687,7 @@ impl Parser {
             None
         };
         self.expect(&ShaderToken::Semicolon, "`;` after the declaration")?;
-        Ok(Stmt::Local { name, init })
+        Ok(Stmt::Local { name, ty, init })
     }
 
     fn parse_if(&mut self) -> Result<Stmt, ShaderError> {
@@ -1090,7 +1157,7 @@ fn exec_stmt(
     ctx: &mut StageContext,
 ) -> Result<Flow, ShaderError> {
     match stmt {
-        Stmt::Local { name, init } => {
+        Stmt::Local { name, init, .. } => {
             let value = match init {
                 Some(e) => eval_expr(program, e, ctx)?,
                 None => ShaderValue::Float(0.0),

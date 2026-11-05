@@ -2248,6 +2248,10 @@ pub struct Editor3DRenderInputs {
     /// this struct has two, both in this file. The render path is the same
     /// either way — this is where the environment is resolved too.
     pub compositor: Option<Compositor>,
+    /// The scene tree's shader clock (`TIME`) for custom spatial shaders
+    /// (pat-9gjpr). Neither editor render path read it, so a TIME-driven
+    /// shader stood still in Play on both.
+    pub shader_time: f32,
 }
 
 /// The `FogVolume` / `Decal` / `ReflectionProbe` / `OccluderInstance3D` nodes of
@@ -2311,6 +2315,7 @@ pub fn editor_3d_render_inputs(viewport: &Viewport3D, tree: &SceneTree) -> Edito
         // caller installs the compositor for the frame. See
         // `render_editor_3d_frame_with_compositor`.
         compositor: None,
+        shader_time: tree.shader_time(),
     }
 }
 
@@ -3392,6 +3397,7 @@ fn render_editor_3d_frame_from_inputs(
         inputs.root_motion_grid,
     );
     setup_editor_lighting_3d(&mut renderer, viewport, &inputs.scene_lights);
+    renderer.set_shader_time(inputs.shader_time);
 
     // --- Render from the editor camera. Godot's "Preview Environment" toolbar
     //     toggle shows a procedural sky gradient (bluish top → light horizon →
@@ -3613,7 +3619,11 @@ pub fn render_editor_3d_frame_gpu(
         Some(gdserver3d::sky::SkyMaterial::Physical(m)) => m.night_sky.is_some(),
         _ => false,
     };
-    if sky_needs_software {
+    // pat-9gjpr: a custom spatial shader the WGSL transpiler cannot express
+    // draws correctly only on the software path, so such a frame renders
+    // there — slow, and counted by `software_fallback_frames`, but never a
+    // flat-coloured stand-in that looks like a working feature.
+    if sky_needs_software || has_gpu_unsupported_spatial_shader(inputs) {
         note_software_fallback();
         return framebuffer_to_bgra(&render_editor_3d_frame_from_inputs(viewport, inputs));
     }
@@ -3667,6 +3677,7 @@ pub fn render_editor_3d_frame_gpu(
             inputs.root_motion_grid,
         );
         setup_editor_lighting_3d(&mut *renderer, viewport, &inputs.scene_lights);
+        renderer.set_shader_time(inputs.shader_time);
         let mut rv = editor_render_viewport(viewport, width, height);
         // Same environment as the software path: the GPU renderer draws the
         // procedural sky gradient (or flat void color) from it, so the two
@@ -3679,6 +3690,18 @@ pub fn render_editor_3d_frame_gpu(
         // Composite the grid/gizmos/selection directly onto the BGRA bytes.
         draw_editor_overlays_3d(&mut img, viewport, &overlays);
         img
+    })
+}
+
+/// `true` when a visible item carries a `shader_type spatial` material the GPU
+/// path cannot transpile (pat-9gjpr) — the frame must render in software.
+#[cfg(feature = "gpu-render")]
+pub fn has_gpu_unsupported_spatial_shader(inputs: &Editor3DRenderInputs) -> bool {
+    inputs.items.iter().any(|item| {
+        item.shader_material
+            .as_ref()
+            .and_then(gdrender3d::spatial_wgsl::module_for)
+            .is_some_and(|r| r.is_err())
     })
 }
 
