@@ -35,6 +35,28 @@ use gdserver3d::environment::{Environment3D, GlowBlendMode, ToneMapper};
 /// final `linear_to_srgb` encode (with exposure), so a scene authored in sRGB
 /// and converted to linear on input round-trips unchanged.
 pub fn apply_camera_post(pixels: &mut [Color], width: u32, height: u32, env: &Environment3D) {
+    camera_post(pixels, width, height, env, false);
+}
+
+/// [`apply_camera_post`] for a caller that packs the result to 8-bit as
+/// `(c * 255.0) as u8` and reads nothing else (the GPU editor path): those
+/// bytes are identical, but where it can, a channel is written as the stand-in
+/// for its byte that packs back to it, found by a table search instead of the
+/// sRGB encode's `powf` (see [`srgb_byte`]). Other uses of the floats would
+/// see the stand-ins, so only the byte packer may call this.
+pub(crate) fn apply_camera_post_for_bytes(
+    pixels: &mut [Color],
+    width: u32,
+    height: u32,
+    env: &Environment3D,
+) {
+    camera_post(pixels, width, height, env, true);
+}
+
+fn camera_post(pixels: &mut [Color], width: u32, height: u32, env: &Environment3D, for_bytes: bool) {
+    // The byte table stands in for encode + clamp only when nothing runs
+    // between them (BCS adjustments and the debanding dither do).
+    let byte_table = (for_bytes && !env.adjustment_enabled && !env.use_debanding).then(srgb_byte_table);
     let exposure = env.tonemap_exposure;
     // AgX reads its own white point (Godot passes `tonemap_agx_white` as the
     // tonemap settings' white when the mapper is AgX — environment.cpp:253).
@@ -104,6 +126,13 @@ pub fn apply_camera_post(pixels: &mut [Color], width: u32, height: u32, env: &En
             c = [c[0] * brightness, c[1] * brightness, c[2] * brightness];
         }
 
+        if let Some(t) = byte_table {
+            px.r = t.byte_value[t.byte(c[0]) as usize];
+            px.g = t.byte_value[t.byte(c[1]) as usize];
+            px.b = t.byte_value[t.byte(c[2]) as usize];
+            return;
+        }
+
         // Linear → sRGB for display.
         let mut r = linear_to_srgb_channel(c[0]);
         let mut g = linear_to_srgb_channel(c[1]);
@@ -153,6 +182,70 @@ pub fn apply_camera_post(pixels: &mut [Color], width: u32, height: u32, env: &En
         px.b = b;
     };
     for_each_pixel_parallel(pixels, &shade);
+}
+
+/// `(linear_to_srgb_channel(t).clamp(0.0, 1.0) * 255.0) as u8`: the byte the
+/// camera post-process and the GPU path's packer make of a tone-mapped linear
+/// channel `t` (no adjustments, no dither).
+pub(crate) fn srgb_byte(t: f32) -> u8 {
+    (linear_to_srgb_channel(t).clamp(0.0, 1.0) * 255.0) as u8
+}
+
+/// [`srgb_byte`] by table: `thresholds[k - 1]` is the smallest non-negative
+/// `f32` whose byte is at least `k`, so a byte is how many thresholds lie at
+/// or below `t`. Exact because [`srgb_byte`] never decreases as `t` grows over
+/// the non-negative floats — `powf`, the multiply-add and the clamp are each
+/// monotone — which `srgb_byte_table_matches_the_encode_for_every_float`
+/// checks over every float the encode does not saturate.
+pub(crate) struct SrgbByteTable {
+    thresholds: [f32; 255],
+    /// For each byte, a float that `(v * 255.0) as u8` packs back to it.
+    pub(crate) byte_value: [f32; 256],
+}
+
+impl SrgbByteTable {
+    #[inline]
+    pub(crate) fn byte(&self, t: f32) -> u8 {
+        // Negative, -0 and NaN keep the exact path (they are rare here).
+        if !(t > 0.0) {
+            return srgb_byte(t);
+        }
+        self.thresholds.partition_point(|th| *th <= t) as u8
+    }
+}
+
+pub(crate) fn srgb_byte_table() -> &'static SrgbByteTable {
+    static TABLE: std::sync::OnceLock<SrgbByteTable> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut thresholds = [0.0f32; 255];
+        for k in 1..=255u8 {
+            // Smallest bit pattern in [0, +inf] whose byte reaches k:
+            // non-negative floats order like their bits.
+            let (mut lo, mut hi) = (0u32, 0x7f80_0000u32);
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if srgb_byte(f32::from_bits(mid)) >= k {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            thresholds[k as usize - 1] = f32::from_bits(lo);
+        }
+        let mut byte_value = [0.0f32; 256];
+        for k in 0..=255u32 {
+            let mut v = k as f32 / 255.0;
+            while (v * 255.0) as u8 as u32 != k {
+                v = if ((v * 255.0) as u8 as u32) < k {
+                    f32::from_bits(v.to_bits() + 1)
+                } else {
+                    f32::from_bits(v.to_bits() - 1)
+                };
+            }
+            byte_value[k as usize] = v;
+        }
+        SrgbByteTable { thresholds, byte_value }
+    })
 }
 
 /// Runs `f(index, pixel)` over every pixel, on several threads for a large
@@ -660,6 +753,84 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     }
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+#[cfg(test)]
+mod srgb_byte_tests {
+    use super::*;
+
+    fn check_range(lo: u32, hi: u32, stride: u32) {
+        let table = srgb_byte_table();
+        let threads = 8u32;
+        let span = (hi - lo).div_ceil(threads);
+        std::thread::scope(|s| {
+            for t in 0..threads {
+                s.spawn(move || {
+                    let (a, b) = (lo + t * span, (lo + (t + 1) * span).min(hi));
+                    let mut bits = a;
+                    while bits < b {
+                        let v = f32::from_bits(bits);
+                        assert_eq!(table.byte(v), srgb_byte(v), "t = {v:e} ({bits:#x})");
+                        bits = bits.saturating_add(stride);
+                    }
+                });
+            }
+        });
+    }
+
+    /// Every non-negative float up to +inf (the encode reaches 255
+    /// below 1.0). Ignored: ~2e9 `powf`s, ~2 s. Run it on a
+    /// release build after touching `linear_to_srgb_channel` or the table.
+    #[test]
+    #[ignore = "exhaustive: run with --release --ignored"]
+    fn srgb_byte_table_matches_the_encode_for_every_float() {
+        check_range(0, 0x7f80_0001, 1);
+    }
+
+    /// A stride through the same range, every threshold's neighbours, and
+    /// the non-finite and negative inputs.
+    #[test]
+    fn srgb_byte_table_matches_the_encode() {
+        check_range(0, 0x4000_0000, 997);
+        let table = srgb_byte_table();
+        for th in table.thresholds {
+            for d in -3i64..=3 {
+                let v = f32::from_bits((th.to_bits() as i64 + d).max(0) as u32);
+                assert_eq!(table.byte(v), srgb_byte(v), "near threshold {th:e}");
+            }
+        }
+        for v in [f32::INFINITY, f32::NAN, -0.0, -1.0, f32::NEG_INFINITY, 1e30, 2.0, 1.0] {
+            assert_eq!(table.byte(v), srgb_byte(v), "{v}");
+        }
+        for k in 0..=255u32 {
+            assert_eq!((table.byte_value[k as usize] * 255.0) as u8 as u32, k);
+        }
+    }
+
+    /// The byte path packs to the same bytes as the float path on a frame
+    /// with every tone mapper's typical range.
+    #[test]
+    fn the_byte_post_process_packs_to_the_same_bytes() {
+        let mut env = Environment3D::default();
+        env.tone_mapper = ToneMapper::Agx;
+        let (w, h) = (97u32, 61u32);
+        let src: Vec<Color> = (0..w * h)
+            .map(|i| {
+                let f = i as f32 / (w * h) as f32;
+                Color::new(f * 4.0, (f * 37.0).fract() * 1.5, ((i * 7919) % 1000) as f32 / 300.0, 1.0)
+            })
+            .collect();
+        for mapper in [ToneMapper::Agx, ToneMapper::Linear, ToneMapper::Filmic, ToneMapper::Aces, ToneMapper::Reinhard] {
+            env.tone_mapper = mapper;
+            let (mut a, mut b) = (src.clone(), src.clone());
+            apply_camera_post(&mut a, w, h, &env);
+            apply_camera_post_for_bytes(&mut b, w, h, &env);
+            let pack = |c: &Color| [(c.r * 255.0) as u8, (c.g * 255.0) as u8, (c.b * 255.0) as u8];
+            for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+                assert_eq!(pack(x), pack(y), "{mapper:?} pixel {i}");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

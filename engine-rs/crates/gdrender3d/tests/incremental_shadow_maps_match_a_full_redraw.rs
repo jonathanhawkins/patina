@@ -10,8 +10,8 @@
 use gdcore::math::Vector3;
 use gdcore::math3d::Transform3D;
 use gdrender3d::shadow_map::{
-    generate_shadow_maps, generate_shadow_maps_incremental, ShadowCasterCache, ShadowMap,
-    SHADOW_MAP_SIZE,
+    generate_shadow_maps, generate_shadow_maps_incremental,
+    generate_shadow_maps_incremental_reusing, ShadowCasterCache, ShadowMap, SHADOW_MAP_SIZE,
 };
 use gdserver3d::instance::{Instance3D, Instance3DId};
 use gdserver3d::light::{Light3D, Light3DId};
@@ -116,4 +116,49 @@ fn a_changed_light_or_a_vanished_static_caster_rebuilds_the_base() {
     // The light turns: every caster lands somewhere else in its map.
     lights[0].direction = Vector3::new(0.3, -1.0, 0.2).normalized();
     render(&lights, &instances, 8, &mut cache);
+}
+
+/// The same frames with each call handed back the previous call's maps: they
+/// are patched in place (only the moving casters' rectangles restored from
+/// the base) instead of copying the whole base per frame, and every map is
+/// still bit-identical to a full redraw. `last_dirty` covers every texel that
+/// changed since the previous call.
+#[test]
+fn recycled_maps_equal_a_full_redraw_and_dirty_covers_every_change() {
+    let lights = vec![sun()];
+    let mut cache = ShadowCasterCache::default();
+    let mut previous: Vec<ShadowMap> = Vec::new();
+    let mut last_full: Option<Vec<ShadowMap>> = None;
+    for frame in 0..80 {
+        let instances = scene(frame);
+        let refs: Vec<&Instance3D> = instances.iter().collect();
+        let keys: Vec<u64> = instances.iter().map(key).collect();
+        let maps = generate_shadow_maps_incremental_reusing(
+            &lights,
+            &refs,
+            &keys,
+            7,
+            &mut cache,
+            std::mem::take(&mut previous),
+        );
+        let full = generate_shadow_maps(&lights, &instances);
+        assert!(same_maps(&maps, &full), "frame {frame}: the recycled maps differ");
+        if let (Some(dirty), Some(prev)) = (&cache.last_dirty, &last_full) {
+            let rects = &dirty[0];
+            for ty in 0..SHADOW_MAP_SIZE {
+                for tx in 0..SHADOW_MAP_SIZE {
+                    let (a, b) = (prev[0].depth.get(tx, ty), full[0].depth.get(tx, ty));
+                    if a.to_bits() != b.to_bits() {
+                        assert!(
+                            rects.iter().any(|r| tx >= r.0 && tx <= r.2 && ty >= r.1 && ty <= r.3),
+                            "frame {frame}: texel ({tx}, {ty}) changed outside every dirty rectangle"
+                        );
+                    }
+                }
+            }
+        }
+        last_full = Some(full);
+        previous = maps;
+    }
+    assert!(cache.recycled_maps >= 40, "only {} maps were recycled in 80 frames", cache.recycled_maps);
 }

@@ -3378,6 +3378,15 @@ pub struct MaterialTextureCache {
     /// so a cache kept across frames can drop what changed on disk (or what a
     /// project switch re-pointed) via [`Self::drop_stale`] (pat-p3p1m).
     stamps: HashMap<String, TextureStamp>,
+    /// One channel of a source map broadcast into r, g and b (a roughness or
+    /// metallic map, see [`Self::get_or_load_channel`]), with the source `Arc`
+    /// it was derived from. 🔑 Kept so every frame hands the renderer the SAME
+    /// `Arc`: the GPU path caches map uploads by `Arc` identity, and a fresh
+    /// broadcast per frame re-uploaded (and re-mipped) every ORM map of the
+    /// scene on every 3D Play frame.
+    channels: HashMap<(String, u8), (Arc<TextureImage>, Arc<TextureImage>)>,
+    /// How many channel broadcasts were computed. Instrumentation for tests.
+    channel_builds: u64,
 }
 
 /// The resolved file and its modification time (either may be absent).
@@ -3415,6 +3424,32 @@ impl MaterialTextureCache {
         loaded
     }
 
+    /// `res_path` with `channel` broadcast into r, g and b
+    /// ([`TextureChannel::broadcast`]), computed once per decoded source and
+    /// returned as the same `Arc` until the source is reloaded.
+    pub fn get_or_load_channel(
+        &mut self,
+        res_path: &str,
+        channel: gdserver3d::material::TextureChannel,
+    ) -> Option<Arc<TextureImage>> {
+        let source = self.get_or_load(res_path)?;
+        let key = (res_path.to_string(), channel as u8);
+        if let Some((src, derived)) = self.channels.get(&key) {
+            if Arc::ptr_eq(src, &source) {
+                return Some(derived.clone());
+            }
+        }
+        let derived = Arc::new(channel.broadcast(&source));
+        self.channel_builds += 1;
+        self.channels.insert(key, (source, derived.clone()));
+        Some(derived)
+    }
+
+    /// How many channel broadcasts [`Self::get_or_load_channel`] computed.
+    pub fn channel_builds(&self) -> u64 {
+        self.channel_builds
+    }
+
     /// Forgets every entry whose file now resolves elsewhere or was modified
     /// since it was loaded, so the next lookup decodes it afresh.
     ///
@@ -3431,6 +3466,8 @@ impl MaterialTextureCache {
             }
             fresh
         });
+        let entries = &self.entries;
+        self.channels.retain(|(path, _), _| entries.contains_key(path));
     }
 
     fn resolve(res_path: &str) -> Option<std::path::PathBuf> {
@@ -3808,14 +3845,12 @@ fn load_orm_maps(
     // `hint_metallic`, never `source_color`, so a texel of 0.2 IS roughness
     // 0.2. The cache keeps texels as authored, so they are used as they come.
     if let Some(slot) = standard.roughness_texture.as_ref() {
-        material.roughness_texture = textures
-            .get_or_load(&slot.path)
-            .map(|t| Arc::new(standard.roughness_texture_channel.broadcast(&t)));
+        material.roughness_texture =
+            textures.get_or_load_channel(&slot.path, standard.roughness_texture_channel);
     }
     if let Some(slot) = standard.metallic_texture.as_ref() {
-        material.metallic_texture = textures
-            .get_or_load(&slot.path)
-            .map(|t| Arc::new(standard.metallic_texture_channel.broadcast(&t)));
+        material.metallic_texture =
+            textures.get_or_load_channel(&slot.path, standard.metallic_texture_channel);
     }
 }
 

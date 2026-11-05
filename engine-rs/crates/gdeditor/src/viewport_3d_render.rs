@@ -2581,11 +2581,22 @@ fn scene_env_effects(tree: &SceneTree) -> SceneEnvEffects3D {
         let Some(node) = tree.get_node(nid) else {
             continue;
         };
-        let is_fog = node.is_class("FogVolume");
-        let is_decal = node.is_class("Decal");
-        let is_probe = node.is_class("ReflectionProbe");
-        let is_occluder = node.is_class("OccluderInstance3D");
-        let is_voxel_gi = node.is_class("VoxelGI");
+        // One ClassDB walk for the five questions (this loop visits every
+        // node of every Play frame). `is_class` is "the node's own class name,
+        // or a ClassDB ancestor", and so is this.
+        const KINDS: [&str; 5] =
+            ["FogVolume", "Decal", "ReflectionProbe", "OccluderInstance3D", "VoxelGI"];
+        let mut mask = gdobject::class_db::parent_class_mask(node.class_name(), &KINDS);
+        for (i, k) in KINDS.iter().enumerate() {
+            if node.class_name() == *k {
+                mask |= 1 << i;
+            }
+        }
+        let is_fog = mask & 1 != 0;
+        let is_decal = mask & 2 != 0;
+        let is_probe = mask & 4 != 0;
+        let is_occluder = mask & 8 != 0;
+        let is_voxel_gi = mask & 16 != 0;
         if !(is_fog || is_decal || is_probe || is_occluder || is_voxel_gi) {
             continue;
         }
@@ -3594,6 +3605,32 @@ pub fn software_fallback_frames() -> u64 {
     SOFTWARE_FALLBACK_FRAMES.with(|c| c.get())
 }
 
+/// Upload and rebuild counters of this thread's persistent GPU renderer, as of
+/// its last [`render_editor_3d_frame_gpu`] frame. Perf instrumentation: a
+/// per-frame-invariant upload that repeats every frame shows up here as a
+/// count that grows with the frame count.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GpuRenderStats {
+    /// Meshes uploaded (vertex + index buffers).
+    pub mesh_uploads: u64,
+    /// Material maps uploaded (with their mip chains).
+    pub map_uploads: u64,
+    /// Shadow atlas rebuilds (rasterized again because a caster or light changed).
+    pub shadow_rebuilds: u64,
+    /// Shadow-map texels written to the GPU.
+    pub shadow_upload_texels: u64,
+}
+
+thread_local! {
+    static GPU_RENDER_STATS: std::cell::Cell<GpuRenderStats> =
+        const { std::cell::Cell::new(GpuRenderStats { mesh_uploads: 0, map_uploads: 0, shadow_rebuilds: 0, shadow_upload_texels: 0 }) };
+}
+
+/// See [`GpuRenderStats`]. All zero on a thread that never rendered on the GPU.
+pub fn gpu_render_stats() -> GpuRenderStats {
+    GPU_RENDER_STATS.with(|c| c.get())
+}
+
 /// GPU-accelerated twin of [`render_editor_3d_frame`] (pat-ism62 follow-through).
 ///
 /// Rasterizes the scene meshes on the GPU via a **persistent** [`GpuRenderer3D`]
@@ -3728,6 +3765,15 @@ pub fn render_editor_3d_frame_gpu(
         // next.
         rv.environment = Some(editor_render_environment(viewport));
         let (w, h, data) = renderer.render_editor_color_bgra(&rv, VIEWPORT_BG_3D);
+        let (mesh_uploads, map_uploads) = renderer.editor_upload_counts();
+        GPU_RENDER_STATS.with(|c| {
+            c.set(GpuRenderStats {
+                mesh_uploads,
+                map_uploads,
+                shadow_rebuilds: renderer.shadow_atlas_rebuilds(),
+                shadow_upload_texels: renderer.shadow_upload_texels(),
+            })
+        });
         let mut img = Bgra8Image::from_bgra(w, h, data);
         // Composite the grid/gizmos/selection directly onto the BGRA bytes.
         draw_editor_overlays_3d(&mut img, viewport, &overlays);

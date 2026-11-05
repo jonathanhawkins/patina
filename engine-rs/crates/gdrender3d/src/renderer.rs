@@ -1435,6 +1435,7 @@ impl SoftwareRenderer3D {
         // (pat-p3p1m); identical code per pixel, so identical output.
         let _ = h;
         let w_us = w.max(1) as usize;
+        let fog_k = FogConstants::new(env, suns);
         let shade = |i: usize, px: &mut Color| {
             let (x, y) = ((i % w_us) as u32, (i / w_us) as u32);
             let ndc_y = 1.0 - 2.0 * (y as f32 + 0.5) / h as f32;
@@ -1467,7 +1468,8 @@ impl SoftwareRenderer3D {
                             suns,
                         )
                     });
-                    let (fog_color, amount) = fog_process(
+                    let (fog_color, amount) = fog_process_with(
+                        &fog_k,
                         env,
                         distance,
                         world_pos.y,
@@ -1490,7 +1492,8 @@ impl SoftwareRenderer3D {
                     // (:284), so a clear-colour / custom-colour background is a
                     // plain clear and is never fogged. This tinted a custom
                     // colour background toward the fog colour.
-                    let (fog_color, _) = fog_process(env, 1.0, 0.0, &view_dir_world, suns, None);
+                    let (fog_color, _) =
+                        fog_process_with(&fog_k, env, 1.0, 0.0, &view_dir_world, suns, None);
                     let a = env.fog_sky_affect;
                     *px = Color::new(
                         lerp(px.r, fog_color.r, a),
@@ -1573,8 +1576,41 @@ impl SoftwareRenderer3D {
         camera_transform: &Transform3D,
         instances: &[&Instance3D],
     ) {
+        if let Some(plan) = DecalPlan::new(w, h, decals, inv_proj, camera_transform, instances) {
+            plan.apply(pixels, depth, decals, inv_proj, camera_transform);
+        }
+    }
+}
+
+/// The depth-independent half of [`SoftwareRenderer3D::apply_decal_pass_masked`]:
+/// each decal's screen rectangle, depth window and box, and the depth of the
+/// instances its `cull_mask` excludes. Split out so the GPU path can build it
+/// while the GPU is still rendering the frame (the excluded-instance raster is
+/// CPU work that needs neither the colour nor the depth readback).
+pub(crate) struct DecalPlan {
+    w: u32,
+    h: u32,
+    camera_distances: Vec<f64>,
+    boxes: Vec<(Vector3, Vector3)>,
+    inverses: Vec<Transform3D>,
+    rects: Vec<Option<(u32, u32, u32, u32)>>,
+    windows: Vec<Option<(f32, f32)>>,
+    exclusions: Vec<Option<std::sync::Arc<Vec<f32>>>>,
+    union: (u32, u32, u32, u32),
+}
+
+impl DecalPlan {
+    /// `None` when no decal can touch a pixel of this frame.
+    pub(crate) fn new(
+        w: u32,
+        h: u32,
+        decals: &[Decal3D],
+        inv_proj: &[[f32; 4]; 4],
+        camera_transform: &Transform3D,
+        instances: &[&Instance3D],
+    ) -> Option<Self> {
         if decals.is_empty() {
-            return;
+            return None;
         }
         let camera_pos = camera_transform.origin;
         let camera_distances: Vec<f64> = decals
@@ -1691,7 +1727,7 @@ impl SoftwareRenderer3D {
         let Some((ux0, uy0, ux1, uy1)) = rects.iter().flatten().copied().reduce(|a, b| {
             (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
         }) else {
-            return;
+            return None;
         };
         // 4. a depth window per decal, tested BEFORE a pixel's position is
         //    reconstructed. With a projection whose z and w ignore x and y (any
@@ -1772,6 +1808,7 @@ impl SoftwareRenderer3D {
                         &proj,
                         w,
                         h,
+                        (ux0, uy0, ux1, uy1),
                     ))
                 });
                 by_mask.push((d.cull_mask, buf.clone()));
@@ -1779,6 +1816,39 @@ impl SoftwareRenderer3D {
             })
             .collect();
 
+        Some(Self {
+            w,
+            h,
+            camera_distances,
+            boxes,
+            inverses,
+            rects,
+            windows,
+            exclusions,
+            union: (ux0, uy0, ux1, uy1),
+        })
+    }
+
+    /// Shades the decals onto `pixels` (with the frame's `depth`), from the
+    /// same `decals`, `inv_proj` and `camera_transform` the plan was built for.
+    pub(crate) fn apply(
+        &self,
+        pixels: &mut [Color],
+        depth: &[f32],
+        decals: &[Decal3D],
+        inv_proj: &[[f32; 4]; 4],
+        camera_transform: &Transform3D,
+    ) {
+        let (w, h) = (self.w, self.h);
+        let (ux0, uy0, ux1, uy1) = self.union;
+        let (camera_distances, boxes, inverses, rects, windows, exclusions) = (
+            &self.camera_distances,
+            &self.boxes,
+            &self.inverses,
+            &self.rects,
+            &self.windows,
+            &self.exclusions,
+        );
         let shade_row = |y: u32, row: &mut [Color]| {
             let ndc_y = 1.0 - 2.0 * (y as f32 + 0.5) / h as f32;
             for x in ux0..=ux1 {
@@ -1789,7 +1859,7 @@ impl SoftwareRenderer3D {
                 if d >= 1.0 {
                     continue;
                 }
-                let reachable = rects.iter().zip(&windows).any(|(r, win)| match r {
+                let reachable = rects.iter().zip(windows.iter()).any(|(r, win)| match r {
                     Some((x0, y0, x1, y1)) if x >= *x0 && x <= *x1 && y >= *y0 && y <= *y1 => {
                         win.map_or(true, |(d0, d1)| d >= d0 && d <= d1)
                     }
@@ -1906,6 +1976,9 @@ impl SoftwareRenderer3D {
             });
         }
     }
+}
+
+impl SoftwareRenderer3D {
 
     /// Adds `VoxelGI` indirect ambient to a linear HDR frame in place
     /// (pat-s3rrv.114).
@@ -2739,64 +2812,108 @@ fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
 /// A triangle with a vertex at or behind the eye is skipped: this marks
 /// surfaces to EXCLUDE, so missing a sliver at the near plane only lets the
 /// decal through where it would otherwise have been dropped.
+///
+/// Only texels inside the inclusive `clip` rectangle are written (the rest
+/// stay `+inf`): the decal pass reads this buffer only inside a decal's screen
+/// rectangle, and rasterizing the excluded robot over the whole frame was most
+/// of that pass on every 3D Play frame.
 fn rasterize_screen_depth(
     instances: &[&Instance3D],
     view_of_world: &Transform3D,
     proj: &[[f32; 4]; 4],
     w: u32,
     h: u32,
+    clip: (u32, u32, u32, u32),
 ) -> Vec<f32> {
     let mut out = vec![f32::INFINITY; (w * h) as usize];
     let (wf, hf) = (w as f32, h as f32);
-    for inst in instances {
-        let Some(mesh) = &inst.mesh else { continue };
-        let to_view = *view_of_world * inst.transform;
-        let screen: Vec<Option<(f32, f32, f32)>> = mesh
-            .vertices
-            .iter()
-            .map(|v| {
-                let p = to_view.xform(*v);
-                let r = |r: usize| proj[0][r] * p.x + proj[1][r] * p.y + proj[2][r] * p.z + proj[3][r];
-                let cw = r(3);
-                if cw <= 1e-4 {
-                    return None;
-                }
-                let (nx, ny, nz) = (r(0) / cw, r(1) / cw, r(2) / cw);
-                Some(((nx + 1.0) * 0.5 * wf, (1.0 - ny) * 0.5 * hf, nz))
-            })
-            .collect();
-        for tri in mesh.indices.chunks_exact(3) {
-            let get = |i: u32| screen.get(i as usize).copied().flatten();
-            let (Some(a), Some(b), Some(c)) = (get(tri[0]), get(tri[1]), get(tri[2])) else {
-                continue;
-            };
-            let area = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
-            if area.abs() < 1e-9 {
-                continue;
-            }
-            let x0 = a.0.min(b.0).min(c.0).floor().max(0.0) as u32;
-            let y0 = a.1.min(b.1).min(c.1).floor().max(0.0) as u32;
-            let x1 = (a.0.max(b.0).max(c.0).ceil().min(wf) as u32).min(w);
-            let y1 = (a.1.max(b.1).max(c.1).ceil().min(hf) as u32).min(h);
-            for py in y0..y1 {
-                let fy = py as f32 + 0.5;
-                for px in x0..x1 {
-                    let fx = px as f32 + 0.5;
-                    let w0 = ((b.0 - fx) * (c.1 - fy) - (b.1 - fy) * (c.0 - fx)) / area;
-                    let w1 = ((c.0 - fx) * (a.1 - fy) - (c.1 - fy) * (a.0 - fx)) / area;
-                    let w2 = 1.0 - w0 - w1;
-                    if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
-                        continue;
+    let screens: Vec<(&Mesh3D, Vec<Option<(f32, f32, f32)>>)> = instances
+        .iter()
+        .filter_map(|inst| {
+            let mesh = inst.mesh.as_ref()?;
+            let to_view = *view_of_world * inst.transform;
+            let screen = mesh
+                .vertices
+                .iter()
+                .map(|v| {
+                    let p = to_view.xform(*v);
+                    let r = |r: usize| {
+                        proj[0][r] * p.x + proj[1][r] * p.y + proj[2][r] * p.z + proj[3][r]
+                    };
+                    let cw = r(3);
+                    if cw <= 1e-4 {
+                        return None;
                     }
-                    let d = w0 * a.2 + w1 * b.2 + w2 * c.2;
-                    let slot = &mut out[(py * w + px) as usize];
-                    if d < *slot {
-                        *slot = d;
+                    let (nx, ny, nz) = (r(0) / cw, r(1) / cw, r(2) / cw);
+                    Some(((nx + 1.0) * 0.5 * wf, (1.0 - ny) * 0.5 * hf, nz))
+                })
+                .collect();
+            Some((mesh, screen))
+        })
+        .collect();
+    // Rows `band.0..band.1` of `out`, every triangle in the same order: each
+    // texel sees the same sequence of depth tests whichever band it is in, so
+    // splitting the rows across threads cannot change a bit.
+    let raster_band = |band: (u32, u32), rows: &mut [f32]| {
+        for (mesh, screen) in &screens {
+            for tri in mesh.indices.chunks_exact(3) {
+                let get = |i: u32| screen.get(i as usize).copied().flatten();
+                let (Some(a), Some(b), Some(c)) = (get(tri[0]), get(tri[1]), get(tri[2])) else {
+                    continue;
+                };
+                let area = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
+                if area.abs() < 1e-9 {
+                    continue;
+                }
+                let x0 = (a.0.min(b.0).min(c.0).floor().max(0.0) as u32).max(clip.0);
+                let y0 = (a.1.min(b.1).min(c.1).floor().max(0.0) as u32).max(clip.1).max(band.0);
+                let x1 = (a.0.max(b.0).max(c.0).ceil().min(wf) as u32).min(w).min(clip.2 + 1);
+                let y1 = (a.1.max(b.1).max(c.1).ceil().min(hf) as u32)
+                    .min(h)
+                    .min(clip.3 + 1)
+                    .min(band.1);
+                for py in y0..y1 {
+                    let fy = py as f32 + 0.5;
+                    for px in x0..x1 {
+                        let fx = px as f32 + 0.5;
+                        let w0 = ((b.0 - fx) * (c.1 - fy) - (b.1 - fy) * (c.0 - fx)) / area;
+                        let w1 = ((c.0 - fx) * (a.1 - fy) - (c.1 - fy) * (a.0 - fx)) / area;
+                        let w2 = 1.0 - w0 - w1;
+                        if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                            continue;
+                        }
+                        let d = w0 * a.2 + w1 * b.2 + w2 * c.2;
+                        let slot = &mut rows[((py - band.0) * w + px) as usize];
+                        if d < *slot {
+                            *slot = d;
+                        }
                     }
                 }
             }
         }
-    }
+    };
+    let rows_in_clip = (clip.3 + 1).saturating_sub(clip.1).min(h);
+    let threads = if rows_in_clip >= 64 {
+        std::thread::available_parallelism().map(|t| t.get()).unwrap_or(1).clamp(1, 8) as u32
+    } else {
+        1
+    };
+    let band_rows = h.div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        for (bi, rows) in out.chunks_mut((band_rows * w) as usize).enumerate() {
+            let y0 = bi as u32 * band_rows;
+            let band = (y0, y0 + (rows.len() as u32) / w.max(1));
+            if band.1 <= clip.1 || band.0 > clip.3 {
+                continue;
+            }
+            let raster_band = &raster_band;
+            if threads == 1 {
+                raster_band(band, rows);
+            } else {
+                scope.spawn(move || raster_band(band, rows));
+            }
+        }
+    });
     out
 }
 
@@ -2837,13 +2954,61 @@ fn fog_process(
     suns: &[SkySun],
     sky_in_view: Option<Color>,
 ) -> (Color, f32) {
-    // Base fog color: sRGB authoring → linear, times energy.
-    let base = env.fog_light_color.srgb_to_linear();
-    let mut fog = [
-        base.r * env.fog_light_energy,
-        base.g * env.fog_light_energy,
-        base.b * env.fog_light_energy,
-    ];
+    fog_process_with(
+        &FogConstants::new(env, suns),
+        env,
+        view_distance,
+        world_y,
+        view_dir_world,
+        suns,
+        sky_in_view,
+    )
+}
+
+/// The parts of [`fog_process`] that depend on the environment and the suns
+/// only: the base fog colour and each sun's linear colour. Each one is an sRGB
+/// decode (three `powf`s), and computing them once per FRAME rather than once
+/// per PIXEL is the same arithmetic on the same inputs — the same bits.
+struct FogConstants {
+    base: [f32; 3],
+    sun_linear: Vec<[f32; 3]>,
+}
+
+impl FogConstants {
+    fn new(env: &Environment3D, suns: &[SkySun]) -> Self {
+        // Base fog color: sRGB authoring → linear, times energy.
+        let base = env.fog_light_color.srgb_to_linear();
+        Self {
+            base: [
+                base.r * env.fog_light_energy,
+                base.g * env.fog_light_energy,
+                base.b * env.fog_light_energy,
+            ],
+            sun_linear: suns
+                .iter()
+                .map(|sun| {
+                    [
+                        srgb_to_linear_channel(sun.color.r),
+                        srgb_to_linear_channel(sun.color.g),
+                        srgb_to_linear_channel(sun.color.b),
+                    ]
+                })
+                .collect(),
+        }
+    }
+}
+
+/// [`fog_process`] with its per-frame constants already computed.
+fn fog_process_with(
+    k: &FogConstants,
+    env: &Environment3D,
+    view_distance: f32,
+    world_y: f32,
+    view_dir_world: &Vector3,
+    suns: &[SkySun],
+    sky_in_view: Option<Color>,
+) -> (Color, f32) {
+    let mut fog = k.base;
 
     // Aerial perspective: blend the fog color toward the sky in the view dir.
     if env.fog_aerial_perspective > 0.0 {
@@ -2859,16 +3024,16 @@ fn fog_process(
 
     // Sun scatter: directional lights bleed into the fog toward the viewer.
     if env.fog_sun_scatter > 0.001 {
-        for sun in suns {
+        for (sun, lin) in suns.iter().zip(&k.sun_linear) {
             // ⚠️ `volumetric_fog_energy` scales ONLY this scatter term. Before
             // this it was parsed, carried onto the Light3D and read by nobody
             // (pat-s3rrv.90) — so setting it to 0 dimmed nothing.
             let amt = view_dir_world.dot(sun.direction).max(0.0).powf(8.0)
                 * env.fog_sun_scatter
                 * sun.volumetric_fog_energy;
-            fog[0] += srgb_to_linear_channel(sun.color.r) * sun.energy * amt;
-            fog[1] += srgb_to_linear_channel(sun.color.g) * sun.energy * amt;
-            fog[2] += srgb_to_linear_channel(sun.color.b) * sun.energy * amt;
+            fog[0] += lin[0] * sun.energy * amt;
+            fog[1] += lin[1] * sun.energy * amt;
+            fog[2] += lin[2] * sun.energy * amt;
         }
     }
 

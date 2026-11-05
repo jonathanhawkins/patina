@@ -265,8 +265,17 @@ pub fn generate_shadow_maps(lights: &[Light3D], instances: &[Instance3D]) -> Vec
 /// (pat-414k3).
 #[derive(Debug, Default)]
 pub struct ShadowCasterCache {
-    /// Signature of the lights the bases were rasterized for.
+    /// Signature of the lights the bases were rasterized for. Kept for the
+    /// callers' benefit only: each map's base is validated by its own
+    /// [`Self::map_sigs`] entry, so a moving headlight re-rasterizes its own
+    /// base and leaves the sun's alone.
     light_sig: u64,
+    /// Per map, the signature of what its base was rasterized with (the
+    /// frame's view, projection and size, and the light's caster mask).
+    map_sigs: Vec<u64>,
+    /// How many single maps had their base rasterized again because only
+    /// their own light moved. Instrumentation for the tests.
+    pub map_base_rebuilds: u64,
     /// How many instances of each caster key the bases hold.
     base_counts: std::collections::HashMap<u64, u32>,
     /// One base depth buffer per shadow map, in `generate_shadow_maps` order.
@@ -280,7 +289,25 @@ pub struct ShadowCasterCache {
     pub base_rebuilds: u64,
     /// How many casters the last call rasterized on top of the base.
     pub last_redrawn: usize,
+    /// Per map, the texel rectangles the last call drew on top of its base.
+    rest_rects: Vec<Vec<TexelRect>>,
+    /// Per map, where the last call's maps can differ from the call before
+    /// it: the rectangles both calls drew over an unchanged base. `None` when
+    /// the base was rebuilt (or the map set changed), so anything may differ.
+    /// The GPU path re-uploads only these (pat-414k3 follow-up: a full 2048²
+    /// f32 atlas upload per frame because the coins spin).
+    pub last_dirty: Option<Vec<Vec<TexelRect>>>,
+    /// The heap address of each map the last call returned, so
+    /// [`generate_shadow_maps_incremental_reusing`] can tell its own previous
+    /// output from any other buffer of the same size.
+    last_out: Vec<usize>,
+    /// How many maps were rebuilt from a recycled previous map rather than a
+    /// copy of the whole base. Instrumentation for the tests.
+    pub recycled_maps: u64,
 }
+
+/// An inclusive texel rectangle `(x0, y0, x1, y1)` of a shadow map.
+pub type TexelRect = (u32, u32, u32, u32);
 
 /// See [`ShadowCasterCache::ages`].
 const STATIC_CASTER_CALLS: u32 = 30;
@@ -305,6 +332,24 @@ pub fn generate_shadow_maps_incremental(
     keys: &[u64],
     light_sig: u64,
     cache: &mut ShadowCasterCache,
+) -> Vec<ShadowMap> {
+    generate_shadow_maps_incremental_reusing(lights, instances, keys, light_sig, cache, Vec::new())
+}
+
+/// [`generate_shadow_maps_incremental`], handed back the maps its previous
+/// call on `cache` returned (`previous`; anything else is ignored).
+///
+/// Over an unchanged base a previous map differs from the base only inside
+/// the rectangles its casters were drawn in, so restoring those from the base
+/// and drawing this call's casters gives the same texels as a fresh copy of
+/// the base — without copying the whole 2048² map every frame.
+pub fn generate_shadow_maps_incremental_reusing(
+    lights: &[Light3D],
+    instances: &[&Instance3D],
+    keys: &[u64],
+    light_sig: u64,
+    cache: &mut ShadowCasterCache,
+    previous: Vec<ShadowMap>,
 ) -> Vec<ShadowMap> {
     use std::collections::HashMap;
     debug_assert_eq!(instances.len(), keys.len());
@@ -352,8 +397,24 @@ pub fn generate_shadow_maps_incremental(
             })
             .collect()
     };
-    let base_valid = cache.light_sig == light_sig
-        && cache.base.len() == casting.len()
+    // Everything a map's raster reads besides the casters: its frame and the
+    // light's caster mask.
+    let map_sigs: Vec<u64> = casting
+        .iter()
+        .zip(&frames)
+        .map(|(l, f)| {
+            use std::hash::Hasher;
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            h.write_u32(l.shadow_caster_mask);
+            h.write_u32(f.size);
+            for v in f.view.iter().chain(f.proj.iter()).flatten() {
+                h.write_u32(v.to_bits());
+            }
+            h.finish()
+        })
+        .collect();
+    let base_valid = cache.base.len() == casting.len()
+        && cache.map_sigs.len() == casting.len()
         && cache
             .base_counts
             .iter()
@@ -366,7 +427,8 @@ pub fn generate_shadow_maps_incremental(
         .iter()
         .filter(|i| cache.ages[&keys[**i]] >= STATIC_CASTER_CALLS)
         .count();
-    if !base_valid || (settled > 0 && settled * 2 >= rest.len()) {
+    let rebuilt = !base_valid || (settled > 0 && settled * 2 >= rest.len());
+    if rebuilt {
         // Rebuild from the casters that have sat still for a while.
         let stable: Vec<usize> = (0..instances.len())
             .filter(|i| cache.ages[&keys[*i]] >= STATIC_CASTER_CALLS)
@@ -395,23 +457,96 @@ pub fn generate_shadow_maps_incremental(
         cache.base_rebuilds += 1;
         rest = outside_base(&cache.base_counts);
     }
-    let rest: Vec<&Instance3D> = rest.into_iter().map(|i| instances[i]).collect();
-    cache.last_redrawn = rest.len();
-
-    casting
-        .iter()
-        .zip(&cache.base)
-        .zip(&frames)
-        .map(|((l, base), f)| {
-            let mut depth = base.clone();
+    // 🔑 A map whose own light moved (a car's headlight) re-rasterizes its own
+    // base from the casters the bases hold, and the others keep theirs. It
+    // used to throw every base away whenever ANY light moved, so truck_town
+    // rasterized its whole town into the 2048² sun map on every frame.
+    let mut map_rebuilt = vec![rebuilt; casting.len()];
+    if !rebuilt {
+        let in_rest: std::collections::HashSet<usize> = rest.iter().copied().collect();
+        let in_base: Vec<usize> = (0..instances.len()).filter(|i| !in_rest.contains(i)).collect();
+        for (mi, ((l, f), sig)) in casting.iter().zip(&frames).zip(&map_sigs).enumerate() {
+            if cache.map_sigs[mi] == *sig {
+                continue;
+            }
+            let mut depth = DepthBuffer::new(f.size, f.size);
             rasterize_instance_refs_into_shadow(
-                rest.iter().copied(),
+                in_base.iter().map(|i| instances[*i]),
                 l.shadow_caster_mask,
                 &f.view,
                 &f.proj,
                 &mut depth,
                 f.size,
             );
+            cache.base[mi] = depth;
+            cache.map_base_rebuilds += 1;
+            map_rebuilt[mi] = true;
+        }
+    }
+    cache.map_sigs = map_sigs;
+    let rest: Vec<&Instance3D> = rest.into_iter().map(|i| instances[i]).collect();
+    cache.last_redrawn = rest.len();
+
+    let mut rest_rects: Vec<Vec<TexelRect>> = Vec::with_capacity(casting.len());
+    // The previous call's own output, over the same base, map for map.
+    let mut previous: Vec<Option<DepthBuffer>> = if !rebuilt
+        && previous.len() == casting.len()
+        && cache.last_out.len() == casting.len()
+        && cache.rest_rects.len() == casting.len()
+        && previous
+            .iter()
+            .zip(&cache.last_out)
+            .zip(&cache.base)
+            .all(|((m, addr), base)| {
+                m.depth.as_slice().as_ptr() as usize == *addr
+                    && m.depth.dimensions() == base.dimensions()
+            }) {
+        previous.into_iter().map(|m| Some(m.depth)).collect()
+    } else {
+        Vec::new()
+    };
+    let prev_rects = std::mem::take(&mut cache.rest_rects);
+    let mut recycled = 0u64;
+    let maps: Vec<ShadowMap> = casting
+        .iter()
+        .zip(&cache.base)
+        .zip(&frames)
+        .enumerate()
+        .map(|(mi, ((l, base), f))| {
+            let reusable = previous.get_mut(mi).and_then(Option::take).filter(|_| !map_rebuilt[mi]);
+            let mut depth = match reusable {
+                Some(mut prev) => {
+                    let (w, _) = base.dimensions();
+                    let src = base.as_slice();
+                    let dst = prev.as_mut_slice();
+                    for &(x0, y0, x1, y1) in &prev_rects[mi] {
+                        for y in y0..=y1 {
+                            let row = (y * w) as usize;
+                            dst[row + x0 as usize..=row + x1 as usize]
+                                .copy_from_slice(&src[row + x0 as usize..=row + x1 as usize]);
+                        }
+                    }
+                    recycled += 1;
+                    prev
+                }
+                None => base.clone(),
+            };
+            // One call per caster (a minimum is order-independent, so the
+            // texels are the same), to learn each caster's own rectangle.
+            let mut rects = Vec::new();
+            for inst in rest.iter().copied() {
+                if let Some(r) = rasterize_instance_refs_into_shadow(
+                    std::iter::once(inst),
+                    l.shadow_caster_mask,
+                    &f.view,
+                    &f.proj,
+                    &mut depth,
+                    f.size,
+                ) {
+                    rects.push(r);
+                }
+            }
+            rest_rects.push(rects);
             ShadowMap {
                 light_id: l.id,
                 depth,
@@ -421,7 +556,29 @@ pub fn generate_shadow_maps_incremental(
                 filter: f.filter,
             }
         })
-        .collect()
+        .collect();
+    // Same base as the last call: a texel differs only where either call drew
+    // a caster over it.
+    cache.last_dirty = (!rebuilt && prev_rects.len() == rest_rects.len()).then(|| {
+        prev_rects
+            .iter()
+            .zip(&rest_rects)
+            .zip(&maps)
+            .zip(&map_rebuilt)
+            .map(|(((prev, cur), m), whole)| {
+                if *whole {
+                    let (w, h) = m.depth.dimensions();
+                    vec![(0, 0, w.saturating_sub(1), h.saturating_sub(1))]
+                } else {
+                    prev.iter().chain(cur).copied().collect()
+                }
+            })
+            .collect()
+    });
+    cache.rest_rects = rest_rects;
+    cache.recycled_maps += recycled;
+    cache.last_out = maps.iter().map(|m| m.depth.as_slice().as_ptr() as usize).collect();
+    maps
 }
 
 /// Builds a view matrix looking from the spot light position along its direction.
@@ -535,7 +692,9 @@ fn rasterize_instances_into_shadow(
     );
 }
 
-/// [`rasterize_instances_into_shadow`] over borrowed instances.
+/// [`rasterize_instances_into_shadow`] over borrowed instances. Returns the
+/// bounding texel rectangle of every triangle it rasterized, or `None` when it
+/// drew none.
 fn rasterize_instance_refs_into_shadow<'a>(
     instances: impl IntoIterator<Item = &'a Instance3D>,
     caster_mask: u32,
@@ -543,7 +702,9 @@ fn rasterize_instance_refs_into_shadow<'a>(
     proj_matrix: &[[f32; 4]; 4],
     depth_buf: &mut DepthBuffer,
     size: u32,
-) {
+) -> Option<TexelRect> {
+    // Projected first, rasterized after, so a big list can be split by rows.
+    let mut tris: Vec<[(f32, f32, f32); 3]> = Vec::new();
     for inst in instances {
         if !casts_into_shadow(inst, caster_mask) {
             continue;
@@ -588,10 +749,52 @@ fn rasterize_instance_refs_into_shadow<'a>(
             if !valid {
                 continue;
             }
-            rasterize_shadow_triangle(&screen_pts, depth_buf, size, size);
+            tris.push(screen_pts);
         }
     }
+    let mut touched: Option<TexelRect> = None;
+    let mut grow = |r: Option<TexelRect>| {
+        if let Some((x0, y0, x1, y1)) = r {
+            touched = Some(match touched {
+                None => (x0, y0, x1, y1),
+                Some(t) => (t.0.min(x0), t.1.min(y0), t.2.max(x1), t.3.max(y1)),
+            });
+        }
+    };
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 8);
+    if tris.len() < PARALLEL_SHADOW_TRIS || threads <= 1 {
+        for pts in &tris {
+            grow(rasterize_shadow_triangle(pts, depth_buf, size, size));
+        }
+        return touched;
+    }
+    // 🔑 A whole level (a base rebuild, which a camera-fitted map needs every
+    // few units of camera travel) in row bands on worker threads. Every band
+    // walks the triangles in the same order and runs the same per-texel test,
+    // so each texel sees the same sequence of depths as the serial loop: the
+    // same bits.
+    for pts in &tris {
+        grow(shadow_triangle_bounds(pts, size, size));
+    }
+    let (w, h) = depth_buf.dimensions();
+    let band_rows = h.div_ceil(threads as u32).max(1);
+    let tris = &tris;
+    std::thread::scope(|scope| {
+        for (bi, rows) in depth_buf.as_mut_slice().chunks_mut((band_rows * w) as usize).enumerate() {
+            let y0 = bi as u32 * band_rows;
+            let y1 = y0 + rows.len() as u32 / w.max(1);
+            scope.spawn(move || {
+                for pts in tris {
+                    rasterize_shadow_triangle_rows(pts, rows, size, size, y0, y1);
+                }
+            });
+        }
+    });
+    touched
 }
+
+/// Below this many triangles a raster stays on the caller's thread.
+const PARALLEL_SHADOW_TRIS: usize = 4096;
 
 /// Resolution for omni shadow cubemap faces.
 pub const OMNI_SHADOW_SIZE: u32 = 128;
@@ -634,6 +837,13 @@ pub fn generate_omni_shadow_cubemaps(
 /// Renders the scene from the light's position into 6 cubemap faces using a
 /// 90-degree perspective projection. Depth values are linear distance from light.
 fn generate_omni_shadow_cubemap(light: &Light3D, instances: &[Instance3D]) -> ShadowCubemap {
+    let refs: Vec<&Instance3D> = instances.iter().collect();
+    generate_omni_shadow_cubemap_refs(light, &refs)
+}
+
+/// The cubemap [`generate_omni_shadow_cubemaps`] makes for `light` (a casting
+/// point light), over borrowed instances.
+pub fn generate_omni_shadow_cubemap_refs(light: &Light3D, instances: &[&Instance3D]) -> ShadowCubemap {
     let size = OMNI_SHADOW_SIZE;
     let mut cubemap = ShadowCubemap::new(size);
     let near = 0.05_f32;
@@ -644,7 +854,7 @@ fn generate_omni_shadow_cubemap(light: &Light3D, instances: &[Instance3D]) -> Sh
     };
 
     for face in CubeFace::ALL {
-        for inst in instances {
+        for inst in instances.iter().copied() {
             // Same filter as the 2D shadow path (pat-nzgdu.76), through the
             // SHARED predicate — an omni light must not shadow from an instance
             // the directional path already excluded, and that now includes
@@ -709,6 +919,41 @@ fn generate_omni_shadow_cubemap(light: &Light3D, instances: &[Instance3D]) -> Sh
     }
 
     cubemap
+}
+
+/// `false` only when no vertex of `inst` can reach `light`'s omni cubemap:
+/// its world box lies wholly beyond the light's range, and the cubemap raster
+/// drops every triangle with a vertex past the range. Conservative (a box
+/// corner test with slack), so `true` never wrongly drops a caster.
+pub fn omni_caster_in_range(light: &Light3D, inst: &Instance3D, local_aabb: Option<gdcore::math3d::Aabb>) -> bool {
+    let Some(aabb) = local_aabb else {
+        // No vertices: draws nothing either way.
+        return false;
+    };
+    let far = if light.range > 0.0 { light.range } else { 100.0 };
+    let (lo, hi) = (aabb.position, aabb.position + aabb.size);
+    let (mut wlo, mut whi) = (Vector3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY), Vector3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY));
+    for k in 0..8 {
+        let c = Vector3::new(
+            if k & 1 == 0 { lo.x } else { hi.x },
+            if k & 2 == 0 { lo.y } else { hi.y },
+            if k & 4 == 0 { lo.z } else { hi.z },
+        );
+        let w = inst.transform.xform(c);
+        wlo = Vector3::new(wlo.x.min(w.x), wlo.y.min(w.y), wlo.z.min(w.z));
+        whi = Vector3::new(whi.x.max(w.x), whi.y.max(w.y), whi.z.max(w.z));
+    }
+    if !(wlo.x.is_finite() && whi.x.is_finite() && wlo.y.is_finite() && whi.y.is_finite() && wlo.z.is_finite() && whi.z.is_finite()) {
+        return true;
+    }
+    let p = light.position;
+    let d = Vector3::new(
+        (wlo.x - p.x).max(0.0).max(p.x - whi.x),
+        (wlo.y - p.y).max(0.0).max(p.y - whi.y),
+        (wlo.z - p.z).max(0.0).max(p.z - whi.z),
+    );
+    let slack = 1e-3 * (1.0 + far + (whi - wlo).length());
+    d.length() <= far + slack
 }
 
 /// The (sc, tc) face-plane coordinates for a direction on a given cube face —
@@ -868,11 +1113,13 @@ pub fn directional_shadow_frame(light: &Light3D) -> DirectionalShadowFrame {
     // fov is vertical (the caller has already resolved KEEP_WIDTH).
     let tan_half = (cam.fov_y * 0.5).tan();
     let mut corners = [Vector3::ZERO; 8];
+    let mut local_corners = [Vector3::ZERO; 8];
     let mut k = 0;
     for d in [min_distance, max_distance] {
         for sy in [-1.0f32, 1.0] {
             for sx in [-1.0f32, 1.0] {
                 let local = Vector3::new(sx * d * tan_half * cam.aspect, sy * d * tan_half, -d);
+                local_corners[k] = local;
                 corners[k] = cam.transform.xform(local);
                 k += 1;
             }
@@ -883,9 +1130,21 @@ pub fn directional_shadow_frame(light: &Light3D) -> DirectionalShadowFrame {
         center = center + *c;
     }
     center = center * (1.0 / 8.0);
+    // The sphere's radius in the CAMERA's own frame: mathematically the same
+    // as measuring the world-space corners, but it does not pick up rounding
+    // from wherever the camera happens to be. Measured in world space it
+    // changed in its last bits on every frame of camera motion, so the shadow
+    // frame (and the light signature it feeds) never repeated while driving,
+    // and the whole level's shadow casters were rasterized again every frame
+    // (truck_town).
+    let mut local_center = Vector3::ZERO;
+    for c in &local_corners {
+        local_center = local_center + *c;
+    }
+    local_center = local_center * (1.0 / 8.0);
     let mut radius = 0.0f32;
-    for c in &corners {
-        radius = radius.max((*c - center).length());
+    for c in &local_corners {
+        radius = radius.max((*c - local_center).length());
     }
     // Godot: "add a texel by each side", at ITS split size.
     let godot_size = params.split_size() as f32;
@@ -959,13 +1218,86 @@ pub fn directional_shadow_frame(light: &Light3D) -> DirectionalShadowFrame {
     }
 }
 
+/// The texel bounds [`rasterize_shadow_triangle`] loops over (and returns),
+/// or `None` when it draws nothing.
+fn shadow_triangle_bounds(pts: &[(f32, f32, f32); 3], width: u32, height: u32) -> Option<TexelRect> {
+    let (x0, y0, _) = pts[0];
+    let (x1, y1, _) = pts[1];
+    let (x2, y2, _) = pts[2];
+    let min_x = x0.min(x1).min(x2).max(0.0) as i32;
+    let max_x = x0.max(x1).max(x2).min(width as f32 - 1.0) as i32;
+    let min_y = y0.min(y1).min(y2).max(0.0) as i32;
+    let max_y = y0.max(y1).max(y2).min(height as f32 - 1.0) as i32;
+    if min_x > max_x || min_y > max_y {
+        return None;
+    }
+    if edge_function(x0, y0, x1, y1, x2, y2).abs() < 1e-6 {
+        return None;
+    }
+    Some((min_x as u32, min_y as u32, max_x as u32, max_y as u32))
+}
+
+/// [`rasterize_shadow_triangle`] restricted to rows `band_y0..band_y1`, whose
+/// texels are `rows` (row-major, `width` wide, starting at row `band_y0`). The
+/// arithmetic per texel is the same, so are the depths it writes.
+fn rasterize_shadow_triangle_rows(
+    pts: &[(f32, f32, f32); 3],
+    rows: &mut [f32],
+    width: u32,
+    height: u32,
+    band_y0: u32,
+    band_y1: u32,
+) {
+    let Some((min_x, min_y, max_x, max_y)) = shadow_triangle_bounds(pts, width, height) else {
+        return;
+    };
+    let (x0, y0, z0) = pts[0];
+    let (x1, y1, z1) = pts[1];
+    let (x2, y2, z2) = pts[2];
+    let area = edge_function(x0, y0, x1, y1, x2, y2);
+    let area_recip = 1.0 / area;
+    let (ry0, ry1) = (min_y.max(band_y0), max_y.min(band_y1.saturating_sub(1)));
+    if band_y1 == 0 || ry0 > ry1 {
+        return;
+    }
+    for py in ry0..=ry1 {
+        for px in min_x..=max_x {
+            let px_f = px as f32 + 0.5;
+            let py_f = py as f32 + 0.5;
+
+            let w0 = edge_function(x1, y1, x2, y2, px_f, py_f);
+            let w1 = edge_function(x2, y2, x0, y0, px_f, py_f);
+            let w2 = edge_function(x0, y0, x1, y1, px_f, py_f);
+
+            let inside = if area > 0.0 {
+                w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0
+            } else {
+                w0 <= 0.0 && w1 <= 0.0 && w2 <= 0.0
+            };
+            if !inside {
+                continue;
+            }
+
+            let b0 = w0 * area_recip;
+            let b1 = w1 * area_recip;
+            let b2 = w2 * area_recip;
+
+            let depth = b0 * z0 + b1 * z1 + b2 * z2;
+            let slot = &mut rows[((py - band_y0) * width + px) as usize];
+            if depth < *slot {
+                *slot = depth;
+            }
+        }
+    }
+}
+
 /// Rasterizes a triangle into a depth buffer only (no color output).
 fn rasterize_shadow_triangle(
     pts: &[(f32, f32, f32); 3],
     depth_buf: &mut DepthBuffer,
     width: u32,
     height: u32,
-) {
+) -> Option<TexelRect> {
     let (x0, y0, z0) = pts[0];
     let (x1, y1, z1) = pts[1];
     let (x2, y2, z2) = pts[2];
@@ -976,12 +1308,12 @@ fn rasterize_shadow_triangle(
     let max_y = y0.max(y1).max(y2).min(height as f32 - 1.0) as i32;
 
     if min_x > max_x || min_y > max_y {
-        return;
+        return None;
     }
 
     let area = edge_function(x0, y0, x1, y1, x2, y2);
     if area.abs() < 1e-6 {
-        return;
+        return None;
     }
     let area_recip = 1.0 / area;
 
@@ -1012,6 +1344,7 @@ fn rasterize_shadow_triangle(
             depth_buf.test_and_set(px as u32, py as u32, depth);
         }
     }
+    Some((min_x as u32, min_y as u32, max_x as u32, max_y as u32))
 }
 
 fn edge_function(ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32) -> f32 {
@@ -1053,6 +1386,106 @@ mod tests {
     use super::*;
     use gdcore::math::Color;
     use gdserver3d::mesh::Mesh3D;
+
+    /// The row-band raster a big caster list takes writes exactly the texels
+    /// (and returns exactly the bounds) of one serial pass of
+    /// `rasterize_shadow_triangle` over the same triangles, overlapping and
+    /// crossing band edges included.
+    #[test]
+    fn banded_shadow_raster_equals_the_serial_raster() {
+        use gdserver3d::instance::{Instance3D, Instance3DId};
+        let mut light = Light3D::directional(Light3DId(1));
+        light.direction = Vector3::new(-0.4, -1.0, -0.3).normalized();
+        light.shadow_enabled = true;
+        let view = directional_light_view_matrix(&light);
+        let proj = directional_light_proj_matrix();
+        let mut instances = Vec::new();
+        for i in 0..420u64 {
+            let mut inst = Instance3D::new(Instance3DId(i + 1));
+            inst.mesh = Some(Mesh3D::cube(0.4 + (i % 7) as f32 * 0.3));
+            let (x, z) = ((i % 21) as f32 - 10.0, (i / 21) as f32 - 10.0);
+            inst.transform = Transform3D::IDENTITY.translated(Vector3::new(x * 0.9, (i % 5) as f32 * 0.7, z * 0.9));
+            inst.visible = true;
+            instances.push(inst);
+        }
+        let size = SHADOW_MAP_SIZE;
+        let mut banded = DepthBuffer::new(size, size);
+        let banded_bounds =
+            rasterize_instance_refs_into_shadow(instances.iter(), 1, &view, &proj, &mut banded, size);
+
+        // Serial reference: the same projection, one triangle at a time.
+        let mut serial = DepthBuffer::new(size, size);
+        let mut serial_bounds: Option<TexelRect> = None;
+        let mut tris = 0;
+        for inst in &instances {
+            for i in 0..inst.mesh.as_ref().unwrap().indices.len() / 3 {
+                let one = Instance3D {
+                    mesh: Some(Mesh3D {
+                        indices: inst.mesh.as_ref().unwrap().indices[i * 3..i * 3 + 3].to_vec(),
+                        ..inst.mesh.clone().unwrap()
+                    }),
+                    ..inst.clone()
+                };
+                tris += 1;
+                if let Some(r) = rasterize_instance_refs_into_shadow(
+                    std::iter::once(&one),
+                    1,
+                    &view,
+                    &proj,
+                    &mut serial,
+                    size,
+                ) {
+                    serial_bounds = Some(match serial_bounds {
+                        None => r,
+                        Some(t) => (t.0.min(r.0), t.1.min(r.1), t.2.max(r.2), t.3.max(r.3)),
+                    });
+                }
+            }
+        }
+        assert!(tris > PARALLEL_SHADOW_TRIS, "{tris} triangles must take the banded path");
+        assert_eq!(banded_bounds, serial_bounds);
+        let differing = banded
+            .as_slice()
+            .iter()
+            .zip(serial.as_slice())
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
+        assert_eq!(differing, 0, "{differing} texels differ between the banded and serial raster");
+        assert!(banded.as_slice().iter().filter(|d| **d < f32::MAX).count() > 10_000);
+    }
+
+    /// A camera-fitted directional map's size depends on the camera's lens
+    /// only, so its projection must come out BIT-identical wherever the camera
+    /// is and however it is turned. Otherwise the light signature changes on
+    /// every frame of camera motion and the cached shadow base is thrown away
+    /// every frame (truck_town re-rasterized its whole town per frame).
+    #[test]
+    fn a_fitted_directional_projection_does_not_depend_on_the_camera_pose() {
+        let mut light = Light3D::directional(Light3DId(1));
+        light.direction = Vector3::new(-0.4, -1.0, -0.3).normalized();
+        light.shadow_enabled = true;
+        light.directional_shadow_max_distance = 80.0;
+        let mut projs = Vec::new();
+        for i in 0..40 {
+            let t = i as f32 * 0.37;
+            let basis = gdcore::math3d::Basis::from_euler(Vector3::new(-0.3 + 0.01 * t, t, 0.0));
+            light.shadow_camera = Some(gdserver3d::light::ShadowCamera {
+                transform: Transform3D {
+                    basis,
+                    origin: Vector3::new(t * 3.1, 2.0 + t * 0.05, -t * 7.3),
+                },
+                fov_y: 75f32.to_radians(),
+                aspect: 995.0 / 843.0,
+                near: 0.05,
+                far: 4000.0,
+            });
+            projs.push(directional_shadow_frame(&light).proj);
+        }
+        for (i, p) in projs.iter().enumerate() {
+            let bits = |m: &[[f32; 4]; 4]| m.iter().flatten().map(|v| v.to_bits()).collect::<Vec<_>>();
+            assert_eq!(bits(p), bits(&projs[0]), "pose {i}: the fitted projection changed");
+        }
+    }
 
     #[test]
     fn directional_light_view_matrix_is_valid() {
