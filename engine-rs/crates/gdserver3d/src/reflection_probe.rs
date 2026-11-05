@@ -311,6 +311,7 @@ fn cube_face_dir(face: usize, u: f32, v: f32) -> Vector3 {
 
 /// Bilinear lookup inside one face (clamped at the face edge — no
 /// cross-face filtering), texel centres at `(i + 0.5) / res`.
+#[cfg(test)]
 fn bilinear_face(face: &[Color], res: u32, u: f32, v: f32) -> Color {
     let res_i = res.max(1) as i32;
     let x = u.clamp(0.0, 1.0) * res_i as f32 - 0.5;
@@ -338,9 +339,67 @@ fn bilinear_face(face: &[Color], res: u32, u: f32, v: f32) -> Color {
     )
 }
 
+/// The texel `(x, y)` of `face` at edge `res`, where `x`/`y` may lie ONE texel
+/// outside the face: such a texel is fetched from the neighbouring face the
+/// direction through its centre lands on (pat-h7sz7).
+///
+/// Godot 4.6 stores probes and the sky as octahedral maps with a border, so
+/// its bilinear taps never stop at a seam; clamping at each cube face edge
+/// (the old `bilinear_face`) left a visible line along every cube edge of a
+/// blurred reflection. Mirrored by the WGSL `probe_texel`.
+pub fn seamless_texel_index(face: usize, res: u32, x: i32, y: i32) -> (usize, usize) {
+    let r = res.max(1) as i32;
+    if (0..r).contains(&x) && (0..r).contains(&y) {
+        return (face, (y * r + x) as usize);
+    }
+    let u = (x as f32 + 0.5) / r as f32;
+    let v = (y as f32 + 0.5) / r as f32;
+    let dir = cube_face_dir(face, u, v);
+    match cube_face_uv(dir) {
+        Some((f, fu, fv)) => {
+            let tx = ((fu * r as f32).floor() as i32).clamp(0, r - 1);
+            let ty = ((fv * r as f32).floor() as i32).clamp(0, r - 1);
+            (f, (ty * r + tx) as usize)
+        }
+        None => (face, 0),
+    }
+}
+
 impl CubeLevel {
-    /// Bilinear sample along `dir`.
+    /// Bilinear sample along `dir`, filtering ACROSS face seams
+    /// ([`seamless_texel_index`]).
     pub fn sample(&self, dir: Vector3) -> Color {
+        let Some((face, u, v)) = cube_face_uv(dir) else {
+            return Color::new(0.0, 0.0, 0.0, 1.0);
+        };
+        let res = self.resolution.max(1);
+        let x = u.clamp(0.0, 1.0) * res as f32 - 0.5;
+        let y = v.clamp(0.0, 1.0) * res as f32 - 0.5;
+        let (x0, y0) = (x.floor(), y.floor());
+        let (fx, fy) = (x - x0, y - y0);
+        let (x0, y0) = (x0 as i32, y0 as i32);
+        let at = |xx: i32, yy: i32| {
+            let (f, i) = seamless_texel_index(face, res, xx, yy);
+            self.faces[f]
+                .get(i)
+                .copied()
+                .unwrap_or(Color::new(0.0, 0.0, 0.0, 1.0))
+        };
+        let (a, b, c, d) = (at(x0, y0), at(x0 + 1, y0), at(x0, y0 + 1), at(x0 + 1, y0 + 1));
+        let mix = |p: f32, q: f32, r: f32, s: f32| {
+            (p * (1.0 - fx) + q * fx) * (1.0 - fy) + (r * (1.0 - fx) + s * fx) * fy
+        };
+        Color::new(
+            mix(a.r, b.r, c.r, d.r),
+            mix(a.g, b.g, c.g, d.g),
+            mix(a.b, b.b, c.b, d.b),
+            1.0,
+        )
+    }
+
+    /// The old face-clamped bilinear lookup, kept for the seam test.
+    #[cfg(test)]
+    fn sample_clamped(&self, dir: Vector3) -> Color {
         match cube_face_uv(dir) {
             Some((face, u, v)) => bilinear_face(&self.faces[face], self.resolution, u, v),
             None => Color::new(0.0, 0.0, 0.0, 1.0),
@@ -513,6 +572,33 @@ impl ReflectionCubemap {
                 vec![fill; n],
                 vec![fill; n],
             ],
+            roughness_chain: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// A cubemap whose every texel is `f(direction through the texel centre)`
+    /// — how a sky radiance map is rendered (pat-h7sz7). The direction is
+    /// normalized and uses [`Self::sample_direction`]'s face conventions.
+    pub fn from_directions(resolution: u32, mut f: impl FnMut(Vector3) -> Color) -> Self {
+        let res = resolution.max(1);
+        let faces = std::array::from_fn(|face| {
+            let mut out = Vec::with_capacity((res * res) as usize);
+            for y in 0..res {
+                for x in 0..res {
+                    let d = cube_face_dir(
+                        face,
+                        (x as f32 + 0.5) / res as f32,
+                        (y as f32 + 0.5) / res as f32,
+                    )
+                    .normalized();
+                    out.push(f(d));
+                }
+            }
+            out
+        });
+        Self {
+            resolution: res,
+            faces,
             roughness_chain: std::sync::OnceLock::new(),
         }
     }
@@ -782,23 +868,222 @@ pub fn probe_reflection_at(
     probes: &[ReflectionProbe],
     world_pos: Vector3,
 ) -> Option<ProbeReflection> {
-    let probe = &probes[probe_index_at(probes, world_pos)?];
-    let cubemap = probe.captured.as_ref()?.clone();
-    let (box_min, box_max) = probe.world_aabb_min_max();
-    let ac = probe.ambient_color.srgb_to_linear();
-    let e = probe.ambient_color_energy;
-    Some(ProbeReflection {
-        cubemap,
-        box_min,
-        box_max,
-        origin: probe.capture_origin(),
-        box_projection: probe.box_projection,
-        intensity: probe.intensity,
-        blend_distance: probe.blend_distance,
-        ambient_mode: probe.ambient_mode,
-        // light_storage.cpp: `ambient_color.srgb_to_linear() * energy`.
-        ambient_color: Color::new(ac.r * e, ac.g * e, ac.b * e, 1.0),
-    })
+    ProbeReflection::from_probe(&probes[probe_index_at(probes, world_pos)?])
+}
+
+impl ProbeReflection {
+    /// The flattened shading snapshot of a CAPTURED probe; `None` without a
+    /// capture.
+    pub fn from_probe(probe: &ReflectionProbe) -> Option<Self> {
+        let cubemap = probe.captured.as_ref()?.clone();
+        let (box_min, box_max) = probe.world_aabb_min_max();
+        let ac = probe.ambient_color.srgb_to_linear();
+        let e = probe.ambient_color_energy;
+        Some(ProbeReflection {
+            cubemap,
+            box_min,
+            box_max,
+            origin: probe.capture_origin(),
+            box_projection: probe.box_projection,
+            intensity: probe.intensity,
+            blend_distance: probe.blend_distance,
+            ambient_mode: probe.ambient_mode,
+            // light_storage.cpp: `ambient_color.srgb_to_linear() * energy`.
+            ambient_color: Color::new(ac.r * e, ac.g * e, ac.b * e, 1.0),
+        })
+    }
+
+    /// Whether `world_pos` is inside the influence box (Godot
+    /// `reflection_process`: `any(abs(local_pos) > box_extents)` returns).
+    pub fn contains(&self, world_pos: Vector3) -> bool {
+        world_pos.x >= self.box_min.x
+            && world_pos.x <= self.box_max.x
+            && world_pos.y >= self.box_min.y
+            && world_pos.y <= self.box_max.y
+            && world_pos.z >= self.box_min.z
+            && world_pos.z <= self.box_max.z
+    }
+}
+
+/// The environment's sky radiance map (pat-h7sz7): the sky rendered into a
+/// cubemap and GGX-prefiltered into the same [`RoughnessChain`] a probe
+/// capture gets (Godot `sky.cpp` `update_radiance_buffers` +
+/// `octmap_roughness.glsl`).
+///
+/// It is what a surface reflects wherever no probe covers it, and what fills
+/// the `1 - blend` share of a probe's fade band
+/// (`scene_forward_clustered.glsl:2086`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkyRadiance {
+    /// The sky, linear HDR, at energy 1 (the background energy is applied at
+    /// lookup, as Godot does).
+    pub cubemap: std::sync::Arc<ReflectionCubemap>,
+    /// `ambient_light_color_energy.a` in Godot's scene data: the
+    /// environment's `background_energy_multiplier`
+    /// (`render_scene_data_rd.cpp:169`).
+    pub energy: f32,
+}
+
+impl SkyRadiance {
+    /// The sky's specular radiance for a fragment, Godot
+    /// `scene_forward_clustered.glsl:1683-1714`:
+    ///
+    /// ```text
+    /// ref_vec = mix(reflect(-view, normal), normal, roughness * roughness)
+    /// horizon = min(1 + dot(ref_vec, normal), 1)
+    /// radiance(ref_vec, sqrt(roughness) * MAX_ROUGHNESS_LOD) * horizon² * energy
+    /// ```
+    ///
+    /// ⚠️ The sky mixes toward the normal by roughness², a probe by
+    /// roughness⁴ (line 2054). Same file, different constants.
+    pub fn specular(&self, n: Vector3, v: Vector3, roughness: f32) -> Color {
+        let r = roughness.clamp(0.0, 1.0);
+        let mirror = n * (2.0 * n.dot(v)) - v;
+        let t = r * r;
+        let ref_vec = mirror + (n - mirror) * t;
+        let horizon = (1.0 + ref_vec.dot(n)).min(1.0);
+        let k = horizon * horizon * self.energy;
+        let c = self.cubemap.sample_lod(ref_vec, r.sqrt() * MAX_ROUGHNESS_LOD);
+        Color::new(c.r * k, c.g * k, c.b * k, 1.0)
+    }
+}
+
+/// Every captured probe of a frame plus the sky radiance, for PER-FRAGMENT
+/// blending (pat-h7sz7).
+///
+/// Godot's clustered forward walks every probe whose box holds the fragment,
+/// smallest box first, and accumulates reflection and ambient by each probe's
+/// fade weight until both reach 1; whatever weight is left goes to the sky
+/// radiance and the environment ambient (`scene_forward_clustered.glsl`
+/// 2027-2099, `reflection_process` in `scene_forward_lights_inc.glsl`).
+/// Patina used to pick ONE probe per instance at its origin, so a mesh whose
+/// origin sat outside every box took the bright environment ambient over its
+/// whole surface, and the next mesh in a GridMap wall the dark probe one: a
+/// hard seam between two tiles of one wall (the platformer's f318 wall).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ProbeSet {
+    /// Captured probes in Godot's processing order: smallest box first.
+    pub probes: std::sync::Arc<Vec<ProbeReflection>>,
+    /// The sky radiance, when the environment reflects its sky.
+    pub sky: Option<SkyRadiance>,
+}
+
+impl From<ProbeReflection> for ProbeSet {
+    fn from(p: ProbeReflection) -> Self {
+        Self {
+            probes: std::sync::Arc::new(vec![p]),
+            sky: None,
+        }
+    }
+}
+
+/// `probes` in Godot's processing order: Godot sorts by `-extents.length()`
+/// (light_storage.cpp `update_reflection_probe_buffer`) and the cluster loop
+/// walks bits with `findMSB`, so the SMALLEST box comes first. Ties keep list
+/// order. Returns indices into `probes`.
+pub fn probe_processing_order(probes: &[ReflectionProbe]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..probes.len()).collect();
+    order.sort_by(|&a, &b| {
+        let sa = (probes[a].size * 0.5).length();
+        let sb = (probes[b].size * 0.5).length();
+        sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    order
+}
+
+impl ProbeSet {
+    /// The captured probes of `probes` (in processing order) and `sky`.
+    /// `None` when there is neither, so a scene with no capture and no sky
+    /// shades exactly as before.
+    pub fn new(probes: &[ReflectionProbe], sky: Option<SkyRadiance>) -> Option<Self> {
+        let list: Vec<ProbeReflection> = probe_processing_order(probes)
+            .into_iter()
+            .filter_map(|i| ProbeReflection::from_probe(&probes[i]))
+            .collect();
+        if list.is_empty() && sky.is_none() {
+            return None;
+        }
+        Some(Self {
+            probes: std::sync::Arc::new(list),
+            sky,
+        })
+    }
+
+    /// Godot's per-fragment reflection loop: `(ambient light, specular
+    /// radiance)` at `world_pos` for unit normal `n` and unit view vector `v`
+    /// (fragment to camera). The specular is the radiance BEFORE the
+    /// environment BRDF; `base_ambient` is the environment ambient.
+    pub fn indirect(
+        &self,
+        world_pos: Vector3,
+        n: Vector3,
+        v: Vector3,
+        roughness: f32,
+        base_ambient: Color,
+    ) -> (Color, Color) {
+        let r = roughness.clamp(0.0, 1.0);
+        let mut refl = [0.0f32; 4];
+        let mut amb = [0.0f32; 4];
+        if !self.probes.is_empty() {
+            let mirror = (n * (2.0 * n.dot(v)) - v).normalized();
+            let r4 = r * r * r * r;
+            let ref_vec = mirror + (n - mirror) * r4;
+            let lod = r.sqrt() * MAX_ROUGHNESS_LOD;
+            for p in self.probes.iter() {
+                if !p.contains(world_pos) {
+                    continue;
+                }
+                if refl[3] >= 1.0 && amb[3] >= 1.0 {
+                    break;
+                }
+                let blend = p.blend_weight(world_pos);
+                if p.intensity > 0.0 && refl[3] < 1.0 {
+                    let rb = (blend - refl[3]).max(0.0);
+                    let c = p.cubemap.sample_lod(p.lookup_dir(world_pos, ref_vec), lod);
+                    let k = p.intensity * rb;
+                    refl[0] += c.r * k;
+                    refl[1] += c.g * k;
+                    refl[2] += c.b * k;
+                    refl[3] += rb;
+                }
+                if amb[3] < 1.0 {
+                    let c = match p.ambient_mode {
+                        ReflectionProbeAmbientMode::Disabled => None,
+                        ReflectionProbeAmbientMode::Environment => {
+                            Some(p.cubemap.sample_lod(n, MAX_ROUGHNESS_LOD))
+                        }
+                        ReflectionProbeAmbientMode::ConstantColor => Some(p.ambient_color),
+                    };
+                    if let Some(c) = c {
+                        let ab = (blend - amb[3]).max(0.0);
+                        amb[0] += c.r * ab;
+                        amb[1] += c.g * ab;
+                        amb[2] += c.b * ab;
+                        amb[3] += ab;
+                    }
+                }
+            }
+        }
+        if amb[3] < 1.0 {
+            let k = 1.0 - amb[3];
+            amb[0] += base_ambient.r * k;
+            amb[1] += base_ambient.g * k;
+            amb[2] += base_ambient.b * k;
+        }
+        if refl[3] < 1.0 {
+            if let Some(sky) = &self.sky {
+                let s = sky.specular(n, v, r);
+                let k = 1.0 - refl[3];
+                refl[0] += s.r * k;
+                refl[1] += s.g * k;
+                refl[2] += s.b * k;
+            }
+        }
+        (
+            Color::new(amb[0], amb[1], amb[2], 1.0),
+            Color::new(refl[0], refl[1], refl[2], 1.0),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -821,6 +1106,73 @@ mod tests {
         assert!((probe.ambient_color_energy - 1.0).abs() < f32::EPSILON);
         assert_eq!(probe.cull_mask, 0xFFFFF);
         assert!((probe.mesh_lod_threshold - 1.0).abs() < f32::EPSILON);
+    }
+
+    /// pat-h7sz7: bilinear filtering crosses cube face seams (Godot's
+    /// octmaps have a border). A lookup half a texel from the +X/+Y edge
+    /// mixes in the neighbouring face; the old face-clamped lookup read only
+    /// its own face, which drew a line along every cube edge of a blurred
+    /// reflection.
+    #[test]
+    fn a_lookup_at_a_face_edge_filters_across_the_seam() {
+        let res = 8;
+        let mut faces: [Vec<Color>; 6] = std::array::from_fn(|_| vec![Color::BLACK; 64]);
+        faces[CubeFace::PosX as usize] = vec![Color::WHITE; 64];
+        let level = CubeLevel { resolution: res, faces };
+        // On +Y, u = 0.99 (x = 1, z = 0 is the +X edge): the last texel's
+        // centre is at u = 0.9375, so the right-hand tap is past the edge.
+        let dir = Vector3::new(0.98, 1.0, 0.0);
+        let seamless = level.sample(dir);
+        let clamped = level.sample_clamped(dir);
+        assert_eq!(clamped.r, 0.0, "control: the clamped lookup sees only black +Y");
+        assert!(
+            seamless.r > 0.2 && seamless.r < 0.8,
+            "the seamless lookup must blend in the white +X face: {seamless:?}"
+        );
+        // Away from any edge nothing changes.
+        let centre = Vector3::new(0.1, 1.0, 0.05);
+        assert_eq!(level.sample(centre), level.sample_clamped(centre));
+    }
+
+    #[test]
+    fn a_seam_texel_maps_to_the_adjacent_face() {
+        // One texel right of +Y's right edge lies on +X.
+        let (face, _) = seamless_texel_index(CubeFace::PosY as usize, 8, 8, 3);
+        assert_eq!(face, CubeFace::PosX as usize);
+        let (face, idx) = seamless_texel_index(CubeFace::PosY as usize, 8, 2, 3);
+        assert_eq!((face, idx), (CubeFace::PosY as usize, 3 * 8 + 2));
+    }
+
+    fn captured(id: u64, centre: Vector3, size: f32, colour: Color) -> ReflectionProbe {
+        let mut p = ReflectionProbe::new(ReflectionProbeId(id));
+        p.transform.origin = centre;
+        p.size = Vector3::new(size, size, size);
+        p.blend_distance = 0.0;
+        p.captured = Some(std::sync::Arc::new(ReflectionCubemap::new(4, colour)));
+        p
+    }
+
+    /// pat-h7sz7: probes are blended per FRAGMENT, smallest box first, and a
+    /// fragment outside a probe's box ignores it — whatever probe covers the
+    /// instance's origin.
+    #[test]
+    fn probes_are_blended_per_fragment_smallest_box_first() {
+        let red = Color::new(1.0, 0.0, 0.0, 1.0);
+        let blue = Color::new(0.0, 0.0, 1.0, 1.0);
+        // Big blue box listed FIRST, small red box inside it.
+        let probes = [captured(1, Vector3::ZERO, 20.0, blue), captured(2, Vector3::ZERO, 4.0, red)];
+        let set = ProbeSet::new(&probes, None).unwrap();
+        let n = Vector3::new(0.0, 1.0, 0.0);
+        let base = Color::new(0.5, 0.5, 0.5, 1.0);
+        let (amb_in, spec_in) = set.indirect(Vector3::ZERO, n, n, 0.0, base);
+        assert!(spec_in.r > 0.99 && spec_in.b < 1e-4, "the smaller box wins: {spec_in:?}");
+        assert!(amb_in.r > 0.99 && amb_in.b < 1e-4, "its ambient too: {amb_in:?}");
+        let (amb_out, spec_out) = set.indirect(Vector3::new(5.0, 0.0, 0.0), n, n, 0.0, base);
+        assert!(spec_out.b > 0.99 && spec_out.r < 1e-4, "outside the small box, the big one: {spec_out:?}");
+        assert!(amb_out.b > 0.99, "{amb_out:?}");
+        let (amb_far, spec_far) = set.indirect(Vector3::new(50.0, 0.0, 0.0), n, n, 0.0, base);
+        assert_eq!(spec_far, Color::new(0.0, 0.0, 0.0, 1.0), "no probe, no sky: black");
+        assert_eq!(amb_far, base, "no probe: the environment ambient");
     }
 
     #[test]

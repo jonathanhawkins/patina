@@ -71,7 +71,7 @@ fn shade(
         roughness,
         metallic,
         camera_position: camera,
-        probe,
+        probe: probe.map(Into::into),
         layers: 1,
         lights,
         directional_shadow_maps: Vec::new(),
@@ -161,9 +161,13 @@ fn half_lit_cube() -> ReflectionCubemap {
 #[test]
 fn a_rough_metal_reflection_is_roughness_filtered() {
     let p = Vector3::ZERO;
-    // Mirror direction r = 2(n.v)n - v with n = +Y; pick r slightly past the
-    // 45 degree edge between +X and +Y, on the +Y face: r = (0.95, 1, 0).
-    let r = Vector3::new(0.95, 1.0, 0.0).normalized();
+    // Mirror direction r = 2(n.v)n - v with n = +Y; pick r past the 45 degree
+    // edge between +X and +Y, on the +Y face: r = (0.85, 1, 0), u = 0.925.
+    // ⚠️ Not closer: since pat-h7sz7 a lookup filters ACROSS the face seam
+    // (Godot's octmaps have a border), so a mirror within half a texel of the
+    // edge (the old 0.95, u = 0.975 at 16 texels) rightly picks up the bright
+    // neighbour face, and the roughness-0 control below would not be black.
+    let r = Vector3::new(0.85, 1.0, 0.0).normalized();
     let v = Vector3::new(-r.x, r.y, -r.z);
     let camera = p + v * 3.0;
     let dark_side = shade(p, 1.0, 0.4, camera, Some(probe(half_lit_cube(), ReflectionProbeAmbientMode::Disabled, 0.0)), vec![]);

@@ -415,6 +415,13 @@ impl SoftwareRenderer3D {
         for i in pending {
             let origin = self.reflection_probes[i].capture_origin();
             let max_distance = self.reflection_probes[i].max_distance;
+            // pat-h7sz7: Godot renders a probe WITHOUT shadows unless the
+            // probe sets `enable_shadows` (default false):
+            // `_render_reflection_probe_step` passes no shadow atlas then.
+            // Capturing with the camera's shadow map darkened every probe of
+            // the 3D platformer (its ambient and reflections both read the
+            // capture), so walls and the robot came out greyer than Godot's.
+            let enable_shadows = self.reflection_probes[i].enable_shadows;
             let mut cube = ReflectionCubemap::new(resolution, Color::new(0.0, 0.0, 0.0, 1.0));
             for (face, basis) in FACES {
                 let face_view = Viewport3D {
@@ -431,7 +438,7 @@ impl SoftwareRenderer3D {
                     },
                     environment: base.environment.clone(),
                 };
-                let frame = self.render_frame_solid_with(&face_view, false);
+                let frame = self.render_frame_solid_with(&face_view, false, enable_shadows);
                 cube.set_face(
                     face,
                     remap_capture_to_cubemap_face(face, &basis, &frame.pixels, resolution),
@@ -777,7 +784,7 @@ impl SoftwareRenderer3D {
     }
 
     fn render_frame_solid(&self, viewport: &Viewport3D) -> FrameData3D {
-        self.render_frame_solid_with(viewport, true)
+        self.render_frame_solid_with(viewport, true, true)
     }
 
     /// [`Self::render_frame_solid`], optionally WITHOUT the camera
@@ -790,7 +797,7 @@ impl SoftwareRenderer3D {
     /// reflected value (linear 0.05 reads back as 0.25), so the platformer's
     /// metal robot, which Godot shows near-black reflecting dark walls, drew
     /// light grey.
-    fn render_frame_solid_with(&self, viewport: &Viewport3D, camera_post: bool) -> FrameData3D {
+    fn render_frame_solid_with(&self, viewport: &Viewport3D, camera_post: bool, shadows: bool) -> FrameData3D {
         let w = viewport.width;
         let h = viewport.height;
         let pixel_count = (w * h) as usize;
@@ -827,6 +834,16 @@ impl SoftwareRenderer3D {
             Some(env) => environment_ambient_color(env),
             None => Color::new(0.1, 0.1, 0.1, 1.0),
         };
+
+        // The frame's captured probes (smallest box first) and the sky
+        // radiance map (pat-h7sz7). `None` with neither, so such a frame
+        // shades exactly as before.
+        let probe_set = gdserver3d::reflection_probe::ProbeSet::new(
+            &self.reflection_probes,
+            viewport.environment.as_ref().and_then(|env| {
+                sky_radiance_for(env, &sky_suns_from_lights(&self.lights), SKY_RADIANCE_RESOLUTION)
+            }),
+        );
 
         // Build light uniforms from stored lights.
         let light_uniforms: Vec<LightUniform> = self
@@ -907,7 +924,12 @@ impl SoftwareRenderer3D {
             .collect();
 
         // Generate shadow maps for directional lights with shadow_enabled.
-        let shadow_maps = crate::shadow_map::generate_shadow_maps(&self.lights, &self.instances);
+        // A probe capture without `enable_shadows` gets none (pat-h7sz7).
+        let shadow_maps = if shadows {
+            crate::shadow_map::generate_shadow_maps(&self.lights, &self.instances)
+        } else {
+            Vec::new()
+        };
         let directional_shadow_maps: Vec<Option<std::sync::Arc<crate::shadow_map::ShadowMap>>> =
             light_uniforms
                 .iter()
@@ -931,8 +953,11 @@ impl SoftwareRenderer3D {
                 .collect();
 
         // Generate omni shadow cubemaps for point lights with cubemap mode.
-        let omni_cubemaps_raw =
-            crate::shadow_map::generate_omni_shadow_cubemaps(&self.lights, &self.instances);
+        let omni_cubemaps_raw = if shadows {
+            crate::shadow_map::generate_omni_shadow_cubemaps(&self.lights, &self.instances)
+        } else {
+            vec![None; self.lights.len()]
+        };
         let omni_shadow_cubemaps: Vec<Option<std::sync::Arc<gdserver3d::light::ShadowCubemap>>> =
             omni_cubemaps_raw
                 .into_iter()
@@ -1150,8 +1175,9 @@ impl SoftwareRenderer3D {
                 // (`ProbeReflection::ambient`), as Godot does; adding
                 // `ambient_color` on top in `Environment` mode is something
                 // Godot never does.
-                let probe = probe_reflection_at(&self.reflection_probes, entry.transform.origin);
-                let probe_ambient = if probe.is_some() {
+                let covered =
+                    probe_reflection_at(&self.reflection_probes, entry.transform.origin).is_some();
+                let probe_ambient = if covered {
                     Color::new(0.0, 0.0, 0.0, 1.0)
                 } else {
                     self.sample_reflection_probes(entry.transform.origin)
@@ -1179,10 +1205,9 @@ impl SoftwareRenderer3D {
                     roughness: entry.material.roughness,
                     metallic: entry.material.metallic,
                     camera_position: viewport.camera_transform.origin,
-                    // The probe covering this instance, resolved at the same
-                    // point as its ambient term above and sampled per fragment
-                    // in the specular stage (pat-s3rrv.206).
-                    probe,
+                    // Every captured probe plus the sky radiance, blended per
+                    // FRAGMENT as Godot's cluster loop does (pat-h7sz7).
+                    probe: probe_set.clone(),
                     // The half of `light_cull_mask` the shading loop was
                     // missing: WHICH instance it is shading.
                     layers: inst.geometry.layers,
@@ -2170,6 +2195,99 @@ pub fn environment_ambient_color(env: &Environment3D) -> Color {
             None => scaled(env.background_color.srgb_to_linear()),
         },
     }
+}
+
+/// Face edge of the sky radiance map. It must equal the probe capture
+/// resolution: the GPU path stores the sky's roughness chain in the same
+/// atlas array as the probes, which has one layout for every layer.
+pub const SKY_RADIANCE_RESOLUTION: u32 = 32;
+
+/// Whether `env` reflects its sky (Godot `reflected_light_source`): `Sky`
+/// always (given a sky), `Background` only when the background IS the sky.
+pub fn environment_reflects_sky(env: &Environment3D) -> bool {
+    use gdserver3d::environment::{BackgroundMode, ReflectionSource};
+    if env.sky.is_none() {
+        return false;
+    }
+    match env.reflection_source {
+        ReflectionSource::Disabled => false,
+        ReflectionSource::Sky => true,
+        ReflectionSource::Background => env.background_mode == BackgroundMode::Sky,
+    }
+}
+
+/// The environment's sky radiance map (pat-h7sz7), or `None` when the
+/// environment reflects no sky.
+///
+/// The sky is rendered into a cubemap at `resolution` (energy 1, with the sky
+/// suns, as Godot's radiance pass runs the sky shader with its lights) and
+/// GGX-prefiltered lazily by [`ReflectionCubemap::roughness_chain`]. Cached
+/// per thread on a fingerprint of the sky — 26 sampled directions plus the
+/// suns — because a scene's environment is rebuilt every frame while the sky
+/// itself almost never changes, and a custom sky shader is interpreted per
+/// texel.
+pub fn sky_radiance_for(
+    env: &Environment3D,
+    suns: &[SkySun],
+    resolution: u32,
+) -> Option<gdserver3d::reflection_probe::SkyRadiance> {
+    use std::cell::RefCell;
+    use std::sync::Arc;
+    thread_local! {
+        static CACHE: RefCell<Vec<(Vec<u32>, Arc<ReflectionCubemap>)>> =
+            const { RefCell::new(Vec::new()) };
+    }
+    if !environment_reflects_sky(env) {
+        return None;
+    }
+    let sky = env.sky.as_ref()?;
+    let mut key: Vec<u32> = vec![resolution];
+    for x in [-1.0f32, 0.0, 1.0] {
+        for y in [-1.0f32, 0.0, 1.0] {
+            for z in [-1.0f32, 0.0, 1.0] {
+                if x == 0.0 && y == 0.0 && z == 0.0 {
+                    continue;
+                }
+                let d = Vector3::new(x, y, z).normalized();
+                let c = sample_sky_color(&sky.material, &d, 1.0, suns);
+                key.extend([c.r.to_bits(), c.g.to_bits(), c.b.to_bits()]);
+            }
+        }
+    }
+    for s in suns {
+        key.extend([
+            s.direction.x.to_bits(),
+            s.direction.y.to_bits(),
+            s.direction.z.to_bits(),
+            s.color.r.to_bits(),
+            s.color.g.to_bits(),
+            s.color.b.to_bits(),
+            s.energy.to_bits(),
+            s.size.to_bits(),
+        ]);
+    }
+    let cubemap = CACHE.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        if let Some((_, c)) = cache.iter().find(|(k, _)| *k == key) {
+            return c.clone();
+        }
+        let cube = Arc::new(ReflectionCubemap::from_directions(resolution, |d| {
+            let c = sample_sky_color(&sky.material, &d, 1.0, suns);
+            Color::new(c.r, c.g, c.b, 1.0)
+        }));
+        // Prefilter now, while the result is being cached, not on the first
+        // fragment that samples it.
+        let _ = cube.roughness_chain();
+        if cache.len() >= 4 {
+            cache.remove(0);
+        }
+        cache.push((key, cube.clone()));
+        cube
+    });
+    Some(gdserver3d::reflection_probe::SkyRadiance {
+        cubemap,
+        energy: env.background_energy_multiplier,
+    })
 }
 
 /// Collects the sky-visible directional lights the way Godot's sky renderer

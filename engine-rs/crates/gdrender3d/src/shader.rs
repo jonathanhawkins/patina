@@ -128,13 +128,13 @@ pub struct ShaderUniforms {
     pub metallic: f32,
     /// Camera world-space position.
     pub camera_position: Vector3,
-    /// The reflection probe covering this draw, if any (pat-s3rrv.206).
-    ///
-    /// Selected per instance (a point query, matching how probe ambient was
-    /// already resolved) but sampled per fragment, because a mirror reflects
-    /// different things at different pixels only if the reflection direction
-    /// varies across it. `None` leaves the specular term exactly as it was.
-    pub probe: Option<gdserver3d::reflection_probe::ProbeReflection>,
+    /// The frame's captured reflection probes and sky radiance map
+    /// (pat-s3rrv.206, pat-h7sz7), blended PER FRAGMENT the way Godot's
+    /// cluster loop does ([`gdserver3d::reflection_probe::ProbeSet::indirect`]).
+    /// A single [`ProbeReflection`](gdserver3d::reflection_probe::ProbeReflection)
+    /// converts with `.into()`. `None` leaves the specular term exactly as it
+    /// was.
+    pub probe: Option<gdserver3d::reflection_probe::ProbeSet>,
     /// The render layers of the instance being shaded — Godot's
     /// `VisualInstance3D.layers`, 1-based, default 1.
     ///
@@ -771,11 +771,18 @@ impl FragmentShader for LambertFragmentShader {
         let normal = m.normal;
         let albedo = m.albedo;
 
-        // A captured probe REPLACES the ambient inside its box (pat-t42ca):
-        // the same `ProbeReflection::ambient` the PBR path uses.
-        let ambient = match uniforms.probe.as_ref() {
-            Some(probe) => probe.ambient(input.world_position, normal, uniforms.ambient),
-            None => uniforms.ambient,
+        // A captured probe REPLACES the ambient inside its box (pat-t42ca),
+        // blended per fragment over every probe (pat-h7sz7); the specular
+        // radiance comes from the same loop, with the sky radiance filling
+        // whatever weight the probes leave.
+        let view = (uniforms.camera_position - input.world_position).normalized();
+        let (ambient, env_radiance) = match uniforms.probe.as_ref() {
+            Some(set) => {
+                let (a, s) =
+                    set.indirect(input.world_position, normal, view, m.roughness, uniforms.ambient);
+                (a, Some(s))
+            }
+            None => (uniforms.ambient, None),
         };
         let mut diffuse_r = ambient.r * albedo.r;
         let mut diffuse_g = ambient.g * albedo.g;
@@ -825,10 +832,7 @@ impl FragmentShader for LambertFragmentShader {
         // cannot regress it, where a refactor of both could. If the two ever
         // need to change together, extract then — and keep the F0 and
         // `sharpness` terms identical to `pbr_shade`'s until someone does.
-        if let Some(probe) = uniforms.probe.as_ref() {
-            let n = normal;
-            let v = (uniforms.camera_position - input.world_position).normalized();
-            let n_dot_v = n.dot(v).max(1e-4);
+        if let Some(env) = env_radiance {
             let sharpness = 1.0 - m.roughness.clamp(0.0, 1.0);
             if sharpness > 0.0 {
                 // F0: dielectric 0.04, metals use albedo — the same split
@@ -839,10 +843,8 @@ impl FragmentShader for LambertFragmentShader {
                     lerp_f(f0_d, albedo.g, m.metallic),
                     lerp_f(f0_d, albedo.b, m.metallic),
                 ];
-                let reflection = n * (2.0 * n_dot_v) - v;
-                // Roughness-filtered, as Godot samples every reflection
-                // (pat-9gjpr): `lod = sqrt(roughness) * MAX_ROUGHNESS_LOD`.
-                let env = probe.sample_rough(input.world_position, reflection, m.roughness);
+                // `env` is roughness-filtered, as Godot samples every
+                // reflection (pat-9gjpr): `lod = sqrt(roughness) * 7`.
 
                 // 🔑 Metals have no diffuse. At `metallic = 1.0` the surface
                 // must show the reflection INSTEAD of a Lambert term, not on
@@ -1034,11 +1036,98 @@ pub fn pbr_shade(input: &FragmentInput, uniforms: &ShaderUniforms) -> Color {
     )
 }
 
+/// Edge of the baked DFG table ([`dfg_lut`]). Godot bakes 128; the integral
+/// is smooth enough that 64 bilinear-filtered texels match it to ~1e-3.
+pub const DFG_LUT_SIZE: usize = 64;
+
+/// Godot's split-sum environment BRDF table (pat-h7sz7), ported from
+/// `integrate_dfg.glsl`: texel `(i, j)` holds `(A, B)` for
+/// `NdotV = (i + 0.5) / N` and perceptual roughness `(j + 0.5) / N`, with
+/// 1024 Hammersley GGX samples, `G` = Smith-Schlick with `k = roughness² / 2`
+/// and `A += Fc * G_Vis`, `B += G_Vis`. Row-major by roughness: index
+/// `j * N + i`. Built once.
+pub fn dfg_lut() -> &'static [[f32; 2]] {
+    static LUT: std::sync::OnceLock<Vec<[f32; 2]>> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        const SAMPLES: u32 = 1024;
+        let n = DFG_LUT_SIZE;
+        let mut out = Vec::with_capacity(n * n);
+        let rad_inv = |mut bits: u32| -> f32 {
+            bits = bits.rotate_left(16);
+            bits = ((bits & 0x5555_5555) << 1) | ((bits & 0xAAAA_AAAA) >> 1);
+            bits = ((bits & 0x3333_3333) << 2) | ((bits & 0xCCCC_CCCC) >> 2);
+            bits = ((bits & 0x0F0F_0F0F) << 4) | ((bits & 0xF0F0_F0F0) >> 4);
+            bits = ((bits & 0x00FF_00FF) << 8) | ((bits & 0xFF00_FF00) >> 8);
+            bits as f32 * 2.328_306_4e-10
+        };
+        let g1 = |n_dot: f32, k: f32| n_dot / (n_dot * (1.0 - k) + k);
+        for j in 0..n {
+            let roughness = (j as f32 + 0.5) / n as f32;
+            let a = roughness * roughness;
+            let k = roughness * roughness / 2.0;
+            for i in 0..n {
+                let n_dot_v = (i as f32 + 0.5) / n as f32;
+                let v = [(1.0 - n_dot_v * n_dot_v).sqrt(), 0.0, n_dot_v];
+                let (mut sa, mut sb) = (0.0f32, 0.0f32);
+                for s in 0..SAMPLES {
+                    let xi = (s as f32 / SAMPLES as f32, rad_inv(s));
+                    let phi = 2.0 * std::f32::consts::PI * xi.0;
+                    let cos_t = ((1.0 - xi.1) / (1.0 + (a * a - 1.0) * xi.1)).sqrt();
+                    let sin_t = (1.0 - cos_t * cos_t).max(0.0).sqrt();
+                    let (hx, hy, hz) = (phi.cos() * sin_t, phi.sin() * sin_t, cos_t);
+                    // Godot's tangent frame for N = +Z: tangent (0,-1,0),
+                    // bitangent (1,0,0).
+                    let h = [hy, -hx, hz];
+                    let hl = (h[0] * h[0] + h[1] * h[1] + h[2] * h[2]).sqrt();
+                    let h = [h[0] / hl, h[1] / hl, h[2] / hl];
+                    let v_dot_h = v[0] * h[0] + v[1] * h[1] + v[2] * h[2];
+                    let l = [
+                        2.0 * v_dot_h * h[0] - v[0],
+                        2.0 * v_dot_h * h[1] - v[1],
+                        2.0 * v_dot_h * h[2] - v[2],
+                    ];
+                    let n_dot_l = l[2].clamp(0.0, 1.0);
+                    let n_dot_h = h[2].clamp(0.0, 1.0);
+                    let v_dot_h = v_dot_h.clamp(0.0, 1.0);
+                    if n_dot_l > 0.0 {
+                        let g = g1(n_dot_v.clamp(0.0, 1.0), k) * g1(n_dot_l, k);
+                        let g_vis = g * v_dot_h / (n_dot_h * n_dot_v);
+                        let fc = (1.0 - v_dot_h).powi(5);
+                        sa += fc * g_vis;
+                        sb += g_vis;
+                    }
+                }
+                out.push([sa / SAMPLES as f32, sb / SAMPLES as f32]);
+            }
+        }
+        out
+    })
+}
+
 /// Godot's split-sum environment BRDF `prefiltered_dfg(roughness, NdotV).xy`
-/// (pat-9gjpr), as `(x, y)` with `x` the Fresnel (f90) term and `y` the total,
-/// so `specular = (f90 - f0) * x + f0 * y`. Godot reads a baked LUT; this is
-/// Karis' analytic fit of the same integral (UE4 `EnvBRDFApprox`).
+/// (pat-9gjpr, pat-h7sz7), as `(x, y)` with `x` the Fresnel (f90) term and
+/// `y` the total, so `specular = (f90 - f0) * x + f0 * y`: a bilinear,
+/// edge-clamped lookup of the baked [`dfg_lut`], as Godot's
+/// `textureLod(dfg, vec2(NoV, 1 - roughness))` with `SAMPLER_LINEAR_CLAMP`.
 pub fn env_brdf(roughness: f32, n_dot_v: f32) -> (f32, f32) {
+    let lut = dfg_lut();
+    let n = DFG_LUT_SIZE;
+    let fx = (n_dot_v.clamp(0.0, 1.0) * n as f32 - 0.5).clamp(0.0, (n - 1) as f32);
+    let fy = (roughness.clamp(0.0, 1.0) * n as f32 - 0.5).clamp(0.0, (n - 1) as f32);
+    let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
+    let (x1, y1) = ((x0 + 1).min(n - 1), (y0 + 1).min(n - 1));
+    let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+    let at = |x: usize, y: usize| lut[y * n + x];
+    let lerp2 = |a: [f32; 2], b: [f32; 2], t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    let top = lerp2(at(x0, y0), at(x1, y0), tx);
+    let bot = lerp2(at(x0, y1), at(x1, y1), tx);
+    let v = lerp2(top, bot, ty);
+    (v[0], v[1].max(1e-4))
+}
+
+/// Karis' analytic fit of the DFG integral (UE4 `EnvBRDFApprox`), what
+/// [`env_brdf`] returned before the table (kept for the comparison test).
+pub fn env_brdf_karis(roughness: f32, n_dot_v: f32) -> (f32, f32) {
     let c0 = [-1.0f32, -0.0275, -0.572, 0.022];
     let c1 = [1.0f32, 0.0425, 1.04, -0.04];
     let r = [
@@ -1069,7 +1158,7 @@ pub fn env_brdf(roughness: f32, n_dot_v: f32) -> (f32, f32) {
 /// ambient by `albedo * (1 - metallic)` and adds the specular as is.
 #[allow(clippy::too_many_arguments)]
 pub fn probe_indirect(
-    probe: &gdserver3d::reflection_probe::ProbeReflection,
+    probe: &gdserver3d::reflection_probe::ProbeSet,
     world_pos: Vector3,
     n: Vector3,
     v: Vector3,
@@ -1080,16 +1169,10 @@ pub fn probe_indirect(
 ) -> (Color, [f32; 3]) {
     let roughness = roughness.clamp(0.0, 1.0);
     let metallic = metallic.clamp(0.0, 1.0);
-    let ambient = probe.ambient(world_pos, n, base_ambient);
+    // pat-h7sz7: every probe holding the fragment, smallest first, then the
+    // sky radiance for the weight they leave.
+    let (ambient, env) = probe.indirect(world_pos, n, v, roughness, base_ambient);
     let n_dot_v_raw = n.dot(v);
-    let mirror = (n * (2.0 * n_dot_v_raw) - v).normalized();
-    let r4 = roughness * roughness * roughness * roughness;
-    let ref_vec = Vector3::new(
-        lerp_f(mirror.x, n.x, r4),
-        lerp_f(mirror.y, n.y, r4),
-        lerp_f(mirror.z, n.z, r4),
-    );
-    let env = probe.sample_rough(world_pos, ref_vec, roughness);
 
     let lum = (ambient.r * 0.3 + ambient.g * 0.59 + ambient.b * 0.11) * 2.0;
     let mut so = (lum * 4.0).min(1.0);
