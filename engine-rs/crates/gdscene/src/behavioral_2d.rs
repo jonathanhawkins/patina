@@ -598,10 +598,87 @@ pub const CAMERA2D_SCROLL_ROTATION: &str = "_camera2d_scroll_rotation";
 /// tie-break the renderer has always used — this is the one definition both it
 /// and the scroll pass resolve through, so they cannot disagree about which
 /// camera is current (pat-s3rrv.84).
+///
+/// ⚠️ This is the ROOT viewport's camera (pat-8mb8y). A Camera2D inside a
+/// `SubViewport` — or redirected to one through `custom_viewport` — drives THAT
+/// viewport's canvas, not the window's; see [`current_camera2d_in`]. In a scene
+/// with no SubViewport every camera belongs to the root, so this is unchanged.
 pub fn current_camera2d(tree: &SceneTree) -> Option<NodeId> {
+    current_camera2d_in(tree, None)
+}
+
+/// Whether a node is a `SubViewport` — the boundary at which a 2D canvas, its
+/// camera and its transforms stop (pat-8mb8y).
+///
+/// A plain class-name test, not `is_class`: this runs inside
+/// `node2d::get_global_transform`'s ancestor walk, the hottest loop of the 2D
+/// path, and `is_class` takes the ClassDB lock. SubViewport has no subclasses.
+pub fn is_sub_viewport(tree: &SceneTree, id: NodeId) -> bool {
+    tree.get_node(id)
+        .is_some_and(|n| n.class_name() == "SubViewport")
+}
+
+/// The nearest `SubViewport` ancestor of `id` (Godot's `get_viewport()` when it
+/// is not the root window), or `None` for a node in the root viewport.
+pub fn enclosing_sub_viewport(tree: &SceneTree, id: NodeId) -> Option<NodeId> {
+    let mut cur = tree.get_node(id).and_then(|n| n.parent());
+    while let Some(p) = cur {
+        if is_sub_viewport(tree, p) {
+            return Some(p);
+        }
+        cur = tree.get_node(p).and_then(|n| n.parent());
+    }
+    None
+}
+
+/// The viewport a Camera2D drives: its `custom_viewport` when that names a live
+/// SubViewport, otherwise the viewport it sits in (`camera_2d.cpp`
+/// `set_custom_viewport` / `_update_scroll`). `None` is the root viewport.
+pub fn camera2d_viewport(tree: &SceneTree, cam: NodeId) -> Option<NodeId> {
+    if let Some(Variant::ObjectId(oid)) =
+        tree.get_node(cam).map(|n| n.get_property("custom_viewport"))
+    {
+        let target = NodeId::from_object_id(oid);
+        if is_sub_viewport(tree, target) {
+            return Some(target);
+        }
+        if tree.get_node(target).is_some() {
+            // The root window, or a node inside the viewport it names.
+            return enclosing_sub_viewport(tree, target);
+        }
+    }
+    enclosing_sub_viewport(tree, cam)
+}
+
+/// A viewport's size in its own pixels — what a camera inside it centres on.
+/// `None` is the root window. A SubViewport's `size` is a `Vector2i` in a
+/// `.tscn` and a `Vector2` once a stretching SubViewportContainer laid it out.
+pub fn sub_viewport_size(tree: &SceneTree, vp: Option<NodeId>) -> Vector2 {
+    let Some(vp) = vp else {
+        return tree.root_window().visible_size();
+    };
+    match tree.get_node(vp).map(|n| n.get_property("size")) {
+        Some(Variant::Vector2(v)) => v,
+        Some(Variant::Vector2i(v)) => Vector2::new(v.x as f32, v.y as f32),
+        // Godot's SubViewport default.
+        _ => Vector2::new(512.0, 512.0),
+    }
+}
+
+/// Monotonic stamp `Camera2D.make_current()` writes, so the camera made current
+/// most recently wins its viewport over tree order (pat-8mb8y).
+pub const CAMERA2D_CURRENT_STAMP: &str = "_camera2d_current_stamp";
+
+/// The current Camera2D of one viewport (`None` = the root window).
+///
+/// A camera claims through `enabled` (Godot 4) or `current` (Godot 3); among
+/// the claimants the one `make_current()` named last wins, otherwise the LAST
+/// in top-down order, the renderer's long-standing tie-break.
+pub fn current_camera2d_in(tree: &SceneTree, viewport: Option<NodeId>) -> Option<NodeId> {
     let mut subtree = Vec::new();
     tree.collect_subtree_top_down(tree.root_id(), &mut subtree);
     let mut found = None;
+    let mut best_stamp = i64::MIN;
     for id in subtree {
         let Some(node) = tree.get_node(id) else {
             continue;
@@ -620,11 +697,28 @@ pub fn current_camera2d(tree: &SceneTree) -> Option<NodeId> {
             Variant::Bool(b) => b,
             _ => !matches!(node.get_property("current"), Variant::Bool(false)),
         };
-        if claims {
+        if !claims {
+            continue;
+        }
+        let stamp = match node.get_property(CAMERA2D_CURRENT_STAMP) {
+            Variant::Int(i) => i,
+            _ => i64::MIN,
+        };
+        if stamp >= best_stamp && camera2d_viewport(tree, id) == viewport {
+            best_stamp = stamp;
             found = Some(id);
         }
     }
     found
+}
+
+/// Every SubViewport in the tree, in tree order (pat-8mb8y). Empty in every
+/// scene without one, which is what keeps the per-viewport passes inert there.
+pub fn sub_viewports(tree: &SceneTree) -> Vec<NodeId> {
+    tree.all_nodes_in_tree_order()
+        .into_iter()
+        .filter(|&id| is_sub_viewport(tree, id))
+        .collect()
 }
 
 /// Advances the current Camera2D's scroll state by one frame — Patina's
@@ -642,10 +736,20 @@ pub fn current_camera2d(tree: &SceneTree) -> Option<NodeId> {
 /// Godot's `first` branch (camera_2d.cpp:208) — a camera that is `current` from
 /// the start opens on its subject instead of sliding in from the origin.
 pub fn process_camera2d_scroll(tree: &mut SceneTree, dt: f32) {
-    let Some(cam) = current_camera2d(tree) else {
-        return;
-    };
-    let viewport = tree.root_window().visible_size();
+    // One current camera per viewport: the root's, then each SubViewport's
+    // (pat-8mb8y). A scene without SubViewports runs exactly the root pass.
+    let mut viewports = vec![None];
+    viewports.extend(sub_viewports(tree).into_iter().map(Some));
+    for vp in viewports {
+        if let Some(cam) = current_camera2d_in(tree, vp) {
+            let size = sub_viewport_size(tree, vp);
+            process_one_camera2d_scroll(tree, cam, size, dt);
+        }
+    }
+}
+
+/// [`process_camera2d_scroll`] for one camera on a viewport of `viewport` size.
+fn process_one_camera2d_scroll(tree: &mut SceneTree, cam: NodeId, viewport: Vector2, dt: f32) {
     let config = node2d::camera2d_config_from_node(tree, cam);
 
     // 🔑 `offset` is added AFTER the limits, not to the target: Godot clamps

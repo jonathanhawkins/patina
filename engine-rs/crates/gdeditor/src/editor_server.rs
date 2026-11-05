@@ -1487,6 +1487,12 @@ pub fn clone_scene_tree(source: &SceneTree) -> SceneTree {
         for group in src_node.groups() {
             new_node.add_to_group(group.clone());
         }
+        // The "Access as Unique Name" flag lives on the node, not in its
+        // property bag, so the copy above dropped it: Play's tree answered
+        // "node not found: %Player2" for the split-screen scene's
+        // `%Player2` while the runner, which instances the `.tscn` directly,
+        // resolved it (pat-8mb8y).
+        new_node.set_unique_name(src_node.is_unique_name());
         let new_id = match dest.add_child(dest_parent, new_node) {
             Ok(id) => id,
             Err(_) => return,

@@ -188,6 +188,16 @@ pub struct AudioServerBridge {
     panning_strength_2d: f32,
     panning_strength_3d: f32,
     stream_keys: HashMap<NodeId, String>,
+    /// Loaded `AudioStreamRandomizer` pools per player (pat-m7bqe). Each
+    /// `play()` draws a clip from here and installs it on the player first.
+    randomizers: HashMap<NodeId, RandomizerState>,
+    /// The pitch multiplier and volume offset (dB) the current randomized
+    /// voice started with, applied ON TOP of the node's own `pitch_scale` and
+    /// `volume_db` every frame (Godot multiplies the playback's pitch in
+    /// `AudioStreamPlaybackRandomizer::mix`).
+    randomized_variation: HashMap<NodeId, (f32, f32)>,
+    /// State of the randomizer's private generator.
+    randomizer_rng: u64,
 }
 
 impl AudioServerBridge {
@@ -216,6 +226,15 @@ impl AudioServerBridge {
             // still matches Godot rather than the old implicit 1.0.
             panning_strength_2d: 0.5,
             panning_strength_3d: 0.5,
+            randomizers: HashMap::new(),
+            randomized_variation: HashMap::new(),
+            // Seeded from the clock like Godot's global RNG, so two runs do not
+            // play the identical pitch sequence. `| 1`: xorshift must never be 0.
+            randomizer_rng: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0x9E37_79B9_7F4A_7C15)
+                | 1,
         }
     }
 
@@ -530,6 +549,8 @@ impl AudioServerBridge {
             // Same reasoning for the loop the departed stream declared: a new
             // one-shot clip on a reused id would inherit it.
             self.stream_loops.remove(&id);
+            self.randomizers.remove(&id);
+            self.randomized_variation.remove(&id);
         }
 
         // Mix this frame's worth of output.
@@ -1115,6 +1136,15 @@ impl AudioServerBridge {
             StreamSpec::Path(raw) if needs_load => Some(self.resolve_stream_path(raw)),
             _ => None,
         };
+        // Every slot of a randomizer, resolved under the same rule (pat-m7bqe).
+        let resolved_pool: Vec<(PathBuf, f32)> = match &stream_spec {
+            StreamSpec::Randomizer(spec) if needs_load => spec
+                .entries
+                .iter()
+                .map(|(raw, weight)| (self.resolve_stream_path(raw), *weight))
+                .collect(),
+            _ => Vec::new(),
+        };
 
         let player = self
             .players
@@ -1158,6 +1188,11 @@ impl AudioServerBridge {
             // A failed import used to be discarded here, so a missing or
             // undecodable file was indistinguishable from success: the
             // player just stayed silent. Report it (pat-0q2kx.6).
+            //
+            // A pool belongs to the stream it came from: swapping to any other
+            // stream must drop it, or the next `play()` would draw from it.
+            self.randomizers.remove(&id);
+            self.randomized_variation.remove(&id);
             let loaded = match (&stream_spec, &resolved_path) {
                 (StreamSpec::Path(_), Some(path)) => load_stream_buffer(&mut self.importer, path)
                     .map_err(|err| {
@@ -1169,6 +1204,37 @@ impl AudioServerBridge {
                 (StreamSpec::Inline(wav), _) => decode_inline_wav(wav).map_err(|err| {
                     format!("AudioStreamPlayer inline stream failed to decode: {err}")
                 }),
+                // pat-m7bqe: decode the whole pool now, so a `play()` never
+                // touches the disk. A slot that fails is reported and left out;
+                // the player is silent only if every slot failed. The first
+                // clip becomes the player's stream so `autoplay` and
+                // `has_stream` behave exactly as for a plain file.
+                (StreamSpec::Randomizer(spec), _) => {
+                    let mut pool = Vec::new();
+                    for (path, weight) in &resolved_pool {
+                        match load_stream_buffer(&mut self.importer, path) {
+                            Ok(clip) => pool.push((clip, *weight)),
+                            Err(err) => self.stream_errors.push(format!(
+                                "AudioStreamRandomizer slot failed to load: {} ({err})",
+                                path.display()
+                            )),
+                        }
+                    }
+                    match pool.first().map(|(clip, _)| clip.clone()) {
+                        Some(first) => {
+                            self.randomizers.insert(
+                                id,
+                                RandomizerState {
+                                    spec: spec.clone(),
+                                    pool,
+                                    last: None,
+                                },
+                            );
+                            Ok(first)
+                        }
+                        None => Err("AudioStreamRandomizer: no slot loaded".to_owned()),
+                    }
+                }
                 // `stream_key` is empty for both other variants, so `needs_load`
                 // is false and this is unreachable; reported rather than
                 // panicked because an audio frame is the wrong place to abort.
@@ -1269,6 +1335,14 @@ impl AudioServerBridge {
                     self.extra_voices.remove(&id);
                 }
             }
+            install_randomized(
+                player,
+                &mut self.randomizers,
+                &mut self.randomizer_rng,
+                &mut self.stream_loops,
+                &mut self.randomized_variation,
+                id,
+            );
             if let Some(pid) = player.play(&mut self.server) {
                 if let Some(points) = self.stream_loops.get(&id) {
                     apply_stream_loop(&mut self.server, pid, points);
@@ -1291,6 +1365,14 @@ impl AudioServerBridge {
             // would have silenced `AudioStreamGenerator` the frame a script
             // called `play()` on it.
         } else if first_sight && (autoplay || playing_prop) {
+            install_randomized(
+                player,
+                &mut self.randomizers,
+                &mut self.randomizer_rng,
+                &mut self.stream_loops,
+                &mut self.randomized_variation,
+                id,
+            );
             if let Some(pid) = player.play(&mut self.server) {
                 if let Some(points) = self.stream_loops.get(&id) {
                     apply_stream_loop(&mut self.server, pid, points);
@@ -1302,6 +1384,14 @@ impl AudioServerBridge {
         } else if playing_prop && !voice_alive && !player.playing_flag() {
             // Script flipped `playing` on: start the stream. The loop is a
             // property of the STREAM, so a replay loops the same way.
+            install_randomized(
+                player,
+                &mut self.randomizers,
+                &mut self.randomizer_rng,
+                &mut self.stream_loops,
+                &mut self.randomized_variation,
+                id,
+            );
             if let Some(pid) = player.play(&mut self.server) {
                 if let Some(points) = self.stream_loops.get(&id) {
                     apply_stream_loop(&mut self.server, pid, points);
@@ -1342,9 +1432,16 @@ impl AudioServerBridge {
         // Volume and pitch track the node every frame, not just at `play()`, so
         // assigning `pitch_scale`/`volume_db` mid-playback is audible.
         player.set_pitch_scale(pitch);
+        // A randomized voice keeps the variation it was drawn with on top of
+        // the node's own values (pat-m7bqe); 1.0 / 0 dB for any other stream.
+        let (random_pitch, random_db) = self
+            .randomized_variation
+            .get(&id)
+            .copied()
+            .unwrap_or((1.0, 0.0));
         if let Some(stream) = self.server.stream_mut(pid) {
-            stream.set_volume_db(volume_db);
-            stream.set_pitch_scale(pitch.max(0.01));
+            stream.set_volume_db(volume_db + random_db);
+            stream.set_pitch_scale((pitch * random_pitch).max(0.01));
             if let Some(pos) = seek_request {
                 stream.seek(pos);
             }
@@ -1387,6 +1484,195 @@ enum StreamSpec {
     /// inline data. Kept distinct from [`None`](Self::None) so the player can
     /// say so rather than being quietly mute.
     Unresolved(String),
+    /// An inline `AudioStreamRandomizer` sub-resource (pat-m7bqe): a pool of
+    /// files, one of which each `play()` picks, at a random pitch and volume.
+    Randomizer(RandomizerSpec),
+}
+
+/// An `AudioStreamRandomizer`'s pool and variation, in Godot's own property
+/// shape (`doc/classes/AudioStreamRandomizer.xml`,
+/// `servers/audio/audio_stream.cpp`).
+#[derive(Debug, Clone, PartialEq)]
+struct RandomizerSpec {
+    /// `(path, weight)` per pool slot that names a file, in slot order.
+    entries: Vec<(String, f32)>,
+    /// `random_pitch` (default 1.0 = no variation; Godot clamps below 1 to 1).
+    random_pitch: f32,
+    /// `random_volume_offset_db` (default 0; Godot clamps below 0 to 0).
+    random_volume_offset_db: f32,
+    /// `playback_mode`: 0 RANDOM_NO_REPEATS (default), 1 RANDOM, 2 SEQUENTIAL.
+    playback_mode: i64,
+}
+
+/// The `__resref__<prop>` prefix an inline randomizer sub-resource carries.
+const RANDOMIZER_RESREF_PREFIX: &str = "AudioStreamRandomizer::";
+
+/// Reads an inline `AudioStreamRandomizer` off a player node's companions.
+///
+/// `packed_scene.rs` copies the sub-resource body verbatim as
+/// `__subres__stream__<key>`, and its `ExtResource` resolution pass then gives
+/// each `stream_<i>/stream` entry its own `__extres__` companion holding the
+/// file path. That path is all a slot needs.
+///
+/// `None` when the node's stream is not a randomizer. A randomizer whose slots
+/// resolve to no file at all is `Some` with no entries, so the caller can
+/// report it rather than mistaking it for "no stream".
+fn randomizer_spec_from_node(node: &crate::node::Node) -> Option<RandomizerSpec> {
+    match node.get_property("__resref__stream") {
+        Variant::String(s) if s.starts_with(RANDOMIZER_RESREF_PREFIX) => {}
+        _ => return None,
+    }
+    let sub = |key: &str| node.get_property(&format!("__subres__stream__{key}"));
+    let as_f32 = |v: Variant, default: f32| match v {
+        Variant::Float(f) => f as f32,
+        Variant::Int(i) => i as f32,
+        _ => default,
+    };
+    let count = match sub("streams_count") {
+        Variant::Int(n) => n.max(0) as usize,
+        _ => 0,
+    };
+    let entries = (0..count)
+        .filter_map(|i| {
+            let path = match node.get_property(&format!("__extres____subres__stream__stream_{i}/stream"))
+            {
+                Variant::String(p) if !p.is_empty() => p,
+                _ => return None,
+            };
+            // Godot's per-slot default weight is 1.0.
+            Some((path, as_f32(sub(&format!("stream_{i}/weight")), 1.0)))
+        })
+        .collect();
+    Some(RandomizerSpec {
+        entries,
+        random_pitch: as_f32(sub("random_pitch"), 1.0).max(1.0),
+        random_volume_offset_db: as_f32(sub("random_volume_offset_db"), 0.0).max(0.0),
+        playback_mode: match sub("playback_mode") {
+            Variant::Int(m) => m,
+            _ => 0,
+        },
+    })
+}
+
+/// Before a player starts a voice: if its stream is a randomizer, draw this
+/// play's clip and variation and install them (pat-m7bqe).
+///
+/// Takes the bridge's fields separately so the caller can hold its `&mut`
+/// player borrow across the call.
+fn install_randomized(
+    player: &mut AudioStreamPlayer,
+    randomizers: &mut HashMap<NodeId, RandomizerState>,
+    rng: &mut u64,
+    loops: &mut HashMap<NodeId, gdaudio::import::StreamLoop>,
+    variation: &mut HashMap<NodeId, (f32, f32)>,
+    id: NodeId,
+) {
+    let Some(state) = randomizers.get_mut(&id) else {
+        return;
+    };
+    let Some(draw) = draw_randomized(state, rng) else {
+        return;
+    };
+    let (buffer, loop_points) = draw.stream;
+    match loop_points {
+        Some(points) => {
+            loops.insert(id, points);
+        }
+        None => {
+            loops.remove(&id);
+        }
+    }
+    player.set_stream(buffer);
+    variation.insert(id, (draw.pitch_scale, draw.volume_offset_db));
+}
+
+/// A loaded randomizer: every slot's decoded clip plus the pick history the
+/// no-repeats and sequential modes need.
+struct RandomizerState {
+    spec: RandomizerSpec,
+    /// One decoded clip per entry of `spec.entries` that loaded.
+    pool: Vec<(LoadedStream, f32)>,
+    /// Index into `pool` of the last clip played (`last_playback` in Godot).
+    last: Option<usize>,
+}
+
+/// One `play()`'s draw from a randomizer: the clip, and the pitch multiplier
+/// and volume offset it starts with.
+struct RandomizedPlay {
+    stream: LoadedStream,
+    pitch_scale: f32,
+    volume_offset_db: f32,
+}
+
+/// xorshift64* step, as a float in `[0, 1)`. A private generator rather than
+/// the script RNG so audio variation cannot perturb a game's seeded sequence.
+fn next_unit(rng: &mut u64) -> f32 {
+    let mut x = *rng;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    *rng = x;
+    ((x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40) as f32) / (1u64 << 24) as f32
+}
+
+/// Picks the clip for one `play()` exactly as Godot's
+/// `AudioStreamRandomizer::instantiate_playback` does, then rolls the
+/// variation `AudioStreamPlaybackRandomizer::start` applies: a pitch uniform in
+/// LOG space over `[1/random_pitch, random_pitch]` and a volume offset uniform
+/// over `[-offset, +offset]` dB.
+fn draw_randomized(state: &mut RandomizerState, rng: &mut u64) -> Option<RandomizedPlay> {
+    if state.pool.is_empty() {
+        return None;
+    }
+    let weighted_pick = |candidates: &[usize], rng: &mut u64, pool: &[(LoadedStream, f32)]| {
+        let total: f32 = candidates.iter().map(|&i| pool[i].1).sum();
+        let chosen = next_unit(rng) * total;
+        let mut cumulative = 0.0;
+        for &i in candidates {
+            cumulative += pool[i].1;
+            if cumulative > chosen {
+                return Some(i);
+            }
+        }
+        // Godot's floating-point fallback: the last candidate.
+        candidates.last().copied()
+    };
+    let positive: Vec<usize> = (0..state.pool.len())
+        .filter(|&i| state.pool[i].1 > 0.0)
+        .collect();
+    let index = match state.spec.playback_mode {
+        // PLAYBACK_SEQUENTIAL: the slot after the last one, wrapping.
+        2 => match state.last {
+            Some(last) if last + 1 < state.pool.len() => Some(last + 1),
+            _ => Some(0),
+        },
+        // PLAYBACK_RANDOM.
+        1 => weighted_pick(&positive, rng, &state.pool),
+        // PLAYBACK_RANDOM_NO_REPEATS: never the last clip, unless it is the
+        // only one (Godot then falls back to plain RANDOM).
+        _ => {
+            let others: Vec<usize> = positive
+                .iter()
+                .copied()
+                .filter(|&i| Some(i) != state.last)
+                .collect();
+            if others.is_empty() {
+                weighted_pick(&positive, rng, &state.pool)
+            } else {
+                weighted_pick(&others, rng, &state.pool)
+            }
+        }
+    }?;
+    state.last = Some(index);
+    let pitch_range = state.spec.random_pitch.ln();
+    let pitch_scale = (-pitch_range + next_unit(rng) * 2.0 * pitch_range).exp();
+    let offset = state.spec.random_volume_offset_db;
+    let volume_offset_db = -offset + next_unit(rng) * 2.0 * offset;
+    Some(RandomizedPlay {
+        stream: state.pool[index].0.clone(),
+        pitch_scale,
+        volume_offset_db,
+    })
 }
 
 impl StreamSpec {
@@ -1401,6 +1687,7 @@ impl StreamSpec {
             Self::None | Self::Unresolved(_) => String::new(),
             Self::Path(p) => format!("path:{p}"),
             Self::Inline(wav) => format!("inline:{:016x}", wav.identity()),
+            Self::Randomizer(spec) => format!("randomizer:{spec:?}"),
         }
     }
 }
@@ -1482,6 +1769,16 @@ fn resolve_stream_spec(node: &crate::node::Node) -> StreamSpec {
                 node.get_property(&format!("__subres__stream__{key}"))
             }) {
                 StreamSpec::Inline(wav)
+            } else if let Some(spec) = randomizer_spec_from_node(node) {
+                // pat-m7bqe: the 3D platformer's jump and shoot sounds. This
+                // used to fall through to `Unresolved`, so both were mute.
+                if spec.entries.is_empty() {
+                    StreamSpec::Unresolved(format!(
+                        "{s} (AudioStreamRandomizer with no playable slot)"
+                    ))
+                } else {
+                    StreamSpec::Randomizer(spec)
+                }
             } else {
                 StreamSpec::Unresolved(s)
             }
@@ -1803,6 +2100,76 @@ mod tests {
             tree.get_node(id).unwrap().get_property("playing"),
             Variant::Bool(true),
         );
+    }
+
+    /// A pool of `n` one-sample clips whose single sample is the slot index, so
+    /// a draw names its slot (pat-m7bqe).
+    fn randomizer(n: usize, mode: i64, random_pitch: f32) -> RandomizerState {
+        RandomizerState {
+            spec: RandomizerSpec {
+                entries: (0..n).map(|i| (format!("res://{i}.wav"), 1.0)).collect(),
+                random_pitch,
+                random_volume_offset_db: 0.0,
+                playback_mode: mode,
+            },
+            pool: (0..n)
+                .map(|i| {
+                    let buf = AudioBuffer {
+                        samples: vec![i as f32],
+                        sample_rate: 44_100,
+                        channels: 1,
+                    };
+                    ((buf, None), 1.0)
+                })
+                .collect(),
+            last: None,
+        }
+    }
+
+    fn slot(draw: &RandomizedPlay) -> usize {
+        draw.stream.0.samples[0] as usize
+    }
+
+    /// Godot's default PLAYBACK_RANDOM_NO_REPEATS never plays the same slot
+    /// twice in a row; PLAYBACK_SEQUENTIAL walks the slots in order and wraps.
+    #[test]
+    fn randomizer_modes_pick_slots_like_godot() {
+        let mut rng = 0x1234_5678_9abc_def1;
+        let mut state = randomizer(3, 0, 1.0);
+        let picks: Vec<usize> = (0..60)
+            .map(|_| slot(&draw_randomized(&mut state, &mut rng).unwrap()))
+            .collect();
+        assert!(picks.windows(2).all(|w| w[0] != w[1]), "no repeats: {picks:?}");
+        assert!((0..3).all(|s| picks.contains(&s)), "every slot plays: {picks:?}");
+
+        let mut state = randomizer(3, 2, 1.0);
+        let picks: Vec<usize> = (0..7)
+            .map(|_| slot(&draw_randomized(&mut state, &mut rng).unwrap()))
+            .collect();
+        assert_eq!(picks, vec![0, 1, 2, 0, 1, 2, 0], "sequential wraps");
+
+        // One slot under NO_REPEATS falls back to RANDOM, so it still plays.
+        let mut state = randomizer(1, 0, 1.0);
+        assert_eq!(slot(&draw_randomized(&mut state, &mut rng).unwrap()), 0);
+        assert_eq!(slot(&draw_randomized(&mut state, &mut rng).unwrap()), 0);
+    }
+
+    /// `random_pitch = 2` draws pitches log-uniformly over [0.5, 2]: inside the
+    /// range, and centred on 1 in LOG space (about half below 1).
+    #[test]
+    fn randomizer_pitch_is_log_uniform_over_the_range() {
+        let mut rng = 0x0bad_c0de_dead_beef;
+        let mut state = randomizer(1, 1, 2.0);
+        let pitches: Vec<f32> = (0..2000)
+            .map(|_| draw_randomized(&mut state, &mut rng).unwrap().pitch_scale)
+            .collect();
+        assert!(pitches.iter().all(|p| (0.5..=2.0).contains(p)), "range");
+        let below = pitches.iter().filter(|p| **p < 1.0).count();
+        assert!(
+            (850..1150).contains(&below),
+            "log-uniform puts ~half below 1.0; got {below}/2000"
+        );
+        assert!(pitches.iter().any(|p| *p < 0.6) && pitches.iter().any(|p| *p > 1.7));
     }
 
     #[test]

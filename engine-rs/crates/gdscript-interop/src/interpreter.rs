@@ -2990,12 +2990,22 @@ impl Interpreter {
                 }
                 // Handle compound member assignment: obj.prop.field = value
                 // e.g. self.position.x = 5.0, node.position.y += 10.0
+                //
+                // ⚠️ Only when `obj.prop` is a VALUE. When it holds an OBJECT
+                // (`player_2.camera.custom_viewport = viewport_2`, pat-8mb8y) the
+                // write is a reference write onto that object, which the generic
+                // ObjectId path below performs; the read-modify-write refused it
+                // with "cannot assign member 'custom_viewport' on ObjectId".
                 if let Expr::MemberAccess {
                     object: inner_obj,
                     member: prop,
                 } = object.as_ref()
                 {
-                    return self.exec_compound_member_assignment(inner_obj, prop, member, op, rhs);
+                    let holds_object = matches!(self.eval_expr(object), Ok(Variant::ObjectId(_)));
+                    if !holds_object {
+                        return self
+                            .exec_compound_member_assignment(inner_obj, prop, member, op, rhs);
+                    }
                 }
                 // Handle self.member = value
                 if matches!(object.as_ref(), Expr::SelfRef) {
@@ -10760,6 +10770,28 @@ impl Interpreter {
             // in Godot (the 3D platformer's `stage.gd` adds a dimmed light
             // under it), so it must take them here. A name Godot does not know
             // reads as the `forward_plus` default rather than being echoed.
+            // pat-b4zhq. The 3D platformer's `stage.gd` calls this with
+            // `SHADOW_QUALITY_SOFT_HIGH` under Compatibility. Godot applies it
+            // to the renderer, not to ProjectSettings, so it goes to the
+            // renderer-side override the 3D shadow pass reads.
+            "directional_soft_shadow_filter_set_quality" => {
+                arity(1)?;
+                let quality = match args.first() {
+                    Some(Variant::Int(i)) => *i,
+                    Some(Variant::Float(f)) => *f as i64,
+                    _ => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
+                            "RenderingServer.directional_soft_shadow_filter_set_quality() \
+                             expects a ShadowQuality int"
+                                .into(),
+                        )))
+                    }
+                };
+                gdcore::project_settings::set_directional_soft_shadow_quality_override(Some(
+                    quality,
+                ));
+                Ok(Variant::Nil)
+            }
             "get_current_rendering_method" => {
                 arity(0)?;
                 let name =
@@ -11398,11 +11430,45 @@ impl Interpreter {
                 }
             }
             "get_vector" => {
-                if args.len() != 4 {
+                // Godot: `get_vector(neg_x, pos_x, neg_y, pos_y, deadzone = -1.0)`.
+                // The optional 5th argument was rejected outright (pat-b4zhq).
+                if args.len() != 4 && args.len() != 5 {
                     return Err(RuntimeError::new(RuntimeErrorKind::TypeError(
-                        "Input.get_vector() takes 4 arguments".into(),
+                        "Input.get_vector() takes 4 or 5 arguments".into(),
                     )));
                 }
+                let deadzone = match args.get(4) {
+                    None => -1.0,
+                    Some(Variant::Float(f)) => *f as f32,
+                    Some(Variant::Int(i)) => *i as f32,
+                    Some(other) => {
+                        return Err(RuntimeError::new(RuntimeErrorKind::TypeError(format!(
+                            "Input.get_vector() deadzone must be a float, got {other:?}"
+                        ))))
+                    }
+                };
+                if deadzone >= 0.0 {
+                    // An explicit deadzone: Godot's formula exactly
+                    // (`core/input/input.cpp` `Input::get_vector`) on the RAW
+                    // strengths, then a circular deadzone and length limit.
+                    let strs: Vec<&str> = args[..4]
+                        .iter()
+                        .map(|a| Self::input_action_arg("get_vector", a))
+                        .collect::<Result<_, _>>()?;
+                    let Some(ref access) = self.scene_access else {
+                        return Ok(Variant::Vector2(gdcore::math::Vector2::new(0.0, 0.0)));
+                    };
+                    let raw = |a: &str| access.get_action_raw_strength(a);
+                    let (x, y) = (raw(strs[1]) - raw(strs[0]), raw(strs[3]) - raw(strs[2]));
+                    let (x, y) = input_vector_with_deadzone(x, y, deadzone);
+                    return Ok(Variant::Vector2(gdcore::math::Vector2::new(x, y)));
+                }
+                // No deadzone given: Godot averages the four actions'
+                // deadzones. ⚠️ The interpreter cannot read the live InputMap's
+                // per-action deadzones, so this keeps the host's
+                // `get_input_vector`, which is exact for digital bindings (any
+                // deadzone below 1 leaves a unit or diagonal vector unchanged).
+                let args = &args[..4];
                 // Action names are StringNames in Godot's signature, and
                 // `Input.get_vector(&"move_left", ...)` is how the official
                 // 3D platformer spells it — accepting only `String` raised a
@@ -24415,13 +24481,24 @@ fn try_static_member(type_name: &str, member: &str) -> Option<Variant> {
         // Derived from the same table that maps the enum to a type name, rather
         // than a second hand-written list: two lists would be free to disagree,
         // and disagreeing here means `add` and `get_type` stop round-tripping.
-        "RenderingServer" => member.strip_prefix("GLOBAL_VAR_TYPE_").and_then(|suffix| {
-            if suffix == "MAX" {
-                // Not a type, the count — Godot exposes it as the enum's bound.
-                return Some(Variant::Int(29));
-            }
-            gdvariant::shader_globals::enum_for_type_name_by_const_suffix(suffix).map(Variant::Int)
-        }),
+        "RenderingServer" => member
+            .strip_prefix("GLOBAL_VAR_TYPE_")
+            .and_then(|suffix| {
+                if suffix == "MAX" {
+                    // Not a type, the count — Godot exposes it as the enum's bound.
+                    return Some(Variant::Int(29));
+                }
+                gdvariant::shader_globals::enum_for_type_name_by_const_suffix(suffix)
+                    .map(Variant::Int)
+            })
+            // Every other RenderingServer enum ClassDB registers
+            // (`SHADOW_QUALITY_*`, pat-b4zhq). This arm is exclusive, so
+            // without the fallback the generic ClassDB lookup in `_` below
+            // was unreachable for this class and `SHADOW_QUALITY_SOFT_HIGH`
+            // was an UndefinedVariable.
+            .or_else(|| {
+                gdobject::class_get_integer_constant("RenderingServer", member).map(Variant::Int)
+            }),
         // Godot FileAccess.ModeFlags
         "FileAccess" => match member {
             "READ" => Some(Variant::Int(1)),
@@ -28809,6 +28886,23 @@ fn rng_u64_arg(value: &Variant) -> u64 {
     }
 }
 
+/// Godot's circular deadzone and length limit for `Input.get_vector`
+/// (`core/input/input.cpp`): inside the deadzone is zero, past unit length is
+/// normalised, and in between the length is remapped from `(deadzone, 1)` to
+/// `(0, 1)` (pat-b4zhq).
+fn input_vector_with_deadzone(x: f32, y: f32, deadzone: f32) -> (f32, f32) {
+    let length = (x * x + y * y).sqrt();
+    if length <= deadzone {
+        (0.0, 0.0)
+    } else if length > 1.0 {
+        (x / length, y / length)
+    } else {
+        // `Math::inverse_lerp(deadzone, 1, length) / length`.
+        let k = ((length - deadzone) / (1.0 - deadzone)) / length;
+        (x * k, y * k)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PhysicsDirectBodyState2D (pat-s3rrv.94)
 // ---------------------------------------------------------------------------
@@ -29028,6 +29122,42 @@ fn call_direct_body_state_2d_instance(
         "get_inverse_inertia" => Variant::Float(s.inverse_inertia as f64),
         "get_center_of_mass" => Variant::Vector2(s.center_of_mass),
         "get_center_of_mass_local" => Variant::Vector2(s.center_of_mass_local),
+        // The rest of the accessor half (pat-b4zhq). ClassDB registers every
+        // one of these as the property's getter/setter, so before this
+        // `has_method("get_linear_velocity")` was true while the call fell
+        // through to the catch-all `Nil` and `set_linear_velocity(v)` was
+        // swallowed — the body never took the velocity. The 3D table below
+        // already had them.
+        "get_linear_velocity" => Variant::Vector2(s.linear_velocity),
+        "get_angular_velocity" => Variant::Float(s.angular_velocity as f64),
+        "get_transform" => Variant::Transform2D(s.transform),
+        "is_sleeping" => Variant::Bool(s.sleeping),
+        "get_collision_layer" => Variant::Int(s.collision_layer),
+        "get_collision_mask" => Variant::Int(s.collision_mask),
+        // Setters write the same fields the property assignments do, so
+        // `apply_state` carries them back onto the body either way. A
+        // wrong-typed argument leaves the field alone, as the property path
+        // does.
+        "set_linear_velocity" => {
+            if let Some(Variant::Vector2(v)) = args.first() {
+                s.linear_velocity = *v;
+            }
+            Variant::Nil
+        }
+        "set_angular_velocity" => {
+            match args.first() {
+                Some(Variant::Float(f)) => s.angular_velocity = *f as f32,
+                Some(Variant::Int(n)) => s.angular_velocity = *n as f32,
+                _ => {}
+            }
+            Variant::Nil
+        }
+        "set_transform" => {
+            if let Some(Variant::Transform2D(t)) = args.first() {
+                s.transform = *t;
+            }
+            Variant::Nil
+        }
         // Godot's `set_sleep_state(enabled)`. A missing or non-bool argument
         // reads as `false`, which is what an untyped GDScript call to a bool
         // parameter does anyway.

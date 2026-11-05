@@ -64,9 +64,35 @@ pub const LAYER_ORIG_OFFSET: &str = "_parallax_orig_offset";
 /// drag-held camera parallaxes against the view it actually renders. That is
 /// why this phase runs after it.
 pub fn process_parallax(tree: &mut SceneTree, delta_secs: f32) {
-    let viewport = tree.root_window().visible_size();
-    let Some(cam) = crate::behavioral_2d::current_camera2d(tree) else {
+    // A parallax node follows the camera of the viewport it is IN (pat-8mb8y):
+    // the split-screen scene has one ParallaxBackground per SubViewport, each
+    // under its own player's camera. Without SubViewports this is one pass over
+    // the root, exactly as before.
+    let sub_viewports = crate::behavioral_2d::sub_viewports(tree);
+    if sub_viewports.is_empty() {
+        process_parallax_in(tree, None, false, delta_secs);
         return;
+    }
+    process_parallax_in(tree, None, true, delta_secs);
+    for vp in sub_viewports {
+        process_parallax_in(tree, Some(vp), true, delta_secs);
+    }
+}
+
+/// [`process_parallax`] for the nodes of one viewport (`None` = the root).
+/// `filter` restricts the pass to nodes inside `vp`; off, every node is taken.
+fn process_parallax_in(
+    tree: &mut SceneTree,
+    vp: Option<NodeId>,
+    filter: bool,
+    delta_secs: f32,
+) {
+    let viewport = crate::behavioral_2d::sub_viewport_size(tree, vp);
+    let Some(cam) = crate::behavioral_2d::current_camera2d_in(tree, vp) else {
+        return;
+    };
+    let in_viewport = |tree: &SceneTree, id: NodeId| {
+        !filter || crate::behavioral_2d::enclosing_sub_viewport(tree, id) == vp
     };
     let origin = canvas_origin(tree, cam, viewport);
     let zoom = camera_zoom_scale(tree, cam);
@@ -79,7 +105,7 @@ pub fn process_parallax(tree: &mut SceneTree, delta_secs: f32) {
         let Some(node) = tree.get_node(id) else {
             continue;
         };
-        if node.class_name() != "ParallaxBackground" {
+        if node.class_name() != "ParallaxBackground" || !in_viewport(tree, id) {
             continue;
         }
         let background = background_from_node(node, origin);
@@ -117,7 +143,7 @@ pub fn process_parallax(tree: &mut SceneTree, delta_secs: f32) {
         }
     }
 
-    process_parallax_2d(tree, cam, viewport, delta_secs);
+    process_parallax_2d(tree, cam, viewport, delta_secs, &in_viewport);
 
     for (layer_id, offset, orig) in writes {
         // Written as `position`, the same property the editor and the render
@@ -148,7 +174,13 @@ pub fn process_parallax(tree: &mut SceneTree, delta_secs: f32) {
 /// The class has been registered in ClassDB with all ten of its properties and
 /// no behaviour whatsoever: a `.tscn` containing one loaded, kept every
 /// property, and never moved. This is the phase that drives it.
-fn process_parallax_2d(tree: &mut SceneTree, cam: NodeId, viewport: Vector2, delta_secs: f32) {
+fn process_parallax_2d(
+    tree: &mut SceneTree,
+    cam: NodeId,
+    viewport: Vector2,
+    delta_secs: f32,
+    in_viewport: &dyn Fn(&SceneTree, NodeId) -> bool,
+) {
     let center = match tree
         .get_node(cam)
         .map(|n| n.get_property(crate::behavioral_2d::CAMERA2D_SCROLL_CENTER))
@@ -163,7 +195,7 @@ fn process_parallax_2d(tree: &mut SceneTree, cam: NodeId, viewport: Vector2, del
         let Some(node) = tree.get_node(id) else {
             continue;
         };
-        if node.class_name() != "Parallax2D" {
+        if node.class_name() != "Parallax2D" || !in_viewport(tree, id) {
             continue;
         }
         let mut parallax = parallax_2d_from_node(node);

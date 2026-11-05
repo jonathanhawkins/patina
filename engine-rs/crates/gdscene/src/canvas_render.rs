@@ -1315,6 +1315,11 @@ fn canvas_layer_ancestor(tree: &SceneTree, id: crate::NodeId) -> Option<crate::N
         if node.is_class("CanvasLayer") {
             return Some(pid);
         }
+        // A SubViewport is a canvas of its own: a CanvasLayer above it belongs
+        // to the outer viewport and does not place what is inside (pat-8mb8y).
+        if node.class_name() == "SubViewport" {
+            return None;
+        }
         current = node.parent();
     }
     None
@@ -2691,6 +2696,24 @@ pub fn camera2d_view_transform(
     dt: f32,
 ) -> Option<Transform2D> {
     let camera = current_camera2d(tree)?;
+    Some(camera2d_view_transform_of(
+        tree,
+        camera,
+        viewport_size,
+        previous_center,
+        dt,
+    ))
+}
+
+/// [`camera2d_view_transform`] for a given camera — the one a SubViewport's
+/// pass uses with its own camera and size (pat-8mb8y).
+pub fn camera2d_view_transform_of(
+    tree: &SceneTree,
+    camera: crate::NodeId,
+    viewport_size: Vector2,
+    previous_center: Option<Vector2>,
+    dt: f32,
+) -> Transform2D {
     let config = node2d::camera2d_config_from_node(tree, camera);
     // The camera's own global position plus its `offset`, as Godot's target.
     let target = node2d::get_global_transform(tree, camera).origin;
@@ -2724,7 +2747,101 @@ pub fn camera2d_view_transform(
     } else {
         view * Transform2D::rotated(-rotation)
     };
-    Some(view * Transform2D::translated(-center))
+    view * Transform2D::translated(-center)
+}
+
+/// Whether `id` is a `CanvasItem` (a Node2D or a Control), with the same
+/// ClassDB-free fallback the Control hit test uses.
+fn is_canvas_item(tree: &SceneTree, id: crate::NodeId) -> bool {
+    tree.get_node(id)
+        .is_some_and(|n| n.is_class("CanvasItem") || n.is_class("Node2D"))
+        || control::node_is_control(tree, id)
+}
+
+/// A `CanvasItem`'s LOCAL transform, as Godot's `get_transform()` builds it.
+///
+/// A Control is `T(position) * T(pivot) * R(rotation) * S(scale) * T(-pivot)`
+/// (`control.cpp::_get_internal_transform`); everything else is the Node2D
+/// transform.
+fn canvas_item_local_transform(tree: &SceneTree, id: crate::NodeId) -> Transform2D {
+    if !control::node_is_control(tree, id) {
+        return node2d::get_local_transform(tree, id);
+    }
+    let Some(node) = tree.get_node(id) else {
+        return Transform2D::IDENTITY;
+    };
+    let rotation = match node.get_property("rotation") {
+        Variant::Float(v) => v as f32,
+        Variant::Int(v) => v as f32,
+        _ => 0.0,
+    };
+    let scale = match node.get_property("scale") {
+        Variant::Vector2(v) => v,
+        _ => Vector2::new(1.0, 1.0),
+    };
+    let pivot = match node.get_property("pivot_offset") {
+        Variant::Vector2(v) => v,
+        _ => Vector2::ZERO,
+    };
+    Transform2D::translated(control::get_position(tree, id) + pivot)
+        * Transform2D::rotated(rotation)
+        * Transform2D::scaled(scale)
+        * Transform2D::translated(Vector2::new(-pivot.x, -pivot.y))
+}
+
+/// `CanvasItem.get_global_transform()` for any canvas item, Controls included
+/// (pat-b4zhq).
+///
+/// Godot composes through `get_parent_item()`, which is null for a top-level
+/// item and for a parent that is not a CanvasItem — so a `CanvasLayer` or a
+/// plain `Node` ends the walk rather than being passed through.
+pub fn canvas_item_global_transform(tree: &SceneTree, id: crate::NodeId) -> Transform2D {
+    let mut global = canvas_item_local_transform(tree, id);
+    let mut current = id;
+    while !node2d::is_top_level(tree, current) {
+        match tree.get_node(current).and_then(|n| n.parent()) {
+            Some(parent) if is_canvas_item(tree, parent) => {
+                global = canvas_item_local_transform(tree, parent) * global;
+                current = parent;
+            }
+            _ => break,
+        }
+    }
+    global
+}
+
+/// `CanvasItem.get_global_transform_with_canvas()` (pat-b4zhq): the item's
+/// global transform carried through its canvas — the enclosing `CanvasLayer`'s
+/// final transform, or the viewport's canvas transform (the `Camera2D` view)
+/// for an item on the default canvas (`canvas_item.cpp:159`).
+///
+/// The layer's final transform follows `canvas_layer.cpp::get_final_transform`:
+/// a `follow_viewport_enabled` layer is `canvas * scale(follow) * transform`,
+/// otherwise the layer's own transform.
+pub fn global_transform_with_canvas(tree: &SceneTree, id: crate::NodeId) -> Transform2D {
+    let global = canvas_item_global_transform(tree, id);
+    // The canvas of the viewport the item is IN: a SubViewport's own camera at
+    // the SubViewport's size, or the root window's (pat-8mb8y).
+    let viewport_canvas = || {
+        let vp = crate::behavioral_2d::enclosing_sub_viewport(tree, id);
+        let size = crate::behavioral_2d::sub_viewport_size(tree, vp);
+        crate::behavioral_2d::current_camera2d_in(tree, vp)
+            .map(|cam| camera2d_view_transform_of(tree, cam, size, None, 0.0))
+            .unwrap_or(Transform2D::IDENTITY)
+    };
+    let canvas = match canvas_layer_ancestor(tree, id) {
+        Some(layer) => {
+            let xform = crate::canvas_layer::layer_transform(tree, layer);
+            if crate::canvas_layer::get_follow_viewport_enabled(tree, layer) {
+                let s = crate::canvas_layer::get_follow_viewport_scale(tree, layer) as f32;
+                viewport_canvas() * Transform2D::scaled(Vector2::new(s, s)) * xform
+            } else {
+                xform
+            }
+        }
+        None => viewport_canvas(),
+    };
+    canvas * global
 }
 
 /// The Camera2D scroll centre `behavioral_2d::process_camera2d_scroll` published
@@ -4338,6 +4455,200 @@ pub fn canvas_size_of(window: &crate::viewport::RootWindow) -> Vector2 {
     }
 }
 
+/// The node property recording which viewport's `World2D` a SubViewport draws,
+/// written by `viewport.world_2d = other.world_2d` (pat-8mb8y). Holds the raw
+/// id of the viewport that OWNS the world; absent means the viewport's own.
+pub const WORLD_2D_OWNER_PROP: &str = "__world_2d_owner__";
+
+/// The viewport whose `World2D` `vp` renders (`None` = the root window's).
+fn world_2d_owner(tree: &SceneTree, vp: Option<crate::NodeId>) -> Option<crate::NodeId> {
+    let vp = vp?;
+    match tree.get_node(vp).map(|n| n.get_property(WORLD_2D_OWNER_PROP)) {
+        Some(Variant::Int(raw)) if raw > 0 => {
+            let owner = crate::NodeId::from_object_id(gdcore::id::ObjectId::from_raw(raw as u64));
+            if crate::behavioral_2d::is_sub_viewport(tree, owner) {
+                Some(owner)
+            } else {
+                // The root window's world.
+                None
+            }
+        }
+        // Owner 0: the root window's world was assigned.
+        Some(Variant::Int(0)) => None,
+        _ => Some(vp),
+    }
+}
+
+/// Composites every SubViewport shown by a `SubViewportContainer` into the
+/// root frame, Godot's split-screen model (pat-8mb8y).
+///
+/// Godot renders each SubViewport separately — its World2D's canvas under ITS
+/// current Camera2D at ITS size, plus its own CanvasLayers — and the container
+/// draws the result at its rect, scaled by `stretch_shrink`
+/// (`subviewport_container.cpp`). Before this the whole tree was one flat
+/// canvas under one camera, so the 2D platformer's split-screen scene showed a
+/// single full-width view.
+///
+/// Here, per displayed SubViewport `V`:
+/// - the world items are every DEFAULT-canvas item of any viewport sharing
+///   `V`'s World2D (`viewport_2.world_2d = viewport_1.world_2d` makes both
+///   draw Viewport1's level), and the layer items are `V`'s own CanvasLayers;
+/// - `V`'s camera view applies to them (as on the root canvas, so a
+///   ParallaxBackground and a fixed HUD behave as they do there);
+/// - they are moved to the container's rect, scaled by the shrink, clipped to
+///   it, and spliced into the root list where the container draws.
+///
+/// Root items get the ROOT viewport's camera, which is no longer whichever
+/// camera happened to be last in the tree. A SubViewport no container shows (a
+/// render target only) contributes nothing to the frame.
+///
+/// ⚠️ Items arrive in the merged, globally sorted order; filtering preserves
+/// it, so each viewport's own `(layer, z)` order holds inside its slot.
+fn compose_sub_viewports(
+    tree: &SceneTree,
+    items: Vec<Render2DItem>,
+    sub_viewports: &[crate::NodeId],
+    canvas_size: Vector2,
+    stretch: Transform2D,
+) -> Vec<Render2DItem> {
+    use crate::behavioral_2d::{current_camera2d_in, enclosing_sub_viewport, sub_viewport_size};
+    let node_of =
+        |raw: u64| crate::NodeId::from_object_id(gdcore::id::ObjectId::from_raw(raw));
+    let item_viewport = |item: &Render2DItem| {
+        let id = node_of(item.node_id);
+        if tree.get_node(id).is_none() {
+            return None;
+        }
+        if crate::behavioral_2d::is_sub_viewport(tree, id) {
+            return Some(id);
+        }
+        enclosing_sub_viewport(tree, id)
+    };
+    let viewports: Vec<Option<crate::NodeId>> = items.iter().map(&item_viewport).collect();
+
+    // Root canvas: only the root viewport's own camera.
+    let mut main: Vec<Render2DItem> = Vec::new();
+    for (item, vp) in items.iter().zip(&viewports) {
+        if vp.is_none() {
+            main.push(item.clone());
+        }
+    }
+    if let Some(cam) = current_camera2d_in(tree, None) {
+        let view = camera2d_view_transform_of(tree, cam, canvas_size, None, 1.0 / 60.0);
+        apply_camera2d_view(&mut main, view);
+    }
+
+    let order: std::collections::HashMap<u64, usize> = tree
+        .all_nodes_in_tree_order()
+        .into_iter()
+        .enumerate()
+        .map(|(i, id)| (id.raw(), i))
+        .collect();
+
+    for &vp in sub_viewports {
+        let Some(container) = tree.get_node(vp).and_then(|n| n.parent()) else {
+            continue;
+        };
+        let shown = tree
+            .get_node(container)
+            .is_some_and(|n| n.class_name() == "SubViewportContainer")
+            && node2d::is_visible_in_tree(tree, container);
+        if !shown {
+            continue;
+        }
+        let world = world_2d_owner(tree, Some(vp));
+        let mut slot: Vec<Render2DItem> = items
+            .iter()
+            .zip(&viewports)
+            .filter(|(item, item_vp)| match item.canvas_follow {
+                CanvasFollow::DefaultCanvas => {
+                    item_vp.is_some() && world_2d_owner(tree, **item_vp) == world
+                }
+                _ => **item_vp == Some(vp),
+            })
+            .map(|(item, _)| item.clone())
+            .collect();
+
+        let size = sub_viewport_size(tree, Some(vp));
+        if let Some(cam) = current_camera2d_in(tree, Some(vp)) {
+            let view = camera2d_view_transform_of(tree, cam, size, None, 1.0 / 60.0);
+            apply_camera2d_view(&mut slot, view);
+        }
+
+        // Container placement: `stretch` draws the viewport scaled by
+        // `stretch_shrink`; without it the texture is drawn at its own size.
+        let rect = control::get_global_rect(tree, container);
+        let stretch_on = matches!(
+            tree.get_node(container).map(|n| n.get_property("stretch")),
+            Some(Variant::Bool(true))
+        );
+        let shrink = match tree.get_node(container).map(|n| n.get_property("stretch_shrink")) {
+            Some(Variant::Int(s)) if stretch_on && s > 1 => s as f32,
+            _ => 1.0,
+        };
+        let place = Transform2D::translated(rect.position) * Transform2D::scaled(Vector2::new(shrink, shrink));
+        // The clip is in final pixels, past the stretch transform the caller
+        // applies to the positions.
+        let clip = transformed_bounds(stretch, rect);
+        for item in &mut slot {
+            item.global_transform = place * item.global_transform;
+            item.clip_rect = Some(match item.clip_rect {
+                Some(own) => intersect_rects(own, clip),
+                None => clip,
+            });
+        }
+
+        // Splice where the container draws: after everything before the end of
+        // its subtree on its canvas layer, before anything later or higher.
+        let layer = canvas_layer_for(tree, container);
+        let start = order.get(&container.raw()).copied().unwrap_or(usize::MAX);
+        let end = start.saturating_add(subtree_len(tree, container));
+        let at = main
+            .iter()
+            .position(|m| {
+                let idx = order.get(&m.node_id).copied().unwrap_or(usize::MAX);
+                m.canvas_layer > layer || (m.canvas_layer == layer && idx > end)
+            })
+            .unwrap_or(main.len());
+        main.splice(at..at, slot);
+    }
+    main
+}
+
+/// Number of descendants under `id` (not counting `id`).
+fn subtree_len(tree: &SceneTree, id: crate::NodeId) -> usize {
+    let mut nodes = Vec::new();
+    tree.collect_subtree_top_down(id, &mut nodes);
+    nodes.len().saturating_sub(1)
+}
+
+/// Axis-aligned bounds of `rect` under `xform`.
+fn transformed_bounds(xform: Transform2D, rect: Rect2) -> Rect2 {
+    let p = rect.position;
+    let s = rect.size;
+    let corners = [
+        xform.xform(p),
+        xform.xform(Vector2::new(p.x + s.x, p.y)),
+        xform.xform(Vector2::new(p.x, p.y + s.y)),
+        xform.xform(Vector2::new(p.x + s.x, p.y + s.y)),
+    ];
+    let (mut min, mut max) = (corners[0], corners[0]);
+    for c in &corners[1..] {
+        min = Vector2::new(min.x.min(c.x), min.y.min(c.y));
+        max = Vector2::new(max.x.max(c.x), max.y.max(c.y));
+    }
+    Rect2::new(min, Vector2::new(max.x - min.x, max.y - min.y))
+}
+
+/// The overlap of two rects (zero-sized when they do not meet).
+fn intersect_rects(a: Rect2, b: Rect2) -> Rect2 {
+    let x0 = a.position.x.max(b.position.x);
+    let y0 = a.position.y.max(b.position.y);
+    let x1 = (a.position.x + a.size.x).min(b.position.x + b.size.x);
+    let y1 = (a.position.y + a.size.y).min(b.position.y + b.size.y);
+    Rect2::new(Vector2::new(x0, y0), Vector2::new((x1 - x0).max(0.0), (y1 - y0).max(0.0)))
+}
+
 pub fn render_play_frame(
     tree: &mut SceneTree,
     width: u32,
@@ -4407,8 +4718,19 @@ pub fn prepare_play_frame(
     let runtime = build_runtime_render_list(tree);
     let mut items = merge_control_items(tree, runtime, controls);
 
-    if let Some(view) = camera2d_view_transform(tree, canvas_size, None, 1.0 / 60.0) {
-        apply_camera2d_view(&mut items, view);
+    let sub_viewports = crate::behavioral_2d::sub_viewports(tree);
+    if sub_viewports.is_empty() {
+        if let Some(view) = camera2d_view_transform(tree, canvas_size, None, 1.0 / 60.0) {
+            apply_camera2d_view(&mut items, view);
+        }
+    } else {
+        items = compose_sub_viewports(
+            tree,
+            items,
+            &sub_viewports,
+            canvas_size,
+            window.stretch_transform(),
+        );
     }
     apply_stretch_transform(&mut items, window.stretch_transform());
 

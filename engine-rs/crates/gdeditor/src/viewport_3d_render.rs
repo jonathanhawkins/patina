@@ -1158,6 +1158,19 @@ pub struct SceneLight3D {
 /// keeps Godot's defaults, which `DirectionalShadowParams::default` already
 /// carries.
 fn with_project_directional_shadow(
+    params: gdserver3d::light::DirectionalShadowParams,
+) -> gdserver3d::light::DirectionalShadowParams {
+    let mut params = with_project_directional_shadow_settings(params);
+    // A script's `RenderingServer.directional_soft_shadow_filter_set_quality`
+    // reconfigures the renderer after boot, so it outranks the project value
+    // (pat-b4zhq).
+    if let Some(q) = gdcore::project_settings::directional_soft_shadow_quality_override() {
+        params.soft_quality = q.clamp(0, 5) as u8;
+    }
+    params
+}
+
+fn with_project_directional_shadow_settings(
     mut params: gdserver3d::light::DirectionalShadowParams,
 ) -> gdserver3d::light::DirectionalShadowParams {
     let Ok(text) = gdcore::file_access::FileAccess::read_file_string("res://project.godot") else {
