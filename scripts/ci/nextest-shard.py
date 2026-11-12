@@ -76,7 +76,11 @@ def main(argv):
     # One nextest invocation per package: `--test <name>` is not scoped to a
     # package, so mixing packages could select a same-named target twice.
     for pkg, names in by_package(mine).items():
-        cmd = ["cargo", "nextest", "run", "--no-fail-fast", "-p", pkg]
+        # --no-tests=pass: a target can legitimately hold zero tests (e.g.
+        # gdcore's crash_report_test is `#![cfg(any())]`-disabled), and when it
+        # is the only one a package has in this shard nextest would otherwise
+        # fail with "no tests to run". `cargo test` treats that as success.
+        cmd = ["cargo", "nextest", "run", "--no-fail-fast", "--no-tests=pass", "-p", pkg]
         for name in names:
             cmd += ["--test", name]
         print(f"::group::{pkg} ({len(names)} targets)", flush=True)
